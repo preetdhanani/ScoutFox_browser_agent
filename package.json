@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node --check utils/storage.js utils/logger.js content/domCompressor.js content/actionExecutor.js content/content.js background/apiClients.js background/agentEngine.js background/background.js sidepanel/sidepanel.js"
+    "check": "for f in utils/storage.js utils/logger.js content/domCompressor.js content/actionExecutor.js content/content.js background/apiClients.js background/agentEngine.js background/background.js sidepanel/sidepanel.js; do node --check \"$f\" || exit 1; done"
   },
   "keywords": [
     "browser-agent",

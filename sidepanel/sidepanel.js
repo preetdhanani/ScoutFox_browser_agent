@@ -364,7 +364,6 @@ function connectPort() {
     scheduleReconnect();
   });
 
-  portReconnectAttempts = 0;
   if (portReconnectTimer) {
     clearTimeout(portReconnectTimer);
     portReconnectTimer = null;
@@ -397,6 +396,12 @@ function resyncAgentState() {
       // port-level reconnect loop above will keep retrying independently of this.
       return;
     }
+    // A real, confirmed round-trip to the background — NOW it's safe to say the backoff
+    // has actually succeeded and reset it. Resetting this eagerly in connectPort() (right
+    // after obtaining a Port object) was a bug: chrome.runtime.connect() returns a Port
+    // optimistically even against a dead/invalid context, so under a sustained failure the
+    // backoff was being wiped back to 0 every cycle and never actually ramped up.
+    portReconnectAttempts = 0;
     if (res) {
       renderState(res);
       if (res.logs) {
@@ -700,8 +705,23 @@ function renderEmptyState() {
 /**
  * Render Agent Execution State into UI
  */
+let lastRenderedStateVersion = -1;
+
 function renderState(state) {
   if (!state) return;
+
+  // STATE_UPDATE (live port push) and the GET_AGENT_STATE resync response (fired after
+  // every reconnect) are two independent round-trips with no ordering guarantee between
+  // them — a resync response can arrive after a fresher live update already rendered.
+  // stateVersion is a monotonic counter stamped by the background; drop anything older
+  // than what's already on screen. Synthetic states (e.g. viewing a saved history session
+  // in loadSelectedSession(), which has no stateVersion) always render — this guard only
+  // applies to the two live channels.
+  if (typeof state.stateVersion === 'number') {
+    if (state.stateVersion <= lastRenderedStateVersion) return;
+    lastRenderedStateVersion = state.stateVersion;
+  }
+
   const { status, stepCount, history, planSteps, currentPhase } = state;
 
   const statusPill = document.getElementById('statusPill');
@@ -715,8 +735,11 @@ function renderState(state) {
   const btnStartTask = document.getElementById('btnStartTask');
 
   if (statusPill && statusText) {
-    statusPill.className = `status-indicator ${status}`;
-    statusText.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    // Don't let an unrelated render (e.g. opening a saved session from history) stomp the
+    // "Reconnecting…" indicator while the port is genuinely still down.
+    const isDisconnected = backgroundPort === null;
+    statusPill.className = `status-indicator ${status}${isDisconnected ? ' reconnecting' : ''}`;
+    statusText.textContent = isDisconnected ? 'Reconnecting…' : status.charAt(0).toUpperCase() + status.slice(1);
   }
 
   renderPlanChecklist(planSteps);

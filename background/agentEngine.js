@@ -19,6 +19,10 @@ export class AgentEngine {
     this.currentPhase = '';
     this.isLoopActive = false;
     this.onStateChangeCallback = null;
+    // Monotonic counter stamped on every broadcast so the sidepanel can detect and drop
+    // an out-of-order/stale render (e.g. a slow GET_AGENT_STATE resync response arriving
+    // after a fresher live STATE_UPDATE already came in over the port).
+    this.stateVersion = 0;
     
     this.restoreState();
   }
@@ -74,6 +78,7 @@ export class AgentEngine {
   }
 
   notifyStateChange(extraData = {}) {
+    this.stateVersion++;
     this.persistState();
     if (this.onStateChangeCallback) {
       try {
@@ -85,6 +90,7 @@ export class AgentEngine {
           planSteps: this.planSteps,
           currentPhase: this.currentPhase,
           logs: Logger.getLogsHistory(),
+          stateVersion: this.stateVersion,
           ...extraData
         });
       } catch (err) {
@@ -158,19 +164,8 @@ export class AgentEngine {
       Logger.warn('AgentEngine', 'Background plan refinement failed', err);
     });
 
-    try {
-      await this.runLoop();
-    } catch (err) {
-      Logger.error('AgentEngine', '[LOOP ERROR] Unhandled exception in execution loop', err);
-      this.status = 'idle';
-      this.isLoopActive = false;
-      this.currentPhase = '';
-      this.history.push({
-        type: 'error',
-        content: `Execution Error: ${err.message}`
-      });
-      this.notifyStateChange({ error: err.message });
-    }
+    // runLoop() has its own outer try/catch/finally and never rejects — see its docstring.
+    await this.runLoop();
   }
 
   async generatePlan(userPrompt, settings) {

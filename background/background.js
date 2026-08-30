@@ -34,6 +34,7 @@ const agentEngine = new AgentEngine();
 
 agentEngine.setStateChangeCallback((state) => {
   broadcastToSidepanel('STATE_UPDATE', state);
+  syncKeepaliveAlarm(state.status);
 });
 
 Logger.setBroadcastCallback((logEntry) => {
@@ -64,7 +65,8 @@ chrome.runtime.onConnect.addListener((port) => {
           history: agentEngine.history,
           planSteps: agentEngine.planSteps,
           currentPhase: agentEngine.currentPhase,
-          logs: Logger.getLogsHistory()
+          logs: Logger.getLogsHistory(),
+          stateVersion: agentEngine.stateVersion
         }
       });
     } catch (err) {
@@ -79,9 +81,16 @@ function broadcastToSidepanel(type, payload) {
     // real browser work, but there is nobody left to receive the update. Log it loudly
     // (once per gap, not per message, to avoid flooding) so it always shows up in the
     // persisted log history even though the UI that would normally display it is gone.
+    //
+    // IMPORTANT: this runs inside Logger's own broadcast callback chain (Logger.X() ->
+    // addLog() -> logBroadcastCallback() -> broadcastToSidepanel()). Logging here with a
+    // normal Logger.warn() would call straight back into this same function before the
+    // guard flag below is set, recursing until the stack overflows — warnSilent() never
+    // re-enters the broadcast path, and setting the flag BEFORE logging is a second,
+    // redundant safeguard against exactly that.
     if (!lastBroadcastHadNoListeners) {
-      Logger.warn('Background', `[BROADCAST_DROPPED] No sidepanel connected — "${type}" updates are being generated but nothing can receive them until the panel reconnects.`);
       lastBroadcastHadNoListeners = true;
+      Logger.warnSilent('Background', `[BROADCAST_DROPPED] No sidepanel connected — "${type}" updates are being generated but nothing can receive them until the panel reconnects.`);
     }
     return;
   }
@@ -90,7 +99,7 @@ function broadcastToSidepanel(type, payload) {
     try {
       port.postMessage({ type, payload });
     } catch (e) {
-      Logger.warn('Background', '[BROADCAST_ERROR] Dropping dead port that failed to receive a message', e.message);
+      Logger.warnSilent('Background', '[BROADCAST_ERROR] Dropping dead port that failed to receive a message', e.message);
       activeSidepanelPorts.delete(port);
     }
   }
@@ -99,25 +108,44 @@ function broadcastToSidepanel(type, payload) {
 /**
  * Service-worker keepalive: Chrome can suspend an MV3 service worker after ~30s with no
  * extension-API activity, which is easy to hit during the plain `setTimeout` delay between
- * agent loop steps. A recurring alarm counts as activity and greatly reduces how often the
- * worker is killed mid-task. This does not GUARANTEE the worker survives (Chrome can still
- * kill it under memory pressure), which is why the sidepanel reconnect logic exists as the
- * correctness backstop regardless of whether this mitigation helps in a given run.
+ * agent loop steps. A recurring alarm counts as activity and reduces how often the worker
+ * is killed mid-task. This does not GUARANTEE the worker survives — Chrome can still kill
+ * it under memory pressure, and this does nothing at all for the OTHER way this bug can
+ * happen (the long-lived port itself getting disconnected independent of the worker, e.g.
+ * a documented lifetime cap on chrome.runtime.connect() ports) — which is why the sidepanel
+ * reconnect logic is the real correctness backstop regardless of whether this helps.
+ *
+ * Only active while a task is running/paused (not for the extension's entire lifetime) to
+ * avoid needlessly waking the worker when nothing is happening. Chrome clamps periodInMinutes
+ * below 1 to 1 minute for a packed/production extension, so that's the real cadence here
+ * despite `chrome.alarms` technically accepting a smaller value in unpacked/dev mode.
  */
+const KEEPALIVE_ALARM_NAME = 'scoutfox_keepalive';
+let keepaliveAlarmActive = false;
+
 if (typeof chrome !== 'undefined' && chrome.alarms) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === KEEPALIVE_ALARM_NAME && agentEngine.status === 'running') {
+      // Intentionally trivial — the point is just to give the service worker a reason to
+      // be "active" on a recurring cadence so Chrome is less likely to idle it out mid-task.
+      Logger.info('Background', `[KEEPALIVE] Heartbeat (task running, step ${agentEngine.stepCount}).`);
+    }
+  });
+}
+
+function syncKeepaliveAlarm(status) {
+  if (typeof chrome === 'undefined' || !chrome.alarms) return;
+  const shouldRun = status === 'running' || status === 'paused';
   try {
-    chrome.alarms.create('scoutfox_keepalive', { periodInMinutes: 0.5 });
-    chrome.alarms.onAlarm.addListener((alarm) => {
-      if (alarm.name === 'scoutfox_keepalive') {
-        // Intentionally trivial — the point is just to give the service worker a reason
-        // to be "active" on a tight cadence so Chrome doesn't idle it out mid-task.
-        if (agentEngine.status === 'running') {
-          Logger.info('Background', `[KEEPALIVE] Heartbeat (task running, step ${agentEngine.stepCount}).`);
-        }
-      }
-    });
+    if (shouldRun && !keepaliveAlarmActive) {
+      keepaliveAlarmActive = true;
+      chrome.alarms.create(KEEPALIVE_ALARM_NAME, { periodInMinutes: 1 });
+    } else if (!shouldRun && keepaliveAlarmActive) {
+      keepaliveAlarmActive = false;
+      chrome.alarms.clear(KEEPALIVE_ALARM_NAME);
+    }
   } catch (err) {
-    Logger.warn('Background', '[KEEPALIVE] Could not register keepalive alarm', err);
+    Logger.warn('Background', '[KEEPALIVE] Could not sync keepalive alarm', err);
   }
 }
 
@@ -190,7 +218,8 @@ function routeMessage(request, sender, sendResponse) {
       history: agentEngine.history,
       planSteps: agentEngine.planSteps,
       currentPhase: agentEngine.currentPhase,
-      logs: Logger.getLogsHistory()
+      logs: Logger.getLogsHistory(),
+      stateVersion: agentEngine.stateVersion
     });
     return true;
   }
@@ -239,7 +268,7 @@ function routeMessage(request, sender, sendResponse) {
     sendResponse({ success: true });
     return true;
   }
-});
+}
 
 async function getActiveTab() {
   const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
