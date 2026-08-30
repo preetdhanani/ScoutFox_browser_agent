@@ -1,7 +1,8 @@
 /**
  * AgentEngine for ScoutFox AI Agent
  * Orchestrates dynamic task-tailored plan generation, real action-driven checklist progress tracking,
- * resilient service worker state restoration, Few-Shot System Prompting, and Universal Model Guardrails.
+ * tab completion waiting, page text body extraction module, resilient service worker state restoration,
+ * Few-Shot System Prompting, and Universal Model Guardrails.
  */
 
 import { ApiClients } from './apiClients.js';
@@ -71,6 +72,16 @@ export class AgentEngine {
     } catch (e) {
       Logger.warn('AgentEngine', 'Could not persist state', e);
     }
+  }
+
+  clearHistory() {
+    this.history = [];
+    this.planSteps = [];
+    this.stepCount = 0;
+    this.currentPlanIndex = 0;
+    this.currentTask = null;
+    this.notifyStateChange();
+    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history and plan cleared.');
   }
 
   setStateChangeCallback(cb) {
@@ -258,12 +269,12 @@ Example for task "Summarize README for scout":
       Logger.info('AgentEngine', `---------------- STEP ${this.stepCount}/${maxSteps} ----------------`);
 
       // 1. DOM Extraction Input
-      this.setPhase(`🌐 Step ${this.stepCount}/${maxSteps}: Reading webpage elements...`);
+      this.setPhase(`🌐 Step ${this.stepCount}/${maxSteps}: Reading webpage elements & text body...`);
 
       let domSnapshot;
       try {
         domSnapshot = await this.getTabDOMWithAutoInject(this.activeTabId, settings.showElementBadges);
-        Logger.info('AgentEngine', `[DOM_SNAPSHOT_INPUT] Title: "${domSnapshot.title}" | URL: ${domSnapshot.url} | Elements: ${domSnapshot.elementCount}`);
+        Logger.info('AgentEngine', `[DOM_SNAPSHOT_INPUT] Title: "${domSnapshot.title}" | URL: ${domSnapshot.url} | Elements: ${domSnapshot.elementCount} | PageTextLen: ${domSnapshot.pageText ? domSnapshot.pageText.length : 0}`);
       } catch (err) {
         Logger.error('AgentEngine', '[DOM_ERROR] Failed to read page state', err);
         this.history.push({
@@ -398,6 +409,10 @@ Example for task "Summarize README for scout":
           this.updatePlanProgress(actionObj, false);
         }
 
+        if (actionObj.action === 'click' || actionObj.action === 'navigate' || (actionObj.action === 'type' && actionObj.submit)) {
+          await this.waitForTabComplete(this.activeTabId, 4000);
+        }
+
         const delay = settings.actionDelayMs || 1000;
         await new Promise(r => setTimeout(r, delay));
       } catch (execErr) {
@@ -423,6 +438,45 @@ Example for task "Summarize README for scout":
       });
       this.notifyStateChange();
     }
+  }
+
+  /**
+   * Helper to wait for browser tab loading to complete following navigation/clicks
+   */
+  waitForTabComplete(tabId, timeoutMs = 4000) {
+    return new Promise((resolve) => {
+      let resolved = false;
+
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onUpdated && chrome.tabs.onUpdated.hasListener(listener)) {
+            chrome.tabs.onUpdated.removeListener(listener);
+          }
+          resolve();
+        }
+      }, timeoutMs);
+
+      const listener = (updatedTabId, changeInfo) => {
+        if (updatedTabId === tabId && changeInfo.status === 'complete') {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timer);
+            if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onUpdated) {
+              chrome.tabs.onUpdated.removeListener(listener);
+            }
+            resolve();
+          }
+        }
+      };
+
+      if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onUpdated) {
+        chrome.tabs.onUpdated.addListener(listener);
+      } else {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
   }
 
   async getTabDOMWithAutoInject(tabId, showBadges = true) {
@@ -510,9 +564,13 @@ Example for task "Summarize README for scout":
   buildSystemPrompt(customInstructions) {
     return `${customInstructions || 'You are ScoutFox, an autonomous web browsing AI agent.'}
 
-You are provided with a user goal and a compressed list of interactive web page elements labeled with numerical IDs like [1], [2], [3].
+You are provided with a user goal, visible webpage text content, and a compressed list of interactive web page elements labeled with numerical IDs like [1], [2], [3].
 
 Your objective is to choose the single best action to move closer to the goal.
+
+### Critical Rule for Summarization & Reading Tasks:
+- Read the "Webpage Visible Text Content". If the required information to answer or summarize the user's task is visible, do NOT scroll or navigate in circles! Output your final answer immediately using:
+  {"action": "finish", "answer": "<your_summary_here>", "reason": "Target information is already visible"}
 
 ### Available Actions:
 1. Click element:
@@ -530,10 +588,13 @@ Your objective is to choose the single best action to move closer to the goal.
 5. Go back / forward:
    {"action": "go_back", "reason": "<explanation>"}
 
-6. Task finished (Output final summary answer):
+6. Explicitly extract full readable page text body:
+   {"action": "read_page_text", "reason": "<explanation>"}
+
+7. Task finished (Output final summary answer):
    {"action": "finish", "answer": "<final_answer_text>", "reason": "<explanation>"}
 
-7. Ask user for input/help:
+8. Ask user for input/help:
    {"action": "ask_user", "question": "<question_text>", "reason": "<explanation>"}
 
 ### FEW-SHOT OUTPUT EXAMPLES (Always follow these exact output patterns):
@@ -579,7 +640,7 @@ The required information is further down the page. I need to scroll down to view
 
 --- Example 4: Completing the Task & Summarizing Answer ---
 <thought>
-I have gathered all the necessary information from the page. I will synthesize the final summary and complete the task.
+I have read the visible text content from the webpage. I will synthesize the final summary and complete the task.
 </thought>
 \`\`\`json
 {
@@ -601,6 +662,17 @@ The goal requires visiting news.ycombinator.com directly. I will navigate to the
 }
 \`\`\`
 
+--- Example 6: Extracting Full Readable Page Text Body ---
+<thought>
+I need to read the complete text body of the page to answer the user's question accurately.
+</thought>
+\`\`\`json
+{
+  "action": "read_page_text",
+  "reason": "Extract full text body of webpage for reading"
+}
+\`\`\`
+
 ### Output Rules:
 1. Always output your reasoning inside <thought>...</thought> (or <think>...</think>).
 2. Always output your single action inside a valid \`\`\`json ... \`\`\` block matching the JSON structure in the examples above.
@@ -611,6 +683,11 @@ The goal requires visiting news.ycombinator.com directly. I will navigate to the
     return `Current Page Title: "${snapshot.title}"
 Current URL: ${snapshot.url}
 Scroll Position: Y=${snapshot.scrollState.scrollY} / ${snapshot.scrollState.pageHeight}px
+
+Webpage Visible Text Content (Use this to read content or summarize):
+"""
+${snapshot.pageText || '(No visible text extracted)'}
+"""
 
 Interactive Elements on Page:
 ${snapshot.elementsText || '(No interactive elements detected)'}
@@ -662,7 +739,7 @@ Choose your next action based on the goal: "${this.currentTask}"`;
       for (let i = matches.length - 1; i >= 0; i--) {
         try {
           const parsed = JSON.parse(matches[i]);
-          if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish)) {
+          if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.read_page_text)) {
             actionObj = parsed;
             break;
           }
@@ -696,6 +773,10 @@ Choose your next action based on the goal: "${this.currentTask}"`;
         if (scrollMatch) {
           actionObj = { action: 'scroll', direction: scrollMatch[1].toLowerCase(), amount: 500, reason: 'Extracted via text intent' };
         }
+      }
+
+      if (!actionObj && /read.*page.*text|extract.*text|get.*page.*content/i.test(cleanText)) {
+        actionObj = { action: 'read_page_text', reason: 'Extracted via text intent' };
       }
     }
 
@@ -731,6 +812,7 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     if (act.action === 'type_text' || act.action === 'input') act.action = 'type';
     if (act.action === 'done' || act.action === 'complete' || act.action === 'finished') act.action = 'finish';
     if (act.action === 'scroll_page') act.action = 'scroll';
+    if (act.action === 'extract_text' || act.action === 'read_text' || act.action === 'extract_page_text') act.action = 'read_page_text';
 
     if (act.element_id === undefined) {
       if (act.element !== undefined) act.element_id = act.element;
@@ -755,5 +837,6 @@ function formatActionSummary(act) {
   if (act.action === 'type') return `Type "${act.text || ''}" in [${act.element_id}]`;
   if (act.action === 'scroll') return `Scroll ${act.direction || 'down'}`;
   if (act.action === 'navigate') return `Navigate to ${act.url || ''}`;
+  if (act.action === 'read_page_text') return `Extract text body`;
   return act.action;
 }

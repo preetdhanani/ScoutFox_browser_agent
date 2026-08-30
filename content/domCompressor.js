@@ -48,8 +48,55 @@
         scrollState: { scrollY, pageHeight, viewportHeight },
         elementCount: formattedElements.length,
         elementsText: formattedElements.map(e => e.formatted).join('\n'),
-        elements: formattedElements
+        elements: formattedElements,
+        pageText: this.extractPageText()
       };
+    }
+
+    /**
+     * Dedicated Text Body Extraction Module
+     * Extracts readable text content across rendered HTML, raw text files, and documentation containers.
+     */
+    extractPageText() {
+      try {
+        // 1. Raw Markdown / Plain Text Pages (e.g. raw.githubusercontent.com)
+        if (window.location.hostname.includes('raw.githubusercontent.com') || (document.contentType && document.contentType.startsWith('text/'))) {
+          const rawText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+          return rawText.trim().slice(0, 4000);
+        }
+
+        // 2. Targeted Article / README / Documentation Containers
+        const targetedContainer = document.querySelector('article, main, #readme, .markdown-body, [role="main"]');
+        const container = targetedContainer || document.body;
+        if (!container) return '';
+
+        // Extract headings, paragraphs, list items, table text, and code snippets
+        const textNodes = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, td, th, pre, code, blockquote'));
+        let extractedText = '';
+
+        if (textNodes.length > 0) {
+          extractedText = textNodes
+            .map(node => {
+              const str = node.textContent.trim().replace(/\s+/g, ' ');
+              if (/^h[1-6]$/i.test(node.tagName)) {
+                return `\n### ${str}\n`;
+              }
+              return str;
+            })
+            .filter(t => t.length > 3)
+            .slice(0, 80)
+            .join('\n');
+        }
+
+        // 3. Fallback to container innerText if targeted extraction is sparse
+        if (!extractedText || extractedText.length < 100) {
+          extractedText = (container.innerText || container.textContent || '').trim();
+        }
+
+        return extractedText.slice(0, 4000);
+      } catch (_) {
+        return (document.body ? (document.body.innerText || document.body.textContent || '') : '').slice(0, 2500);
+      }
     }
 
     /**

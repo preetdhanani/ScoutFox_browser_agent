@@ -1,5 +1,5 @@
 /**
- * ActionExecutor - Handles element highlighting overlay and executes actions (click, type, scroll, keypress).
+ * ActionExecutor - Handles element highlighting overlay and executes actions (click, type, scroll, keypress, read_page_text).
  * Encapsulated in an IIFE to prevent V8 parse-time redeclaration errors upon re-injection.
  */
 
@@ -89,6 +89,12 @@
         case 'go_forward':
           window.history.forward();
           return { success: true, message: 'Going forward' };
+        case 'read_page_text':
+        case 'extract_page_text': {
+          const compressor = window.domCompressor || window.domCompressorInstance || (window.DOMCompressor ? new window.DOMCompressor() : null);
+          const pageText = compressor ? compressor.extractPageText() : (document.body ? document.body.innerText : '');
+          return { success: true, message: `Extracted text snippet (${pageText.length} chars):\n"""\n${pageText.slice(0, 1500)}\n"""` };
+        }
         case 'wait':
           await new Promise(r => setTimeout(r, (amount || 1) * 1000));
           return { success: true, message: `Waited ${amount || 1}s` };
@@ -148,23 +154,17 @@
       if (submit) {
         const form = el.closest('form');
         if (form) {
-          if (typeof form.requestSubmit === 'function') {
-            form.requestSubmit();
-          } else {
-            form.submit();
-          }
+          form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
         } else {
-          // Fallback: Dispatch Enter key
-          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-          el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
         }
       }
 
-      return { success: true, message: `Typed "${text}" into element [${elementId}]${submit ? ' and submitted' : ''}` };
+      return { success: true, message: `Typed "${text}" into element [${elementId}]` };
     }
 
     /**
-     * Scroll window or container
+     * Scroll webpage smoothly
      */
     doScroll(direction = 'down', amount = 500) {
       const distance = direction === 'up' ? -amount : amount;
@@ -173,31 +173,36 @@
     }
 
     /**
-     * Press key event
+     * Dispatch keypress event
      */
     doPressKey(key = 'Enter') {
       const activeEl = document.activeElement || document.body;
       activeEl.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
       activeEl.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true }));
-      return { success: true, message: `Pressed key "${key}"` };
+      return { success: true, message: `Pressed key [${key}]` };
     }
 
     /**
-     * Temporarily pulse highlight an element
+     * Temporary visual highlight ring around target element
      */
     highlightElement(el) {
-      const originalOutline = el.style.outline;
-      const originalTransition = el.style.transition;
+      const origOutline = el.style.outline;
+      const origTransition = el.style.transition;
+
       el.style.transition = 'outline 0.2s ease';
       el.style.outline = '3px solid #a85f34';
+
       setTimeout(() => {
-        el.style.outline = originalOutline;
-        el.style.transition = originalTransition;
-      }, 1200);
+        el.style.outline = origOutline;
+        el.style.transition = origTransition;
+      }, 1000);
     }
   }
 
-  // Attach instance to window object cleanly
-  window.ActionExecutor = ActionExecutor;
-  window.actionExecutor = window.actionExecutor || new ActionExecutor();
+  // Window global attachment with re-injection protection
+  if (typeof window !== 'undefined') {
+    window.ActionExecutor = window.ActionExecutor || ActionExecutor;
+    window.actionExecutorInstance = window.actionExecutorInstance || new ActionExecutor();
+    window.actionExecutor = window.actionExecutor || window.actionExecutorInstance;
+  }
 })();

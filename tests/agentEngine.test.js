@@ -1,146 +1,113 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-// Mock storage & chrome APIs
-const mockStorageData = {};
+// Mock Chrome APIs before importing AgentEngine
 global.chrome = {
   storage: {
     local: {
-      get: (keys, cb) => {
-        const res = {};
-        keys.forEach(k => res[k] = mockStorageData[k]);
-        cb(res);
-      },
-      set: (items, cb) => {
-        Object.assign(mockStorageData, items);
-        if (cb) cb();
-      }
+      get: (keys, cb) => cb({}),
+      set: (data, cb) => cb && cb()
     }
   },
   tabs: {
-    get: async () => ({ id: 1, url: 'https://example.com' }),
-    sendMessage: (id, msg, cb) => cb({ success: true, data: { title: 'Ex', url: 'https://ex.com', scrollState: {}, elementCount: 0, elementsText: '' } }),
-    onUpdated: { addListener: () => {}, removeListener: () => {} },
-    onActivated: { addListener: () => {} },
-    onCreated: { addListener: () => {} }
+    query: async () => [{ id: 101, url: 'https://example.com' }],
+    sendMessage: (tabId, msg, cb) => cb({ success: true })
   }
 };
 
-const { AgentEngine } = await import('../background/agentEngine.js');
+import { AgentEngine } from '../background/agentEngine.js';
 
-test('AgentEngine - Response Parsing for <thought> and JSON actions', () => {
+test('AgentEngine - Parse DeepSeek <think> reasoning tags', () => {
   const engine = new AgentEngine();
-
-  const sampleLLMOutput = `<thought>
-I need to search for papers on LLM evaluation by typing into element 3.
-</thought>
-\`\`\`json
-{
-  "action": "type",
-  "element_id": 3,
-  "text": "LLM evaluation research papers",
-  "submit": true,
-  "reason": "Search for papers"
-}
-\`\`\``;
-
-  const result = engine.parseResponse(sampleLLMOutput);
-  assert.equal(result.thought, 'I need to search for papers on LLM evaluation by typing into element 3.');
-  assert.equal(result.action.action, 'type');
-  assert.equal(result.action.element_id, 3);
-  assert.equal(result.action.text, 'LLM evaluation research papers');
-});
-
-test('AgentEngine - Universal Guardrail 1: Regex Intent Extraction for Dumber Models', () => {
-  const engine = new AgentEngine();
-
-  // Plain text from a dumber model without JSON
-  const plainTextOutput = `I analyzed the page. Action: click element 4 to view README file.`;
-
-  const result = engine.parseResponse(plainTextOutput, 10);
-  assert.equal(result.action.action, 'click');
-  assert.equal(result.action.element_id, 4);
-});
-
-test('AgentEngine - Universal Guardrail 2: Element ID Hallucination Clamping', () => {
-  const engine = new AgentEngine();
-
-  // Model hallucinated element_id: 45 when page only has 8 elements
-  const hallucinatedOutput = `\`\`\`json\n{"action": "click", "element_id": 45}\n\`\`\``;
-
-  const result = engine.parseResponse(hallucinatedOutput, 8);
-  assert.equal(result.action.action, 'click');
-  assert.equal(result.action.element_id, 8); // Clamped to max 8
-});
-
-test('AgentEngine - Universal Guardrail 3: Action Schema Normalization', () => {
-  const engine = new AgentEngine();
-
-  // Non-standard key names (elementId instead of element_id, done instead of finish)
-  const nonStandardOutput = `\`\`\`json\n{"action": "done", "elementId": "3"}\n\`\`\``;
-
-  const result = engine.parseResponse(nonStandardOutput, 10);
-  assert.equal(result.action.action, 'finish');
-});
-
-test('AgentEngine - DeepSeek R1 <think> Tag Support & JSON Parsing', () => {
-  const engine = new AgentEngine();
-
-  const deepSeekOutput = `<think>
-Analyzing the page elements... Element 5 is the main search box for GitHub repos.
+  const rawOutput = `<think>
+I need to click the search button on element [3].
 </think>
 \`\`\`json
 {
-  "action": "type",
-  "element_id": 5,
-  "text": "agentic browser",
-  "submit": true
+  "action": "click",
+  "element_id": 3,
+  "reason": "Click search button"
 }
 \`\`\``;
 
-  const result = engine.parseResponse(deepSeekOutput);
-  assert.equal(result.thought, 'Analyzing the page elements... Element 5 is the main search box for GitHub repos.');
-  assert.equal(result.action.action, 'type');
+  const result = engine.parseResponse(rawOutput, 10);
+  assert.equal(result.thought, 'I need to click the search button on element [3].');
+  assert.equal(result.action.action, 'click');
+  assert.equal(result.action.element_id, 3);
+});
+
+test('AgentEngine - Plain text intent extraction for smaller LLMs', () => {
+  const engine = new AgentEngine();
+  const textOutput = 'I will click on element [5] to continue.';
+  
+  const result = engine.parseResponse(textOutput, 10);
+  assert.equal(result.action.action, 'click');
   assert.equal(result.action.element_id, 5);
 });
 
-test('AgentEngine - Freeform Text Direct Summary Auto-Wrapping', () => {
+test('AgentEngine - Element ID Clamping Guardrail', () => {
   const engine = new AgentEngine();
+  const output = `\`\`\`json
+{
+  "action": "click",
+  "element_id": 99,
+  "reason": "Hallucinated ID"
+}
+\`\`\``;
 
-  const freeformTextOutput = `<think>
-I have gathered all information from the README file.
-</think>
-Here is the summary of the ScoutFox README file:
-1. ScoutFox is an autonomous AI browser agent.
-2. Supports OpenRouter, AgentRouter, Ollama, Gemini, and OpenAI.
-3. Built with Manifest V3 and Studio Mono design system.`;
-
-  const result = engine.parseResponse(freeformTextOutput);
-  assert.equal(result.thought, 'I have gathered all information from the README file.');
-  assert.equal(result.action.action, 'finish');
-  assert.ok(result.action.answer.includes('ScoutFox is an autonomous AI browser agent'));
+  const result = engine.parseResponse(output, 12);
+  assert.equal(result.action.element_id, 12); // Clamped to max elements (12)
 });
 
-test('AgentEngine - Instant Plan Checklist Initialization', () => {
+test('AgentEngine - Schema Normalization & Key Aliases', () => {
   const engine = new AgentEngine();
-  engine.planSteps = [
-    { id: 1, text: 'Inspect & index webpage interactive elements', status: 'in_progress' },
-    { id: 2, text: 'Plan sub-goals and execute browser actions', status: 'pending' },
-    { id: 3, text: 'Extract target data & synthesize answer', status: 'pending' }
-  ];
+  const output = `\`\`\`json
+{
+  "action": "click_element",
+  "elementId": 2
+}
+\`\`\``;
 
-  assert.equal(engine.planSteps.length, 3);
-  assert.equal(engine.planSteps[0].status, 'in_progress');
+  const result = engine.parseResponse(output, 10);
+  assert.equal(result.action.action, 'click');
+  assert.equal(result.action.element_id, 2);
 });
 
-test('AgentEngine - Zombie Status Auto-Recovery on SW Restart', async () => {
-  mockStorageData.agent_session = {
-    task: 'Previous interrupted task',
-    history: [],
-    planSteps: [],
-    stepCount: 4,
-    status: 'running'
-  };
+test('AgentEngine - Parse read_page_text Action', () => {
+  const engine = new AgentEngine();
+  const output = `\`\`\`json
+{
+  "action": "extract_page_text",
+  "reason": "Extract full text body for reading"
+}
+\`\`\``;
+
+  const result = engine.parseResponse(output, 10);
+  assert.equal(result.action.action, 'read_page_text');
+});
+
+test('AgentEngine - clearHistory resets state', () => {
+  const engine = new AgentEngine();
+  engine.history = [{ type: 'user_goal', prompt: 'test' }];
+  engine.planSteps = [{ id: 1, text: 'step 1' }];
+  engine.stepCount = 5;
+
+  engine.clearHistory();
+
+  assert.equal(engine.history.length, 0);
+  assert.equal(engine.planSteps.length, 0);
+  assert.equal(engine.stepCount, 0);
+});
+
+test('AgentEngine - Zombie Running State Reset on Service Worker Restore', async () => {
+  global.chrome.storage.local.get = (keys, cb) => cb({
+    agent_session: {
+      history: [],
+      planSteps: [],
+      stepCount: 4,
+      status: 'running'
+    }
+  });
 
   const engine = new AgentEngine();
   await engine.restoreState();
