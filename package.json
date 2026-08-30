@@ -1,0 +1,20 @@
+{
+  "name": "scoutfox-ai-browser-agent",
+  "version": "1.0.0",
+  "description": "Autonomous AI Browser Agent for Local & Cloud LLMs (Ollama, OpenRouter, Gemini, OpenAI, Claude, Groq).",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "check": "node --check utils/storage.js utils/logger.js content/domCompressor.js content/actionExecutor.js content/content.js background/apiClients.js background/agentEngine.js background/background.js sidepanel/sidepanel.js"
+  },
+  "keywords": [
+    "browser-agent",
+    "ai-agent",
+    "chrome-extension",
+    "openrouter",
+    "ollama",
+    "gemini"
+  ],
+  "author": "Prit Dhanani (preetdhanani)",
+  "license": "MIT"
+}
