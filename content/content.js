@@ -1,6 +1,7 @@
 /**
  * Content Script Entry Point for ScoutFox AI Agent
- * Listens for background agent execution messages and returns DOM state or executes actions.
+ * Listens for background agent execution messages, relays network recordings from MAIN world,
+ * and executes actions or returns DOM snapshot state.
  */
 
 (function init() {
@@ -11,6 +12,22 @@
     return;
   }
   window.__scoutfox_listener_registered = true;
+
+  // Relay network requests from MAIN world net-recorder.js to Background Service Worker
+  window.addEventListener('message', (event) => {
+    if (event.source === window && event.data && event.data.source === 'scoutfox-net') {
+      try {
+        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({
+            action: 'NET_REQUEST_RECORDED',
+            payload: event.data.payload
+          });
+        }
+      } catch (_) {
+        // Service worker might be sleeping/restarting — ignore
+      }
+    }
+  });
 
   // Forward anything that fails in this page context to the central log
   const reportContentError = (source, err) => {

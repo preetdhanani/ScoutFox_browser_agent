@@ -54,15 +54,15 @@
     }
 
     /**
-     * Dedicated Text Body Extraction Module
-     * Extracts readable text content across rendered HTML, raw text files, and documentation containers.
+     * Dedicated Scroll-Aware Text Body Extraction Module
+     * Extracts readable text content relative to current scroll viewport or full document.
      */
     extractPageText() {
       try {
         // 1. Raw Markdown / Plain Text Pages (e.g. raw.githubusercontent.com)
         if (window.location.hostname.includes('raw.githubusercontent.com') || (document.contentType && document.contentType.startsWith('text/'))) {
           const rawText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-          return rawText.trim().slice(0, 4000);
+          return rawText.trim().slice(0, 4500);
         }
 
         // 2. Targeted Article / README / Documentation Containers
@@ -71,7 +71,24 @@
         if (!container) return '';
 
         // Extract headings, paragraphs, list items, table text, and code snippets
-        const textNodes = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, td, th, pre, code, blockquote'));
+        const allTextNodes = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, td, th, pre, code, blockquote'));
+        
+        let textNodes = allTextNodes;
+
+        // If page is scrolled down, filter nodes to current viewport window so scrolling reveals new text
+        if (window.scrollY > 200 && allTextNodes.length > 30) {
+          const vHeight = window.innerHeight || 800;
+          textNodes = allTextNodes.filter(node => {
+            const rect = node.getBoundingClientRect();
+            return rect.bottom >= -200 && rect.top <= vHeight + 1500;
+          });
+          if (textNodes.length < 10) {
+            textNodes = allTextNodes.slice(-50); // Fallback to lower section
+          }
+        } else {
+          textNodes = allTextNodes.slice(0, 90);
+        }
+
         let extractedText = '';
 
         if (textNodes.length > 0) {
@@ -84,18 +101,17 @@
               return str;
             })
             .filter(t => t.length > 3)
-            .slice(0, 80)
             .join('\n');
         }
 
-        // 3. Fallback to container innerText if targeted extraction is sparse
+        // Fallback to container innerText if targeted extraction is sparse
         if (!extractedText || extractedText.length < 100) {
           extractedText = (container.innerText || container.textContent || '').trim();
         }
 
-        return extractedText.slice(0, 4000);
+        return extractedText.slice(0, 4500);
       } catch (_) {
-        return (document.body ? (document.body.innerText || document.body.textContent || '') : '').slice(0, 2500);
+        return (document.body ? (document.body.innerText || document.body.textContent || '') : '').slice(0, 3000);
       }
     }
 
@@ -104,6 +120,35 @@
      */
     getElement(id) {
       return this.elementMap.get(Number(id));
+    }
+
+    /**
+     * Compute stable CSS selector path for an element
+     */
+    getCssPath(el) {
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
+      if (el.id) return `#${CSS.escape ? CSS.escape(el.id) : el.id}`;
+      
+      const path = [];
+      let current = el;
+      while (current && current.nodeType === Node.ELEMENT_NODE && current !== document.body) {
+        let selector = current.tagName.toLowerCase();
+        if (current.id) {
+          selector = `#${CSS.escape ? CSS.escape(current.id) : current.id}`;
+          path.unshift(selector);
+          break;
+        } else {
+          let sibling = current;
+          let nth = 1;
+          while (sibling = sibling.previousElementSibling) {
+            if (sibling.tagName.toLowerCase() === selector) nth++;
+          }
+          if (nth > 1) selector += `:nth-of-type(${nth})`;
+        }
+        path.unshift(selector);
+        current = current.parentElement;
+      }
+      return path.join(' > ');
     }
 
     /**
@@ -149,7 +194,7 @@
     }
 
     /**
-     * Produce concise element string representation
+     * Produce concise element string representation with stable locator descriptors
      */
     getElementSummary(el, id) {
       const tagName = el.tagName.toLowerCase();
@@ -166,11 +211,25 @@
 
       let labelText = text || ariaLabel || placeholder || 'element';
 
+      const locator = {
+        index: id,
+        tag: tagName,
+        text: labelText,
+        role: el.getAttribute('role') || tagName,
+        cssPath: this.getCssPath(el),
+        attrs: {
+          id: el.id || '',
+          name: el.getAttribute('name') || '',
+          'data-testid': el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('data-cy') || ''
+        }
+      };
+
       return {
         id,
         tagName,
         type,
         text: labelText,
+        locator,
         formatted: `[${id}] ${tagName}${type ? `[${type}]` : ''} "${labelText}" (${desc})`
       };
     }

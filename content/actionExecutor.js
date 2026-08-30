@@ -1,5 +1,6 @@
 /**
- * ActionExecutor - Handles element highlighting overlay and executes actions (click, type, scroll, keypress, read_page_text).
+ * ActionExecutor - Handles element highlighting overlay, stable locator re-resolution,
+ * and executes actions (click, type, scroll, keypress, read_page_text, browser_batch).
  * Encapsulated in an IIFE to prevent V8 parse-time redeclaration errors upon re-injection.
  */
 
@@ -66,10 +67,70 @@
     }
 
     /**
+     * Re-resolve element using Stable Locator descriptors to prevent stale index execution
+     */
+    resolveElement(elementId) {
+      const compressor = window.domCompressor || window.domCompressorInstance;
+      const liveNode = compressor ? compressor.getElement(elementId) : null;
+
+      // 1. Live Node Reference (if still attached to DOM)
+      if (liveNode && document.contains(liveNode)) {
+        return liveNode;
+      }
+
+      // Find descriptor from snapshot elements cache if available
+      let locator = null;
+      if (compressor && compressor.elements) {
+        const item = compressor.elements.find(e => e.id === Number(elementId));
+        if (item) locator = item.locator;
+      }
+
+      if (!locator) {
+        return null;
+      }
+
+      // 2. Stable attributes (#id / [data-testid] / [name])
+      if (locator.attrs) {
+        if (locator.attrs.id) {
+          const el = document.getElementById(locator.attrs.id);
+          if (el && document.contains(el)) return el;
+        }
+        if (locator.attrs['data-testid']) {
+          const el = document.querySelector(`[data-testid="${CSS.escape ? CSS.escape(locator.attrs['data-testid']) : locator.attrs['data-testid']}"]`);
+          if (el && document.contains(el)) return el;
+        }
+        if (locator.attrs.name) {
+          const el = document.querySelector(`[name="${CSS.escape ? CSS.escape(locator.attrs.name) : locator.attrs.name}"]`);
+          if (el && document.contains(el)) return el;
+        }
+      }
+
+      // 3. CSS Path
+      if (locator.cssPath) {
+        try {
+          const el = document.querySelector(locator.cssPath);
+          if (el && document.contains(el)) return el;
+        } catch (_) {}
+      }
+
+      // 4. Tag + Text + Role Match
+      if (locator.tag) {
+        const candidates = Array.from(document.querySelectorAll(locator.tag));
+        const matched = candidates.find(candidate => {
+          const txt = (candidate.innerText || candidate.textContent || '').trim().replace(/\s+/g, ' ');
+          return txt === locator.text;
+        });
+        if (matched) return matched;
+      }
+
+      return null;
+    }
+
+    /**
      * Execute action requested by agent
      */
     async execute(actionPayload) {
-      const { action, element_id, text, submit, direction, amount, key, url } = actionPayload;
+      const { action, element_id, text, submit, direction, amount, key, url, steps, stopOnError = true } = actionPayload;
 
       switch (action) {
         case 'click':
@@ -95,6 +156,8 @@
           const pageText = compressor ? compressor.extractPageText() : (document.body ? document.body.innerText : '');
           return { success: true, message: `Extracted text snippet (${pageText.length} chars):\n"""\n${pageText.slice(0, 1500)}\n"""` };
         }
+        case 'browser_batch':
+          return this.doBrowserBatch(steps, stopOnError);
         case 'wait':
           await new Promise(r => setTimeout(r, (amount || 1) * 1000));
           return { success: true, message: `Waited ${amount || 1}s` };
@@ -104,12 +167,124 @@
     }
 
     /**
-     * Simulate realistic click on element
+     * Execute deterministic sequence of primitives in one round trip with stable locator re-resolution
+     */
+    async doBrowserBatch(steps, stopOnError = true) {
+      if (!Array.isArray(steps) || steps.length === 0) {
+        return { success: false, error: 'browser_batch requires a non-empty "steps" array' };
+      }
+
+      if (steps.length > 8) {
+        return { success: false, error: 'browser_batch exceeds maximum allowed 8 steps limit' };
+      }
+
+      const forbidden = ['navigate', 'go_back', 'go_forward', 'ask_user', 'finish', 'browser_batch'];
+      const results = [];
+      let completed = 0;
+      let abortedAt = null;
+      let terminatedBy = null;
+
+      const initialUrl = window.location.href;
+
+      for (let i = 0; i < steps.length; i++) {
+        const step = { ...steps[i] };
+        
+        // Key aliases
+        const actName = step.action || (step.click !== undefined ? 'click' : step.type !== undefined ? 'type' : '');
+        const targetId = step.element_id || step.index || step.elementId || step.element;
+
+        if (forbidden.includes(actName)) {
+          const err = `Action "${actName}" is forbidden inside browser_batch`;
+          results.push({ step: i, action: actName, ok: false, error: err });
+          abortedAt = i;
+          if (stopOnError) break;
+          continue;
+        }
+
+        // Execute primitive step
+        try {
+          const stepPayload = { ...step, action: actName, element_id: targetId };
+          const stepRes = await this.execute(stepPayload);
+
+          if (stepRes.success !== false) {
+            results.push({ step: i, action: actName, ok: true, message: stepRes.message });
+            completed++;
+          } else {
+            results.push({ step: i, action: actName, ok: false, error: stepRes.error });
+            abortedAt = i;
+            if (stopOnError) break;
+          }
+        } catch (stepErr) {
+          results.push({ step: i, action: actName, ok: false, error: stepErr.message });
+          abortedAt = i;
+          if (stopOnError) break;
+        }
+
+        // Check if page started navigating
+        if (window.location.href !== initialUrl) {
+          terminatedBy = 'navigation';
+          break;
+        }
+
+        // Auto-wait between batch steps (readyState + DOM quiet window)
+        await this.waitForDomQuiet(300, 1500);
+      }
+
+      const ok = completed > 0 && (abortedAt === null);
+      return {
+        success: ok,
+        completed,
+        total: steps.length,
+        results,
+        abortedAt,
+        terminatedBy
+      };
+    }
+
+    /**
+     * Helper to wait for DOM quietness between batch steps
+     */
+    waitForDomQuiet(quietMs = 300, timeoutCeilingMs = 1500) {
+      return new Promise((resolve) => {
+        let timer = null;
+        let ceilingTimer = null;
+        let observer = null;
+
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          if (ceilingTimer) clearTimeout(ceilingTimer);
+          if (observer) observer.disconnect();
+        };
+
+        ceilingTimer = setTimeout(() => {
+          cleanup();
+          resolve();
+        }, timeoutCeilingMs);
+
+        const resetTimer = () => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            cleanup();
+            resolve();
+          }, quietMs);
+        };
+
+        if (typeof MutationObserver !== 'undefined' && document.body) {
+          observer = new MutationObserver(resetTimer);
+          observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+        }
+
+        resetTimer();
+      });
+    }
+
+    /**
+     * Simulate realistic click on element with stable locator re-resolution
      */
     doClick(elementId) {
-      const el = window.domCompressor ? window.domCompressor.getElement(elementId) : null;
+      const el = this.resolveElement(elementId);
       if (!el) {
-        return { success: false, error: `Element [${elementId}] not found on page. Please choose a valid index from the list.` };
+        return { success: false, error: `Element [${elementId}] no longer resolvable in DOM.` };
       }
 
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -133,12 +308,12 @@
     }
 
     /**
-     * Simulate realistic typing into input field
+     * Simulate realistic typing into input field with stable locator re-resolution
      */
     doType(elementId, text, submit = false) {
-      const el = window.domCompressor ? window.domCompressor.getElement(elementId) : null;
+      const el = this.resolveElement(elementId);
       if (!el) {
-        return { success: false, error: `Element [${elementId}] not found on page.` };
+        return { success: false, error: `Element [${elementId}] no longer resolvable in DOM.` };
       }
 
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -147,7 +322,7 @@
       el.focus();
       el.value = text;
 
-      // Dispatch input and change events so modern frameworks (React, Vue, Angular) register changes
+      // Dispatch input and change events so modern frameworks register changes
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
 

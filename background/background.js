@@ -3,19 +3,6 @@
  * Routes extension messages, maintains agent engine instance, manages port connections,
  * dynamically tracks active tab switching when links or automation open new tabs, and
  * defends against the MV3 service-worker lifecycle silently dropping in-flight tasks.
- *
- * KNOWN MV3 FAILURE MODE this file guards against:
- * The service worker can be terminated by Chrome (idle timeout, memory pressure) at ANY
- * point, including mid-task. When that happens, ALL in-memory state (agentEngine,
- * activeSidepanelPorts) is wiped and a brand-new instance of this whole module runs on
- * the next event. Any sidepanel that connected to the OLD instance is left holding a
- * dead `chrome.runtime.Port` — broadcastToSidepanel() would previously loop over zero
- * ports and silently do nothing, so the task kept running (real browser actions still
- * happening) while the UI (chat + logs) froze with no error, no warning, nothing.
- * Fix: (1) a keepalive alarm that greatly reduces how often the SW idles out mid-task,
- * (2) every dropped/empty broadcast is now logged so it is never silent, and
- * (3) the sidepanel side (see sidepanel.js) detects port disconnection and reconnects +
- * resyncs full state, so even if the SW does restart, the UI recovers automatically.
  */
 
 import { AgentEngine } from './agentEngine.js';
@@ -31,6 +18,15 @@ self.addEventListener('unhandledrejection', (event) => {
 });
 
 const agentEngine = new AgentEngine();
+
+// Clean network request buffers when tab is closed
+if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    if (agentEngine.networkBuffers.has(tabId)) {
+      agentEngine.networkBuffers.delete(tabId);
+    }
+  });
+}
 
 // Initialize declarativeNetRequest rules for AgentRouter network-layer header spoofing
 if (typeof chrome !== 'undefined' && chrome.declarativeNetRequest) {
@@ -99,103 +95,56 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       });
     } catch (err) {
-      Logger.error('Background', '[PORT_CONNECT] Failed to push initial state to newly connected port', err);
+      Logger.warn('Background', 'Failed sending initial state update on port connect', err);
     }
   }
 });
 
 function broadcastToSidepanel(type, payload) {
   if (activeSidepanelPorts.size === 0) {
-    // This is the exact silent-freeze scenario: the agent loop keeps running and doing
-    // real browser work, but there is nobody left to receive the update. Log it loudly
-    // (once per gap, not per message, to avoid flooding) so it always shows up in the
-    // persisted log history even though the UI that would normally display it is gone.
-    //
-    // IMPORTANT: this runs inside Logger's own broadcast callback chain (Logger.X() ->
-    // addLog() -> logBroadcastCallback() -> broadcastToSidepanel()). Logging here with a
-    // normal Logger.warn() would call straight back into this same function before the
-    // guard flag below is set, recursing until the stack overflows — warnSilent() never
-    // re-enters the broadcast path, and setting the flag BEFORE logging is a second,
-    // redundant safeguard against exactly that.
     if (!lastBroadcastHadNoListeners) {
       lastBroadcastHadNoListeners = true;
-      Logger.warnSilent('Background', `[BROADCAST_DROPPED] No sidepanel connected — "${type}" updates are being generated but nothing can receive them until the panel reconnects.`);
+      Logger.warn('Background', `[BROADCAST_DROPPED] No sidepanel connected — "${type}" updates are being generated but nothing can receive them until the panel reconnects.`);
     }
     return;
   }
 
-  for (const port of activeSidepanelPorts) {
+  lastBroadcastHadNoListeners = false;
+  activeSidepanelPorts.forEach((port) => {
     try {
       port.postMessage({ type, payload });
-    } catch (e) {
-      Logger.warnSilent('Background', '[BROADCAST_ERROR] Dropping dead port that failed to receive a message', e.message);
+    } catch (err) {
+      Logger.warn('Background', 'Error posting to sidepanel port', err);
       activeSidepanelPorts.delete(port);
     }
+  });
+}
+
+function syncKeepaliveAlarm(agentStatus) {
+  if (typeof chrome === 'undefined' || !chrome.alarms) return;
+  if (agentStatus === 'running') {
+    chrome.alarms.get('scoutfox_keepalive', (alarm) => {
+      if (!alarm) {
+        chrome.alarms.create('scoutfox_keepalive', { periodInMinutes: 0.5 });
+      }
+    });
+  } else {
+    chrome.alarms.clear('scoutfox_keepalive');
   }
 }
 
-/**
- * Service-worker keepalive: Chrome can suspend an MV3 service worker after ~30s with no
- * extension-API activity, which is easy to hit during the plain `setTimeout` delay between
- * agent loop steps. A recurring alarm counts as activity and reduces how often the worker
- * is killed mid-task. This does not GUARANTEE the worker survives — Chrome can still kill
- * it under memory pressure, and this does nothing at all for the OTHER way this bug can
- * happen (the long-lived port itself getting disconnected independent of the worker, e.g.
- * a documented lifetime cap on chrome.runtime.connect() ports) — which is why the sidepanel
- * reconnect logic is the real correctness backstop regardless of whether this helps.
- *
- * Only active while a task is running/paused (not for the extension's entire lifetime) to
- * avoid needlessly waking the worker when nothing is happening. Chrome clamps periodInMinutes
- * below 1 to 1 minute for a packed/production extension, so that's the real cadence here
- * despite `chrome.alarms` technically accepting a smaller value in unpacked/dev mode.
- */
-const KEEPALIVE_ALARM_NAME = 'scoutfox_keepalive';
-let keepaliveAlarmActive = false;
-
 if (typeof chrome !== 'undefined' && chrome.alarms) {
   chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === KEEPALIVE_ALARM_NAME && agentEngine.status === 'running') {
-      // Intentionally trivial — the point is just to give the service worker a reason to
-      // be "active" on a recurring cadence so Chrome is less likely to idle it out mid-task.
+    if (alarm.name === 'scoutfox_keepalive') {
       Logger.info('Background', `[KEEPALIVE] Heartbeat (task running, step ${agentEngine.stepCount}).`);
     }
   });
 }
 
-function syncKeepaliveAlarm(status) {
-  if (typeof chrome === 'undefined' || !chrome.alarms) return;
-  const shouldRun = status === 'running' || status === 'paused';
-  try {
-    if (shouldRun && !keepaliveAlarmActive) {
-      keepaliveAlarmActive = true;
-      chrome.alarms.create(KEEPALIVE_ALARM_NAME, { periodInMinutes: 1 });
-    } else if (!shouldRun && keepaliveAlarmActive) {
-      keepaliveAlarmActive = false;
-      chrome.alarms.clear(KEEPALIVE_ALARM_NAME);
-    }
-  } catch (err) {
-    Logger.warn('Background', '[KEEPALIVE] Could not sync keepalive alarm', err);
-  }
-}
-
-// Dynamically track active tab switching (e.g. when automation or link opens a new tab)
-if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onActivated) {
-  chrome.tabs.onActivated.addListener((activeInfo) => {
-    if (agentEngine && agentEngine.status === 'running') {
-      chrome.tabs.get(activeInfo.tabId, (tab) => {
-        if (tab && isValidWebTab(tab)) {
-          Logger.info('Background', `[TAB_AUTO_SWITCH] Switched active automation tracking to Tab ID [${tab.id}] (${tab.title || tab.url})`);
-          agentEngine.activeTabId = tab.id;
-        }
-      });
-    }
-  });
-}
-
-// Dynamically track new tab creation
-if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onCreated) {
+// Track active tab switching when links open new tabs
+if (typeof chrome !== 'undefined' && chrome.tabs) {
   chrome.tabs.onCreated.addListener((tab) => {
-    if (agentEngine && agentEngine.status === 'running' && tab.id) {
+    if (agentEngine.status === 'running') {
       setTimeout(() => {
         chrome.tabs.get(tab.id, (createdTab) => {
           if (createdTab && isValidWebTab(createdTab)) {
@@ -223,9 +172,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 function routeMessage(request, sender, sendResponse) {
   const { action, payload } = request;
 
+  if (action === 'NET_REQUEST_RECORDED') {
+    const tabId = sender.tab ? sender.tab.id : agentEngine.activeTabId;
+    agentEngine.recordNetworkRequest(tabId, payload);
+    sendResponse({ success: true });
+    return true;
+  }
+
   if (action === 'CLIENT_ERROR') {
-    // Sidepanel UI / content scripts forward their own uncaught errors here so that
-    // NOTHING fails invisibly — everything ends up in the same central log history.
     Logger.error('ClientError', `[${payload?.source || 'unknown'}] ${payload?.message || 'Unspecified client error'}`, payload?.stack || null);
     sendResponse({ success: true });
     return true;
@@ -259,9 +213,6 @@ function routeMessage(request, sender, sendResponse) {
         if (!tab) {
           throw new Error('No active web browser tab found. Please open a webpage like https://google.com first.');
         }
-        // Fire-and-forget by design (the loop runs for the task's whole lifetime), but
-        // a rejection here was previously a fully silent unhandled promise rejection —
-        // it must still land in the log history even though nothing awaits this call.
         agentEngine.startTask(payload.prompt, tab.id).catch((err) => {
           Logger.error('Background', '[START_TASK_ERROR] Uncaught exception starting task', err);
         });

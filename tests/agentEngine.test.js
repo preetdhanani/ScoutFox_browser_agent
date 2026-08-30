@@ -86,6 +86,69 @@ test('AgentEngine - Parse read_page_text Action', () => {
   assert.equal(result.action.action, 'read_page_text');
 });
 
+test('AgentEngine - Parse execute_js Action', () => {
+  const engine = new AgentEngine();
+  const output = `\`\`\`json
+{
+  "action": "eval_js",
+  "code": "return document.title",
+  "world": "MAIN"
+}
+\`\`\``;
+
+  const result = engine.parseResponse(output, 10);
+  assert.equal(result.action.action, 'execute_js');
+  assert.equal(result.action.code, 'return document.title');
+});
+
+test('AgentEngine - Parse read_network_requests Action', () => {
+  const engine = new AgentEngine();
+  const output = `\`\`\`json
+{
+  "action": "network_requests",
+  "filter": { "status": "error" },
+  "limit": 5
+}
+\`\`\``;
+
+  const result = engine.parseResponse(output, 10);
+  assert.equal(result.action.action, 'read_network_requests');
+});
+
+test('AgentEngine - Parse browser_batch Action', () => {
+  const engine = new AgentEngine();
+  const output = `\`\`\`json
+{
+  "action": "batch_actions",
+  "steps": [
+    { "action": "type", "element_id": 1, "text": "a@b.com" },
+    { "action": "click", "element_id": 2 }
+  ]
+}
+\`\`\``;
+
+  const result = engine.parseResponse(output, 10);
+  assert.equal(result.action.action, 'browser_batch');
+  assert.equal(result.action.steps.length, 2);
+});
+
+test('AgentEngine - Redact Sensitive Data in Network Payloads', () => {
+  const engine = new AgentEngine();
+  const payloadJson = JSON.stringify({
+    user: 'testuser',
+    password: 'superSecretPassword123',
+    apiKey: 'sk-1234567890abcdef',
+    token: 'bearer-xyz-123',
+    card: '4111222233334444'
+  });
+
+  const redacted = engine.redactSensitiveData(payloadJson);
+  assert.ok(!redacted.includes('superSecretPassword123'));
+  assert.ok(!redacted.includes('sk-1234567890abcdef'));
+  assert.ok(redacted.includes('[REDACTED]'));
+  assert.ok(redacted.includes('testuser'));
+});
+
 test('AgentEngine - clearHistory resets state', () => {
   const engine = new AgentEngine();
   engine.history = [{ type: 'user_goal', prompt: 'test' }];

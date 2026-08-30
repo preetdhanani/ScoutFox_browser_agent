@@ -1,8 +1,9 @@
 /**
  * AgentEngine for ScoutFox AI Agent
  * Orchestrates dynamic task-tailored plan generation, real action-driven checklist progress tracking,
- * tab completion waiting, page text body extraction module, resilient service worker state restoration,
- * Few-Shot System Prompting, and Universal Model Guardrails.
+ * tab completion waiting, viewport-aware page text body extraction, network request ring-buffer recording,
+ * execute_js, read_network_requests, browser_batch orchestration, Few-Shot System Prompting,
+ * and Universal Model Guardrails.
  */
 
 import { ApiClients } from './apiClients.js';
@@ -23,6 +24,7 @@ export class AgentEngine {
     this.stateVersion = 0;
     this.recentActionSignatures = [];
     this.currentPlanIndex = 0;
+    this.networkBuffers = new Map(); // tabId -> Array of Network Requests (capped at 100)
     
     this.restoreState();
   }
@@ -115,6 +117,210 @@ export class AgentEngine {
     this.notifyStateChange();
   }
 
+  /**
+   * Record network request into tab ring buffer (capacity 100)
+   */
+  recordNetworkRequest(tabId, req) {
+    if (!tabId || !req) return;
+    if (!this.networkBuffers.has(tabId)) {
+      this.networkBuffers.set(tabId, []);
+    }
+    const buf = this.networkBuffers.get(tabId);
+    req.actionMarkerIndex = this.stepCount;
+    buf.push(req);
+    
+    if (buf.length > 100) {
+      buf.shift();
+    }
+  }
+
+  /**
+   * Read recent network activity with filtering & sensitive key redaction
+   */
+  readNetworkRequests(tabId, filter = {}, includeBody = true, limit = 10) {
+    const buf = this.networkBuffers.get(tabId) || [];
+    let requests = [...buf];
+
+    if (filter.status === 'error') {
+      requests = requests.filter(r => !r.ok || r.status >= 400 || r.error);
+    } else if (filter.status === 'success') {
+      requests = requests.filter(r => r.ok && r.status < 400);
+    }
+
+    if (filter.since === 'last_action') {
+      const lastStep = Math.max(1, this.stepCount - 1);
+      requests = requests.filter(r => r.actionMarkerIndex >= lastStep);
+    }
+
+    if (filter.urlContains) {
+      const term = filter.urlContains.toLowerCase();
+      requests = requests.filter(r => r.url.toLowerCase().includes(term));
+    }
+
+    const finalSlice = requests.slice(-Math.min(limit, 50));
+
+    if (finalSlice.length === 0) {
+      return '(No network requests captured matching filter criteria)';
+    }
+
+    const textLines = finalSlice.map(req => {
+      const relativeUrl = req.url.length > 80 ? req.url.slice(0, 80) + '...' : req.url;
+      let line = `[${req.method}] ${relativeUrl} → ${req.status || 'ERR'} (${req.durationMs}ms)`;
+      if (req.error) line += ` [Error: ${req.error}]`;
+
+      if (includeBody) {
+        if (req.reqBody) {
+          const redactedReq = this.redactSensitiveData(req.reqBody);
+          line += `\n  req:  ${redactedReq.length > 500 ? redactedReq.slice(0, 500) + '...' : redactedReq}`;
+        }
+        if (req.respBody) {
+          const redactedResp = this.redactSensitiveData(req.respBody);
+          line += `\n  resp: ${redactedResp.length > 500 ? redactedResp.slice(0, 500) + '...' : redactedResp}`;
+        }
+      }
+      return line;
+    });
+
+    return textLines.join('\n\n');
+  }
+
+  redactSensitiveData(data) {
+    if (!data) return data;
+    const sensitiveKeys = ['password', 'token', 'authorization', 'cookie', 'secret', 'apikey', 'ssn', 'card', 'cvv'];
+    
+    if (typeof data === 'string') {
+      try {
+        const parsed = JSON.parse(data);
+        const redacted = this.redactObject(parsed, sensitiveKeys);
+        return JSON.stringify(redacted);
+      } catch (_) {
+        let str = data;
+        sensitiveKeys.forEach(key => {
+          const regex = new RegExp(`("${key}"\\s*:\\s*")([^"]+)(")`, 'gi');
+          str = str.replace(regex, '$1[REDACTED]$3');
+        });
+        return str;
+      }
+    }
+    if (typeof data === 'object') {
+      return this.redactObject(data, sensitiveKeys);
+    }
+    return data;
+  }
+
+  redactObject(obj, sensitiveKeys) {
+    if (!obj || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map(item => this.redactObject(item, sensitiveKeys));
+    
+    const copy = {};
+    for (const [k, v] of Object.entries(obj)) {
+      const isSensitive = sensitiveKeys.some(s => k.toLowerCase().includes(s));
+      if (isSensitive) {
+        copy[k] = '[REDACTED]';
+      } else if (v && typeof v === 'object') {
+        copy[k] = this.redactObject(v, sensitiveKeys);
+      } else {
+        copy[k] = v;
+      }
+    }
+    return copy;
+  }
+
+  /**
+   * Tool 1: execute_js in MAIN or ISOLATED world with 5s timeout, CSP fallback, and truncation
+   */
+  async executeJs(tabId, code, world = 'MAIN') {
+    const timeoutMs = 5000;
+    const startTime = Date.now();
+
+    const executeWork = async (targetWorld) => {
+      const [inj] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: targetWorld,
+        func: (src) => {
+          // eslint-disable-next-line no-new-func
+          const fn = new Function(`return (async () => { ${src} })()`);
+          return fn();
+        },
+        args: [code]
+      });
+      return inj ? inj.result : undefined;
+    };
+
+    const serializeResult = (val) => {
+      if (val === undefined) return 'undefined';
+      if (val === null) return 'null';
+      if (typeof val === 'number' || typeof val === 'boolean' || typeof val === 'string') {
+        return val;
+      }
+      try {
+        const json = JSON.stringify(val, (key, value) => {
+          if (value && value.nodeType === 1) { // Element node
+            return {
+              tag: value.tagName ? value.tagName.toLowerCase() : '',
+              id: value.id || '',
+              className: value.className || '',
+              textContent: (value.textContent || '').slice(0, 200)
+            };
+          }
+          return value;
+        });
+        return json || String(val);
+      } catch (_) {
+        return String(val);
+      }
+    };
+
+    try {
+      const resultPromise = (async () => {
+        let rawVal;
+        let usedWorld = world;
+        try {
+          rawVal = await executeWork(world);
+        } catch (err) {
+          if (world === 'MAIN' && (err.message.includes('EvalError') || err.message.includes('CSP') || err.message.includes('unsafe-eval'))) {
+            usedWorld = 'ISOLATED';
+            rawVal = await executeWork('ISOLATED');
+          } else if (err.message.includes('Frame with ID') && err.message.includes('removed')) {
+            return { ok: true, result: 'navigation triggered', durationMs: Date.now() - startTime };
+          } else {
+            throw err;
+          }
+        }
+
+        let serialized = serializeResult(rawVal);
+        let truncated = false;
+        if (typeof serialized === 'string' && serialized.length > 2000) {
+          const origLen = serialized.length;
+          serialized = serialized.slice(0, 2000) + `…[${origLen - 2000} more chars]`;
+          truncated = true;
+        }
+
+        return {
+          ok: true,
+          result: serialized,
+          world: usedWorld,
+          truncated,
+          durationMs: Date.now() - startTime
+        };
+      })();
+
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('execute_js timed out after 5000ms')), timeoutMs);
+      });
+
+      const res = await Promise.race([resultPromise, timeoutPromise]);
+      return { success: res.ok, message: res.ok ? `Result: ${res.result}` : res.error, ...res };
+    } catch (err) {
+      return {
+        success: false,
+        ok: false,
+        error: err.message,
+        durationMs: Date.now() - startTime
+      };
+    }
+  }
+
   async startTask(userPrompt, tabId) {
     if (!userPrompt || !userPrompt.trim()) return;
 
@@ -143,12 +349,15 @@ export class AgentEngine {
   }
 
   async generatePlan(userPrompt, settings) {
-    const planPrompt = `Task: "${userPrompt}"
-Generate a concise 3-4 step execution plan tailored specifically for this web browsing task.
-Output ONLY a raw JSON array of short action strings.
+    const isSummarizeTask = /summarize|summary|readme|overview|describe|explain|read/i.test(userPrompt);
 
-Example for task "Summarize README for scout":
-["Identify target project repository", "Access README file in repository", "Extract key documentation text", "Synthesize concise summary"]`;
+    const planPrompt = `Task: "${userPrompt}"
+Generate a concise, efficient execution plan tailored specifically for this web browsing task.
+Output ONLY a raw JSON array of short sub-goal action strings.
+
+${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 steps max) so the agent finishes immediately without scrolling loops:
+["Analyze visible documentation text on page", "Synthesize concise summary"]` : `Example for multi-step task:
+["Identify target form or section", "Execute required browser actions", "Verify result and complete task"]`}`;
 
     try {
       const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.');
@@ -171,7 +380,10 @@ Example for task "Summarize README for scout":
       }
     } catch (err) {
       Logger.warn('AgentEngine', '[PLANNER_FALLBACK] Using dynamic fallback checklist for task', err.message);
-      this.planSteps = [
+      this.planSteps = isSummarizeTask ? [
+        { id: 1, text: 'Analyze visible documentation text on page', status: 'in_progress' },
+        { id: 2, text: 'Synthesize concise summary', status: 'pending' }
+      ] : [
         { id: 1, text: `Analyze page state for "${this.currentTask}"`, status: 'in_progress' },
         { id: 2, text: 'Execute targeted web actions & navigate', status: 'pending' },
         { id: 3, text: 'Extract relevant information & synthesize answer', status: 'pending' }
@@ -192,8 +404,9 @@ Example for task "Summarize README for scout":
     if (lastActionObj) {
       const totalSteps = this.planSteps.length;
       if (this.currentPlanIndex < totalSteps - 1) {
-        if (lastActionObj.action === 'navigate' || lastActionObj.action === 'type' || (lastActionObj.action === 'click' && this.stepCount > 2)) {
-          this.currentPlanIndex = Math.min(totalSteps - 1, this.currentPlanIndex + 1);
+        if (lastActionObj.action === 'navigate' || lastActionObj.action === 'type' || lastActionObj.action === 'browser_batch' || (lastActionObj.action === 'click' && this.stepCount > 1)) {
+          const advanceCount = (lastActionObj.action === 'browser_batch' && lastActionObj.completed) ? Math.min(2, lastActionObj.completed) : 1;
+          this.currentPlanIndex = Math.min(totalSteps - 1, this.currentPlanIndex + advanceCount);
         }
       }
     }
@@ -292,13 +505,18 @@ Example for task "Summarize README for scout":
       const systemPrompt = this.buildSystemPrompt(settings.systemInstructions);
       let userMessage = this.buildStepMessage(domSnapshot);
 
-      // Universal Guardrail: Anti-Stuck Loop Detection
+      // Universal Guardrail: Anti-Stuck Loop Detection & Auto-Inject Network Errors
       if (this.recentActionSignatures.length >= 2) {
         const last1 = this.recentActionSignatures[this.recentActionSignatures.length - 1];
         const last2 = this.recentActionSignatures[this.recentActionSignatures.length - 2];
         if (last1 === last2 && !last1.includes('finish') && !last1.includes('scroll')) {
           userMessage += `\n\n[ANTI-STUCK GUARDRAIL WARNING]: You executed the exact same action ("${last1}") twice in a row. If the page did not update, DO NOT repeat it again. Choose a different element, type a new query, or scroll down.`;
-          Logger.warn('AgentEngine', `[GUARDRAIL_LOOP_DETECTED] Injected anti-stuck warning into prompt for repeating action: ${last1}`);
+          
+          const netErrors = this.readNetworkRequests(this.activeTabId, { status: 'error', since: 'last_action' }, true, 5);
+          if (netErrors && !netErrors.includes('(No network requests')) {
+            userMessage += `\n\n[RECENT FAILED NETWORK REQUESTS]:\n${netErrors}`;
+            Logger.info('AgentEngine', '[GUARDRAIL_NET_AUTO_INJECT] Auto-injected recent network request errors into user prompt.');
+          }
         }
       }
 
@@ -402,7 +620,8 @@ Example for task "Summarize README for scout":
           type: 'execution_result',
           success: execResult.success !== false,
           message: execResult.message,
-          error: execResult.error
+          error: execResult.error,
+          resultData: execResult.result || execResult.results || null
         });
 
         if (execResult.success !== false) {
@@ -524,6 +743,15 @@ Example for task "Summarize README for scout":
   }
 
   async executeActionOnTab(tabId, actionPayload) {
+    if (actionPayload.action === 'execute_js') {
+      return this.executeJs(tabId, actionPayload.code, actionPayload.world || 'MAIN');
+    }
+
+    if (actionPayload.action === 'read_network_requests') {
+      const netFormatted = this.readNetworkRequests(tabId, actionPayload.filter, actionPayload.includeBody !== false, actionPayload.limit || 10);
+      return { success: true, message: `Recent Network Activity:\n${netFormatted}` };
+    }
+
     return new Promise((resolve, reject) => {
       chrome.tabs.sendMessage(tabId, { action: 'EXECUTE_ACTION', payload: actionPayload }, (response) => {
         if (chrome.runtime.lastError) {
@@ -566,11 +794,20 @@ Example for task "Summarize README for scout":
 
 You are provided with a user goal, visible webpage text content, and a compressed list of interactive web page elements labeled with numerical IDs like [1], [2], [3].
 
-Your objective is to choose the single best action to move closer to the goal.
+Your objective is to choose the single best action to complete the user's goal in as few steps as possible.
 
-### Critical Rule for Summarization & Reading Tasks:
-- Read the "Webpage Visible Text Content". If the required information to answer or summarize the user's task is visible, do NOT scroll or navigate in circles! Output your final answer immediately using:
-  {"action": "finish", "answer": "<your_summary_here>", "reason": "Target information is already visible"}
+### General Guidelines for High Efficiency:
+1. **Summarization / Reading / Overview Tasks**:
+   - Inspect the "Webpage Visible Text Content". If the visible text already provides the project name, description, key features, and architecture, DO NOT waste steps scrolling or navigating in search of minor missing sentences!
+   - Synthesize a comprehensive final summary immediately using:
+     {"action": "finish", "answer": "<your_summary_here>", "reason": "Target documentation is visible"}
+   - If you scroll once and the text snippet does not reveal new information, call "finish" immediately with what you have gathered.
+
+2. **Form Filling / Multi-Step Primitives**:
+   - Use "browser_batch" to fill multiple input fields and click submit in a SINGLE round trip instead of issuing individual "type" actions.
+
+3. **Silent Action Failures / Error Debugging**:
+   - If an action succeeds but the page state remains unchanged, use "read_network_requests" to inspect API responses or "execute_js" to verify state instead of blindly retrying.
 
 ### Available Actions:
 1. Click element:
@@ -588,13 +825,22 @@ Your objective is to choose the single best action to move closer to the goal.
 5. Go back / forward:
    {"action": "go_back", "reason": "<explanation>"}
 
-6. Explicitly extract full readable page text body:
+6. Execute JavaScript in page context:
+   {"action": "execute_js", "code": "return document.querySelectorAll('.result').length", "world": "MAIN", "reason": "<explanation>"}
+
+7. Read recent network activity (XHR/fetch status & bodies):
+   {"action": "read_network_requests", "filter": {"status": "error"|"all", "since": "last_action"}, "includeBody": true, "limit": 10, "reason": "<explanation>"}
+
+8. Execute batch of deterministic primitive steps in 1 round trip:
+   {"action": "browser_batch", "steps": [{"action": "type", "element_id": 1, "text": "user@example.com"}, {"action": "type", "element_id": 2, "text": "pass123"}, {"action": "click", "element_id": 3}], "stopOnError": true, "reason": "<explanation>"}
+
+9. Explicitly extract full readable page text body:
    {"action": "read_page_text", "reason": "<explanation>"}
 
-7. Task finished (Output final summary answer):
+10. Task finished (Output final summary answer):
    {"action": "finish", "answer": "<final_answer_text>", "reason": "<explanation>"}
 
-8. Ask user for input/help:
+11. Ask user for input/help:
    {"action": "ask_user", "question": "<question_text>", "reason": "<explanation>"}
 
 ### FEW-SHOT OUTPUT EXAMPLES (Always follow these exact output patterns):
@@ -625,51 +871,59 @@ Element [4] is the main repository link relevant to the user's task. I will clic
 }
 \`\`\`
 
---- Example 3: Scrolling Down to Reveal Content ---
+--- Example 3: Filling Multi-Field Form in One Round Trip using browser_batch ---
 <thought>
-The required information is further down the page. I need to scroll down to view more content.
+Filling out username and password fields and submitting form in a single batch sequence.
 </thought>
 \`\`\`json
 {
-  "action": "scroll",
-  "direction": "down",
-  "amount": 500,
-  "reason": "Scroll down to reveal hidden elements"
+  "action": "browser_batch",
+  "steps": [
+    { "action": "type", "element_id": 2, "text": "user@example.com" },
+    { "action": "type", "element_id": 3, "text": "securePassword123" },
+    { "action": "click", "element_id": 5 }
+  ],
+  "stopOnError": true,
+  "reason": "Fill login form and click submit"
 }
 \`\`\`
 
---- Example 4: Completing the Task & Summarizing Answer ---
+--- Example 4: Executing Custom JS to Inspect Page State ---
 <thought>
-I have read the visible text content from the webpage. I will synthesize the final summary and complete the task.
+I need to check the number of virtualized table rows and verify form validity using execute_js.
+</thought>
+\`\`\`json
+{
+  "action": "execute_js",
+  "code": "return document.querySelectorAll('.table-row').length",
+  "world": "MAIN",
+  "reason": "Count table rows in page"
+}
+\`\`\`
+
+--- Example 5: Reading Recent Network Requests after Action ---
+<thought>
+The page did not change after clicking submit. I will check network requests to see if an API error occurred.
+</thought>
+\`\`\`json
+{
+  "action": "read_network_requests",
+  "filter": { "status": "error", "since": "last_action" },
+  "includeBody": true,
+  "limit": 5,
+  "reason": "Check recent API errors"
+}
+\`\`\`
+
+--- Example 6: Completing Task & Summarizing Answer ---
+<thought>
+The visible documentation text provides the project title, key features, and architecture. I will synthesize the final summary and complete the task.
 </thought>
 \`\`\`json
 {
   "action": "finish",
   "answer": "### Summary of ScoutFox Project:\n- Autonomous AI Browser Extension supporting OpenRouter, AgentRouter, Ollama, Gemini, OpenAI, Claude.\n- Built with Manifest V3 and Studio Mono design system.",
   "reason": "Extracted and summarized requested data"
-}
-\`\`\`
-
---- Example 5: Direct Navigation to a URL ---
-<thought>
-The goal requires visiting news.ycombinator.com directly. I will navigate to the URL.
-</thought>
-\`\`\`json
-{
-  "action": "navigate",
-  "url": "https://news.ycombinator.com",
-  "reason": "Navigate directly to requested website"
-}
-\`\`\`
-
---- Example 6: Extracting Full Readable Page Text Body ---
-<thought>
-I need to read the complete text body of the page to answer the user's question accurately.
-</thought>
-\`\`\`json
-{
-  "action": "read_page_text",
-  "reason": "Extract full text body of webpage for reading"
 }
 \`\`\`
 
@@ -739,7 +993,7 @@ Choose your next action based on the goal: "${this.currentTask}"`;
       for (let i = matches.length - 1; i >= 0; i--) {
         try {
           const parsed = JSON.parse(matches[i]);
-          if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.read_page_text)) {
+          if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.execute_js || parsed.browser_batch || parsed.read_network_requests)) {
             actionObj = parsed;
             break;
           }
@@ -813,6 +1067,9 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     if (act.action === 'done' || act.action === 'complete' || act.action === 'finished') act.action = 'finish';
     if (act.action === 'scroll_page') act.action = 'scroll';
     if (act.action === 'extract_text' || act.action === 'read_text' || act.action === 'extract_page_text') act.action = 'read_page_text';
+    if (act.action === 'eval_js' || act.action === 'run_js' || act.action === 'javascript') act.action = 'execute_js';
+    if (act.action === 'read_network' || act.action === 'network_requests' || act.action === 'get_network') act.action = 'read_network_requests';
+    if (act.action === 'batch' || act.action === 'batch_actions') act.action = 'browser_batch';
 
     if (act.element_id === undefined) {
       if (act.element !== undefined) act.element_id = act.element;
@@ -820,7 +1077,7 @@ Choose your next action based on the goal: "${this.currentTask}"`;
       else if (act.elementId !== undefined) act.element_id = act.elementId;
     }
 
-    if (act.element_id !== undefined) {
+    if (act.element_id !== undefined && typeof act.element_id === 'number') {
       act.element_id = parseInt(act.element_id, 10) || 1;
       if (maxElementCount > 0 && act.element_id > maxElementCount) {
         Logger.warn('AgentEngine', `[GUARDRAIL_BOUNDS] Model selected hallucinated element_id [${act.element_id}]. Clamping to valid range [1..${maxElementCount}]`);
@@ -838,5 +1095,8 @@ function formatActionSummary(act) {
   if (act.action === 'scroll') return `Scroll ${act.direction || 'down'}`;
   if (act.action === 'navigate') return `Navigate to ${act.url || ''}`;
   if (act.action === 'read_page_text') return `Extract text body`;
+  if (act.action === 'execute_js') return `Execute JS`;
+  if (act.action === 'read_network_requests') return `Read network requests`;
+  if (act.action === 'browser_batch') return `Batch (${act.steps ? act.steps.length : 0} steps)`;
   return act.action;
 }
