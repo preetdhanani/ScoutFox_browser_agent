@@ -12,6 +12,47 @@ let currentSessionId = null;
 let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
 
+/**
+ * Inline icon set — no emoji, thin-line SVGs matching the Studio Mono system.
+ */
+const ICONS = {
+  check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>',
+  cross: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
+  dot: '<svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4" fill="currentColor"/></svg>',
+  circle: '<svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
+  warning: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L2 20h20L12 3z"/><line x1="12" y1="9" x2="12" y2="14"/><circle cx="12" cy="17.3" r="0.6" fill="currentColor" stroke="none"/></svg>',
+  complete: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.3 2.3L16 10"/></svg>',
+  clock: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>',
+  trash: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/></svg>',
+  copy: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="1.5"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>',
+  search: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+  star: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l2.6 5.4 5.9.8-4.3 4.2 1 5.9L12 16.3 6.8 19.3l1-5.9-4.3-4.2 5.9-.8z"/></svg>',
+  doc: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5"/><line x1="7" y1="9" x2="17" y2="9"/><line x1="7" y1="13" x2="17" y2="13"/><line x1="7" y1="17" x2="13" y2="17"/></svg>',
+  aim: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>'
+};
+
+const THEME_MODES = ['system', 'light', 'dark'];
+const THEME_ICON = {
+  system: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
+  light: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>',
+  dark: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>'
+};
+const THEME_LABEL = { system: 'Auto (matches system)', light: 'Light', dark: 'Dark' };
+
+function applyTheme(mode) {
+  const root = document.documentElement;
+  if (mode === 'light' || mode === 'dark') {
+    root.setAttribute('data-theme', mode);
+  } else {
+    root.removeAttribute('data-theme');
+  }
+  const btn = document.getElementById('btnThemeToggle');
+  if (btn) {
+    btn.innerHTML = THEME_ICON[mode] || THEME_ICON.system;
+    btn.title = `Theme: ${THEME_LABEL[mode] || THEME_LABEL.system}`;
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
   initTabs();
@@ -26,6 +67,7 @@ document.addEventListener('DOMContentLoaded', async () => {
  */
 async function loadSettings() {
   currentSettings = await Storage.getSettings();
+  applyTheme(currentSettings.theme || 'system');
 
   document.getElementById('providerSelect').value = currentSettings.provider || 'gemini';
   document.getElementById('baseUrlInput').value = currentSettings.baseUrl || 'http://localhost:11434';
@@ -72,7 +114,7 @@ async function fetchDynamicModels(forceRefresh = false) {
 
         const customOpt = document.createElement('option');
         customOpt.value = '__custom__';
-        customOpt.textContent = '✏️ Custom Model Name...';
+        customOpt.textContent = 'Custom model name…';
         selectEl.appendChild(customOpt);
 
         if (currentSettings.model && res.models.includes(currentSettings.model)) {
@@ -161,6 +203,14 @@ function initPortConnection() {
 }
 
 function initEventListeners() {
+  document.getElementById('btnThemeToggle').addEventListener('click', async () => {
+    const current = currentSettings.theme || 'system';
+    const next = THEME_MODES[(THEME_MODES.indexOf(current) + 1) % THEME_MODES.length];
+    currentSettings.theme = next;
+    applyTheme(next);
+    await Storage.saveSettings({ theme: next });
+  });
+
   document.getElementById('btnStartTask').addEventListener('click', startTask);
   document.getElementById('taskInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -219,8 +269,8 @@ function initEventListeners() {
     const outputText = document.getElementById('logOutput').textContent;
     navigator.clipboard.writeText(outputText).then(() => {
       const copyBtn = document.getElementById('btnCopyLogs');
-      copyBtn.textContent = '✓ Copied!';
-      setTimeout(() => copyBtn.textContent = '📋 Copy', 2000);
+      copyBtn.innerHTML = `${ICONS.check} Copied`;
+      setTimeout(() => copyBtn.innerHTML = `${ICONS.copy} Copy`, 2000);
     });
   });
 
@@ -311,7 +361,7 @@ function startTask() {
 async function loadSessionHistory() {
   const sessions = await Storage.getSessions();
   const historyBtn = document.getElementById('btnToggleHistory');
-  if (historyBtn) historyBtn.textContent = `📜 History (${sessions.length})`;
+  if (historyBtn) historyBtn.innerHTML = `${ICONS.clock} History (${sessions.length})`;
 
   const listContainer = document.getElementById('historySessionsList');
   if (!listContainer) return;
@@ -329,7 +379,7 @@ async function loadSessionHistory() {
           <span class="history-item-title">${escapeHtml(session.task || 'Untitled Session')}</span>
           <span class="history-item-meta">${session.timestamp || ''} • ${session.model || ''}</span>
         </div>
-        <button class="btn-delete-session" data-delete-id="${session.id}">🗑️</button>
+        <button class="btn-delete-session" data-delete-id="${session.id}">${ICONS.trash}</button>
       </div>
     `;
   }).join('');
@@ -372,7 +422,7 @@ async function autoSaveActiveSession(state) {
   await Storage.saveSession(sessionObj);
   const sessions = await Storage.getSessions();
   const historyBtn = document.getElementById('btnToggleHistory');
-  if (historyBtn) historyBtn.textContent = `📜 History (${sessions.length})`;
+  if (historyBtn) historyBtn.innerHTML = `${ICONS.clock} History (${sessions.length})`;
 }
 
 async function loadSelectedSession(sessionId) {
@@ -399,13 +449,13 @@ function renderEmptyState() {
   if (timeline) {
     timeline.innerHTML = `
       <div class="empty-state" id="emptyState">
-        <div class="sparkle-icon">✨</div>
+        <div class="empty-icon-tile">${ICONS.aim}</div>
         <h3>What would you like to automate?</h3>
         <p>Enter a task below. ScoutFox will read the page, index elements, and execute browser actions step-by-step.</p>
         <div class="sample-prompts">
-          <span class="sample-chip" data-prompt="Search Google for open-source AI browser frameworks">🔍 Search Google for AI agents</span>
-          <span class="sample-chip" data-prompt="Find top trending repositories on GitHub for python">⭐ Top Python GitHub repos</span>
-          <span class="sample-chip" data-prompt="Summarize the main articles on news.ycombinator.com">📰 Summarize Hacker News</span>
+          <span class="sample-chip" data-prompt="Search Google for open-source AI browser frameworks">${ICONS.search} Search Google for AI agents</span>
+          <span class="sample-chip" data-prompt="Find top trending repositories on GitHub for python">${ICONS.star} Top Python GitHub repos</span>
+          <span class="sample-chip" data-prompt="Summarize the main articles on news.ycombinator.com">${ICONS.doc} Summarize Hacker News</span>
         </div>
       </div>
     `;
@@ -479,39 +529,39 @@ function renderState(state) {
     let html = '';
     history.forEach(item => {
       if (item.type === 'user_goal') {
-        html += `<div class="user-goal-card">🎯 <strong>Goal:</strong> ${escapeHtml(item.prompt)}</div>`;
+        html += `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(item.prompt)}</div>`;
       } else if (item.type === 'step_start') {
         html += `
           <div class="timeline-card">
             <div class="timeline-header">
               <span class="step-badge">Step ${item.step}</span>
-              <span style="color: #94a3b8;">${escapeHtml(item.pageTitle || item.url || '')}</span>
+              <span>${escapeHtml(item.pageTitle || item.url || '')}</span>
             </div>
         `;
       } else if (item.type === 'agent_response') {
         if (item.thought) {
-          html += `<div class="thought-text">💭 ${escapeHtml(item.thought)}</div>`;
+          html += `<div class="thought-text">${escapeHtml(item.thought)}</div>`;
         }
         if (item.action) {
           const actionStr = formatActionPill(item.action);
-          html += `<div class="action-pill">⚡ Action: ${actionStr}</div>`;
+          html += `<div class="action-pill">${actionStr}</div>`;
         }
       } else if (item.type === 'execution_result') {
         const cls = item.success ? 'success' : 'error';
         html += `
-            <div class="result-badge ${cls}">${item.success ? '✓' : '✗'} ${escapeHtml(item.message || item.error || '')}</div>
+            <div class="result-badge ${cls}">${item.success ? ICONS.check : ICONS.cross} ${escapeHtml(item.message || item.error || '')}</div>
           </div>
         `;
       } else if (item.type === 'error') {
         html += `
-          <div class="result-badge error" style="margin-top: 8px; padding: 12px; border-radius: 8px; font-size: 12px; line-height: 1.5; border: 1px solid rgba(248,113,113,0.4); background: rgba(248,113,113,0.12);">
-            🚨 <strong>Error Diagnostic:</strong><br>${escapeHtml(item.content)}
+          <div class="result-badge error" style="margin-top: 8px; padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.5; align-items: flex-start;">
+            ${ICONS.warning}<span><strong>Error Diagnostic:</strong><br>${escapeHtml(item.content)}</span>
           </div>
         `;
       } else if (item.type === 'finish') {
         html += `
           <div class="finish-card">
-            <div class="finish-title">🎉 Task Complete</div>
+            <div class="finish-title">${ICONS.complete} Task Complete</div>
             <div class="finish-body">${formatMarkdownText(item.answer)}</div>
           </div>
         `;
@@ -540,13 +590,13 @@ function renderPlanChecklist(planSteps) {
   if (planProgressPill) planProgressPill.textContent = `${completedCount}/${planSteps.length} Done`;
 
   planItemsList.innerHTML = planSteps.map((step) => {
-    let icon = '⚪';
+    let icon = ICONS.circle;
     let cls = 'pending';
     if (step.status === 'completed') {
-      icon = '✅';
+      icon = ICONS.check;
       cls = 'completed';
     } else if (step.status === 'in_progress') {
-      icon = '🔄';
+      icon = ICONS.dot;
       cls = 'in_progress';
     }
 
@@ -584,7 +634,7 @@ function renderFilteredLogs() {
     const level = log.level || 'INFO';
     const mod = log.module || 'System';
     const msg = log.message || '';
-    const dataStr = log.data ? `\n   📦 Payload: ${log.data}` : '';
+    const dataStr = log.data ? `\n   Payload: ${log.data}` : '';
     return `[${time}] [${level}] [${mod}] ${msg}${dataStr}`;
   }).join('\n\n');
 
@@ -596,17 +646,17 @@ function formatActionPill(actionObj) {
   const { action, element_id, text, url, direction, answer, question } = actionObj;
   switch (action) {
     case 'click':
-      return `Click [${element_id}]`;
+      return `click → [${element_id}]`;
     case 'type':
-      return `Type "${escapeHtml(text || '')}" in [${element_id}]`;
+      return `type → [${element_id}] "${escapeHtml(text || '')}"`;
     case 'scroll':
-      return `Scroll ${direction || 'down'}`;
+      return `scroll → ${direction || 'down'}`;
     case 'navigate':
-      return `Navigate to ${escapeHtml(url || '')}`;
+      return `navigate → ${escapeHtml(url || '')}`;
     case 'finish':
-      return `Finish (${escapeHtml(answer || '')})`;
+      return `finish → ${escapeHtml(answer || '')}`;
     case 'ask_user':
-      return `Ask User: "${escapeHtml(question || '')}"`;
+      return `ask → "${escapeHtml(question || '')}"`;
     default:
       return `${action} ${element_id ? `[${element_id}]` : ''}`;
   }

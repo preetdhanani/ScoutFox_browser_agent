@@ -1,7 +1,7 @@
 /**
  * AgentEngine for ScoutFox AI Agent
- * Orchestrates instant plan checklist generation, fault-tolerant execution loops,
- * robust error recovery, and seamless UI synchronization.
+ * Orchestrates plan generation, execution loop, fault-tolerant action parsing,
+ * resilient service worker state restoration, and persistent log integration.
  */
 
 import { ApiClients } from './apiClients.js';
@@ -17,6 +17,7 @@ export class AgentEngine {
     this.stepCount = 0;
     this.activeTabId = null;
     this.currentPhase = '';
+    this.isLoopActive = false;
     this.onStateChangeCallback = null;
     
     this.restoreState();
@@ -31,6 +32,16 @@ export class AgentEngine {
             this.planSteps = res.agent_session.planSteps || [];
             this.currentTask = res.agent_session.task || null;
             this.stepCount = res.agent_session.stepCount || 0;
+            
+            // Service worker restart guard: If SW restarted while running, reset status to idle
+            if (res.agent_session.status === 'running' && !this.isLoopActive) {
+              Logger.info('AgentEngine', '[STATE_RESTORE] Service worker restarted. Resetting zombie running state to idle.');
+              this.status = 'idle';
+              this.currentPhase = '';
+            } else {
+              this.status = res.agent_session.status || 'idle';
+            }
+            
             this.notifyStateChange();
           }
         });
@@ -90,13 +101,23 @@ export class AgentEngine {
     this.currentTask = null;
     this.status = 'idle';
     this.currentPhase = '';
+    this.isLoopActive = false;
     Logger.clearLogs();
     this.notifyStateChange();
   }
 
   async startTask(userPrompt, tabId) {
-    if (this.status === 'running') {
-      throw new Error('An agent task is already running. Stop it before starting a new task.');
+    // If a zombie task state exists, force reset to idle for the new user prompt
+    if (this.status === 'running' && !this.isLoopActive) {
+      Logger.info('AgentEngine', '[TASK_OVERRIDE] Overriding zombie running status for new user task.');
+      this.status = 'idle';
+    }
+
+    if (this.status === 'running' && this.isLoopActive) {
+      Logger.info('AgentEngine', '[TASK_INTERRUPT] Stopping active running task to execute new user prompt.');
+      this.status = 'stopped';
+      this.isLoopActive = false;
+      await new Promise(r => setTimeout(r, 300));
     }
 
     this.status = 'running';
@@ -104,7 +125,7 @@ export class AgentEngine {
     this.stepCount = 0;
     this.activeTabId = tabId;
 
-    // INSTANT INITIAL PLAN CHECKLIST (0ms latency so UI pops up immediately!)
+    // Instant initial plan checklist (0ms latency)
     this.planSteps = [
       { id: 1, text: 'Inspect & index webpage interactive elements', status: 'in_progress' },
       { id: 2, text: 'Plan sub-goals and execute browser actions', status: 'pending' },
@@ -125,7 +146,7 @@ export class AgentEngine {
 
     const settings = await Storage.getSettings();
 
-    // Generate refined AI plan in background
+    // Refine AI plan in background
     this.setPhase('📋 Refining execution plan checklist...');
     this.generatePlan(userPrompt, settings).catch(err => {
       Logger.warn('AgentEngine', 'Background plan refinement failed', err);
@@ -136,6 +157,7 @@ export class AgentEngine {
     } catch (err) {
       Logger.error('AgentEngine', '[LOOP ERROR] Unhandled exception in execution loop', err);
       this.status = 'idle';
+      this.isLoopActive = false;
       this.currentPhase = '';
       this.history.push({
         type: 'error',
@@ -223,6 +245,7 @@ Example Output:
 
   stop() {
     this.status = 'stopped';
+    this.isLoopActive = false;
     this.currentPhase = '';
     Logger.info('AgentEngine', '[STOPPED] Task stopped by user.');
     this.notifyStateChange({ message: 'Task stopped.' });
@@ -255,6 +278,7 @@ Example Output:
   async runLoop() {
     const settings = await Storage.getSettings();
     const maxSteps = settings.maxSteps || 25;
+    this.isLoopActive = true;
 
     while (this.status === 'running' && this.stepCount < maxSteps) {
       this.stepCount++;
@@ -277,6 +301,7 @@ Example Output:
           content: `${err.message}`
         });
         this.status = 'idle';
+        this.isLoopActive = false;
         this.currentPhase = '';
         this.notifyStateChange({ error: err.message });
         break;
@@ -312,6 +337,7 @@ Example Output:
           content: `LLM Connection Error (${settings.provider}): ${err.message}`
         });
         this.status = 'idle';
+        this.isLoopActive = false;
         this.currentPhase = '';
         this.notifyStateChange({ error: err.message });
         return;
@@ -347,6 +373,7 @@ Example Output:
 
       if (action.action === 'finish') {
         this.status = 'idle';
+        this.isLoopActive = false;
         this.currentPhase = '';
         this.updatePlanProgress(this.stepCount, maxSteps, true);
         this.history.push({
@@ -406,6 +433,7 @@ Example Output:
       await new Promise(r => setTimeout(r, delayMs));
     }
 
+    this.isLoopActive = false;
     if (this.stepCount >= maxSteps && this.status === 'running') {
       this.status = 'idle';
       this.currentPhase = '';

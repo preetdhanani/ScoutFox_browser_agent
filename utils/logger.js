@@ -1,10 +1,30 @@
 /**
- * Logger utility for Agentic Browser Extension
+ * Logger utility for ScoutFox Agentic Browser Extension
  * Outputs formatted console logs and broadcasts debug messages to Sidepanel UI safely.
+ * Persists logs to storage to survive background service worker lifecycle restarts.
  */
 
 const logsHistory = [];
 let logBroadcastCallback = null;
+
+// Restore logs from storage on startup
+if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+  chrome.storage.local.get(['agent_logs_history'], (res) => {
+    if (res && Array.isArray(res.agent_logs_history)) {
+      logsHistory.push(...res.agent_logs_history.slice(-300));
+    }
+  });
+}
+
+function persistLogsToStorage() {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ agent_logs_history: logsHistory.slice(-300) });
+    }
+  } catch (e) {
+    // Ignore storage write errors during shutdown
+  }
+}
 
 export const Logger = {
   setBroadcastCallback(cb) {
@@ -17,6 +37,7 @@ export const Logger = {
 
   clearLogs() {
     logsHistory.length = 0;
+    persistLogsToStorage();
   },
 
   addLog(level, module, message, data = null) {
@@ -45,6 +66,8 @@ export const Logger = {
 
       logsHistory.push(entry);
       if (logsHistory.length > 300) logsHistory.shift();
+
+      persistLogsToStorage();
 
       if (logBroadcastCallback) {
         logBroadcastCallback(entry);

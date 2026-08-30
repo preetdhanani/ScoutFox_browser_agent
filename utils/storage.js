@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS = {
   actionDelayMs: 1000,
   showElementBadges: true,
   autoScroll: true,
+  theme: 'system',
   systemInstructions: 'You are Strawberry, an autonomous web browsing AI agent. Your goal is to help the user complete tasks on the web efficiently and accurately.'
 };
 
