@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Strawberry AI Agent</title>
+  <link rel="stylesheet" href="sidepanel.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo-icon">
+          <span>🍓</span>
+        </div>
+        <div class="brand-text">
+          <h1>Strawberry AI</h1>
+          <span class="badge-tag" id="currentModelBadge">Gemini 1.5 Flash</span>
+        </div>
+      </div>
+      <div class="status-indicator" id="statusPill">
+        <span class="status-dot"></span>
+        <span class="status-text" id="statusText">Idle</span>
+      </div>
+    </header>
+
+    <!-- Navigation Tabs -->
+    <nav class="nav-tabs">
+      <button class="nav-btn active" data-tab="chat">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        Agent Chat
+      </button>
+      <button class="nav-btn" data-tab="settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Settings
+      </button>
+      <button class="nav-btn" data-tab="logs">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        Backend Logs
+      </button>
+    </nav>
+
+    <!-- Tab Contents -->
+    <main class="tab-content">
+
+      <!-- TAB 1: AGENT CHAT & TIMELINE -->
+      <section id="tab-chat" class="tab-panel active">
+        <!-- Chat Controls Bar -->
+        <div class="chat-header-bar">
+          <button class="btn btn-secondary btn-xs" id="btnNewSession">➕ New Session</button>
+          <button class="btn btn-secondary btn-xs" id="btnToggleHistory">📜 History (0)</button>
+        </div>
+
+        <!-- SESSION HISTORY DRAWER -->
+        <div class="history-drawer" id="historyDrawer" style="display: none;">
+          <div class="history-drawer-header">
+            <span>Saved Session History</span>
+            <button class="btn btn-secondary btn-xs" id="btnCloseHistory">✕</button>
+          </div>
+          <div class="history-sessions-list" id="historySessionsList">
+            <div class="subtext-hint" style="padding: 10px; text-align: center;">No saved sessions yet.</div>
+          </div>
+        </div>
+
+        <!-- PLANNER CHECKLIST CARD -->
+        <div class="plan-card" id="planContainer" style="display: none;">
+          <div class="plan-card-header">
+            <span class="plan-card-title">📋 Execution Plan Checklist</span>
+            <span class="plan-progress-pill" id="planProgressPill">0/0 Done</span>
+          </div>
+          <div class="plan-items-list" id="planItemsList"></div>
+        </div>
+
+        <div class="timeline-container" id="timeline">
+          <div class="empty-state" id="emptyState">
+            <div class="sparkle-icon">✨</div>
+            <h3>What would you like to automate?</h3>
+            <p>Enter a task below. Strawberry will read the page, index elements, and execute browser actions step-by-step.</p>
+            
+            <div class="sample-prompts">
+              <span class="sample-chip" data-prompt="Search Google for open-source AI browser frameworks">🔍 Search Google for AI agents</span>
+              <span class="sample-chip" data-prompt="Find top trending repositories on GitHub for python">⭐ Top Python GitHub repos</span>
+              <span class="sample-chip" data-prompt="Summarize the main articles on news.ycombinator.com">📰 Summarize Hacker News</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- LIVE PROCESSING STATUS BANNER -->
+        <div class="processing-banner" id="processingBanner" style="display: none;">
+          <div class="spinner-ring"></div>
+          <div class="processing-text-wrapper">
+            <span class="processing-phase" id="processingPhaseText">Agent is processing...</span>
+            <div class="progress-bar-track">
+              <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="input-panel">
+          <div class="control-bar" id="controlBar" style="display: none;">
+            <button class="btn btn-secondary btn-sm" id="btnPause">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+              Pause
+            </button>
+            <button class="btn btn-danger btn-sm" id="btnStop">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16"/></svg>
+              Stop Task
+            </button>
+          </div>
+
+          <div class="input-wrapper">
+            <textarea id="taskInput" placeholder="e.g. Find the price of product X and click Add to Cart..." rows="2"></textarea>
+            <button class="btn btn-primary" id="btnStartTask">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: SETTINGS -->
+      <section id="tab-settings" class="tab-panel">
+        <div class="settings-form">
+
+          <!-- Provider Select -->
+          <div class="form-group">
+            <label class="form-label" for="providerSelect">LLM Provider</label>
+            <select id="providerSelect" class="form-select">
+              <option value="gemini">Google Gemini API</option>
+              <option value="ollama">Ollama (Local Host)</option>
+              <option value="openai_compatible">OpenAI-Compatible (Groq, vLLM, LM Studio, Llama API)</option>
+              <option value="openai">OpenAI Official</option>
+              <option value="anthropic">Anthropic (Claude)</option>
+            </select>
+          </div>
+
+          <!-- Base URL -->
+          <div class="form-group" id="baseUrlGroup">
+            <label class="form-label" for="baseUrlInput">Base API URL</label>
+            <input type="text" id="baseUrlInput" class="form-input" placeholder="http://localhost:11434">
+          </div>
+
+          <!-- API Key -->
+          <div class="form-group">
+            <label class="form-label" for="apiKeyInput">API Key (Required for Gemini / OpenAI / Claude)</label>
+            <input type="password" id="apiKeyInput" class="form-input" placeholder="AIzaSy... or sk-...">
+          </div>
+
+          <!-- DYNAMIC MODEL SELECT & REFRESH -->
+          <div class="form-group">
+            <div class="label-row">
+              <label class="form-label" for="modelSelect">Available Models (Dynamic API Fetch)</label>
+              <button type="button" class="btn btn-secondary btn-xs" id="btnFetchModels">🔄 Fetch Models</button>
+            </div>
+            <select id="modelSelect" class="form-select"></select>
+            <input type="text" id="modelCustomInput" class="form-input" style="display: none; margin-top: 4px;" placeholder="Or type custom model name...">
+            <span class="subtext-hint" id="modelFetchStatus">Click "Fetch Models" to pull available models from API</span>
+          </div>
+
+          <!-- Advanced Tuning -->
+          <div class="form-row">
+            <div class="form-group half">
+              <label class="form-label" for="maxStepsInput">Max Steps</label>
+              <input type="number" id="maxStepsInput" class="form-input" value="25" min="1" max="100">
+            </div>
+            <div class="form-group half">
+              <label class="form-label" for="delayInput">Delay (ms)</label>
+              <input type="number" id="delayInput" class="form-input" value="1000" min="200" step="100">
+            </div>
+          </div>
+
+          <!-- Feature Toggles -->
+          <div class="form-group toggle-group">
+            <label class="toggle-label" for="badgesToggle">
+              <span>Show Floating Element Badges `[1]`, `[2]` on Webpage</span>
+              <input type="checkbox" id="badgesToggle" checked>
+            </label>
+          </div>
+
+          <button class="btn btn-primary btn-block" id="btnSaveSettings">Save Settings</button>
+        </div>
+      </section>
+
+      <!-- TAB 3: DOM LOGS & DEBUG CONSOLE -->
+      <section id="tab-logs" class="tab-panel">
+        <div class="logs-container">
+          <div class="logs-header">
+            <h3>Backend System Telemetry</h3>
+            <div style="display: flex; gap: 4px;">
+              <button class="btn btn-secondary btn-xs" id="btnCopyLogs">📋 Copy</button>
+              <button class="btn btn-secondary btn-xs" id="btnClearLogs">Clear</button>
+            </div>
+          </div>
+
+          <div class="log-toolbar">
+            <span class="log-filter-chip active" data-filter="all">All</span>
+            <span class="log-filter-chip" data-filter="DOM">🌐 DOM</span>
+            <span class="log-filter-chip" data-filter="LLM">🧠 LLM</span>
+            <span class="log-filter-chip" data-filter="EXECUTION">⚡ Action</span>
+            <span class="log-filter-chip" data-filter="NETWORK">📡 Network</span>
+          </div>
+
+          <pre class="log-output" id="logOutput">// Waiting for backend system logs...</pre>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>

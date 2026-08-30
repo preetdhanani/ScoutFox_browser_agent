@@ -1,0 +1,13 @@
+# OS Junk
+.DS_Store
+Thumbs.db
+
+# Node & Python
+node_modules/
+__pycache__/
+*.pyc
+
+# Logs & Environment
+*.log
+.env
+.env.local
