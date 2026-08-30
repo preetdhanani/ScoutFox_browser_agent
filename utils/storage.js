@@ -1,45 +1,83 @@
 /**
- * Storage utility for Agentic Browser Extension
- * Manages settings, multi-session history, and provider model caching.
+ * Storage utility for ScoutFox Agentic Browser Extension
+ * Manages settings, per-provider API configuration memory, multi-session history, and model caching.
  */
 
+export const DEFAULT_PROVIDER_CONFIGS = {
+  openrouter: { baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', model: 'anthropic/claude-3.5-sonnet' },
+  gemini: { baseUrl: '', apiKey: '', model: 'gemini-1.5-flash' },
+  ollama: { baseUrl: 'http://localhost:11434', apiKey: '', model: 'qwen2.5:14b' },
+  openai: { baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o-mini' },
+  openai_compatible: { baseUrl: 'https://api.groq.com/openai/v1', apiKey: '', model: 'llama-3.1-70b-versatile' },
+  anthropic: { baseUrl: 'https://api.anthropic.com', apiKey: '', model: 'claude-3-5-sonnet-20241022' }
+};
+
 export const DEFAULT_SETTINGS = {
-  provider: 'gemini',
-  baseUrl: 'http://localhost:11434',
+  provider: 'openrouter',
+  baseUrl: 'https://openrouter.ai/api/v1',
   apiKey: '',
-  model: 'gemini-1.5-flash',
+  model: 'anthropic/claude-3.5-sonnet',
+  providerConfigs: DEFAULT_PROVIDER_CONFIGS,
   temperature: 0.1,
   maxSteps: 25,
   actionDelayMs: 1000,
   showElementBadges: true,
   autoScroll: true,
   theme: 'system',
-  systemInstructions: 'You are Strawberry, an autonomous web browsing AI agent. Your goal is to help the user complete tasks on the web efficiently and accurately.'
+  systemInstructions: 'You are ScoutFox, an autonomous web browsing AI agent. Your goal is to help the user complete tasks on the web efficiently and accurately.'
 };
 
 export const Storage = {
   /**
-   * Load user settings
+   * Load user settings with merged providerConfigs
    */
   async getSettings() {
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
         chrome.storage.local.get(['agent_settings'], (result) => {
-          resolve({ ...DEFAULT_SETTINGS, ...(result.agent_settings || {}) });
+          const loaded = result.agent_settings || {};
+          const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
+          resolve({ ...DEFAULT_SETTINGS, ...loaded, providerConfigs: mergedConfigs });
         });
       } else {
         const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('agent_settings') : null;
-        resolve(saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : DEFAULT_SETTINGS);
+        if (saved) {
+          const loaded = JSON.parse(saved);
+          const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
+          resolve({ ...DEFAULT_SETTINGS, ...loaded, providerConfigs: mergedConfigs });
+        } else {
+          resolve(DEFAULT_SETTINGS);
+        }
       }
     });
   },
 
   /**
-   * Save user settings
+   * Save user settings and update active provider configuration
    */
   async saveSettings(newSettings) {
     const current = await this.getSettings();
-    const updated = { ...current, ...newSettings };
+    const activeProvider = newSettings.provider || current.provider;
+
+    const updatedProviderConfigs = {
+      ...(current.providerConfigs || DEFAULT_PROVIDER_CONFIGS),
+      ...(newSettings.providerConfigs || {})
+    };
+
+    // If apiKey, baseUrl, or model are provided, store them under the active provider key
+    if (newSettings.apiKey !== undefined || newSettings.baseUrl !== undefined || newSettings.model !== undefined) {
+      updatedProviderConfigs[activeProvider] = {
+        baseUrl: newSettings.baseUrl !== undefined ? newSettings.baseUrl : (updatedProviderConfigs[activeProvider]?.baseUrl || ''),
+        apiKey: newSettings.apiKey !== undefined ? newSettings.apiKey : (updatedProviderConfigs[activeProvider]?.apiKey || ''),
+        model: newSettings.model !== undefined ? newSettings.model : (updatedProviderConfigs[activeProvider]?.model || '')
+      };
+    }
+
+    const updated = {
+      ...current,
+      ...newSettings,
+      providerConfigs: updatedProviderConfigs
+    };
     
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {

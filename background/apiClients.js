@@ -1,6 +1,6 @@
 /**
- * API Clients for Strawberry Agentic Browser
- * Universal adapter supporting Ollama, OpenAI-compatible APIs, Anthropic Claude, and Google Gemini.
+ * API Clients for ScoutFox Agentic Browser
+ * Universal adapter supporting OpenRouter, Ollama, Google Gemini, OpenAI-compatible APIs, Anthropic Claude.
  * Includes local storage caching to prevent redundant model fetch requests.
  */
 
@@ -17,6 +17,8 @@ export const ApiClients = {
     Logger.info('ApiClients', `[NETWORK] Dispatching completion request to provider [${provider}] with model [${settings.model}]`);
 
     switch (provider) {
+      case 'openrouter':
+        return this.callOpenRouter(settings, messages, systemPrompt);
       case 'ollama':
         return this.callOllama(settings, messages, systemPrompt);
       case 'openai_compatible':
@@ -53,7 +55,30 @@ export const ApiClients = {
     try {
       let models = [];
 
-      if (provider === 'ollama') {
+      if (provider === 'openrouter') {
+        const url = 'https://openrouter.ai/api/v1/models';
+        const headers = {};
+        if (settings.apiKey) headers['Authorization'] = `Bearer ${settings.apiKey}`;
+        
+        const res = await fetch(url, { headers });
+        const elapsed = Date.now() - startTime;
+        if (!res.ok) throw new Error(`OpenRouter returned HTTP ${res.status}`);
+
+        const data = await res.json();
+        models = (data.data || []).map(m => m.id).sort();
+        if (models.length === 0) {
+          models = [
+            'anthropic/claude-3.5-sonnet',
+            'meta-llama/llama-3.3-70b-instruct',
+            'google/gemini-2.0-flash-001',
+            'deepseek/deepseek-r1',
+            'deepseek/deepseek-chat',
+            'openai/gpt-4o-mini',
+            'qwen/qwen-2.5-72b-instruct'
+          ];
+        }
+        Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from OpenRouter`);
+      } else if (provider === 'ollama') {
         const baseUrl = (settings.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
         const url = `${baseUrl}/api/tags`;
         const res = await fetch(url);
@@ -109,9 +134,64 @@ export const ApiClients = {
       return models;
     } catch (err) {
       Logger.warn('ApiClients', `Could not fetch dynamic models for [${provider}]`, err.message);
+      if (provider === 'openrouter') return ['anthropic/claude-3.5-sonnet', 'meta-llama/llama-3.3-70b-instruct', 'google/gemini-2.0-flash-001', 'deepseek/deepseek-r1'];
       if (provider === 'ollama') return ['qwen2.5:14b', 'llama3.1:8b', 'gemma2:9b'];
       if (provider === 'gemini') return ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp'];
       return ['gemini-1.5-flash', 'qwen2.5:14b', 'gpt-4o-mini'];
+    }
+  },
+
+  /**
+   * OpenRouter API Client
+   */
+  async callOpenRouter(settings, messages, systemPrompt) {
+    const url = 'https://openrouter.ai/api/v1/chat/completions';
+    const apiKey = settings.apiKey || '';
+    const startTime = Date.now();
+
+    if (!apiKey) {
+      throw new Error('OpenRouter API Key is missing. Please enter your OpenRouter API Key in Settings.');
+    }
+
+    const formattedMessages = [
+      { role: 'system', content: systemPrompt },
+      ...messages.map(m => ({ role: m.role, content: m.content }))
+    ];
+
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+      'HTTP-Referer': 'https://github.com/preetdhanani/ScoutFox_browser_agent',
+      'X-Title': 'ScoutFox AI Agent'
+    };
+
+    const body = {
+      model: settings.model || 'anthropic/claude-3.5-sonnet',
+      messages: formattedMessages,
+      temperature: settings.temperature ?? 0.1
+    };
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+      });
+
+      const elapsed = Date.now() - startTime;
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`OpenRouter API Error (${response.status}): ${errText}`);
+      }
+
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content || '';
+      Logger.info('ApiClients', `[NETWORK] 200 OK (${elapsed}ms) - Output length: ${content.length} chars`);
+      return content;
+    } catch (err) {
+      Logger.error('OpenRouterClient', `[NETWORK] Failed request to OpenRouter`, err.message);
+      throw new Error(`OpenRouter API connection error: ${err.message}`);
     }
   },
 

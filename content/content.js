@@ -1,16 +1,16 @@
 /**
- * Content Script Entry Point for Strawberry AI Agentic Browser
+ * Content Script Entry Point for ScoutFox AI Agent
  * Listens for background agent execution messages and returns DOM state or executes actions.
  */
 
 (function init() {
-  console.log('[Strawberry Agent] Content script active.');
+  console.log('[ScoutFox Agent] Content script active.');
 
   // Guard against duplicate listener registration
-  if (window.__strawberry_listener_registered) {
+  if (window.__scoutfox_listener_registered) {
     return;
   }
-  window.__strawberry_listener_registered = true;
+  window.__scoutfox_listener_registered = true;
 
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const { action, payload } = request;

@@ -151,6 +151,7 @@
           <div class="form-group">
             <label class="form-label" for="providerSelect">LLM Provider</label>
             <select id="providerSelect" class="form-select">
+              <option value="openrouter">OpenRouter API</option>
               <option value="gemini">Google Gemini API</option>
               <option value="ollama">Ollama (Local Host)</option>
               <option value="openai_compatible">OpenAI-Compatible (Groq, vLLM, LM Studio, Llama API)</option>
@@ -162,27 +163,44 @@
           <!-- Base URL -->
           <div class="form-group" id="baseUrlGroup">
             <label class="form-label" for="baseUrlInput">Base API URL</label>
-            <input type="text" id="baseUrlInput" class="form-input" placeholder="http://localhost:11434">
+            <input type="text" id="baseUrlInput" class="form-input" placeholder="https://openrouter.ai/api/v1">
           </div>
 
           <!-- API Key -->
           <div class="form-group">
-            <label class="form-label" for="apiKeyInput">API Key (Required for Gemini / OpenAI / Claude)</label>
-            <input type="password" id="apiKeyInput" class="form-input" placeholder="AIzaSy... or sk-...">
+            <label class="form-label" for="apiKeyInput">API Key (Required for OpenRouter / Gemini / OpenAI / Claude)</label>
+            <input type="password" id="apiKeyInput" class="form-input" placeholder="sk-or-v1-... or AIzaSy...">
           </div>
 
-          <!-- DYNAMIC MODEL SELECT & REFRESH -->
+          <!-- DYNAMIC MODEL SEARCHABLE COMBOBOX -->
           <div class="form-group">
             <div class="label-row">
-              <label class="form-label" for="modelSelect">Available Models (Dynamic API Fetch)</label>
+              <label class="form-label">Available Models (Dynamic API Fetch)</label>
               <button type="button" class="btn btn-secondary btn-xs" id="btnFetchModels">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                 Fetch Models
               </button>
             </div>
-            <select id="modelSelect" class="form-select"></select>
-            <input type="text" id="modelCustomInput" class="form-input" style="display: none; margin-top: 4px;" placeholder="Or type custom model name...">
-            <span class="subtext-hint" id="modelFetchStatus">Click "Fetch Models" to pull available models from API</span>
+
+            <!-- Custom Searchable Dropdown Component -->
+            <div class="custom-combobox" id="modelCombobox">
+              <div class="combobox-trigger" id="modelComboboxTrigger">
+                <span id="modelSelectedLabel">Select a model...</span>
+                <svg class="chevron-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </div>
+              <div class="combobox-menu" id="modelComboboxMenu" style="display: none;">
+                <div class="combobox-search-box">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                  <input type="text" id="modelSearchInside" placeholder="Search models (e.g. claude, deepseek, llama)..." autocomplete="off">
+                </div>
+                <div class="combobox-options-list" id="modelComboboxOptions"></div>
+              </div>
+            </div>
+
+            <!-- Hidden backing select element for state consistency -->
+            <select id="modelSelect" class="form-select" style="display: none;"></select>
+            <input type="text" id="modelCustomInput" class="form-input" style="display: none; margin-top: 6px;" placeholder="Or type custom model name...">
+            <span class="subtext-hint" id="modelFetchStatus">Click model box to search and select</span>
           </div>
 
           <!-- Advanced Tuning -->

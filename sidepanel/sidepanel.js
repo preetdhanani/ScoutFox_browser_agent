@@ -1,19 +1,21 @@
 /**
  * Sidepanel Controller Script for ScoutFox AI Agent
  * Connects to Background Agent Engine, renders timeline, session history drawer, plan checklist, progress banner, settings, and backend logs.
- * Employs persistent model caching to prevent redundant API fetches on sidepanel open.
+ * Employs persistent per-provider API key storage, automatic model fetching, and an inline searchable combobox dropdown component.
  */
 
-import { Storage, DEFAULT_SETTINGS } from '../utils/storage.js';
+import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../utils/storage.js';
 
 let backgroundPort = null;
 let currentSettings = { ...DEFAULT_SETTINGS };
 let currentSessionId = null;
 let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
+let apiKeyFetchDebounce = null;
+let allFetchedModels = [];
 
 /**
- * Inline icon set — no emoji, thin-line SVGs matching the Studio Mono system.
+ * Inline icon set — thin-line SVGs matching the Studio Mono system.
  */
 const ICONS = {
   check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>',
@@ -58,33 +60,165 @@ document.addEventListener('DOMContentLoaded', async () => {
   initTabs();
   initPortConnection();
   initEventListeners();
+  initCombobox();
   await loadSessionHistory();
   await fetchDynamicModels(false);
 });
 
 /**
- * Load settings into form controls
+ * Load settings into form controls with per-provider memory restoration
  */
 async function loadSettings() {
   currentSettings = await Storage.getSettings();
   applyTheme(currentSettings.theme || 'system');
 
-  document.getElementById('providerSelect').value = currentSettings.provider || 'gemini';
-  document.getElementById('baseUrlInput').value = currentSettings.baseUrl || 'http://localhost:11434';
-  document.getElementById('apiKeyInput').value = currentSettings.apiKey || '';
+  const activeProvider = currentSettings.provider || 'openrouter';
+  const providerCfg = (currentSettings.providerConfigs && currentSettings.providerConfigs[activeProvider]) || DEFAULT_PROVIDER_CONFIGS[activeProvider] || {};
+
+  document.getElementById('providerSelect').value = activeProvider;
+  document.getElementById('baseUrlInput').value = providerCfg.baseUrl || currentSettings.baseUrl || '';
+  document.getElementById('apiKeyInput').value = providerCfg.apiKey || currentSettings.apiKey || '';
   document.getElementById('maxStepsInput').value = currentSettings.maxSteps || 25;
   document.getElementById('delayInput').value = currentSettings.actionDelayMs || 1000;
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
 
-  updateModelBadge(currentSettings.model);
+  updateSelectedModel(providerCfg.model || currentSettings.model);
 }
 
 /**
- * Fetch dynamic models with storage caching
+ * Update active model label and backing select element
+ */
+function updateSelectedModel(modelName) {
+  const labelEl = document.getElementById('modelSelectedLabel');
+  const selectEl = document.getElementById('modelSelect');
+  const customInput = document.getElementById('modelCustomInput');
+
+  if (labelEl) labelEl.textContent = modelName || 'Select a model...';
+  if (selectEl) selectEl.value = modelName;
+  updateModelBadge(modelName);
+
+  if (modelName === '__custom__') {
+    if (customInput) customInput.style.display = 'block';
+  } else {
+    if (customInput) customInput.style.display = 'none';
+  }
+}
+
+/**
+ * Render model options into custom searchable combobox menu
+ */
+function renderModelOptions(modelsList) {
+  const selectEl = document.getElementById('modelSelect');
+  const optionsContainer = document.getElementById('modelComboboxOptions');
+  if (!optionsContainer) return;
+
+  if (selectEl) {
+    selectEl.innerHTML = '';
+    modelsList.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      selectEl.appendChild(opt);
+    });
+    const customOpt = document.createElement('option');
+    customOpt.value = '__custom__';
+    customOpt.textContent = 'Custom model name…';
+    selectEl.appendChild(customOpt);
+  }
+
+  const activeProvider = document.getElementById('providerSelect').value;
+  const currentSelected = selectEl?.value || currentSettings.providerConfigs?.[activeProvider]?.model || currentSettings.model;
+
+  let html = modelsList.map(modelName => {
+    const isSelected = modelName === currentSelected;
+    return `<div class="combobox-option-item ${isSelected ? 'selected' : ''}" data-value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</div>`;
+  }).join('');
+
+  html += `<div class="combobox-option-item custom-option" data-value="__custom__">✏️ Enter custom model name...</div>`;
+
+  optionsContainer.innerHTML = html;
+
+  optionsContainer.querySelectorAll('.combobox-option-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const val = item.getAttribute('data-value');
+      updateSelectedModel(val);
+      closeComboboxMenu();
+    });
+  });
+
+  if (modelsList.length > 0 && !modelsList.includes(currentSelected) && currentSelected !== '__custom__') {
+    updateSelectedModel(modelsList[0]);
+  } else {
+    updateSelectedModel(currentSelected);
+  }
+}
+
+function initCombobox() {
+  const trigger = document.getElementById('modelComboboxTrigger');
+  const menu = document.getElementById('modelComboboxMenu');
+  const searchInput = document.getElementById('modelSearchInside');
+  const combobox = document.getElementById('modelCombobox');
+
+  if (trigger && menu) {
+    trigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isVisible = menu.style.display === 'flex';
+      if (isVisible) {
+        closeComboboxMenu();
+      } else {
+        openComboboxMenu();
+      }
+    });
+  }
+
+  if (searchInput) {
+    searchInput.addEventListener('click', (e) => e.stopPropagation());
+    searchInput.addEventListener('input', (e) => {
+      const query = e.target.value.toLowerCase().trim();
+      if (!query) {
+        renderModelOptions(allFetchedModels);
+      } else {
+        const filtered = allFetchedModels.filter(m => m.toLowerCase().includes(query));
+        renderModelOptions(filtered);
+      }
+    });
+  }
+
+  document.addEventListener('click', () => {
+    closeComboboxMenu();
+  });
+}
+
+function openComboboxMenu() {
+  const menu = document.getElementById('modelComboboxMenu');
+  const combobox = document.getElementById('modelCombobox');
+  const searchInput = document.getElementById('modelSearchInside');
+
+  if (menu && combobox) {
+    menu.style.display = 'flex';
+    combobox.classList.add('open');
+    if (searchInput) {
+      searchInput.value = '';
+      renderModelOptions(allFetchedModels);
+      setTimeout(() => searchInput.focus(), 50);
+    }
+  }
+}
+
+function closeComboboxMenu() {
+  const menu = document.getElementById('modelComboboxMenu');
+  const combobox = document.getElementById('modelCombobox');
+  if (menu && combobox) {
+    menu.style.display = 'none';
+    combobox.classList.remove('open');
+  }
+}
+
+/**
+ * Fetch dynamic models with storage caching & search filter support
  */
 async function fetchDynamicModels(forceRefresh = false) {
   const statusEl = document.getElementById('modelFetchStatus');
-  const selectEl = document.getElementById('modelSelect');
   const btnFetch = document.getElementById('btnFetchModels');
 
   if (statusEl) {
@@ -104,44 +238,20 @@ async function fetchDynamicModels(forceRefresh = false) {
       if (btnFetch) btnFetch.disabled = false;
 
       if (res && res.success && res.models && res.models.length > 0) {
-        selectEl.innerHTML = '';
-        res.models.forEach(modelName => {
-          const opt = document.createElement('option');
-          opt.value = modelName;
-          opt.textContent = modelName;
-          selectEl.appendChild(opt);
-        });
-
-        const customOpt = document.createElement('option');
-        customOpt.value = '__custom__';
-        customOpt.textContent = 'Custom model name…';
-        selectEl.appendChild(customOpt);
-
-        if (currentSettings.model && res.models.includes(currentSettings.model)) {
-          selectEl.value = currentSettings.model;
-        } else if (res.models.length > 0) {
-          selectEl.value = res.models[0];
-          currentSettings.model = res.models[0];
-        }
+        allFetchedModels = res.models;
+        renderModelOptions(allFetchedModels);
 
         if (statusEl) {
           statusEl.textContent = forceRefresh
             ? `Retrieved ${res.models.length} model(s) fresh from API!`
-            : `Loaded ${res.models.length} model(s) instantly from local storage cache.`;
+            : `Loaded ${res.models.length} model(s) from local cache (${allFetchedModels.length} total).`;
         }
-        updateModelBadge(selectEl.value);
         resolve(res.models);
       } else {
         if (statusEl) statusEl.textContent = `Could not fetch models (${res?.error || 'Unreachable'}). Using fallbacks.`;
-        const fallbacks = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp', 'qwen2.5:14b', 'gpt-4o-mini'];
-        selectEl.innerHTML = '';
-        fallbacks.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m;
-          opt.textContent = m;
-          selectEl.appendChild(opt);
-        });
-        resolve(fallbacks);
+        allFetchedModels = ['anthropic/claude-3.5-sonnet', 'meta-llama/llama-3.3-70b-instruct', 'google/gemini-2.0-flash-001', 'deepseek/deepseek-r1', 'qwen2.5:14b', 'gpt-4o-mini'];
+        renderModelOptions(allFetchedModels);
+        resolve(allFetchedModels);
       }
     });
   });
@@ -179,11 +289,7 @@ function initPortConnection() {
       if (msg.type === 'STATE_UPDATE') {
         renderState(msg.payload);
         autoSaveActiveSession(msg.payload);
-      }
-    });
-
-    chrome.runtime.onMessage.addListener((msg) => {
-      if (msg.type === 'LOG_ENTRY') {
+      } else if (msg.type === 'LOG_ENTRY') {
         rawLogsCache.push(msg.payload);
         if (rawLogsCache.length > 300) rawLogsCache.shift();
         renderFilteredLogs();
@@ -283,52 +389,65 @@ function initEventListeners() {
     fetchDynamicModels(true);
   });
 
-  document.getElementById('providerSelect').addEventListener('change', () => {
+  // Auto-fetch models on API Key input / paste
+  const autoFetchOnKeyInput = () => {
+    const key = document.getElementById('apiKeyInput').value.trim();
+    if (key.length >= 8) {
+      if (apiKeyFetchDebounce) clearTimeout(apiKeyFetchDebounce);
+      apiKeyFetchDebounce = setTimeout(() => {
+        fetchDynamicModels(true);
+      }, 500);
+    }
+  };
+
+  document.getElementById('apiKeyInput').addEventListener('input', autoFetchOnKeyInput);
+  document.getElementById('apiKeyInput').addEventListener('change', autoFetchOnKeyInput);
+  document.getElementById('apiKeyInput').addEventListener('paste', () => {
+    setTimeout(() => fetchDynamicModels(true), 200);
+  });
+
+  // Switch per-provider memory when provider dropdown changes
+  document.getElementById('providerSelect').addEventListener('change', async () => {
     const provider = document.getElementById('providerSelect').value;
-    if (provider === 'ollama') {
-      document.getElementById('baseUrlInput').value = 'http://localhost:11434';
-    } else if (provider === 'openai') {
-      document.getElementById('baseUrlInput').value = 'https://api.openai.com';
-    } else if (provider === 'anthropic') {
-      document.getElementById('baseUrlInput').value = 'https://api.anthropic.com';
-    }
-    fetchDynamicModels(true);
-  });
+    const providerConfigs = currentSettings.providerConfigs || DEFAULT_PROVIDER_CONFIGS;
+    const savedCfg = providerConfigs[provider] || DEFAULT_PROVIDER_CONFIGS[provider] || {};
 
-  document.getElementById('apiKeyInput').addEventListener('change', () => {
-    fetchDynamicModels(true);
-  });
+    document.getElementById('baseUrlInput').value = savedCfg.baseUrl || '';
+    document.getElementById('apiKeyInput').value = savedCfg.apiKey || '';
 
-  document.getElementById('modelSelect').addEventListener('change', () => {
-    const val = document.getElementById('modelSelect').value;
-    const customInput = document.getElementById('modelCustomInput');
-    if (val === '__custom__') {
-      customInput.style.display = 'block';
-    } else {
-      customInput.style.display = 'none';
-      updateModelBadge(val);
-    }
+    // Update settings object
+    currentSettings.provider = provider;
+    currentSettings.baseUrl = savedCfg.baseUrl || '';
+    currentSettings.apiKey = savedCfg.apiKey || '';
+    if (savedCfg.model) currentSettings.model = savedCfg.model;
+
+    const hasKeyOrOllama = provider === 'ollama' || (savedCfg.apiKey && savedCfg.apiKey.length > 5);
+    await fetchDynamicModels(hasKeyOrOllama);
   });
 
   document.getElementById('btnSaveSettings').addEventListener('click', async () => {
+    const provider = document.getElementById('providerSelect').value;
     const selectVal = document.getElementById('modelSelect').value;
     const customVal = document.getElementById('modelCustomInput').value.trim();
     const finalModel = (selectVal === '__custom__' && customVal) ? customVal : selectVal;
 
+    const apiKey = document.getElementById('apiKeyInput').value.trim();
+    const baseUrl = document.getElementById('baseUrlInput').value.trim();
+
     const newSettings = {
-      provider: document.getElementById('providerSelect').value,
-      baseUrl: document.getElementById('baseUrlInput').value.trim(),
-      apiKey: document.getElementById('apiKeyInput').value.trim(),
+      provider,
+      baseUrl,
+      apiKey,
       model: finalModel,
       maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || 25,
       actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || 1000,
       showElementBadges: document.getElementById('badgesToggle').checked
     };
 
-    await Storage.saveSettings(newSettings);
-    currentSettings = newSettings;
+    const saved = await Storage.saveSettings(newSettings);
+    currentSettings = saved;
     updateModelBadge(finalModel);
-    alert(`Settings saved! Active model: ${finalModel}`);
+    alert(`Settings saved! Provider [${provider}] configured with model [${finalModel}].`);
   });
 
   document.querySelectorAll('.sample-chip').forEach(chip => {

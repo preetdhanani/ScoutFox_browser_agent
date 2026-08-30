@@ -1,6 +1,7 @@
 /**
  * Background Service Worker for ScoutFox AI Agent
- * Routes extension messages, maintains agent engine instance, and manages port connections.
+ * Routes extension messages, maintains agent engine instance, manages port connections,
+ * and dynamically tracks active tab switching when links or automation open new tabs.
  */
 
 import { AgentEngine } from './agentEngine.js';
@@ -52,6 +53,36 @@ function broadcastToSidepanel(type, payload) {
       activeSidepanelPorts.delete(port);
     }
   }
+}
+
+// Dynamically track active tab switching (e.g. when automation or link opens a new tab)
+if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onActivated) {
+  chrome.tabs.onActivated.addListener((activeInfo) => {
+    if (agentEngine && agentEngine.status === 'running') {
+      chrome.tabs.get(activeInfo.tabId, (tab) => {
+        if (tab && isValidWebTab(tab)) {
+          Logger.info('Background', `[TAB_AUTO_SWITCH] Switched active automation tracking to Tab ID [${tab.id}] (${tab.title || tab.url})`);
+          agentEngine.activeTabId = tab.id;
+        }
+      });
+    }
+  });
+}
+
+// Dynamically track new tab creation
+if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onCreated) {
+  chrome.tabs.onCreated.addListener((tab) => {
+    if (agentEngine && agentEngine.status === 'running' && tab.id) {
+      setTimeout(() => {
+        chrome.tabs.get(tab.id, (createdTab) => {
+          if (createdTab && isValidWebTab(createdTab)) {
+            Logger.info('Background', `[NEW_TAB_DETECTED] Automation switching to newly opened Tab ID [${createdTab.id}]`);
+            agentEngine.activeTabId = createdTab.id;
+          }
+        });
+      }, 500);
+    }
+  });
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
