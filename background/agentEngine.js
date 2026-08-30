@@ -76,16 +76,22 @@ export class AgentEngine {
   notifyStateChange(extraData = {}) {
     this.persistState();
     if (this.onStateChangeCallback) {
-      this.onStateChangeCallback({
-        status: this.status,
-        stepCount: this.stepCount,
-        task: this.currentTask,
-        history: this.history,
-        planSteps: this.planSteps,
-        currentPhase: this.currentPhase,
-        logs: Logger.getLogsHistory(),
-        ...extraData
-      });
+      try {
+        this.onStateChangeCallback({
+          status: this.status,
+          stepCount: this.stepCount,
+          task: this.currentTask,
+          history: this.history,
+          planSteps: this.planSteps,
+          currentPhase: this.currentPhase,
+          logs: Logger.getLogsHistory(),
+          ...extraData
+        });
+      } catch (err) {
+        // Never let a broadcast failure take down the loop that's reporting it.
+        // console.error (not Logger) deliberately, in case Logger itself is implicated.
+        console.error('[AgentEngine] notifyStateChange callback threw', err);
+      }
     }
   }
 
@@ -239,7 +245,11 @@ Example Output:
       this.status = 'running';
       this.setPhase('Resuming task...');
       Logger.info('AgentEngine', '[RESUMED] Task resumed by user.');
-      this.runLoop();
+      // runLoop() catches everything internally (see its own try/catch/finally), but this
+      // call is intentionally fire-and-forget — .catch() here is a last-resort net only.
+      this.runLoop().catch((err) => {
+        Logger.error('AgentEngine', '[RESUME_ERROR] Uncaught exception resuming loop', err);
+      });
     }
   }
 
@@ -275,7 +285,40 @@ Example Output:
     });
   }
 
+  /**
+   * Runs the step loop. Wrapped in an outer try/catch/finally as a structural safety net:
+   * previously only the two explicitly-caught sub-steps (DOM read, LLM call) could fail
+   * safely — any OTHER exception anywhere in this method (or one introduced later) would
+   * reject silently (both call sites, startTask() and resume(), invoke this without a
+   * guaranteed catch), leaving status stuck at 'running' forever with no log output and
+   * no way for the UI to recover. The finally block guarantees isLoopActive is always
+   * cleared and status can never remain incorrectly 'running' once this method exits.
+   */
   async runLoop() {
+    try {
+      await this.runLoopBody();
+    } catch (err) {
+      Logger.error('AgentEngine', '[LOOP_ERROR] Unhandled exception in execution loop', err);
+      this.history.push({
+        type: 'error',
+        content: `Execution Error: ${err.message}`
+      });
+      this.notifyStateChange({ error: err.message });
+    } finally {
+      this.isLoopActive = false;
+      if (this.status === 'running') {
+        // The loop exited (returned, threw, or fell through) without ever transitioning
+        // out of 'running' — force it back to a safe, visible state rather than leaving
+        // the UI showing Pause/Stop for a task that is no longer actually executing.
+        Logger.warn('AgentEngine', '[LOOP_SAFETY_NET] Loop exited while still marked running — forcing status to idle.');
+        this.status = 'idle';
+        this.currentPhase = '';
+        this.notifyStateChange();
+      }
+    }
+  }
+
+  async runLoopBody() {
     const settings = await Storage.getSettings();
     const maxSteps = settings.maxSteps || 25;
     this.isLoopActive = true;

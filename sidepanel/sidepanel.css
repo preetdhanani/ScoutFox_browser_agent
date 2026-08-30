@@ -189,6 +189,16 @@ a:hover { color: var(--text-main); }
   background-color: var(--accent);
 }
 
+.status-indicator.reconnecting {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.status-indicator.reconnecting .status-dot {
+  background-color: var(--accent);
+  animation: pulse 1s ease-in-out infinite;
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 0.55; transform: scale(0.85); }
   50% { opacity: 1; transform: scale(1.15); }
@@ -1058,8 +1068,15 @@ a:hover { color: var(--text-main); }
 }
 
 .combobox-option-item.custom-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   border-top: 1px dashed var(--border);
   color: var(--text-muted);
   font-style: italic;
+}
+
+.combobox-option-item.custom-option svg {
+  flex-shrink: 0;
 }
 

@@ -11,6 +11,38 @@ let currentSettings = { ...DEFAULT_SETTINGS };
 let currentSessionId = null;
 let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
+let portReconnectAttempts = 0;
+let portReconnectTimer = null;
+
+/**
+ * Forward any error this UI hits to the background's central Logger, so it always shows
+ * up in the Logs tab — the same place background/content-script errors already land.
+ * Best-effort: never lets error reporting itself throw or block anything.
+ */
+function reportClientError(source, err) {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({
+        action: 'CLIENT_ERROR',
+        payload: {
+          source,
+          message: (err && err.message) || String(err),
+          stack: (err && err.stack) || null
+        }
+      });
+    }
+  } catch (_) {
+    // Reporting must never itself throw.
+  }
+  console.error(`[ScoutFox:${source}]`, err);
+}
+
+window.addEventListener('error', (event) => {
+  reportClientError('sidepanel:window', event.error || event.message);
+});
+window.addEventListener('unhandledrejection', (event) => {
+  reportClientError('sidepanel:unhandledrejection', event.reason);
+});
 let apiKeyFetchDebounce = null;
 let allFetchedModels = [];
 
@@ -30,7 +62,8 @@ const ICONS = {
   search: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
   star: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l2.6 5.4 5.9.8-4.3 4.2 1 5.9L12 16.3 6.8 19.3l1-5.9-4.3-4.2 5.9-.8z"/></svg>',
   doc: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5"/><line x1="7" y1="9" x2="17" y2="9"/><line x1="7" y1="13" x2="17" y2="13"/><line x1="7" y1="17" x2="13" y2="17"/></svg>',
-  aim: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>'
+  aim: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>',
+  edit: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>'
 };
 
 const THEME_MODES = ['system', 'light', 'dark'];
@@ -134,7 +167,7 @@ function renderModelOptions(modelsList) {
     return `<div class="combobox-option-item ${isSelected ? 'selected' : ''}" data-value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</div>`;
   }).join('');
 
-  html += `<div class="combobox-option-item custom-option" data-value="__custom__">✏️ Enter custom model name...</div>`;
+  html += `<div class="combobox-option-item custom-option" data-value="__custom__">${ICONS.edit} Enter custom model name...</div>`;
 
   optionsContainer.innerHTML = html;
 
@@ -281,30 +314,106 @@ function initTabs() {
   });
 }
 
+/**
+ * Connects the live update channel to the background service worker.
+ *
+ * WHY THIS MATTERS: the background service worker (MV3) can be terminated by Chrome at
+ * any point — including mid-task — for idle/memory reasons outside this extension's
+ * control. When that happens, this port dies, but a NEW service worker instance starts
+ * up fresh the moment any message reaches it (e.g. Pause/Stop still work, because those
+ * go over chrome.runtime.sendMessage, a one-off channel unrelated to this port). Without
+ * reconnect logic, the result is exactly the reported bug: the agent keeps running and
+ * doing real browser work, Pause/Stop still show (from that one-off message), but the
+ * chat timeline and logs — which depend entirely on this port — go completely silent
+ * with no error shown anywhere, because nothing ever told this side the port had died.
+ *
+ * Fix: detect the disconnect, show it, and reconnect + resync full state (history, plan,
+ * logs) automatically. Combined with background.js's keepalive alarm (which reduces how
+ * often this happens) and its now-loud logging when a broadcast has nobody to receive it,
+ * this closes the loop so a stuck task always becomes visible instead of silent.
+ */
 function initPortConnection() {
-  if (typeof chrome !== 'undefined' && chrome.runtime) {
-    backgroundPort = chrome.runtime.connect({ name: 'scoutfox_sidepanel' });
+  connectPort();
+}
 
-    backgroundPort.onMessage.addListener((msg) => {
-      if (msg.type === 'STATE_UPDATE') {
-        renderState(msg.payload);
-        autoSaveActiveSession(msg.payload);
-      } else if (msg.type === 'LOG_ENTRY') {
-        rawLogsCache.push(msg.payload);
-        if (rawLogsCache.length > 300) rawLogsCache.shift();
+function connectPort() {
+  if (typeof chrome === 'undefined' || !chrome.runtime) return;
+
+  try {
+    backgroundPort = chrome.runtime.connect({ name: 'scoutfox_sidepanel' });
+  } catch (err) {
+    reportClientError('sidepanel:port-connect', err);
+    scheduleReconnect();
+    return;
+  }
+
+  backgroundPort.onMessage.addListener((msg) => {
+    if (msg.type === 'STATE_UPDATE') {
+      renderState(msg.payload);
+      autoSaveActiveSession(msg.payload);
+    } else if (msg.type === 'LOG_ENTRY') {
+      rawLogsCache.push(msg.payload);
+      if (rawLogsCache.length > 300) rawLogsCache.shift();
+      renderFilteredLogs();
+    }
+  });
+
+  backgroundPort.onDisconnect.addListener(() => {
+    backgroundPort = null;
+    setConnectionLostBanner(true);
+    scheduleReconnect();
+  });
+
+  portReconnectAttempts = 0;
+  if (portReconnectTimer) {
+    clearTimeout(portReconnectTimer);
+    portReconnectTimer = null;
+  }
+  setConnectionLostBanner(false);
+  resyncAgentState();
+}
+
+function scheduleReconnect() {
+  if (portReconnectTimer) return; // already scheduled
+  portReconnectAttempts++;
+  const delayMs = Math.min(5000, 300 * portReconnectAttempts);
+  portReconnectTimer = setTimeout(() => {
+    portReconnectTimer = null;
+    connectPort();
+  }, delayMs);
+}
+
+/**
+ * Pulls the current full agent state (status, history, plan, logs) via the one-off
+ * message channel — used on first load AND after every reconnect, so a panel that was
+ * disconnected while a task kept running recovers everything it missed in one shot
+ * (background persists history/logs independently of whether anyone is listening).
+ */
+function resyncAgentState() {
+  if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
+  chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE' }, (res) => {
+    if (chrome.runtime.lastError) {
+      // Background not reachable yet (e.g. right after a service worker restart) — the
+      // port-level reconnect loop above will keep retrying independently of this.
+      return;
+    }
+    if (res) {
+      renderState(res);
+      if (res.logs) {
+        rawLogsCache = res.logs;
         renderFilteredLogs();
       }
-    });
+    }
+  });
+}
 
-    chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE' }, (res) => {
-      if (res) {
-        renderState(res);
-        if (res.logs) {
-          rawLogsCache = res.logs;
-          renderFilteredLogs();
-        }
-      }
-    });
+function setConnectionLostBanner(isDisconnected) {
+  const pill = document.getElementById('statusPill');
+  const textEl = document.getElementById('statusText');
+  if (!pill) return;
+  pill.classList.toggle('reconnecting', isDisconnected);
+  if (isDisconnected && textEl) {
+    textEl.textContent = 'Reconnecting…';
   }
 }
 
