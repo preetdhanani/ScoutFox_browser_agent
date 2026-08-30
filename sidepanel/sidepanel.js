@@ -1,5 +1,5 @@
 /**
- * Sidepanel Controller Script
+ * Sidepanel Controller Script for ScoutFox AI Agent
  * Connects to Background Agent Engine, renders timeline, session history drawer, plan checklist, progress banner, settings, and backend logs.
  * Employs persistent model caching to prevent redundant API fetches on sidepanel open.
  */
@@ -18,7 +18,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initPortConnection();
   initEventListeners();
   await loadSessionHistory();
-  await fetchDynamicModels(false); // Load from storage cache initially
+  await fetchDynamicModels(false);
 });
 
 /**
@@ -38,7 +38,7 @@ async function loadSettings() {
 }
 
 /**
- * Fetch dynamic models with storage caching (forceRefresh = false uses cache)
+ * Fetch dynamic models with storage caching
  */
 async function fetchDynamicModels(forceRefresh = false) {
   const statusEl = document.getElementById('modelFetchStatus');
@@ -131,7 +131,7 @@ function initTabs() {
 
 function initPortConnection() {
   if (typeof chrome !== 'undefined' && chrome.runtime) {
-    backgroundPort = chrome.runtime.connect({ name: 'strawberry_sidepanel' });
+    backgroundPort = chrome.runtime.connect({ name: 'scoutfox_sidepanel' });
 
     backgroundPort.onMessage.addListener((msg) => {
       if (msg.type === 'STATE_UPDATE') {
@@ -161,7 +161,6 @@ function initPortConnection() {
 }
 
 function initEventListeners() {
-  // Start Task
   document.getElementById('btnStartTask').addEventListener('click', startTask);
   document.getElementById('taskInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -170,7 +169,6 @@ function initEventListeners() {
     }
   });
 
-  // Pause / Stop
   document.getElementById('btnPause').addEventListener('click', () => {
     const btn = document.getElementById('btnPause');
     const isPaused = btn.textContent.trim().includes('Resume');
@@ -185,7 +183,6 @@ function initEventListeners() {
     chrome.runtime.sendMessage({ action: 'STOP_TASK' });
   });
 
-  // New Session Button
   document.getElementById('btnNewSession').addEventListener('click', () => {
     currentSessionId = null;
     chrome.runtime.sendMessage({ action: 'CLEAR_HISTORY' }, () => {
@@ -195,7 +192,6 @@ function initEventListeners() {
     });
   });
 
-  // Toggle History Drawer
   document.getElementById('btnToggleHistory').addEventListener('click', async () => {
     const drawer = document.getElementById('historyDrawer');
     if (drawer.style.display === 'none' || !drawer.style.display) {
@@ -210,7 +206,6 @@ function initEventListeners() {
     document.getElementById('historyDrawer').style.display = 'none';
   });
 
-  // Log Category Filter Chips
   document.querySelectorAll('.log-filter-chip').forEach(chip => {
     chip.addEventListener('click', () => {
       document.querySelectorAll('.log-filter-chip').forEach(c => c.classList.remove('active'));
@@ -220,7 +215,6 @@ function initEventListeners() {
     });
   });
 
-  // Copy Logs Button
   document.getElementById('btnCopyLogs').addEventListener('click', () => {
     const outputText = document.getElementById('logOutput').textContent;
     navigator.clipboard.writeText(outputText).then(() => {
@@ -235,7 +229,6 @@ function initEventListeners() {
     document.getElementById('logOutput').textContent = '// Logs cleared.';
   });
 
-  // Explicit Refresh Models Button (forceRefresh = true)
   document.getElementById('btnFetchModels').addEventListener('click', () => {
     fetchDynamicModels(true);
   });
@@ -249,11 +242,11 @@ function initEventListeners() {
     } else if (provider === 'anthropic') {
       document.getElementById('baseUrlInput').value = 'https://api.anthropic.com';
     }
-    fetchDynamicModels(true); // Force refresh when switching provider
+    fetchDynamicModels(true);
   });
 
   document.getElementById('apiKeyInput').addEventListener('change', () => {
-    fetchDynamicModels(true); // Force refresh when key changes
+    fetchDynamicModels(true);
   });
 
   document.getElementById('modelSelect').addEventListener('change', () => {
@@ -408,7 +401,7 @@ function renderEmptyState() {
       <div class="empty-state" id="emptyState">
         <div class="sparkle-icon">✨</div>
         <h3>What would you like to automate?</h3>
-        <p>Enter a task below. Strawberry will read the page, index elements, and execute browser actions step-by-step.</p>
+        <p>Enter a task below. ScoutFox will read the page, index elements, and execute browser actions step-by-step.</p>
         <div class="sample-prompts">
           <span class="sample-chip" data-prompt="Search Google for open-source AI browser frameworks">🔍 Search Google for AI agents</span>
           <span class="sample-chip" data-prompt="Find top trending repositories on GitHub for python">⭐ Top Python GitHub repos</span>
@@ -476,7 +469,6 @@ function renderState(state) {
     if (btnStartTask) btnStartTask.disabled = false;
   }
 
-  // Render Timeline Cards
   const timeline = document.getElementById('timeline');
   if (timeline) {
     if (!history || history.length === 0) {
@@ -567,9 +559,6 @@ function renderPlanChecklist(planSteps) {
   }).join('');
 }
 
-/**
- * Filter and render telemetry logs into DOM console
- */
 function renderFilteredLogs() {
   const logOutput = document.getElementById('logOutput');
   if (!logOutput) return;

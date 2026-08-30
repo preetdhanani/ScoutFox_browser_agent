@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Strawberry AI - Agentic Browser for Small & Cloud LLMs",
+  "name": "ScoutFox AI Browser Agent",
   "version": "1.0.0",
-  "description": "Autonomous privacy-first web browsing agent optimized for local Ollama (8B, 9B, 27B, 32B), OpenAI, Claude, and Gemini.",
+  "description": "Autonomous AI Browser Agent for Local & Cloud LLMs (Ollama, Gemini, OpenAI, Claude, Groq).",
   "permissions": [
     "sidePanel",
     "activeTab",
@@ -21,17 +21,7 @@
     "default_path": "sidepanel/sidepanel.html"
   },
   "action": {
-    "default_title": "Strawberry Agentic Browser",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
-  },
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
+    "default_title": "Open ScoutFox AI Agent"
   },
   "content_scripts": [
     {
@@ -43,5 +33,10 @@
       ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
 }

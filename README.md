@@ -1,112 +1,86 @@
-<<<<<<< HEAD
-# ScoutFox_browser_agent
-=======
-# 🍓 Strawberry AI Agentic Browser (Chrome Extension MVP)
+# ScoutFox AI Browser Agent 🦊
 
-> **Autonomous Web Browsing Agent** optimized for **Local Small LLMs (8B, 9B, 14B, 27B, 32B)** via Ollama / OpenAI-compatible APIs, as well as Cloud LLMs (OpenAI, Claude, Gemini).
+**ScoutFox** is an open-source, production-ready Chrome Extension (Manifest V3) and Python automation runner that empowers local models (Ollama 8B/14B/27B) and cloud APIs (Google Gemini, OpenAI, Claude, Groq) to autonomously control your web browser.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Manifest V3](https://img.shields.io/badge/Chrome-Manifest--V3-brightgreen.svg)](manifest.json)
 
 ---
 
 ## 🌟 Key Features
 
-* 🦙 **Optimized for Small Local LLMs**: Built specifically to run on 8B, 9B, 14B, and 27B/32B open-source models (e.g. `qwen2.5:14b`, `llama3.1:8b`, `gemma2:9b`).
-* 🏷️ **Indexed DOM Distillation**: Compresses massive web DOM trees into concise, single-token element IDs `[1]`, `[2]`, `[3]` (< 2,500 tokens context usage).
-* 🎯 **Visual On-Screen Action Badges**: Displays floating numeric badges over active web elements so you can visually watch the agent target elements in real-time.
-* ⚡ **Fault-Tolerant Action Parser**: Automatic JSON codeblock fallback extraction and self-correction loop when 8B/9B models output slightly broken formatting.
-* 🔒 **Privacy-First Local Execution**: Zero external telemetry. Direct local execution via `http://localhost:11434` (Ollama) or local vLLM / LM Studio instances.
-* 🎨 **Sleek Glassmorphism Side Panel UI**: Modern Chrome SidePanel interface with live timeline feed, provider settings, and DOM debug console.
+* 🦊 **ScoutFox UI**: Glassmorphism Side Panel interface built with Vanilla CSS.
+* 📋 **Batch Plan Checklist**: Automatically generates high-level execution checklists and checks off sub-goals as it navigates.
+* 📜 **Multi-Session History**: Save, restore, and switch between past browser automation runs like ChatGPT / Claude.
+* 📡 **Backend Telemetry Console**: Filter step-by-step DOM snapshots, raw LLM outputs, parser results, and network latency (`(842ms)`).
+* ⚡ **Persistent Storage Model Caching**: Instant 0ms model dropdown loading on panel open.
+* 🦙 **Universal Multi-Provider LLM Support**:
+  * **Google Gemini API** (`gemini-1.5-flash`, `gemini-1.5-pro`, `gemini-2.0-flash-exp`)
+  * **Ollama (Local Host)** (`qwen2.5:14b`, `llama3.1:8b`, `gemma2:9b`)
+  * **Groq Cloud / OpenAI-Compatible** (`llama-3.1-70b-versatile`)
+  * **OpenAI Official** (`gpt-4o-mini`, `gpt-4o`)
+  * **Anthropic Claude** (`claude-3-5-sonnet-20241022`)
+* 🐍 **Standalone Python Playwright Agent**: Run terminal-based Playwright browser automation without registering a Web Store developer account!
 
 ---
 
-## 🚀 Quick Setup & Installation
+## 🚀 Quick Setup (Chrome Extension)
 
-### Step 1: Install Extension in Chrome
-1. Open Google Chrome and navigate to `chrome://extensions`.
-2. Enable **Developer mode** (toggle switch in the top-right corner).
-3. Click **Load unpacked**.
-4. Select the project directory: `/Users/pritdhanani/Study/projects/agent browser`.
-5. The 🍓 **Strawberry AI Agent** icon will appear in your Chrome toolbar!
-
----
-
-### Step 2: Configure Ollama for Local Models (Recommended)
-
-1. **Install & Pull Model**:
+1. Clone the repository:
    ```bash
-   ollama pull qwen2.5:14b
-   # or
-   ollama pull llama3.1:8b
+   git clone https://github.com/preetdhanani/ScoutFox_browser_agent.git
+   cd ScoutFox_browser_agent
    ```
 
-2. **Configure Ollama CORS (Required for Web Extension API access)**:
-   - **macOS**:
-     ```bash
-     OLLAMA_ORIGINS="*" ollama serve
-     ```
-   - **Linux / Windows**: Set environment variable `OLLAMA_ORIGINS="*"` in your system settings before running `ollama serve`.
+2. Load unpacked extension in Chrome:
+   - Open **`chrome://extensions/`** in Google Chrome.
+   - Enable **Developer Mode** (toggle in top-right corner).
+   - Click **Load unpacked** and select the repository directory.
 
-3. **In Strawberry Extension Settings**:
-   - Open Chrome Side Panel (click 🍓 icon in extension toolbar).
-   - Click **Settings** tab.
-   - Click the **🦙 Ollama Local** preset button (or set Provider to `Ollama`, Base URL to `http://localhost:11434`, and Model to `qwen2.5:14b`).
-   - Click **Save Settings**.
+3. Start Automating:
+   - Open any web page (e.g. `https://google.com` or `https://news.ycombinator.com`).
+   - Click the 🦊 ScoutFox icon in your toolbar to open the Side Panel.
+   - Select your LLM Provider (e.g. Google Gemini or Ollama Local) and click **Run Task**!
 
 ---
 
-### Step 3: Using Cloud or OpenAI-Compatible APIs
+## 🦙 Running Local Models with Ollama
 
-Strawberry also supports high-speed cloud providers and custom self-hosted endpoints:
+To use ScoutFox 100% locally and privately without sending data to cloud APIs:
 
-| Provider | Base URL | Model Example |
-| :--- | :--- | :--- |
-| **Ollama** | `http://localhost:11434` | `qwen2.5:14b`, `llama3.1:8b` |
-| **Groq / Llama API** | `https://api.groq.com/openai` | `llama-3.1-70b-versatile` |
-| **LM Studio / vLLM** | `http://localhost:1234` | `local-model` |
-| **OpenAI** | `https://api.openai.com` | `gpt-4o-mini`, `gpt-4o` |
-| **Anthropic** | `https://api.anthropic.com` | `claude-3-5-sonnet-20241022` |
-| **Google Gemini** | `https://generativelanguage.googleapis.com` | `gemini-1.5-flash` |
-
----
-
-## 💡 How to Use Strawberry Agent
-
-1. Open any webpage in Chrome (e.g. `https://google.com` or `https://news.ycombinator.com`).
-2. Open the **Strawberry AI SidePanel** (click the extension icon in top right).
-3. Enter your task in the input box:
-   - *"Search for best open source AI browser agents on GitHub"*
-   - *"Find the top 3 headlines on Hacker News and summarize them"*
-   - *"Navigate to Amazon and check the price of wireless mouse"*
-4. Click **Run Task** (or press `Enter`).
-5. Watch Strawberry index elements, display visual badges `[1]`, `[2]`, and execute actions step-by-step in real-time!
+1. Install [Ollama](https://ollama.com).
+2. Pull a recommended model:
+   ```bash
+   ollama pull qwen2.5:14b
+   ```
+3. Start Ollama with browser origin access enabled:
+   ```bash
+   OLLAMA_ORIGINS="*" ollama serve
+   ```
+4. In ScoutFox Settings, select **Ollama (Local Host)** and pick `qwen2.5:14b`!
 
 ---
 
-## 📁 Codebase Architecture
+## 🐍 Standalone Terminal Python Runner
 
-```text
-agent browser/
-├── manifest.json            # Chrome Extension Manifest V3
-├── PRD.md                   # Product Requirement Document
-├── icons/                   # High-res extension icons (16, 48, 128px)
-├── utils/
-│   ├── storage.js           # Chrome storage manager & defaults
-│   └── logger.js            # Structured console logging
-├── content/
-│   ├── domCompressor.js     # DOM distiller & element tagger [1], [2]
-│   ├── actionExecutor.js    # Element click/type/scroll & badge renderer
-│   └── content.js           # Content script message router
-├── background/
-│   ├── apiClients.js        # Universal REST client (Ollama, OpenAI, Claude, Gemini)
-│   ├── agentEngine.js       # Agent execution loop, prompt generator, action parser
-│   └── background.js        # Service worker entry point
-└── sidepanel/
-    ├── sidepanel.html       # UI layout (Chat, Settings, Logs)
-    ├── sidepanel.css        # Glassmorphism dark void theme
-    └── sidepanel.js         # Sidepanel UI controller script
+No Chrome extension setup needed! Run ScoutFox directly from your Mac terminal using Playwright:
+
+```bash
+cd python_runner
+pip install -r requirements.txt
+playwright install chromium
+
+# List available models
+python agent.py --list-models
+
+# Run automation goal
+python agent.py --goal "Find top 3 trending python repositories on GitHub and summarize them"
 ```
 
 ---
 
-## 📄 License
-MIT License. Created for local AI browser automation.
->>>>>>> d5aca47 (Initial commit: ScoutFox AI Browser Agent Extension with Multi-Provider Support, Live Planner, Session History, and Custom Telemetry Logs)
+## 📜 Community & Governance
+
+* **[License](LICENSE)**: MIT License
+* **[Code of Conduct](CODE_OF_CONDUCT.md)**: Contributor Covenant v2.1
+* **[Contributing Guide](CONTRIBUTING.md)**: How to submit issues and Pull Requests.

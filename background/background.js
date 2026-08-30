@@ -1,5 +1,5 @@
 /**
- * Background Service Worker
+ * Background Service Worker for ScoutFox AI Agent
  * Routes extension messages, maintains agent engine instance, and manages port connections.
  */
 
@@ -9,12 +9,10 @@ import { Logger } from '../utils/logger.js';
 
 const agentEngine = new AgentEngine();
 
-// Broadcast state updates to active sidepanel UI port
 agentEngine.setStateChangeCallback((state) => {
   broadcastToSidepanel('STATE_UPDATE', state);
 });
 
-// Forward log entries safely
 Logger.setBroadcastCallback((logEntry) => {
   broadcastToSidepanel('LOG_ENTRY', logEntry);
 });
@@ -22,13 +20,13 @@ Logger.setBroadcastCallback((logEntry) => {
 let activeSidepanelPorts = new Set();
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === 'strawberry_sidepanel') {
+  if (port.name === 'scoutfox_sidepanel' || port.name === 'strawberry_sidepanel') {
     activeSidepanelPorts.add(port);
-    Logger.info('Background', 'Sidepanel UI connected.');
+    Logger.info('Background', 'ScoutFox Sidepanel UI connected.');
 
     port.onDisconnect.addListener(() => {
       activeSidepanelPorts.delete(port);
-      Logger.info('Background', 'Sidepanel UI disconnected.');
+      Logger.info('Background', 'ScoutFox Sidepanel UI disconnected.');
     });
 
     port.postMessage({
@@ -56,7 +54,6 @@ function broadcastToSidepanel(type, payload) {
   }
 }
 
-// Handle runtime messages from Sidepanel & Content Scripts
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   const { action, payload } = request;
 
