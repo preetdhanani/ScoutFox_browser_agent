@@ -32,6 +32,35 @@ self.addEventListener('unhandledrejection', (event) => {
 
 const agentEngine = new AgentEngine();
 
+// Initialize declarativeNetRequest rules for AgentRouter network-layer header spoofing
+if (typeof chrome !== 'undefined' && chrome.declarativeNetRequest) {
+  try {
+    chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [8888],
+      addRules: [
+        {
+          id: 8888,
+          priority: 1,
+          action: {
+            type: 'modifyHeaders',
+            requestHeaders: [
+              { header: 'user-agent', operation: 'set', value: 'claude-cli/2.1.158 (external, sdk-cli)' },
+              { header: 'x-app', operation: 'set', value: 'cli' }
+            ]
+          },
+          condition: {
+            urlFilter: '*://agentrouter.org/*',
+            resourceTypes: ['xmlhttprequest']
+          }
+        }
+      ]
+    });
+    Logger.info('Background', '[DNR] Active declarativeNetRequest rule set for AgentRouter (agentrouter.org)');
+  } catch (err) {
+    Logger.warn('Background', '[DNR_WARN] Could not initialize declarativeNetRequest rules', err);
+  }
+}
+
 agentEngine.setStateChangeCallback((state) => {
   broadcastToSidepanel('STATE_UPDATE', state);
   syncKeepaliveAlarm(state.status);

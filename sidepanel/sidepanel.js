@@ -1,7 +1,7 @@
 /**
  * Sidepanel Controller Script for ScoutFox AI Agent
  * Connects to Background Agent Engine, renders timeline, session history drawer, plan checklist, progress banner, settings, and backend logs.
- * Employs persistent per-provider API key storage, automatic model fetching, and an inline searchable combobox dropdown component.
+ * Employs persistent per-provider API key storage, automatic model fetching, instant key auto-saving, and a smart searchable combobox component.
  */
 
 import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../utils/storage.js';
@@ -11,38 +11,6 @@ let currentSettings = { ...DEFAULT_SETTINGS };
 let currentSessionId = null;
 let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
-let portReconnectAttempts = 0;
-let portReconnectTimer = null;
-
-/**
- * Forward any error this UI hits to the background's central Logger, so it always shows
- * up in the Logs tab — the same place background/content-script errors already land.
- * Best-effort: never lets error reporting itself throw or block anything.
- */
-function reportClientError(source, err) {
-  try {
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      chrome.runtime.sendMessage({
-        action: 'CLIENT_ERROR',
-        payload: {
-          source,
-          message: (err && err.message) || String(err),
-          stack: (err && err.stack) || null
-        }
-      });
-    }
-  } catch (_) {
-    // Reporting must never itself throw.
-  }
-  console.error(`[ScoutFox:${source}]`, err);
-}
-
-window.addEventListener('error', (event) => {
-  reportClientError('sidepanel:window', event.error || event.message);
-});
-window.addEventListener('unhandledrejection', (event) => {
-  reportClientError('sidepanel:unhandledrejection', event.reason);
-});
 let apiKeyFetchDebounce = null;
 let allFetchedModels = [];
 
@@ -62,8 +30,7 @@ const ICONS = {
   search: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
   star: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l2.6 5.4 5.9.8-4.3 4.2 1 5.9L12 16.3 6.8 19.3l1-5.9-4.3-4.2 5.9-.8z"/></svg>',
   doc: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5"/><line x1="7" y1="9" x2="17" y2="9"/><line x1="7" y1="13" x2="17" y2="13"/><line x1="7" y1="17" x2="13" y2="17"/></svg>',
-  aim: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>',
-  edit: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>'
+  aim: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>'
 };
 
 const THEME_MODES = ['system', 'light', 'dark'];
@@ -162,20 +129,26 @@ function renderModelOptions(modelsList) {
   const activeProvider = document.getElementById('providerSelect').value;
   const currentSelected = selectEl?.value || currentSettings.providerConfigs?.[activeProvider]?.model || currentSettings.model;
 
+  if (modelsList.length === 0) {
+    optionsContainer.innerHTML = `<div class="subtext-hint" style="padding: 10px; text-align: center;">No matching models found.</div>`;
+    return;
+  }
+
   let html = modelsList.map(modelName => {
     const isSelected = modelName === currentSelected;
     return `<div class="combobox-option-item ${isSelected ? 'selected' : ''}" data-value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</div>`;
   }).join('');
 
-  html += `<div class="combobox-option-item custom-option" data-value="__custom__">${ICONS.edit} Enter custom model name...</div>`;
+  html += `<div class="combobox-option-item custom-option" data-value="__custom__">✏️ Enter custom model name...</div>`;
 
   optionsContainer.innerHTML = html;
 
   optionsContainer.querySelectorAll('.combobox-option-item').forEach(item => {
-    item.addEventListener('click', () => {
+    item.addEventListener('click', async () => {
       const val = item.getAttribute('data-value');
       updateSelectedModel(val);
       closeComboboxMenu();
+      await autoSaveCurrentForm();
     });
   });
 
@@ -190,7 +163,6 @@ function initCombobox() {
   const trigger = document.getElementById('modelComboboxTrigger');
   const menu = document.getElementById('modelComboboxMenu');
   const searchInput = document.getElementById('modelSearchInside');
-  const combobox = document.getElementById('modelCombobox');
 
   if (trigger && menu) {
     trigger.addEventListener('click', (e) => {
@@ -228,6 +200,31 @@ function openComboboxMenu() {
   const searchInput = document.getElementById('modelSearchInside');
 
   if (menu && combobox) {
+    const triggerRect = combobox.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - triggerRect.bottom;
+
+    if (spaceBelow < 260 && triggerRect.top > 260) {
+      menu.style.top = 'auto';
+      menu.style.bottom = '100%';
+      menu.style.borderTop = '1px solid var(--accent)';
+      menu.style.borderBottom = 'none';
+      menu.style.borderTopLeftRadius = '9px';
+      menu.style.borderTopRightRadius = '9px';
+      menu.style.borderBottomLeftRadius = '0';
+      menu.style.borderBottomRightRadius = '0';
+      menu.style.boxShadow = '0 -10px 25px rgba(0, 0, 0, 0.25)';
+    } else {
+      menu.style.top = '100%';
+      menu.style.bottom = 'auto';
+      menu.style.borderTop = 'none';
+      menu.style.borderBottom = '1px solid var(--accent)';
+      menu.style.borderTopLeftRadius = '0';
+      menu.style.borderTopRightRadius = '0';
+      menu.style.borderBottomLeftRadius = '9px';
+      menu.style.borderBottomRightRadius = '9px';
+      menu.style.boxShadow = '0 10px 25px rgba(0, 0, 0, 0.25)';
+    }
+
     menu.style.display = 'flex';
     combobox.classList.add('open');
     if (searchInput) {
@@ -245,6 +242,32 @@ function closeComboboxMenu() {
     menu.style.display = 'none';
     combobox.classList.remove('open');
   }
+}
+
+/**
+ * Auto-save active form fields to Storage silently
+ */
+async function autoSaveCurrentForm() {
+  const provider = document.getElementById('providerSelect').value;
+  const selectVal = document.getElementById('modelSelect').value;
+  const customVal = document.getElementById('modelCustomInput').value.trim();
+  const finalModel = (selectVal === '__custom__' && customVal) ? customVal : selectVal;
+
+  const apiKey = document.getElementById('apiKeyInput').value.trim();
+  const baseUrl = document.getElementById('baseUrlInput').value.trim();
+
+  const newSettings = {
+    provider,
+    baseUrl,
+    apiKey,
+    model: finalModel,
+    maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || 25,
+    actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || 1000,
+    showElementBadges: document.getElementById('badgesToggle').checked
+  };
+
+  currentSettings = await Storage.saveSettings(newSettings);
+  updateModelBadge(finalModel);
 }
 
 /**
@@ -314,111 +337,30 @@ function initTabs() {
   });
 }
 
-/**
- * Connects the live update channel to the background service worker.
- *
- * WHY THIS MATTERS: the background service worker (MV3) can be terminated by Chrome at
- * any point — including mid-task — for idle/memory reasons outside this extension's
- * control. When that happens, this port dies, but a NEW service worker instance starts
- * up fresh the moment any message reaches it (e.g. Pause/Stop still work, because those
- * go over chrome.runtime.sendMessage, a one-off channel unrelated to this port). Without
- * reconnect logic, the result is exactly the reported bug: the agent keeps running and
- * doing real browser work, Pause/Stop still show (from that one-off message), but the
- * chat timeline and logs — which depend entirely on this port — go completely silent
- * with no error shown anywhere, because nothing ever told this side the port had died.
- *
- * Fix: detect the disconnect, show it, and reconnect + resync full state (history, plan,
- * logs) automatically. Combined with background.js's keepalive alarm (which reduces how
- * often this happens) and its now-loud logging when a broadcast has nobody to receive it,
- * this closes the loop so a stuck task always becomes visible instead of silent.
- */
 function initPortConnection() {
-  connectPort();
-}
-
-function connectPort() {
-  if (typeof chrome === 'undefined' || !chrome.runtime) return;
-
-  try {
+  if (typeof chrome !== 'undefined' && chrome.runtime) {
     backgroundPort = chrome.runtime.connect({ name: 'scoutfox_sidepanel' });
-  } catch (err) {
-    reportClientError('sidepanel:port-connect', err);
-    scheduleReconnect();
-    return;
-  }
 
-  backgroundPort.onMessage.addListener((msg) => {
-    if (msg.type === 'STATE_UPDATE') {
-      renderState(msg.payload);
-      autoSaveActiveSession(msg.payload);
-    } else if (msg.type === 'LOG_ENTRY') {
-      rawLogsCache.push(msg.payload);
-      if (rawLogsCache.length > 300) rawLogsCache.shift();
-      renderFilteredLogs();
-    }
-  });
-
-  backgroundPort.onDisconnect.addListener(() => {
-    backgroundPort = null;
-    setConnectionLostBanner(true);
-    scheduleReconnect();
-  });
-
-  if (portReconnectTimer) {
-    clearTimeout(portReconnectTimer);
-    portReconnectTimer = null;
-  }
-  setConnectionLostBanner(false);
-  resyncAgentState();
-}
-
-function scheduleReconnect() {
-  if (portReconnectTimer) return; // already scheduled
-  portReconnectAttempts++;
-  const delayMs = Math.min(5000, 300 * portReconnectAttempts);
-  portReconnectTimer = setTimeout(() => {
-    portReconnectTimer = null;
-    connectPort();
-  }, delayMs);
-}
-
-/**
- * Pulls the current full agent state (status, history, plan, logs) via the one-off
- * message channel — used on first load AND after every reconnect, so a panel that was
- * disconnected while a task kept running recovers everything it missed in one shot
- * (background persists history/logs independently of whether anyone is listening).
- */
-function resyncAgentState() {
-  if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
-  chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE' }, (res) => {
-    if (chrome.runtime.lastError) {
-      // Background not reachable yet (e.g. right after a service worker restart) — the
-      // port-level reconnect loop above will keep retrying independently of this.
-      return;
-    }
-    // A real, confirmed round-trip to the background — NOW it's safe to say the backoff
-    // has actually succeeded and reset it. Resetting this eagerly in connectPort() (right
-    // after obtaining a Port object) was a bug: chrome.runtime.connect() returns a Port
-    // optimistically even against a dead/invalid context, so under a sustained failure the
-    // backoff was being wiped back to 0 every cycle and never actually ramped up.
-    portReconnectAttempts = 0;
-    if (res) {
-      renderState(res);
-      if (res.logs) {
-        rawLogsCache = res.logs;
+    backgroundPort.onMessage.addListener((msg) => {
+      if (msg.type === 'STATE_UPDATE') {
+        renderState(msg.payload);
+        autoSaveActiveSession(msg.payload);
+      } else if (msg.type === 'LOG_ENTRY') {
+        rawLogsCache.push(msg.payload);
+        if (rawLogsCache.length > 300) rawLogsCache.shift();
         renderFilteredLogs();
       }
-    }
-  });
-}
+    });
 
-function setConnectionLostBanner(isDisconnected) {
-  const pill = document.getElementById('statusPill');
-  const textEl = document.getElementById('statusText');
-  if (!pill) return;
-  pill.classList.toggle('reconnecting', isDisconnected);
-  if (isDisconnected && textEl) {
-    textEl.textContent = 'Reconnecting…';
+    chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE' }, (res) => {
+      if (res) {
+        renderState(res);
+        if (res.logs) {
+          rawLogsCache = res.logs;
+          renderFilteredLogs();
+        }
+      }
+    });
   }
 }
 
@@ -503,9 +445,10 @@ function initEventListeners() {
     fetchDynamicModels(true);
   });
 
-  // Auto-fetch models on API Key input / paste
-  const autoFetchOnKeyInput = () => {
+  // Auto-fetch models & auto-save settings on API Key input / paste / blur
+  const autoFetchAndSaveOnKeyInput = async () => {
     const key = document.getElementById('apiKeyInput').value.trim();
+    await autoSaveCurrentForm();
     if (key.length >= 8) {
       if (apiKeyFetchDebounce) clearTimeout(apiKeyFetchDebounce);
       apiKeyFetchDebounce = setTimeout(() => {
@@ -514,10 +457,15 @@ function initEventListeners() {
     }
   };
 
-  document.getElementById('apiKeyInput').addEventListener('input', autoFetchOnKeyInput);
-  document.getElementById('apiKeyInput').addEventListener('change', autoFetchOnKeyInput);
+  document.getElementById('apiKeyInput').addEventListener('input', autoFetchAndSaveOnKeyInput);
+  document.getElementById('apiKeyInput').addEventListener('change', autoFetchAndSaveOnKeyInput);
+  document.getElementById('apiKeyInput').addEventListener('blur', autoSaveCurrentForm);
+  document.getElementById('baseUrlInput').addEventListener('blur', autoSaveCurrentForm);
   document.getElementById('apiKeyInput').addEventListener('paste', () => {
-    setTimeout(() => fetchDynamicModels(true), 200);
+    setTimeout(async () => {
+      await autoSaveCurrentForm();
+      fetchDynamicModels(true);
+    }, 200);
   });
 
   // Switch per-provider memory when provider dropdown changes
@@ -535,33 +483,15 @@ function initEventListeners() {
     currentSettings.apiKey = savedCfg.apiKey || '';
     if (savedCfg.model) currentSettings.model = savedCfg.model;
 
+    await autoSaveCurrentForm();
+
     const hasKeyOrOllama = provider === 'ollama' || (savedCfg.apiKey && savedCfg.apiKey.length > 5);
     await fetchDynamicModels(hasKeyOrOllama);
   });
 
   document.getElementById('btnSaveSettings').addEventListener('click', async () => {
-    const provider = document.getElementById('providerSelect').value;
-    const selectVal = document.getElementById('modelSelect').value;
-    const customVal = document.getElementById('modelCustomInput').value.trim();
-    const finalModel = (selectVal === '__custom__' && customVal) ? customVal : selectVal;
-
-    const apiKey = document.getElementById('apiKeyInput').value.trim();
-    const baseUrl = document.getElementById('baseUrlInput').value.trim();
-
-    const newSettings = {
-      provider,
-      baseUrl,
-      apiKey,
-      model: finalModel,
-      maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || 25,
-      actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || 1000,
-      showElementBadges: document.getElementById('badgesToggle').checked
-    };
-
-    const saved = await Storage.saveSettings(newSettings);
-    currentSettings = saved;
-    updateModelBadge(finalModel);
-    alert(`Settings saved! Provider [${provider}] configured with model [${finalModel}].`);
+    await autoSaveCurrentForm();
+    alert(`Settings saved! Provider [${currentSettings.provider}] configured with model [${currentSettings.model}].`);
   });
 
   document.querySelectorAll('.sample-chip').forEach(chip => {
@@ -573,9 +503,12 @@ function initEventListeners() {
   });
 }
 
-function startTask() {
+async function startTask() {
   const prompt = document.getElementById('taskInput').value.trim();
   if (!prompt) return;
+
+  // Auto-sync form state into Storage before launching task
+  await autoSaveCurrentForm();
 
   currentSessionId = `session_${Date.now()}`;
 
@@ -705,23 +638,8 @@ function renderEmptyState() {
 /**
  * Render Agent Execution State into UI
  */
-let lastRenderedStateVersion = -1;
-
 function renderState(state) {
   if (!state) return;
-
-  // STATE_UPDATE (live port push) and the GET_AGENT_STATE resync response (fired after
-  // every reconnect) are two independent round-trips with no ordering guarantee between
-  // them — a resync response can arrive after a fresher live update already rendered.
-  // stateVersion is a monotonic counter stamped by the background; drop anything older
-  // than what's already on screen. Synthetic states (e.g. viewing a saved history session
-  // in loadSelectedSession(), which has no stateVersion) always render — this guard only
-  // applies to the two live channels.
-  if (typeof state.stateVersion === 'number') {
-    if (state.stateVersion <= lastRenderedStateVersion) return;
-    lastRenderedStateVersion = state.stateVersion;
-  }
-
   const { status, stepCount, history, planSteps, currentPhase } = state;
 
   const statusPill = document.getElementById('statusPill');
@@ -735,11 +653,8 @@ function renderState(state) {
   const btnStartTask = document.getElementById('btnStartTask');
 
   if (statusPill && statusText) {
-    // Don't let an unrelated render (e.g. opening a saved session from history) stomp the
-    // "Reconnecting…" indicator while the port is genuinely still down.
-    const isDisconnected = backgroundPort === null;
-    statusPill.className = `status-indicator ${status}${isDisconnected ? ' reconnecting' : ''}`;
-    statusText.textContent = isDisconnected ? 'Reconnecting…' : status.charAt(0).toUpperCase() + status.slice(1);
+    statusPill.className = `status-indicator ${status}`;
+    statusText.textContent = status.charAt(0).toUpperCase() + status.slice(1);
   }
 
   renderPlanChecklist(planSteps);

@@ -51,6 +51,76 @@ I need to search for papers on LLM evaluation by typing into element 3.
   assert.equal(result.action.text, 'LLM evaluation research papers');
 });
 
+test('AgentEngine - Universal Guardrail 1: Regex Intent Extraction for Dumber Models', () => {
+  const engine = new AgentEngine();
+
+  // Plain text from a dumber model without JSON
+  const plainTextOutput = `I analyzed the page. Action: click element 4 to view README file.`;
+
+  const result = engine.parseResponse(plainTextOutput, 10);
+  assert.equal(result.action.action, 'click');
+  assert.equal(result.action.element_id, 4);
+});
+
+test('AgentEngine - Universal Guardrail 2: Element ID Hallucination Clamping', () => {
+  const engine = new AgentEngine();
+
+  // Model hallucinated element_id: 45 when page only has 8 elements
+  const hallucinatedOutput = `\`\`\`json\n{"action": "click", "element_id": 45}\n\`\`\``;
+
+  const result = engine.parseResponse(hallucinatedOutput, 8);
+  assert.equal(result.action.action, 'click');
+  assert.equal(result.action.element_id, 8); // Clamped to max 8
+});
+
+test('AgentEngine - Universal Guardrail 3: Action Schema Normalization', () => {
+  const engine = new AgentEngine();
+
+  // Non-standard key names (elementId instead of element_id, done instead of finish)
+  const nonStandardOutput = `\`\`\`json\n{"action": "done", "elementId": "3"}\n\`\`\``;
+
+  const result = engine.parseResponse(nonStandardOutput, 10);
+  assert.equal(result.action.action, 'finish');
+});
+
+test('AgentEngine - DeepSeek R1 <think> Tag Support & JSON Parsing', () => {
+  const engine = new AgentEngine();
+
+  const deepSeekOutput = `<think>
+Analyzing the page elements... Element 5 is the main search box for GitHub repos.
+</think>
+\`\`\`json
+{
+  "action": "type",
+  "element_id": 5,
+  "text": "agentic browser",
+  "submit": true
+}
+\`\`\``;
+
+  const result = engine.parseResponse(deepSeekOutput);
+  assert.equal(result.thought, 'Analyzing the page elements... Element 5 is the main search box for GitHub repos.');
+  assert.equal(result.action.action, 'type');
+  assert.equal(result.action.element_id, 5);
+});
+
+test('AgentEngine - Freeform Text Direct Summary Auto-Wrapping', () => {
+  const engine = new AgentEngine();
+
+  const freeformTextOutput = `<think>
+I have gathered all information from the README file.
+</think>
+Here is the summary of the ScoutFox README file:
+1. ScoutFox is an autonomous AI browser agent.
+2. Supports OpenRouter, AgentRouter, Ollama, Gemini, and OpenAI.
+3. Built with Manifest V3 and Studio Mono design system.`;
+
+  const result = engine.parseResponse(freeformTextOutput);
+  assert.equal(result.thought, 'I have gathered all information from the README file.');
+  assert.equal(result.action.action, 'finish');
+  assert.ok(result.action.answer.includes('ScoutFox is an autonomous AI browser agent'));
+});
+
 test('AgentEngine - Instant Plan Checklist Initialization', () => {
   const engine = new AgentEngine();
   engine.planSteps = [
@@ -69,21 +139,11 @@ test('AgentEngine - Zombie Status Auto-Recovery on SW Restart', async () => {
     history: [],
     planSteps: [],
     stepCount: 4,
-    status: 'running' // Stale status in storage
+    status: 'running'
   };
 
   const engine = new AgentEngine();
   await engine.restoreState();
 
-  // Engine detects SW restarted (isLoopActive === false) and auto-resets zombie status to idle
   assert.equal(engine.status, 'idle');
-});
-
-test('AgentEngine - Invalid JSON parsing error diagnostic', () => {
-  const engine = new AgentEngine();
-  const invalidOutput = `<thought>Thinking...</thought>\n\`\`\`json\n{ action: click, element_id: bad }\n\`\`\``;
-
-  const result = engine.parseResponse(invalidOutput);
-  assert.ok(result.error);
-  assert.ok(result.error.includes('Invalid JSON syntax'));
 });

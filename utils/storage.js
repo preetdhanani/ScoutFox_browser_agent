@@ -5,6 +5,7 @@
 
 export const DEFAULT_PROVIDER_CONFIGS = {
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', model: 'anthropic/claude-3.5-sonnet' },
+  agent_router: { baseUrl: 'https://agentrouter.org/v1', apiKey: '', model: 'claude-3-5-sonnet' },
   gemini: { baseUrl: '', apiKey: '', model: 'gemini-1.5-flash' },
   ollama: { baseUrl: 'http://localhost:11434', apiKey: '', model: 'qwen2.5:14b' },
   openai: { baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o-mini' },
@@ -29,7 +30,7 @@ export const DEFAULT_SETTINGS = {
 
 export const Storage = {
   /**
-   * Load user settings with merged providerConfigs
+   * Load user settings with merged providerConfigs and active provider fallback sync
    */
   async getSettings() {
     return new Promise((resolve) => {
@@ -37,14 +38,56 @@ export const Storage = {
         chrome.storage.local.get(['agent_settings'], (result) => {
           const loaded = result.agent_settings || {};
           const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
-          resolve({ ...DEFAULT_SETTINGS, ...loaded, providerConfigs: mergedConfigs });
+          const provider = loaded.provider || DEFAULT_SETTINGS.provider;
+          const activeCfg = mergedConfigs[provider] || {};
+
+          const apiKey = (loaded.apiKey !== undefined && loaded.apiKey !== '') 
+            ? loaded.apiKey 
+            : (activeCfg.apiKey || '');
+          const baseUrl = (loaded.baseUrl !== undefined && loaded.baseUrl !== '') 
+            ? loaded.baseUrl 
+            : (activeCfg.baseUrl || '');
+          const model = (loaded.model !== undefined && loaded.model !== '') 
+            ? loaded.model 
+            : (activeCfg.model || DEFAULT_SETTINGS.model);
+
+          resolve({
+            ...DEFAULT_SETTINGS,
+            ...loaded,
+            provider,
+            apiKey,
+            baseUrl,
+            model,
+            providerConfigs: mergedConfigs
+          });
         });
       } else {
         const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('agent_settings') : null;
         if (saved) {
           const loaded = JSON.parse(saved);
           const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
-          resolve({ ...DEFAULT_SETTINGS, ...loaded, providerConfigs: mergedConfigs });
+          const provider = loaded.provider || DEFAULT_SETTINGS.provider;
+          const activeCfg = mergedConfigs[provider] || {};
+
+          const apiKey = (loaded.apiKey !== undefined && loaded.apiKey !== '') 
+            ? loaded.apiKey 
+            : (activeCfg.apiKey || '');
+          const baseUrl = (loaded.baseUrl !== undefined && loaded.baseUrl !== '') 
+            ? loaded.baseUrl 
+            : (activeCfg.baseUrl || '');
+          const model = (loaded.model !== undefined && loaded.model !== '') 
+            ? loaded.model 
+            : (activeCfg.model || DEFAULT_SETTINGS.model);
+
+          resolve({
+            ...DEFAULT_SETTINGS,
+            ...loaded,
+            provider,
+            apiKey,
+            baseUrl,
+            model,
+            providerConfigs: mergedConfigs
+          });
         } else {
           resolve(DEFAULT_SETTINGS);
         }
@@ -64,7 +107,7 @@ export const Storage = {
       ...(newSettings.providerConfigs || {})
     };
 
-    // If apiKey, baseUrl, or model are provided, store them under the active provider key
+    // Store settings under the active provider key
     if (newSettings.apiKey !== undefined || newSettings.baseUrl !== undefined || newSettings.model !== undefined) {
       updatedProviderConfigs[activeProvider] = {
         baseUrl: newSettings.baseUrl !== undefined ? newSettings.baseUrl : (updatedProviderConfigs[activeProvider]?.baseUrl || ''),
@@ -73,9 +116,19 @@ export const Storage = {
       };
     }
 
+    // Ensure active provider keys are synchronized top-level
+    const activeCfg = updatedProviderConfigs[activeProvider] || {};
+    const apiKey = newSettings.apiKey !== undefined ? newSettings.apiKey : activeCfg.apiKey;
+    const baseUrl = newSettings.baseUrl !== undefined ? newSettings.baseUrl : activeCfg.baseUrl;
+    const model = newSettings.model !== undefined ? newSettings.model : activeCfg.model;
+
     const updated = {
       ...current,
       ...newSettings,
+      provider: activeProvider,
+      apiKey,
+      baseUrl,
+      model,
       providerConfigs: updatedProviderConfigs
     };
     
@@ -97,14 +150,17 @@ export const Storage = {
   async getCachedModels(cacheKey) {
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(['agent_models_cache'], (res) => {
-          const cache = res.agent_models_cache || {};
-          resolve(cache[cacheKey] || null);
+        chrome.storage.local.get(['models_cache'], (res) => {
+          const cache = res.models_cache || {};
+          const entry = cache[cacheKey];
+          if (entry && (Date.now() - entry.timestamp < 3600000)) { // 1 hour cache
+            resolve(entry.models);
+          } else {
+            resolve(null);
+          }
         });
       } else {
-        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('agent_models_cache') : null;
-        const cache = saved ? JSON.parse(saved) : {};
-        resolve(cache[cacheKey] || null);
+        resolve(null);
       }
     });
   },
@@ -112,85 +168,81 @@ export const Storage = {
   /**
    * Save cached models for a provider key
    */
-  async saveCachedModels(cacheKey, modelsList) {
+  async saveCachedModels(cacheKey, models) {
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(['agent_models_cache'], (res) => {
-          const cache = res.agent_models_cache || {};
-          cache[cacheKey] = modelsList;
-          chrome.storage.local.set({ agent_models_cache: cache }, () => resolve(cache));
+        chrome.storage.local.get(['models_cache'], (res) => {
+          const cache = res.models_cache || {};
+          cache[cacheKey] = {
+            timestamp: Date.now(),
+            models
+          };
+          chrome.storage.local.set({ models_cache: cache }, () => resolve());
         });
       } else {
-        let cache = {};
-        if (typeof localStorage !== 'undefined') {
-          const saved = localStorage.getItem('agent_models_cache');
-          if (saved) cache = JSON.parse(saved);
-          cache[cacheKey] = modelsList;
-          localStorage.setItem('agent_models_cache', JSON.stringify(cache));
-        }
-        resolve(cache);
+        resolve();
       }
     });
   },
 
   /**
-   * Fetch all saved session records
+   * Get saved session history list
    */
   async getSessions() {
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(['agent_sessions_list'], (res) => {
-          resolve(res.agent_sessions_list || []);
+        chrome.storage.local.get(['saved_sessions'], (res) => {
+          resolve(res.saved_sessions || []);
         });
       } else {
-        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('agent_sessions_list') : null;
+        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('saved_sessions') : null;
         resolve(saved ? JSON.parse(saved) : []);
       }
     });
   },
 
   /**
-   * Save or update a session record
+   * Save a completed session into history
    */
   async saveSession(sessionObj) {
     const sessions = await this.getSessions();
-    const existingIdx = sessions.findIndex(s => s.id === sessionObj.id);
+    const existingIndex = sessions.findIndex(s => s.id === sessionObj.id);
 
-    if (existingIdx >= 0) {
-      sessions[existingIdx] = { ...sessions[existingIdx], ...sessionObj };
+    if (existingIndex >= 0) {
+      sessions[existingIndex] = sessionObj;
     } else {
       sessions.unshift(sessionObj);
     }
 
-    if (sessions.length > 50) sessions.pop();
+    const trimmed = sessions.slice(0, 50);
 
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ agent_sessions_list: sessions }, () => resolve(sessions));
+        chrome.storage.local.set({ saved_sessions: trimmed }, () => resolve(trimmed));
       } else {
         if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('agent_sessions_list', JSON.stringify(sessions));
+          localStorage.setItem('saved_sessions', JSON.stringify(trimmed));
         }
-        resolve(sessions);
+        resolve(trimmed);
       }
     });
   },
 
   /**
-   * Delete a session record
+   * Delete a saved session by ID
    */
   async deleteSession(sessionId) {
-    let sessions = await this.getSessions();
-    sessions = sessions.filter(s => s.id !== sessionId);
+    const sessions = await this.getSessions();
+    const updated = sessions.filter(s => s.id !== sessionId);
 
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ agent_sessions_list: sessions }, () => resolve(sessions));
+        chrome.storage.local.set({ saved_sessions: updated }, () => resolve(updated));
       } else {
         if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('agent_sessions_list', JSON.stringify(sessions));
+          localStorage.setItem('saved_sessions', JSON.stringify(updated));
         }
-        resolve(sessions);
+        resolve(updated);
       }
     });
   }

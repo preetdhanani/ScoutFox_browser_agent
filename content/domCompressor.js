@@ -98,91 +98,41 @@
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return false;
 
-      // Check if within bounds or reasonable scroll distance
-      const inViewport = (
-        rect.top < window.innerHeight * 1.5 &&
-        rect.bottom > -window.innerHeight * 0.5 &&
-        rect.left < window.innerWidth * 1.5 &&
-        rect.right > -window.innerWidth * 0.5
-      );
-
-      return inViewport;
+      return true;
     }
 
     /**
-     * Summarize element into concise string for prompt context
+     * Produce concise element string representation
      */
     getElementSummary(el, id) {
       const tagName = el.tagName.toLowerCase();
       const type = el.getAttribute('type') || '';
-      let role = el.getAttribute('role') || '';
-      
-      // Determine label / text content
-      let label = (
-        el.getAttribute('aria-label') ||
-        el.getAttribute('placeholder') ||
-        el.getAttribute('title') ||
-        el.getAttribute('alt') ||
-        this.getLabelForInput(el) ||
-        el.innerText ||
-        el.textContent ||
-        ''
-      ).replace(/\s+/g, ' ').trim();
+      const placeholder = el.getAttribute('placeholder') || '';
+      const ariaLabel = el.getAttribute('aria-label') || '';
+      const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
 
-      if (label.length > 50) {
-        label = label.substring(0, 47) + '...';
-      }
+      let desc = `<${tagName}`;
+      if (type) desc += ` type="${type}"`;
+      if (placeholder) desc += ` placeholder="${placeholder}"`;
+      if (ariaLabel) desc += ` label="${ariaLabel}"`;
+      desc += '>';
 
-      // Determine current value for inputs/selects
-      let valueStr = '';
-      if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
-        if (type === 'checkbox' || type === 'radio') {
-          valueStr = el.checked ? ' [checked]' : ' [unchecked]';
-        } else if (el.value) {
-          const val = el.value.length > 30 ? el.value.substring(0, 27) + '...' : el.value;
-          valueStr = ` value="${val}"`;
-        }
-      }
-
-      let hrefStr = '';
-      if (tagName === 'a' && el.getAttribute('href')) {
-        const href = el.getAttribute('href');
-        if (href.startsWith('http') || href.startsWith('/')) {
-          hrefStr = ` href="${href.length > 40 ? href.substring(0, 37) + '...' : href}"`;
-        }
-      }
-
-      let tagDescription = tagName;
-      if (type) tagDescription += `:${type}`;
-      else if (role) tagDescription += `:${role}`;
-
-      const formatted = `[${id}] ${tagDescription}${label ? ` "${label}"` : ''}${valueStr}${hrefStr}`;
+      let labelText = text || ariaLabel || placeholder || 'element';
 
       return {
         id,
         tagName,
         type,
-        label,
-        value: el.value || '',
-        formatted
+        text: labelText,
+        formatted: `[${id}] ${tagName}${type ? `[${type}]` : ''} "${labelText}" (${desc})`
       };
-    }
-
-    /**
-     * Helper to check associated label tag for inputs
-     */
-    getLabelForInput(el) {
-      if (el.id) {
-        const labelEl = document.querySelector(`label[for="${el.id}"]`);
-        if (labelEl) return labelEl.innerText;
-      }
-      const parentLabel = el.closest('label');
-      if (parentLabel) return parentLabel.innerText;
-      return '';
     }
   }
 
-  // Attach instance to window object cleanly
-  window.DOMCompressor = DOMCompressor;
-  window.domCompressor = window.domCompressor || new DOMCompressor();
+  // Window global attachment with re-injection protection & key alias fallback
+  if (typeof window !== 'undefined') {
+    window.DOMCompressor = window.DOMCompressor || DOMCompressor;
+    window.domCompressorInstance = window.domCompressorInstance || new DOMCompressor();
+    window.domCompressor = window.domCompressor || window.domCompressorInstance;
+  }
 })();

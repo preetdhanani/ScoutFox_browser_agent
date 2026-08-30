@@ -1,7 +1,7 @@
 /**
  * AgentEngine for ScoutFox AI Agent
- * Orchestrates plan generation, execution loop, fault-tolerant action parsing,
- * resilient service worker state restoration, and persistent log integration.
+ * Orchestrates dynamic task-tailored plan generation, real action-driven checklist progress tracking,
+ * resilient service worker state restoration, Few-Shot System Prompting, and Universal Model Guardrails.
  */
 
 import { ApiClients } from './apiClients.js';
@@ -19,10 +19,9 @@ export class AgentEngine {
     this.currentPhase = '';
     this.isLoopActive = false;
     this.onStateChangeCallback = null;
-    // Monotonic counter stamped on every broadcast so the sidepanel can detect and drop
-    // an out-of-order/stale render (e.g. a slow GET_AGENT_STATE resync response arriving
-    // after a fresher live STATE_UPDATE already came in over the port).
     this.stateVersion = 0;
+    this.recentActionSignatures = [];
+    this.currentPlanIndex = 0;
     
     this.restoreState();
   }
@@ -36,8 +35,8 @@ export class AgentEngine {
             this.planSteps = res.agent_session.planSteps || [];
             this.currentTask = res.agent_session.task || null;
             this.stepCount = res.agent_session.stepCount || 0;
+            this.currentPlanIndex = res.agent_session.currentPlanIndex || 0;
             
-            // Service worker restart guard: If SW restarted while running, reset status to idle
             if (res.agent_session.status === 'running' && !this.isLoopActive) {
               Logger.info('AgentEngine', '[STATE_RESTORE] Service worker restarted. Resetting zombie running state to idle.');
               this.status = 'idle';
@@ -64,7 +63,8 @@ export class AgentEngine {
             planSteps: this.planSteps,
             task: this.currentTask,
             stepCount: this.stepCount,
-            status: this.status
+            status: this.status,
+            currentPlanIndex: this.currentPlanIndex
           }
         });
       }
@@ -94,8 +94,6 @@ export class AgentEngine {
           ...extraData
         });
       } catch (err) {
-        // Never let a broadcast failure take down the loop that's reporting it.
-        // console.error (not Logger) deliberately, in case Logger itself is implicated.
         console.error('[AgentEngine] notifyStateChange callback threw', err);
       }
     }
@@ -103,50 +101,20 @@ export class AgentEngine {
 
   setPhase(phaseText) {
     this.currentPhase = phaseText;
-    this.notifyStateChange({ currentPhase: phaseText });
-  }
-
-  clearHistory() {
-    this.history = [];
-    this.planSteps = [];
-    this.stepCount = 0;
-    this.currentTask = null;
-    this.status = 'idle';
-    this.currentPhase = '';
-    this.isLoopActive = false;
-    Logger.clearLogs();
     this.notifyStateChange();
   }
 
   async startTask(userPrompt, tabId) {
-    // If a zombie task state exists, force reset to idle for the new user prompt
-    if (this.status === 'running' && !this.isLoopActive) {
-      Logger.info('AgentEngine', '[TASK_OVERRIDE] Overriding zombie running status for new user task.');
-      this.status = 'idle';
-    }
-
-    if (this.status === 'running' && this.isLoopActive) {
-      Logger.info('AgentEngine', '[TASK_INTERRUPT] Stopping active running task to execute new user prompt.');
-      this.status = 'stopped';
-      this.isLoopActive = false;
-      await new Promise(r => setTimeout(r, 300));
-    }
+    if (!userPrompt || !userPrompt.trim()) return;
 
     this.status = 'running';
-    this.currentTask = userPrompt;
+    this.currentTask = userPrompt.trim();
+    this.history = [];
+    this.recentActionSignatures = [];
     this.stepCount = 0;
+    this.currentPlanIndex = 0;
     this.activeTabId = tabId;
-
-    // Instant initial plan checklist (0ms latency)
-    this.planSteps = [
-      { id: 1, text: 'Inspect & index webpage interactive elements', status: 'in_progress' },
-      { id: 2, text: 'Plan sub-goals and execute browser actions', status: 'pending' },
-      { id: 3, text: 'Extract target data & synthesize answer', status: 'pending' }
-    ];
-
-    Logger.info('AgentEngine', `================ TASK START ================`);
-    Logger.info('AgentEngine', `[GOAL] "${userPrompt}"`);
-    Logger.info('AgentEngine', `[TARGET TAB] Tab ID: ${tabId}`);
+    this.isLoopActive = true;
 
     this.history.push({
       type: 'user_goal',
@@ -154,27 +122,22 @@ export class AgentEngine {
       timestamp: new Date().toLocaleTimeString()
     });
 
-    this.notifyStateChange();
-
     const settings = await Storage.getSettings();
 
-    // Refine AI plan in background
-    this.setPhase('📋 Refining execution plan checklist...');
-    this.generatePlan(userPrompt, settings).catch(err => {
-      Logger.warn('AgentEngine', 'Background plan refinement failed', err);
-    });
+    this.setPhase('📋 Generating dynamic execution plan checklist...');
+    await this.generatePlan(userPrompt, settings);
 
-    // runLoop() has its own outer try/catch/finally and never rejects — see its docstring.
+    this.notifyStateChange();
     await this.runLoop();
   }
 
   async generatePlan(userPrompt, settings) {
     const planPrompt = `Task: "${userPrompt}"
-Generate a concise 3-5 step plan to accomplish this web task.
-Output ONLY a raw JSON array of strings representing the sub-goals.
+Generate a concise 3-4 step execution plan tailored specifically for this web browsing task.
+Output ONLY a raw JSON array of short action strings.
 
-Example Output:
-["Navigate to target website", "Search for query", "Extract relevant items", "Summarize results"]`;
+Example for task "Summarize README for scout":
+["Identify target project repository", "Access README file in repository", "Extract key documentation text", "Synthesize concise summary"]`;
 
     try {
       const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.');
@@ -191,33 +154,43 @@ Example Output:
           text: String(text).replace(/^Step \d+:?/i, '').trim(),
           status: idx === 0 ? 'in_progress' : 'pending'
         }));
-        Logger.info('AgentEngine', `[PLANNER_REFINED] Updated plan checklist with ${this.planSteps.length} sub-goals`, this.planSteps);
-        this.notifyStateChange();
+        Logger.info('AgentEngine', `[PLANNER_DYNAMIC] Generated dynamic plan checklist with ${this.planSteps.length} sub-goals`, this.planSteps);
+      } else {
+        throw new Error('Could not parse plan array');
       }
     } catch (err) {
-      Logger.warn('AgentEngine', '[PLANNER_REFINED_WARN] Using initial plan checklist', err.message);
+      Logger.warn('AgentEngine', '[PLANNER_FALLBACK] Using dynamic fallback checklist for task', err.message);
+      this.planSteps = [
+        { id: 1, text: `Analyze page state for "${this.currentTask}"`, status: 'in_progress' },
+        { id: 2, text: 'Execute targeted web actions & navigate', status: 'pending' },
+        { id: 3, text: 'Extract relevant information & synthesize answer', status: 'pending' }
+      ];
     }
   }
 
-  updatePlanProgress(currentStepNum, maxSteps, isFinished = false) {
+  updatePlanProgress(lastActionObj = null, isFinished = false) {
     if (!this.planSteps || this.planSteps.length === 0) return;
 
     if (isFinished) {
       this.planSteps.forEach(step => step.status = 'completed');
+      this.currentPlanIndex = this.planSteps.length;
       this.notifyStateChange();
       return;
     }
 
-    const totalPlanSteps = this.planSteps.length;
-    const currentPlanIndex = Math.min(
-      totalPlanSteps - 1,
-      Math.floor(((currentStepNum - 1) / maxSteps) * totalPlanSteps)
-    );
+    if (lastActionObj) {
+      const totalSteps = this.planSteps.length;
+      if (this.currentPlanIndex < totalSteps - 1) {
+        if (lastActionObj.action === 'navigate' || lastActionObj.action === 'type' || (lastActionObj.action === 'click' && this.stepCount > 2)) {
+          this.currentPlanIndex = Math.min(totalSteps - 1, this.currentPlanIndex + 1);
+        }
+      }
+    }
 
     this.planSteps.forEach((step, idx) => {
-      if (idx < currentPlanIndex) {
+      if (idx < this.currentPlanIndex) {
         step.status = 'completed';
-      } else if (idx === currentPlanIndex) {
+      } else if (idx === this.currentPlanIndex) {
         step.status = 'in_progress';
       } else {
         step.status = 'pending';
@@ -240,8 +213,6 @@ Example Output:
       this.status = 'running';
       this.setPhase('Resuming task...');
       Logger.info('AgentEngine', '[RESUMED] Task resumed by user.');
-      // runLoop() catches everything internally (see its own try/catch/finally), but this
-      // call is intentionally fire-and-forget — .catch() here is a last-resort net only.
       this.runLoop().catch((err) => {
         Logger.error('AgentEngine', '[RESUME_ERROR] Uncaught exception resuming loop', err);
       });
@@ -256,39 +227,6 @@ Example Output:
     this.notifyStateChange({ message: 'Task stopped.' });
   }
 
-  async waitForTabComplete(tabId, timeoutMs = 6000) {
-    return new Promise((resolve) => {
-      let timer = setTimeout(() => {
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }, timeoutMs);
-
-      const listener = (updatedTabId, changeInfo) => {
-        if (updatedTabId === tabId && changeInfo.status === 'complete') {
-          clearTimeout(timer);
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }
-      };
-
-      if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onUpdated) {
-        chrome.tabs.onUpdated.addListener(listener);
-      } else {
-        clearTimeout(timer);
-        resolve();
-      }
-    });
-  }
-
-  /**
-   * Runs the step loop. Wrapped in an outer try/catch/finally as a structural safety net:
-   * previously only the two explicitly-caught sub-steps (DOM read, LLM call) could fail
-   * safely — any OTHER exception anywhere in this method (or one introduced later) would
-   * reject silently (both call sites, startTask() and resume(), invoke this without a
-   * guaranteed catch), leaving status stuck at 'running' forever with no log output and
-   * no way for the UI to recover. The finally block guarantees isLoopActive is always
-   * cleared and status can never remain incorrectly 'running' once this method exits.
-   */
   async runLoop() {
     try {
       await this.runLoopBody();
@@ -302,9 +240,6 @@ Example Output:
     } finally {
       this.isLoopActive = false;
       if (this.status === 'running') {
-        // The loop exited (returned, threw, or fell through) without ever transitioning
-        // out of 'running' — force it back to a safe, visible state rather than leaving
-        // the UI showing Pause/Stop for a task that is no longer actually executing.
         Logger.warn('AgentEngine', '[LOOP_SAFETY_NET] Loop exited while still marked running — forcing status to idle.');
         this.status = 'idle';
         this.currentPhase = '';
@@ -321,8 +256,6 @@ Example Output:
     while (this.status === 'running' && this.stepCount < maxSteps) {
       this.stepCount++;
       Logger.info('AgentEngine', `---------------- STEP ${this.stepCount}/${maxSteps} ----------------`);
-
-      this.updatePlanProgress(this.stepCount, maxSteps);
 
       // 1. DOM Extraction Input
       this.setPhase(`🌐 Step ${this.stepCount}/${maxSteps}: Reading webpage elements...`);
@@ -346,7 +279,17 @@ Example Output:
       }
 
       const systemPrompt = this.buildSystemPrompt(settings.systemInstructions);
-      const userMessage = this.buildStepMessage(domSnapshot);
+      let userMessage = this.buildStepMessage(domSnapshot);
+
+      // Universal Guardrail: Anti-Stuck Loop Detection
+      if (this.recentActionSignatures.length >= 2) {
+        const last1 = this.recentActionSignatures[this.recentActionSignatures.length - 1];
+        const last2 = this.recentActionSignatures[this.recentActionSignatures.length - 2];
+        if (last1 === last2 && !last1.includes('finish') && !last1.includes('scroll')) {
+          userMessage += `\n\n[ANTI-STUCK GUARDRAIL WARNING]: You executed the exact same action ("${last1}") twice in a row. If the page did not update, DO NOT repeat it again. Choose a different element, type a new query, or scroll down.`;
+          Logger.warn('AgentEngine', `[GUARDRAIL_LOOP_DETECTED] Injected anti-stuck warning into prompt for repeating action: ${last1}`);
+        }
+      }
 
       this.history.push({
         step: this.stepCount,
@@ -381,121 +324,120 @@ Example Output:
         return;
       }
 
-      // 3. Action Parsing
+      // 3. Action Parsing with Universal Guardrails
       this.setPhase(`🔍 Step ${this.stepCount}/${maxSteps}: Parsing action...`);
-      const actionResult = this.parseResponse(responseText);
+      const actionResult = this.parseResponse(responseText, domSnapshot.elementCount);
 
       this.history.push({
         step: this.stepCount,
         type: 'agent_response',
-        rawResponse: responseText,
-        thought: actionResult.thought,
-        action: actionResult.action
+        thought: actionResult.thought || '',
+        action: actionResult.action || null,
+        rawResponse: responseText
       });
 
-      this.notifyStateChange();
-
       if (actionResult.error) {
-        Logger.warn('AgentEngine', '[PARSER_WARN] Invalid response format', actionResult.error);
+        Logger.warn('AgentEngine', `[PARSE_ERROR] Step ${this.stepCount} parsing failed`, actionResult.error);
         this.history.push({
           step: this.stepCount,
           type: 'execution_result',
           success: false,
-          error: `Parsing Error: ${actionResult.error}`
+          error: actionResult.error
         });
         this.notifyStateChange();
+        await new Promise(r => setTimeout(r, 1000));
         continue;
       }
 
-      const action = actionResult.action;
+      const actionObj = actionResult.action;
+      
+      const signature = `${actionObj.action}_${actionObj.element_id || ''}_${actionObj.text || ''}_${actionObj.url || ''}`;
+      this.recentActionSignatures.push(signature);
+      if (this.recentActionSignatures.length > 5) this.recentActionSignatures.shift();
 
-      if (action.action === 'finish') {
+      Logger.info('AgentEngine', `[ACTION_DISPATCH] Executing [${actionObj.action}]`, actionObj);
+
+      if (actionObj.action === 'finish') {
         this.status = 'idle';
         this.isLoopActive = false;
         this.currentPhase = '';
-        this.updatePlanProgress(this.stepCount, maxSteps, true);
+        this.updatePlanProgress(null, true);
         this.history.push({
-          step: this.stepCount,
           type: 'finish',
-          answer: action.answer || action.reason || 'Task finished successfully.'
+          answer: actionObj.answer || 'Task completed successfully.'
         });
-        Logger.info('AgentEngine', `[TASK_COMPLETE] Final Answer:\n${action.answer}`);
-        this.notifyStateChange({ finished: true, finalAnswer: action.answer });
-        return;
+        Logger.info('AgentEngine', '[TASK_FINISHED] Task completed successfully.');
+        this.notifyStateChange();
+        break;
       }
 
-      if (action.action === 'ask_user') {
+      if (actionObj.action === 'ask_user') {
         this.status = 'paused';
-        this.setPhase('Waiting for user feedback...');
+        this.setPhase('Waiting for user input');
+        Logger.info('AgentEngine', '[ASK_USER] Waiting for user input.');
+        this.notifyStateChange({ question: actionObj.question });
+        break;
+      }
+
+      // 4. Action Execution on Web Page
+      this.setPhase(`⚡ Step ${this.stepCount}/${maxSteps}: Executing ${formatActionSummary(actionObj)}...`);
+      
+      try {
+        const execResult = await this.executeActionOnTab(this.activeTabId, actionObj);
+        Logger.info('AgentEngine', `[ACTION_RESULT] ${execResult.success ? 'Success' : 'Failed'}: ${execResult.message || execResult.error}`);
+
         this.history.push({
           step: this.stepCount,
-          type: 'ask_user',
-          question: action.question
+          type: 'execution_result',
+          success: execResult.success !== false,
+          message: execResult.message,
+          error: execResult.error
         });
-        Logger.info('AgentEngine', `[ASK_USER] Question: "${action.question}"`);
-        this.notifyStateChange({ needsUserFeedback: true, question: action.question });
-        return;
+
+        if (execResult.success !== false) {
+          this.updatePlanProgress(actionObj, false);
+        }
+
+        const delay = settings.actionDelayMs || 1000;
+        await new Promise(r => setTimeout(r, delay));
+      } catch (execErr) {
+        Logger.error('AgentEngine', '[ACTION_EXECUTION_ERROR] Action execution failed', execErr);
+        this.history.push({
+          step: this.stepCount,
+          type: 'execution_result',
+          success: false,
+          error: execErr.message
+        });
       }
-
-      // 4. Action Execution Output
-      const actDesc = formatActionSummary(action);
-      this.setPhase(`⚡ Step ${this.stepCount}/${maxSteps}: Executing ${actDesc}...`);
-
-      let execRes;
-      try {
-        execRes = await this.executeActionOnTab(this.activeTabId, action);
-        Logger.info('AgentEngine', `[EXECUTION_RESULT] Success: ${execRes.success} | Message: "${execRes.message || ''}"`);
-      } catch (err) {
-        Logger.error('AgentEngine', '[EXECUTION_ERROR] Action failed', err);
-        execRes = { success: false, error: err.message };
-      }
-
-      this.history.push({
-        step: this.stepCount,
-        type: 'execution_result',
-        success: execRes.success,
-        message: execRes.message || execRes.error,
-        error: execRes.error
-      });
 
       this.notifyStateChange();
-
-      // 5. Synchronize Navigation & Delay
-      if (action.action === 'navigate' || action.action === 'click') {
-        this.setPhase(`🌐 Waiting for web page navigation to complete...`);
-        await this.waitForTabComplete(this.activeTabId, 5000);
-      }
-
-      const delayMs = settings.actionDelayMs || 1000;
-      this.setPhase(`⏳ Step ${this.stepCount}/${maxSteps}: Settling page state...`);
-      await new Promise(r => setTimeout(r, delayMs));
     }
 
-    this.isLoopActive = false;
     if (this.stepCount >= maxSteps && this.status === 'running') {
       this.status = 'idle';
+      this.isLoopActive = false;
       this.currentPhase = '';
-      Logger.warn('AgentEngine', `[MAX_STEPS_REACHED] Terminating task execution at ${maxSteps} steps.`);
-      this.notifyStateChange({ message: 'Reached max execution steps limit.' });
+      this.history.push({
+        type: 'finish',
+        answer: `Reached maximum allowed steps (${maxSteps}) without completing task.`
+      });
+      this.notifyStateChange();
     }
   }
 
-  async getTabDOMWithAutoInject(tabId, showBadges) {
-    const tab = await chrome.tabs.get(tabId);
-    if (!tab || !tab.url) {
-      throw new Error('No active browser tab found. Please open a webpage first.');
-    }
-    if (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:')) {
-      throw new Error(`Cannot run agent on browser internal page (${tab.url}). Please navigate to a web page like https://google.com first.`);
-    }
+  async getTabDOMWithAutoInject(tabId, showBadges = true) {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs[0];
+    if (!tab) throw new Error('No active browser tab detected');
 
     try {
-      return await this.sendTabMessage(tabId, { action: 'GET_DOM_SNAPSHOT', payload: { showBadges } });
+      const responseData = await this.sendTabMessage(tabId, { action: 'GET_DOM_SNAPSHOT', payload: { showBadges } });
+      return responseData;
     } catch (err) {
-      Logger.info('AgentEngine', `Content script not responding on tab [${tabId}]. Injecting content scripts...`);
+      Logger.info('AgentEngine', `Content script not active on tab [${tabId}]. Injecting script dependencies...`);
       try {
         await chrome.scripting.executeScript({
-          target: { tabId },
+          target: { tabId: tab.id },
           files: [
             'content/domCompressor.js',
             'content/actionExecutor.js',
@@ -566,9 +508,9 @@ Example Output:
   }
 
   buildSystemPrompt(customInstructions) {
-    return `${customInstructions || 'You are an autonomous web browsing AI agent.'}
+    return `${customInstructions || 'You are ScoutFox, an autonomous web browsing AI agent.'}
 
-You are provided with a goal and a compressed list of interactive web page elements labeled with numerical IDs like [1], [2], [3].
+You are provided with a user goal and a compressed list of interactive web page elements labeled with numerical IDs like [1], [2], [3].
 
 Your objective is to choose the single best action to move closer to the goal.
 
@@ -594,10 +536,75 @@ Your objective is to choose the single best action to move closer to the goal.
 7. Ask user for input/help:
    {"action": "ask_user", "question": "<question_text>", "reason": "<explanation>"}
 
-### Output Format Rules:
-- First, output your reasoning inside <thought>...</thought>.
-- Second, output your exact single action inside a valid JSON block inside \`\`\`json ... \`\`\`.
-- ONLY select element_id numbers that exist in the provided Interactive Elements list.`;
+### FEW-SHOT OUTPUT EXAMPLES (Always follow these exact output patterns):
+
+--- Example 1: Typing into a Search Bar ---
+<thought>
+Element [1] is the search input field. I will type the search query into element [1] and submit the form.
+</thought>
+\`\`\`json
+{
+  "action": "type",
+  "element_id": 1,
+  "text": "open source browser agents",
+  "submit": true,
+  "reason": "Enter search query into search box"
+}
+\`\`\`
+
+--- Example 2: Clicking a Button or Link ---
+<thought>
+Element [4] is the main repository link relevant to the user's task. I will click element [4].
+</thought>
+\`\`\`json
+{
+  "action": "click",
+  "element_id": 4,
+  "reason": "Click target repository link"
+}
+\`\`\`
+
+--- Example 3: Scrolling Down to Reveal Content ---
+<thought>
+The required information is further down the page. I need to scroll down to view more content.
+</thought>
+\`\`\`json
+{
+  "action": "scroll",
+  "direction": "down",
+  "amount": 500,
+  "reason": "Scroll down to reveal hidden elements"
+}
+\`\`\`
+
+--- Example 4: Completing the Task & Summarizing Answer ---
+<thought>
+I have gathered all the necessary information from the page. I will synthesize the final summary and complete the task.
+</thought>
+\`\`\`json
+{
+  "action": "finish",
+  "answer": "### Summary of ScoutFox Project:\n- Autonomous AI Browser Extension supporting OpenRouter, AgentRouter, Ollama, Gemini, OpenAI, Claude.\n- Built with Manifest V3 and Studio Mono design system.",
+  "reason": "Extracted and summarized requested data"
+}
+\`\`\`
+
+--- Example 5: Direct Navigation to a URL ---
+<thought>
+The goal requires visiting news.ycombinator.com directly. I will navigate to the URL.
+</thought>
+\`\`\`json
+{
+  "action": "navigate",
+  "url": "https://news.ycombinator.com",
+  "reason": "Navigate directly to requested website"
+}
+\`\`\`
+
+### Output Rules:
+1. Always output your reasoning inside <thought>...</thought> (or <think>...</think>).
+2. Always output your single action inside a valid \`\`\`json ... \`\`\` block matching the JSON structure in the examples above.
+3. Only select element_id numbers that exist in the provided Interactive Elements list.`;
   }
 
   buildStepMessage(snapshot) {
@@ -611,37 +618,135 @@ ${snapshot.elementsText || '(No interactive elements detected)'}
 Choose your next action based on the goal: "${this.currentTask}"`;
   }
 
-  parseResponse(text) {
+  /**
+   * Universal Multi-Stage Guardrail Action Parser
+   */
+  parseResponse(text, maxElementCount = 999) {
+    if (!text || typeof text !== 'string') {
+      return { thought: '', error: 'Empty output from model.' };
+    }
+
     let thought = '';
-    const thoughtMatch = text.match(/<thought>([\s\S]*?)<\/thought>/i);
-    if (thoughtMatch) {
-      thought = thoughtMatch[1].trim();
+    
+    // 1. Extract <think> or <thought> or <reasoning>
+    const thinkMatch = text.match(/<(?:think|thought|reasoning)>([\s\S]*?)<\/(?:think|thought|reasoning)>/i);
+    if (thinkMatch) {
+      thought = thinkMatch[1].trim();
     }
 
-    let jsonStr = '';
-    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    let cleanText = text.replace(/<(?:think|thought|reasoning)>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
+
+    let actionObj = null;
+
+    // 2. Extract JSON from ```json ... ``` or ``` ... ```
+    const codeBlockMatch = cleanText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
     if (codeBlockMatch) {
-      jsonStr = codeBlockMatch[1].trim();
-    } else {
-      const braceMatch = text.match(/\{[\s\S]*"action"[\s\S]*\}/i);
+      try {
+        actionObj = JSON.parse(codeBlockMatch[1].trim());
+      } catch (_) { /* continue to fallback extractors */ }
+    }
+
+    // 3. Extract JSON object containing "action" key
+    if (!actionObj) {
+      const braceMatch = cleanText.match(/\{[\s\S]*?"action"\s*:[\s\S]*?\}/i);
       if (braceMatch) {
-        jsonStr = braceMatch[0].trim();
+        try {
+          actionObj = JSON.parse(braceMatch[0].trim());
+        } catch (_) { /* continue */ }
       }
     }
 
-    if (!jsonStr) {
-      return { thought, error: 'No valid JSON action object found in model output.', raw: text };
+    // 4. Reverse SCAN all { ... } blocks in text for valid action JSON
+    if (!actionObj) {
+      const matches = cleanText.match(/\{[\s\S]*?\}/g) || [];
+      for (let i = matches.length - 1; i >= 0; i--) {
+        try {
+          const parsed = JSON.parse(matches[i]);
+          if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish)) {
+            actionObj = parsed;
+            break;
+          }
+        } catch (_) { /* ignore */ }
+      }
     }
 
-    try {
-      const actionObj = JSON.parse(jsonStr);
-      if (!actionObj.action) {
-        return { thought, error: 'JSON object missing required "action" key.', raw: text };
+    // 5. REGEX Intent Extractor for Dumber / Smaller LLMs outputting plain text
+    if (!actionObj) {
+      const clickMatch = cleanText.match(/(?:action:?\s*)?(?:click|press|tap)\s+(?:on\s+)?(?:element\s+)?\[?(\d+)\]?/i);
+      if (clickMatch) {
+        actionObj = { action: 'click', element_id: parseInt(clickMatch[1], 10), reason: 'Extracted via text intent' };
       }
-      return { thought, action: actionObj };
-    } catch (err) {
-      return { thought, error: `Invalid JSON syntax: ${err.message}`, raw: text };
+
+      if (!actionObj) {
+        const typeMatch = cleanText.match(/(?:action:?\s*)?(?:type|enter|write|input)\s+["']([^"']+)["']\s+(?:in|into|on)\s+(?:element\s+)?\[?(\d+)\]?/i);
+        if (typeMatch) {
+          actionObj = { action: 'type', text: typeMatch[1], element_id: parseInt(typeMatch[2], 10), submit: true, reason: 'Extracted via text intent' };
+        }
+      }
+
+      if (!actionObj) {
+        const navMatch = cleanText.match(/(?:action:?\s*)?(?:navigate|go\s+to|open)\s+(https?:\/\/[^\s]+)/i);
+        if (navMatch) {
+          actionObj = { action: 'navigate', url: navMatch[1], reason: 'Extracted via text intent' };
+        }
+      }
+
+      if (!actionObj) {
+        const scrollMatch = cleanText.match(/(?:action:?\s*)?(?:scroll)\s+(down|up)/i);
+        if (scrollMatch) {
+          actionObj = { action: 'scroll', direction: scrollMatch[1].toLowerCase(), amount: 500, reason: 'Extracted via text intent' };
+        }
+      }
     }
+
+    // 6. Freeform Text Auto-Wrapping Guardrail
+    if (!actionObj && cleanText.length > 5) {
+      Logger.info('AgentEngine', '[UNIVERSAL_GUARDRAIL] Model provided direct text response. Auto-wrapping into finish action.');
+      actionObj = {
+        action: 'finish',
+        answer: cleanText,
+        reason: 'Direct text output from model'
+      };
+    }
+
+    if (!actionObj) {
+      return { thought, error: 'No valid action or response text found in model output.', raw: text };
+    }
+
+    // 7. Action Schema & Element ID Sanitizer
+    actionObj = this.sanitizeActionSchema(actionObj, maxElementCount);
+
+    return { thought, action: actionObj };
+  }
+
+  /**
+   * Action Schema Normalizer & Element ID Bounds Validator
+   */
+  sanitizeActionSchema(actionObj, maxElementCount = 999) {
+    const act = { ...actionObj };
+    
+    if (act.click !== undefined && !act.action) { act.action = 'click'; act.element_id = act.click; }
+    if (act.type !== undefined && !act.action) { act.action = 'type'; }
+    if (act.action === 'click_element' || act.action === 'press') act.action = 'click';
+    if (act.action === 'type_text' || act.action === 'input') act.action = 'type';
+    if (act.action === 'done' || act.action === 'complete' || act.action === 'finished') act.action = 'finish';
+    if (act.action === 'scroll_page') act.action = 'scroll';
+
+    if (act.element_id === undefined) {
+      if (act.element !== undefined) act.element_id = act.element;
+      else if (act.id !== undefined) act.element_id = act.id;
+      else if (act.elementId !== undefined) act.element_id = act.elementId;
+    }
+
+    if (act.element_id !== undefined) {
+      act.element_id = parseInt(act.element_id, 10) || 1;
+      if (maxElementCount > 0 && act.element_id > maxElementCount) {
+        Logger.warn('AgentEngine', `[GUARDRAIL_BOUNDS] Model selected hallucinated element_id [${act.element_id}]. Clamping to valid range [1..${maxElementCount}]`);
+        act.element_id = Math.min(act.element_id, maxElementCount);
+      }
+    }
+
+    return act;
   }
 }
 

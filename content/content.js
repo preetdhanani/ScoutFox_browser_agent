@@ -12,8 +12,7 @@
   }
   window.__scoutfox_listener_registered = true;
 
-  // Forward anything that fails in this page context to the central log, so a failure
-  // here (outside the try/catch'd message handlers below) is never fully invisible.
+  // Forward anything that fails in this page context to the central log
   const reportContentError = (source, err) => {
     try {
       chrome.runtime.sendMessage({
@@ -36,10 +35,11 @@
 
     if (action === 'GET_DOM_SNAPSHOT') {
       try {
-        if (!window.domCompressor) {
+        const compressor = window.domCompressor || window.domCompressorInstance || (window.DOMCompressor ? new window.DOMCompressor() : null);
+        if (!compressor) {
           return sendResponse({ success: false, error: 'DOMCompressor engine not initialized on page.' });
         }
-        const snapshot = window.domCompressor.getSnapshot(payload || {});
+        const snapshot = compressor.getSnapshot(payload || {});
         if (payload?.showBadges && window.actionExecutor) {
           window.actionExecutor.renderBadges(snapshot.elements);
         }
@@ -51,35 +51,21 @@
     }
 
     if (action === 'EXECUTE_ACTION') {
-      (async () => {
-        try {
-          if (!window.actionExecutor) {
-            return sendResponse({ success: false, error: 'ActionExecutor engine not initialized on page.' });
-          }
-          const res = await window.actionExecutor.execute(payload);
-          sendResponse(res);
-        } catch (err) {
-          sendResponse({ success: false, error: err.message });
+      try {
+        const executor = window.actionExecutor || window.actionExecutorInstance || (window.ActionExecutor ? new window.ActionExecutor() : null);
+        if (!executor) {
+          return sendResponse({ success: false, error: 'ActionExecutor engine not initialized on page.' });
         }
-      })();
-      return true;
-    }
 
-    if (action === 'SHOW_BADGES') {
-      if (window.domCompressor && window.actionExecutor) {
-        const snapshot = window.domCompressor.getSnapshot(payload || {});
-        window.actionExecutor.renderBadges(snapshot.elements);
-      }
-      sendResponse({ success: true });
-      return true;
-    }
+        const compressor = window.domCompressor || window.domCompressorInstance || (window.DOMCompressor ? new window.DOMCompressor() : null);
 
-    if (action === 'HIDE_BADGES') {
-      if (window.actionExecutor) {
-        window.actionExecutor.removeBadges();
+        executor.execute(payload, compressor)
+          .then((res) => sendResponse(res))
+          .catch((err) => sendResponse({ success: false, error: err.message }));
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
       }
-      sendResponse({ success: true });
-      return true;
+      return true; // Keep message channel open for async execution
     }
   });
 })();
