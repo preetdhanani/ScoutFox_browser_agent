@@ -1,6 +1,7 @@
 /**
- * AgentEngine - Orchestrates plan generation, step checklist tracking, execution loop,
- * fault-tolerant action parsing, auto script injection, tab load synchronization, and phase notifications.
+ * AgentEngine for ScoutFox AI Agent
+ * Orchestrates instant plan checklist generation, fault-tolerant execution loops,
+ * robust error recovery, and seamless UI synchronization.
  */
 
 import { ApiClients } from './apiClients.js';
@@ -102,7 +103,13 @@ export class AgentEngine {
     this.currentTask = userPrompt;
     this.stepCount = 0;
     this.activeTabId = tabId;
-    this.planSteps = [];
+
+    // INSTANT INITIAL PLAN CHECKLIST (0ms latency so UI pops up immediately!)
+    this.planSteps = [
+      { id: 1, text: 'Inspect & index webpage interactive elements', status: 'in_progress' },
+      { id: 2, text: 'Plan sub-goals and execute browser actions', status: 'pending' },
+      { id: 3, text: 'Extract target data & synthesize answer', status: 'pending' }
+    ];
 
     Logger.info('AgentEngine', `================ TASK START ================`);
     Logger.info('AgentEngine', `[GOAL] "${userPrompt}"`);
@@ -114,21 +121,25 @@ export class AgentEngine {
       timestamp: new Date().toLocaleTimeString()
     });
 
+    this.notifyStateChange();
+
     const settings = await Storage.getSettings();
 
-    // 1. Generate High-Level Plan Checklist
-    this.setPhase('📋 Generating execution plan checklist...');
-    await this.generatePlan(userPrompt, settings);
+    // Generate refined AI plan in background
+    this.setPhase('📋 Refining execution plan checklist...');
+    this.generatePlan(userPrompt, settings).catch(err => {
+      Logger.warn('AgentEngine', 'Background plan refinement failed', err);
+    });
 
     try {
       await this.runLoop();
     } catch (err) {
-      Logger.error('AgentEngine', '[LOOP ERROR] Unhandled exception in agent execution loop', err);
+      Logger.error('AgentEngine', '[LOOP ERROR] Unhandled exception in execution loop', err);
       this.status = 'idle';
       this.currentPhase = '';
       this.history.push({
         type: 'error',
-        content: `Error: ${err.message}`
+        content: `Execution Error: ${err.message}`
       });
       this.notifyStateChange({ error: err.message });
     }
@@ -142,12 +153,9 @@ Output ONLY a raw JSON array of strings representing the sub-goals.
 Example Output:
 ["Navigate to target website", "Search for query", "Extract relevant items", "Summarize results"]`;
 
-    Logger.info('AgentEngine', `[PLANNER] Sending plan generation prompt to [${settings.provider}:${settings.model}]...`);
-
     try {
       const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.');
-      Logger.info('AgentEngine', `[PLANNER_RAW_RESPONSE] ${resp}`);
-
+      
       let planArray = [];
       const match = resp.match(/\[[\s\S]*\]/);
       if (match) {
@@ -160,24 +168,12 @@ Example Output:
           text: String(text).replace(/^Step \d+:?/i, '').trim(),
           status: idx === 0 ? 'in_progress' : 'pending'
         }));
-        Logger.info('AgentEngine', `[PLANNER_GENERATED] Created ${this.planSteps.length} sub-goal steps`, this.planSteps);
-      } else {
-        this.planSteps = [
-          { id: 1, text: 'Analyze page state and structure', status: 'in_progress' },
-          { id: 2, text: 'Execute navigation and interaction actions', status: 'pending' },
-          { id: 3, text: 'Extract and finalize target answer', status: 'pending' }
-        ];
+        Logger.info('AgentEngine', `[PLANNER_REFINED] Updated plan checklist with ${this.planSteps.length} sub-goals`, this.planSteps);
+        this.notifyStateChange();
       }
     } catch (err) {
-      Logger.warn('AgentEngine', '[PLANNER_FALLBACK] Using default plan checklist', err);
-      this.planSteps = [
-        { id: 1, text: 'Analyze page state and structure', status: 'in_progress' },
-        { id: 2, text: 'Execute browser actions to reach goal', status: 'pending' },
-        { id: 3, text: 'Complete task & summarize answer', status: 'pending' }
-      ];
+      Logger.warn('AgentEngine', '[PLANNER_REFINED_WARN] Using initial plan checklist', err.message);
     }
-
-    this.notifyStateChange();
   }
 
   updatePlanProgress(currentStepNum, maxSteps, isFinished = false) {
@@ -185,6 +181,7 @@ Example Output:
 
     if (isFinished) {
       this.planSteps.forEach(step => step.status = 'completed');
+      this.notifyStateChange();
       return;
     }
 
@@ -266,13 +263,12 @@ Example Output:
       this.updatePlanProgress(this.stepCount, maxSteps);
 
       // 1. DOM Extraction Input
-      this.setPhase(`🌐 Step ${this.stepCount}/${maxSteps}: Reading webpage DOM elements...`);
+      this.setPhase(`🌐 Step ${this.stepCount}/${maxSteps}: Reading webpage elements...`);
 
       let domSnapshot;
       try {
         domSnapshot = await this.getTabDOMWithAutoInject(this.activeTabId, settings.showElementBadges);
         Logger.info('AgentEngine', `[DOM_SNAPSHOT_INPUT] Title: "${domSnapshot.title}" | URL: ${domSnapshot.url} | Elements: ${domSnapshot.elementCount}`);
-        Logger.info('AgentEngine', `[DOM_ELEMENTS_SUMMARY]\n${domSnapshot.elementsText || '(No elements)'}`);
       } catch (err) {
         Logger.error('AgentEngine', '[DOM_ERROR] Failed to read page state', err);
         this.history.push({
@@ -297,13 +293,14 @@ Example Output:
         elementCount: domSnapshot.elementCount
       });
 
+      this.notifyStateChange();
+
       // 2. LLM Call Input & Output
       const providerName = settings.provider === 'ollama' ? `Ollama (${settings.model})` : settings.model;
-      this.setPhase(`🧠 Step ${this.stepCount}/${maxSteps}: Asking AI model [${providerName}] to plan action...`);
+      this.setPhase(`🧠 Step ${this.stepCount}/${maxSteps}: Thinking via [${providerName}]...`);
 
       let responseText = '';
       try {
-        Logger.info('AgentEngine', `[LLM_PROMPT_INPUT] Sending ${userMessage.length} chars to model [${settings.provider}:${settings.model}]`);
         const messages = this.formatMessagesForLLM(userMessage);
         responseText = await ApiClients.generateCompletion(settings, messages, systemPrompt);
         Logger.info('AgentEngine', `[LLM_RAW_OUTPUT]\n${responseText}`);
@@ -321,10 +318,8 @@ Example Output:
       }
 
       // 3. Action Parsing
-      this.setPhase(`🔍 Step ${this.stepCount}/${maxSteps}: Parsing agent action...`);
+      this.setPhase(`🔍 Step ${this.stepCount}/${maxSteps}: Parsing action...`);
       const actionResult = this.parseResponse(responseText);
-
-      Logger.info('AgentEngine', `[ACTION_PARSED_RESULT] Thought: "${actionResult.thought || 'None'}"`, actionResult.action || actionResult.error);
 
       this.history.push({
         step: this.stepCount,
@@ -334,6 +329,8 @@ Example Output:
         action: actionResult.action
       });
 
+      this.notifyStateChange();
+
       if (actionResult.error) {
         Logger.warn('AgentEngine', '[PARSER_WARN] Invalid response format', actionResult.error);
         this.history.push({
@@ -342,6 +339,7 @@ Example Output:
           success: false,
           error: `Parsing Error: ${actionResult.error}`
         });
+        this.notifyStateChange();
         continue;
       }
 
@@ -380,7 +378,6 @@ Example Output:
 
       let execRes;
       try {
-        Logger.info('AgentEngine', `[EXECUTION_START] Executing action [${action.action}] on active page...`, action);
         execRes = await this.executeActionOnTab(this.activeTabId, action);
         Logger.info('AgentEngine', `[EXECUTION_RESULT] Success: ${execRes.success} | Message: "${execRes.message || ''}"`);
       } catch (err) {
@@ -395,6 +392,8 @@ Example Output:
         message: execRes.message || execRes.error,
         error: execRes.error
       });
+
+      this.notifyStateChange();
 
       // 5. Synchronize Navigation & Delay
       if (action.action === 'navigate' || action.action === 'click') {
@@ -427,7 +426,7 @@ Example Output:
     try {
       return await this.sendTabMessage(tabId, { action: 'GET_DOM_SNAPSHOT', payload: { showBadges } });
     } catch (err) {
-      Logger.info('AgentEngine', `Content script not responding on tab [${tabId}]. Dynamically injecting content scripts...`);
+      Logger.info('AgentEngine', `Content script not responding on tab [${tabId}]. Injecting content scripts...`);
       try {
         await chrome.scripting.executeScript({
           target: { tabId },
