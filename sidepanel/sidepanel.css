@@ -1229,3 +1229,148 @@ a:hover { color: var(--text-main); }
   flex-shrink: 0;
 }
 
+
+/* ============================================================
+   Batched action groups
+   One turn = goal + a collapsible list of one-line action rows + the answer.
+   Deliberately low-contrast and tight: this is a trace, not the content.
+   ============================================================ */
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.act-group {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  overflow: hidden;
+}
+
+.act-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 12px;
+  text-align: left;
+}
+
+.act-head:hover { background: var(--surface); color: var(--text-main); }
+.act-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.act-chev {
+  display: inline-flex;
+  color: var(--text-faint);
+  transition: transform 0.15s ease;
+}
+.act-group.open .act-chev { transform: rotate(90deg); }
+
+.act-head-text { font-variant-numeric: tabular-nums; }
+
+/* An author `display` beats the UA stylesheet's [hidden] { display: none }, so without this
+   the collapse toggles the attribute and nothing visibly happens. */
+.act-body[hidden],
+.act-why[hidden] { display: none; }
+
+.act-body {
+  padding: 2px 12px 10px 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- individual action rows --- */
+.act-item { display: flex; flex-direction: column; }
+
+.act-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 4px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  border-radius: 5px;
+}
+
+.act-row.has-why { cursor: pointer; }
+.act-row.has-why:hover { background: var(--surface); color: var(--text-main); }
+.act-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.act-ico { display: inline-flex; color: var(--text-faint); }
+.act-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-text em { font-style: normal; color: var(--text-main); font-weight: 500; }
+
+.act-row.bad,
+.act-row.fault { color: var(--danger); }
+.act-row.bad .act-ico,
+.act-row.fault .act-ico { color: currentColor; }
+.act-row.fault { align-items: flex-start; }
+.act-row.fault .act-text { white-space: normal; }
+
+.act-state { display: inline-flex; }
+.act-state.bad { color: var(--danger); }
+.act-state.live {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: actPulse 1.1s ease-in-out infinite;
+}
+@keyframes actPulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+
+/* --- reasoning, revealed per row --- */
+.act-why {
+  margin: 0 0 6px 25px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  background: var(--surface);
+  border-radius: 6px;
+  white-space: pre-wrap;
+}
+
+/* --- plan checklist, folded inside the running group --- */
+.act-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 0 9px;
+  margin-bottom: 4px;
+  border-bottom: 1px dashed var(--border);
+}
+.act-plan-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.act-plan-row.in_progress { color: var(--text-main); }
+.act-plan-row.completed { color: var(--text-muted); }
+.act-plan-row.completed span:last-child { text-decoration: line-through; opacity: 0.65; }
+
+.act-phase {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  padding: 7px 4px 2px;
+  font-style: italic;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .act-chev { transition: none; }
+  .act-state.live { animation: none; opacity: 0.85; }
+}

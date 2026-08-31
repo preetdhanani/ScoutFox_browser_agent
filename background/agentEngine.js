@@ -65,6 +65,7 @@ export class AgentEngine {
     this.recentActionSignatures = [];
     this.currentPlanIndex = 0;
     this.networkBuffers = new Map(); // tabId -> Array of Network Requests (capped at 100)
+    this.scoutFoxGroupId = null; // Sandboxed Chrome Tab Group ID
 
     // Identifies THIS service-worker incarnation. MV3 terminates the worker aggressively
     // (idle timeout, memory pressure, Chrome's hard cap on port-based keepalive), and every
@@ -180,6 +181,7 @@ export class AgentEngine {
 
   clearHistory() {
     this.dirty = true;
+    this.turnIndex = 0;
     this.history = [];
     this.planSteps = [];
     this.stepCount = 0;
@@ -187,6 +189,43 @@ export class AgentEngine {
     this.currentTask = null;
     this.notifyStateChange();
     Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history and plan cleared.');
+  }
+
+  /**
+   * Cap total history. Sessions are multi-turn now and would otherwise grow without bound,
+   * and the whole array is serialised to chrome.storage on every state change.
+   */
+  trimHistory(max = 400) {
+    if (this.history.length > max) {
+      this.history.splice(0, this.history.length - max);
+    }
+  }
+
+  /** Entries belonging to the current turn: everything from the most recent user_goal on. */
+  currentTurnHistory() {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      if (this.history[i].type === 'user_goal') return this.history.slice(i);
+    }
+    return this.history;
+  }
+
+  /**
+   * Compact recap of earlier COMPLETED turns, so a follow-up has context without replaying
+   * every step of every previous task into the prompt.
+   */
+  previousTurnsSummary(limit = 4) {
+    const lines = [];
+    let goal = null;
+    for (const item of this.history) {
+      if (item.type === 'user_goal') {
+        goal = item.prompt;
+      } else if (item.type === 'finish' && goal) {
+        const answer = String(item.answer || '').replace(/\s+/g, ' ').slice(0, 280);
+        lines.push(`- Asked: "${goal}"\n  Result: ${answer}`);
+        goal = null;
+      }
+    }
+    return lines.slice(-limit);
   }
 
   setStateChangeCallback(cb) {
@@ -212,11 +251,78 @@ export class AgentEngine {
           // only needs the bulk array on an explicit GET_AGENT_STATE resync.
           stateVersion: this.stateVersion,
           bootId: this.bootId,
+          scoutFoxGroupId: this.scoutFoxGroupId,
           ...extraData
         });
       } catch (err) {
         console.error('[AgentEngine] notifyStateChange callback threw', err);
       }
+    }
+  }
+
+  /**
+   * Ensures target tab and all agent automation tabs are sandboxed into a 'ScoutFox' Chrome Tab Group
+   */
+  async ensureScoutFoxGroup(tabId) {
+    if (!tabId || typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.group) return null;
+
+    try {
+      const tab = await new Promise((resolve) => {
+        chrome.tabs.get(tabId, (t) => {
+          lastRuntimeError();
+          resolve(t);
+        });
+      });
+
+      if (!tab) return null;
+
+      let groupId = tab.groupId;
+      const TAB_GROUP_ID_NONE = typeof chrome.tabGroups !== 'undefined' && chrome.tabGroups.TAB_GROUP_ID_NONE !== undefined
+        ? chrome.tabGroups.TAB_GROUP_ID_NONE
+        : -1;
+
+      let needsGroup = false;
+
+      if (groupId && groupId !== TAB_GROUP_ID_NONE) {
+        if (chrome.tabGroups && chrome.tabGroups.get) {
+          const grp = await new Promise((resolve) => {
+            chrome.tabGroups.get(groupId, (g) => {
+              lastRuntimeError();
+              resolve(g);
+            });
+          });
+          if (!grp || grp.title !== 'ScoutFox') {
+            needsGroup = true;
+          }
+        }
+      } else {
+        needsGroup = true;
+      }
+
+      if (needsGroup) {
+        groupId = await new Promise((resolve) => {
+          chrome.tabs.group({ tabIds: tabId }, (newId) => {
+            lastRuntimeError();
+            resolve(newId);
+          });
+        });
+
+        if (groupId && chrome.tabGroups && chrome.tabGroups.update) {
+          await new Promise((resolve) => {
+            chrome.tabGroups.update(groupId, { title: 'ScoutFox', color: 'orange' }, () => {
+              lastRuntimeError();
+              resolve();
+            });
+          });
+        }
+      }
+
+      this.scoutFoxGroupId = groupId;
+      Logger.info('AgentEngine', `[TAB_SANDBOX] Active task sandboxed inside 'ScoutFox' tab group (GroupID: ${groupId})`);
+      return groupId;
+    } catch (err) {
+      Logger.warn('AgentEngine', '[TAB_SANDBOX_WARN] Could not sandbox tab into ScoutFox group', err.message);
+      return null;
     }
   }
 
@@ -450,19 +556,29 @@ export class AgentEngine {
     this.dirty = true;
     this.status = 'running';
     this.currentTask = userPrompt.trim();
-    this.history = [];
+
+    // History is NOT cleared here. Each task appends a new turn to the same session, so a
+    // follow-up like "now add it to the cart" still knows what "it" refers to. Only the
+    // New Session button (clearHistory) starts over.
+    this.turnIndex = (this.turnIndex || 0) + 1;
     this.recentActionSignatures = [];
     this.stepCount = 0;
     this.currentPlanIndex = 0;
+    this.planSteps = [];
     this.activeTabId = tabId;
     this.isLoopActive = true;
     this.abortController = new AbortController();
 
+    // Sandbox automation inside 'ScoutFox' Chrome Tab Group
+    await this.ensureScoutFoxGroup(tabId);
+
     this.history.push({
       type: 'user_goal',
-      prompt: userPrompt,
+      turn: this.turnIndex,
+      prompt: userPrompt.trim(),
       timestamp: new Date().toLocaleTimeString()
     });
+    this.trimHistory();
 
     const settings = await Storage.getSettings();
 
@@ -796,8 +912,11 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           success: execResult.success !== false,
           message: execResult.message,
           error: execResult.error,
+          label: execResult.label || null,
+          submitted: execResult.submitted || false,
           resultData: execResult.result || execResult.results || null
         });
+        this.trimHistory();
 
         if (execResult.success !== false) {
           this.updatePlanProgress(actionObj, false);
@@ -974,12 +1093,21 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
   formatMessagesForLLM(latestUserMsg) {
     const messages = [];
 
+    const priorTurns = this.previousTurnsSummary();
+    if (priorTurns.length > 0) {
+      messages.push({
+        role: 'user',
+        content: `Earlier in this session you already completed these tasks:\n${priorTurns.join('\n')}\n\nThose are finished. Use them for context \u2014 words like "it" or "that" in the new goal usually refer to them. Your current goal follows.`
+      });
+    }
+
     messages.push({
       role: 'user',
       content: `Goal: ${this.currentTask}`
     });
 
-    const recentHistory = this.history.slice(-8);
+    // Only the CURRENT turn's steps. Earlier turns are represented by the recap above.
+    const recentHistory = this.currentTurnHistory().slice(-8);
     recentHistory.forEach(item => {
       if (item.type === 'agent_response') {
         messages.push({ role: 'assistant', content: item.rawResponse });

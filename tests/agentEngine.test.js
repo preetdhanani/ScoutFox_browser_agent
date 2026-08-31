@@ -10,8 +10,13 @@ global.chrome = {
     }
   },
   tabs: {
+    get: (id, cb) => cb({ id, groupId: -1, url: 'https://example.com' }),
     query: async () => [{ id: 101, url: 'https://example.com' }],
-    sendMessage: (tabId, msg, cb) => cb({ success: true })
+    sendMessage: (tabId, msg, cb) => cb({ success: true }),
+    group: (opts, cb) => cb(999)
+  },
+  tabGroups: {
+    update: (id, opts, cb) => cb && cb()
   }
 };
 
@@ -147,6 +152,14 @@ test('AgentEngine - Redact Sensitive Data in Network Payloads', () => {
   assert.ok(!redacted.includes('sk-1234567890abcdef'));
   assert.ok(redacted.includes('[REDACTED]'));
   assert.ok(redacted.includes('testuser'));
+});
+
+test('AgentEngine - ensureScoutFoxGroup sandboxes tab into ScoutFox group', async () => {
+  const engine = new AgentEngine();
+  const groupId = await engine.ensureScoutFoxGroup(101);
+
+  assert.equal(groupId, 999);
+  assert.equal(engine.scoutFoxGroupId, 999);
 });
 
 test('AgentEngine - clearHistory resets state', () => {

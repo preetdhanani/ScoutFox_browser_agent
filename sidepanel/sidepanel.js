@@ -25,6 +25,13 @@ let portReconnectTimer = null;
 let lastRenderedStateVersion = -1;
 let lastBootId = null;
 
+// Expand/collapse state for the batched action groups. renderState() rewrites the whole
+// timeline on every state broadcast (~7x per step), so this must live OUTSIDE the DOM or a
+// group would snap shut the instant the agent did anything.
+const turnExpandOverride = new Map(); // turn number -> explicit user choice
+const expandedRows = new Set();       // "turn:index" of rows whose reasoning is showing
+
+
 /**
  * Inline icon set — thin-line SVGs matching the Studio Mono system.
  */
@@ -41,6 +48,18 @@ const ICONS = {
   search: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
   star: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l2.6 5.4 5.9.8-4.3 4.2 1 5.9L12 16.3 6.8 19.3l1-5.9-4.3-4.2 5.9-.8z"/></svg>',
   doc: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5"/><line x1="7" y1="9" x2="17" y2="9"/><line x1="7" y1="13" x2="17" y2="13"/><line x1="7" y1="17" x2="13" y2="17"/></svg>',
+  globe: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.5 3.8 5.6 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.6-3.8-9s1.3-6.5 3.8-9z"/></svg>',
+  eye: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></svg>',
+  pointer: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M5 3l6.5 17 2.4-6.6 6.6-2.4z"/></svg>',
+  keyboard: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8" stroke-linecap="round"/></svg>',
+  enter: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 5v6a3 3 0 0 1-3 3H5"/><polyline points="9 10 5 14 9 18"/></svg>',
+  scrollIco: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 4 12 8 16 4"/><polyline points="8 20 12 16 16 20"/></svg>',
+  back: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="10 5 4 11 10 17"/><path d="M4 11h10a6 6 0 0 1 6 6v2"/></svg>',
+  code: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 7 4 12 9 17"/><polyline points="15 7 20 12 15 17"/></svg>',
+  network: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10l-3-3M14 8l-3 3"/><path d="M20 16H10l3-3M10 16l3 3"/></svg>',
+  layers: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><polygon points="12 3 21 8 12 13 3 8"/><polyline points="3 13 12 18 21 13"/></svg>',
+  ask: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.2a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.9.7-.9 1.3v.4"/><circle cx="12" cy="16.6" r="0.6" fill="currentColor" stroke="none"/></svg>',
+  chevron: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>',
   aim: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>'
 };
 
@@ -84,6 +103,7 @@ function applyTheme(mode) {
 document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
   initTabs();
+  initTimelineInteraction();
   initPortConnection();
   initEventListeners();
   initCombobox();
@@ -876,7 +896,19 @@ function renderState(state) {
       : status.charAt(0).toUpperCase() + status.slice(1);
   }
 
-  renderPlanChecklist(planSteps);
+  const sandboxBadge = document.getElementById('sandboxBadge');
+  if (sandboxBadge) {
+    if (state.scoutFoxGroupId) {
+      sandboxBadge.classList.remove('hidden');
+    } else {
+      sandboxBadge.classList.add('hidden');
+    }
+  }
+
+  // The standalone plan card is folded into the action-group header now — one element
+  // instead of two. The full checklist still shows inside the expanded group while running.
+  const planContainerEl = document.getElementById('planContainer');
+  if (planContainerEl) planContainerEl.style.display = 'none';
 
   if (status === 'running' || status === 'paused') {
     if (processingBanner) processingBanner.style.display = 'flex';
@@ -911,51 +943,204 @@ function renderState(state) {
       return;
     }
 
-    let html = '';
-    history.forEach(item => {
-      if (item.type === 'user_goal') {
-        html += `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(item.prompt)}</div>`;
-      } else if (item.type === 'step_start') {
-        html += `
-          <div class="timeline-card">
-            <div class="timeline-header">
-              <span class="step-badge">Step ${item.step}</span>
-              <span>${escapeHtml(item.pageTitle || item.url || '')}</span>
-            </div>
-        `;
-      } else if (item.type === 'agent_response') {
-        if (item.thought) {
-          html += `<div class="thought-text">${escapeHtml(item.thought)}</div>`;
-        }
-        if (item.action) {
-          const actionStr = formatActionPill(item.action);
-          html += `<div class="action-pill">${actionStr}</div>`;
-        }
-      } else if (item.type === 'execution_result') {
-        const cls = item.success ? 'success' : 'error';
-        html += `
-            <div class="result-badge ${cls}">${item.success ? ICONS.check : ICONS.cross} ${escapeHtml(item.message || item.error || '')}</div>
-          </div>
-        `;
-      } else if (item.type === 'error') {
-        html += `
-          <div class="result-badge error" style="margin-top: 8px; padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.5; align-items: flex-start;">
-            ${ICONS.warning}<span><strong>Error Diagnostic:</strong><br>${escapeHtml(item.content)}</span>
-          </div>
-        `;
-      } else if (item.type === 'finish') {
-        html += `
-          <div class="finish-card">
-            <div class="finish-title">${ICONS.complete} Task Complete</div>
-            <div class="finish-body">${formatMarkdownText(item.answer)}</div>
-          </div>
-        `;
-      }
-    });
-
-    timeline.innerHTML = html;
-    timeline.scrollTop = timeline.scrollHeight;
+    // Keep the scroll pinned to the bottom only if the user was already there, so
+    // expanding a row mid-run does not yank the view away from them.
+    const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
+    timeline.innerHTML = renderTurns(history, status, planSteps, currentPhase);
+    if (nearBottom) timeline.scrollTop = timeline.scrollHeight;
   }
+}
+
+/**
+ * Batched action rendering.
+ *
+ * A session is a sequence of turns. Each turn is: the goal you typed, a collapsible group of
+ * one-line action rows showing what the agent actually did, then the answer. While a turn runs
+ * its group is open so you can watch; once it finishes the group collapses to a single summary
+ * line so a long session stays readable. Reasoning hides behind each row until you click it.
+ */
+
+/** Split flat history into turns. A turn starts at each user_goal entry. */
+function buildTurns(history) {
+  const turns = [];
+  let cur = null;
+  (history || []).forEach((item, idx) => {
+    if (item.type === 'user_goal') {
+      cur = { turn: item.turn || turns.length + 1, goal: item.prompt, entries: [], answer: null, failed: false };
+      turns.push(cur);
+      return;
+    }
+    if (!cur) {
+      cur = { turn: turns.length + 1, goal: null, entries: [], answer: null, failed: false };
+      turns.push(cur);
+    }
+    if (item.type === 'agent_response' && item.action) {
+      cur.entries.push({ kind: 'action', idx, action: item.action, thought: item.thought || '', outcome: null });
+    } else if (item.type === 'execution_result') {
+      // Attach the outcome to the action row it belongs to.
+      for (let i = cur.entries.length - 1; i >= 0; i--) {
+        if (cur.entries[i].kind === 'action' && !cur.entries[i].outcome) {
+          cur.entries[i].outcome = item;
+          break;
+        }
+      }
+      if (item.success === false) cur.failed = true;
+    } else if (item.type === 'error') {
+      cur.entries.push({ kind: 'fault', idx, content: item.content });
+      cur.failed = true;
+    } else if (item.type === 'finish') {
+      cur.answer = item.answer;
+    }
+  });
+  return turns;
+}
+
+/** One-line human description of an action: icon, verb, and the thing it acted on. */
+function describeAction(action, outcome) {
+  const label = (outcome && outcome.label) || '';
+  const quote = (t) => `<em>${escapeHtml(String(t).length > 44 ? String(t).slice(0, 43) + '…' : String(t))}</em>`;
+  const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (_) { return u; } };
+
+  switch (action.action) {
+    case 'navigate':      return { icon: ICONS.globe, text: `Opened ${quote(host(action.url || ''))}` };
+    case 'read_page_text':return { icon: ICONS.eye, text: 'Read page text' };
+    case 'click':         return { icon: ICONS.pointer, text: label ? `Clicked ${quote(label)}` : `Clicked element ${action.element_id}` };
+    case 'type':          return { icon: ICONS.keyboard, text: `Typed ${quote(action.text || '')}${label ? ` into ${quote(label)}` : ''}` };
+    case 'scroll':        return { icon: ICONS.scrollIco, text: `Scrolled ${escapeHtml(action.direction || 'down')}` };
+    case 'go_back':       return { icon: ICONS.back, text: 'Went back' };
+    case 'go_forward':    return { icon: ICONS.back, text: 'Went forward' };
+    case 'execute_js':    return { icon: ICONS.code, text: 'Ran JavaScript' };
+    case 'read_network_requests': return { icon: ICONS.network, text: 'Checked network activity' };
+    case 'browser_batch': return { icon: ICONS.layers, text: `Ran ${(action.steps || []).length} actions in one batch` };
+    case 'ask_user':      return { icon: ICONS.ask, text: `Asked ${quote(action.question || 'a question')}` };
+    default:              return { icon: ICONS.dot, text: escapeHtml(action.action || 'Acted') };
+  }
+}
+
+/**
+ * Should this turn's group be open? Explicit user choice always wins. Otherwise: open while
+ * the turn is live so you can watch it, and open if it ended without producing an answer so
+ * the reason is visible. A turn that finished successfully collapses, even if some individual
+ * action failed along the way — recovering from a failed click is normal, not a bad outcome.
+ */
+function isTurnExpanded(turn, isLive, incomplete) {
+  if (turnExpandOverride.has(turn.turn)) return turnExpandOverride.get(turn.turn);
+  return isLive || incomplete;
+}
+
+function renderTurns(history, status, planSteps, currentPhase) {
+  const turns = buildTurns(history);
+  const busy = status === 'running' || status === 'paused';
+
+  return turns.map((turn, ti) => {
+    const isLast = ti === turns.length - 1;
+    const isLive = busy && isLast;
+    const count = turn.entries.filter(e => e.kind === 'action').length;
+    // "Did not finish" means no answer was produced — not merely that one action failed.
+    const incomplete = !isLive && !turn.answer && turn.entries.length > 0;
+    const open = isTurnExpanded(turn, isLive, incomplete);
+
+    // Header doubles as the progress indicator, which is why the separate plan card is gone.
+    let headline;
+    if (isLive) {
+      const done = (planSteps || []).filter(s => s.status === 'completed').length;
+      const total = (planSteps || []).length;
+      headline = total
+        ? `Working · step ${Math.min(done + 1, total)} of ${total} · ${count} action${count === 1 ? '' : 's'}`
+        : `Working · ${count} action${count === 1 ? '' : 's'}`;
+    } else {
+      headline = `${count} action${count === 1 ? '' : 's'}${incomplete ? ' · did not finish' : ''}`;
+    }
+
+    const rows = turn.entries.map((e) => {
+      if (e.kind === 'fault') {
+        return `<div class="act-row fault"><span class="act-ico">${ICONS.warning}</span><span class="act-text">${escapeHtml(e.content)}</span></div>`;
+      }
+      const d = describeAction(e.action, e.outcome);
+      const key = `${turn.turn}:${e.idx}`;
+      const shown = expandedRows.has(key);
+      const bad = e.outcome && e.outcome.success === false;
+      const pending = !e.outcome;
+      const why = e.thought
+        ? `<div class="act-why" ${shown ? '' : 'hidden'}>${escapeHtml(e.thought)}</div>`
+        : '';
+      const state = bad ? `<span class="act-state bad">${ICONS.cross}</span>`
+                  : pending ? '<span class="act-state live"></span>'
+                  : '';
+      return `<div class="act-item">
+          <div class="act-row${bad ? ' bad' : ''}${e.thought ? ' has-why' : ''}" data-row="${key}" ${e.thought ? 'role="button" tabindex="0"' : ''}>
+            <span class="act-ico">${d.icon}</span>
+            <span class="act-text">${d.text}</span>
+            ${state}
+          </div>${why}
+        </div>`;
+    }).join('');
+
+    const planDetail = (isLive && planSteps && planSteps.length)
+      ? `<div class="act-plan">${planSteps.map(st => {
+          const ic = st.status === 'completed' ? ICONS.check : st.status === 'in_progress' ? ICONS.dot : ICONS.circle;
+          return `<div class="act-plan-row ${st.status}"><span>${ic}</span><span>${escapeHtml(st.text)}</span></div>`;
+        }).join('')}</div>`
+      : '';
+
+    const phase = (isLive && currentPhase)
+      ? `<div class="act-phase">${escapeHtml(currentPhase)}</div>`
+      : '';
+
+    return `<div class="turn">
+      ${turn.goal ? `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(turn.goal)}</div>` : ''}
+      ${count || turn.entries.length ? `<div class="act-group${open ? ' open' : ''}">
+        <button class="act-head" data-turn="${turn.turn}" aria-expanded="${open}">
+          <span class="act-chev">${ICONS.chevron}</span>
+          <span class="act-head-text">${headline}</span>
+        </button>
+        <div class="act-body" ${open ? '' : 'hidden'}>${planDetail}${rows}${phase}</div>
+      </div>` : ''}
+      ${turn.answer ? `<div class="finish-card"><div class="finish-title">${ICONS.complete} Done</div><div class="finish-body">${formatMarkdownText(turn.answer)}</div></div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+/**
+ * One delegated listener for the whole timeline. Bound once at startup, so it survives the
+ * innerHTML rewrites that renderState performs on every state broadcast.
+ */
+function initTimelineInteraction() {
+  const timeline = document.getElementById('timeline');
+  if (!timeline) return;
+
+  const toggle = (target) => {
+    const head = target.closest('.act-head');
+    if (head) {
+      const turn = Number(head.getAttribute('data-turn'));
+      const group = head.parentElement;
+      const nowOpen = !group.classList.contains('open');
+      turnExpandOverride.set(turn, nowOpen);
+      group.classList.toggle('open', nowOpen);
+      head.setAttribute('aria-expanded', String(nowOpen));
+      const body = group.querySelector('.act-body');
+      if (body) body.hidden = !nowOpen;
+      return true;
+    }
+    const row = target.closest('.act-row.has-why');
+    if (row) {
+      const key = row.getAttribute('data-row');
+      const why = row.parentElement.querySelector('.act-why');
+      if (!why) return true;
+      const show = why.hidden;
+      why.hidden = !show;
+      if (show) expandedRows.add(key); else expandedRows.delete(key);
+      return true;
+    }
+    return false;
+  };
+
+  timeline.addEventListener('click', (e) => { toggle(e.target); });
+  timeline.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      if (toggle(e.target)) e.preventDefault();
+    }
+  });
 }
 
 function renderPlanChecklist(planSteps) {

@@ -9,6 +9,7 @@
     "scripting",
     "storage",
     "tabs",
+    "tabGroups",
     "alarms",
     "declarativeNetRequest"
   ],

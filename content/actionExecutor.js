@@ -279,6 +279,26 @@
     }
 
     /**
+     * Short human-readable name for an element, for the action list in the side panel.
+     * "Clicked [7]" tells the user nothing; "Clicked Add to cart" tells them everything.
+     */
+    describeElement(el) {
+      if (!el) return '';
+      const pick = (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, ' ') : '');
+      const candidates = [
+        pick(el.getAttribute && el.getAttribute('aria-label')),
+        pick(el.getAttribute && el.getAttribute('alt')),
+        pick(el.getAttribute && el.getAttribute('title')),
+        pick(el.getAttribute && el.getAttribute('placeholder')),
+        pick(el.innerText || el.textContent),
+        pick(el.getAttribute && el.getAttribute('name')),
+        pick(el.value)
+      ];
+      const label = candidates.find(c => c && c.length > 0) || '';
+      return label.length > 48 ? label.slice(0, 47) + '\u2026' : label;
+    }
+
+    /**
      * Simulate realistic click on element with stable locator re-resolution
      */
     doClick(elementId) {
@@ -304,7 +324,8 @@
         el.click();
       }
 
-      return { success: true, message: `Clicked element [${elementId}]` };
+      const clickLabel = this.describeElement(el);
+      return { success: true, label: clickLabel, message: `Clicked element [${elementId}]${clickLabel ? ` ("${clickLabel}")` : ''}` };
     }
 
     /**
@@ -335,7 +356,8 @@
         }
       }
 
-      return { success: true, message: `Typed "${text}" into element [${elementId}]` };
+      const typeLabel = this.describeElement(el);
+      return { success: true, label: typeLabel, submitted: !!submit, message: `Typed "${text}" into element [${elementId}]${typeLabel ? ` ("${typeLabel}")` : ''}` };
     }
 
     /**

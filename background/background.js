@@ -216,10 +216,19 @@ if (typeof chrome !== 'undefined' && chrome.alarms) {
 // in the log pane instead of appearing as the UI mysteriously going quiet.
 Logger.info('Background', `[WORKER_BOOT] Service worker started (boot ${agentEngine.bootId.slice(0, 8)}). MV3 restarts the worker frequently — this line marks a fresh incarnation.`);
 
-// Track active tab switching when links open new tabs
+// Track active tab switching when links open new tabs & auto-group into ScoutFox Sandbox
 if (typeof chrome !== 'undefined' && chrome.tabs) {
   chrome.tabs.onCreated.addListener((tab) => {
     if (agentEngine.status === 'running') {
+      if (agentEngine.scoutFoxGroupId && typeof chrome.tabs.group === 'function') {
+        chrome.tabs.group({ tabIds: tab.id, groupId: agentEngine.scoutFoxGroupId }, () => {
+          const err = chrome.runtime.lastError;
+          if (!err) {
+            Logger.info('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'ScoutFox' tab group [${agentEngine.scoutFoxGroupId}]`);
+          }
+        });
+      }
+
       setTimeout(() => {
         chrome.tabs.get(tab.id, (createdTab) => {
           if (createdTab && isValidWebTab(createdTab)) {
@@ -278,7 +287,8 @@ function routeMessage(request, sender, sendResponse) {
       currentPhase: agentEngine.currentPhase,
       logs: Logger.getLogsHistory(),
       stateVersion: agentEngine.stateVersion,
-      bootId: agentEngine.bootId
+      bootId: agentEngine.bootId,
+      scoutFoxGroupId: agentEngine.scoutFoxGroupId
     });
     return true;
   }
@@ -334,13 +344,19 @@ function routeMessage(request, sender, sendResponse) {
 
 /**
  * Pick the tab to automate.
- *
- * The focused tab wins when it is automatable. When it is not — most often because the user
- * is sitting on chrome://extensions — we fall back to another tab in the window, but that
- * substitution is announced loudly. Silently driving a page the user is not looking at is
- * confusing enough that it reads as a bug.
+ * Prioritizes tabs inside the active 'ScoutFox' Tab Group sandbox when active.
  */
 async function getActiveTab() {
+  if (agentEngine.status === 'running' && agentEngine.scoutFoxGroupId && typeof chrome.tabs.query === 'function') {
+    try {
+      const groupTabs = await chrome.tabs.query({ groupId: agentEngine.scoutFoxGroupId });
+      const activeInGroup = groupTabs.find(t => t.active && isValidWebTab(t));
+      if (activeInGroup) return activeInGroup;
+      const validInGroup = groupTabs.find(isValidWebTab);
+      if (validInGroup) return validInGroup;
+    } catch (_) {}
+  }
+
   const focused = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0] || null;
   if (focused && isValidWebTab(focused)) return focused;
 
