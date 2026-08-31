@@ -50,6 +50,84 @@ function describeRestrictedUrl(url) {
   return null;
 }
 
+/**
+ * Robust Truncated & Partial JSON Repair Engine
+ * Salvages unclosed strings, missing braces, or raw unescaped newlines in JSON action payloads.
+ */
+function parsePartialOrTruncatedJson(str) {
+  if (!str || typeof str !== 'string') return null;
+  const trimmed = str.trim();
+
+  // 1. Standard JSON parse
+  try {
+    return JSON.parse(trimmed);
+  } catch (_) {}
+
+  // 2. Fix unescaped control characters & raw newlines inside JSON string values
+  try {
+    const escapedNewlines = trimmed.replace(/[\r\n]+/g, '\\n');
+    return JSON.parse(escapedNewlines);
+  } catch (_) {}
+
+  // 3. Balance unclosed string quotes and closing braces/brackets
+  try {
+    let repaired = trimmed.replace(/[\r\n]+/g, '\\n');
+    const quoteCount = (repaired.match(/(?<!\\)"/g) || []).length;
+    if (quoteCount % 2 !== 0) {
+      repaired += '"';
+    }
+
+    const openBraces = (repaired.match(/\{/g) || []).length;
+    const closeBraces = (repaired.match(/\}/g) || []).length;
+    for (let i = 0; i < openBraces - closeBraces; i++) {
+      repaired += '}';
+    }
+
+    const openBrackets = (repaired.match(/\[/g) || []).length;
+    const closeBrackets = (repaired.match(/\]/g) || []).length;
+    for (let i = 0; i < openBrackets - closeBrackets; i++) {
+      repaired += ']';
+    }
+
+    return JSON.parse(repaired);
+  } catch (_) {}
+
+  // 4. Regex extraction fallback for truncated execute_js / browser_batch payloads
+  try {
+    const actionMatch = trimmed.match(/"action"\s*:\s*"([^"]+)"/i);
+    if (actionMatch) {
+      const actName = actionMatch[1];
+      
+      if (actName === 'execute_js' || actName === 'eval_js') {
+        const codeMatch = trimmed.match(/"code"\s*:\s*"([\s\S]*)/i);
+        if (codeMatch) {
+          let codeStr = codeMatch[1].replace(/"\s*\}?\s*\]?\s*$/, '').trim();
+          codeStr = codeStr.replace(/\\"/g, '"').replace(/\\n/g, '\n');
+          return {
+            action: 'execute_js',
+            code: codeStr,
+            world: 'MAIN',
+            reason: 'Recovered from truncated model output'
+          };
+        }
+      }
+
+      if (actName === 'click' || actName === 'type') {
+        const idMatch = trimmed.match(/"element_id"\s*:\s*(\d+)/i) || trimmed.match(/"click"\s*:\s*(\d+)/i);
+        const textMatch = trimmed.match(/"text"\s*:\s*"([^"]+)"/i);
+        return {
+          action: actName,
+          element_id: idMatch ? parseInt(idMatch[1], 10) : undefined,
+          text: textMatch ? textMatch[1] : undefined,
+          reason: 'Recovered from truncated model output'
+        };
+      }
+    }
+  } catch (_) {}
+
+  return null;
+}
+
 export class AgentEngine {
   constructor() {
     this.status = 'idle'; // 'idle' | 'running' | 'paused' | 'stopped'
@@ -601,7 +679,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
 ["Identify target form or section", "Execute required browser actions", "Verify result and complete task"]`}`;
 
     try {
-      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.');
+      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.', { json: true });
       
       let planArray = [];
       const match = resp.match(/\[[\s\S]*\]/);
@@ -750,6 +828,14 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     const maxSteps = settings.maxSteps || 25;
     this.isLoopActive = true;
 
+    let consecutiveDomErrors = 0;
+    // A model that cannot produce a parseable action will not start producing one because we
+    // asked it fifteen more times. Without this counter an unusable model (wrong endpoint,
+    // truncated context, reasoning-only output) consumed every remaining step at ~30s each
+    // and reported nothing more useful than "reached maximum allowed steps".
+    let consecutiveParseErrors = 0;
+    const MAX_PARSE_ERRORS = 3;
+
     while (this.status === 'running' && this.stepCount < maxSteps) {
       this.stepCount++;
       Logger.info('AgentEngine', `---------------- STEP ${this.stepCount}/${maxSteps} ----------------`);
@@ -760,9 +846,38 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       let domSnapshot;
       try {
         domSnapshot = await this.getTabDOMWithAutoInject(this.activeTabId, settings.showElementBadges);
+        consecutiveDomErrors = 0; // Reset error count on clean DOM read
         Logger.info('AgentEngine', `[DOM_SNAPSHOT_INPUT] Title: "${domSnapshot.title}" | URL: ${domSnapshot.url} | Elements: ${domSnapshot.elementCount} | PageTextLen: ${domSnapshot.pageText ? domSnapshot.pageText.length : 0}`);
       } catch (err) {
-        Logger.error('AgentEngine', '[DOM_ERROR] Failed to read page state', err);
+        consecutiveDomErrors++;
+        Logger.error('AgentEngine', `[DOM_ERROR] Failed to read page state (attempt ${consecutiveDomErrors}/3)`, err);
+
+        const isErrorPage = err.message.includes('error page') || err.message.includes('Restricted') || err.message.includes('cannot read');
+
+        if (consecutiveDomErrors <= 3 && (isErrorPage || this.recentActionSignatures.some(s => s.startsWith('navigate')))) {
+          const searchQuery = this.currentTask || 'google search';
+          const fallbackUrl = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
+          
+          Logger.warn('AgentEngine', `[DOM_SELF_HEAL] Target page failed to load (${err.message}). Auto-navigating to Google search fallback: ${fallbackUrl}`);
+          
+          this.history.push({
+            step: this.stepCount,
+            type: 'error',
+            content: `Failed to load target page (${err.message}). Self-healing by redirecting to Google search to find valid website path.`
+          });
+
+          try {
+            if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.update) {
+              await new Promise(r => chrome.tabs.update(this.activeTabId, { url: fallbackUrl }, r));
+              await this.waitForTabComplete(this.activeTabId, 4000);
+            }
+          } catch (_) {}
+
+          this.notifyStateChange();
+          await new Promise(r => setTimeout(r, 1500));
+          continue; // Self-heal and continue the loop!
+        }
+
         this.history.push({
           step: this.stepCount,
           type: 'error',
@@ -811,7 +926,8 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       try {
         const messages = this.formatMessagesForLLM(userMessage);
         responseText = await ApiClients.generateCompletion(settings, messages, systemPrompt, {
-          signal: this.abortController ? this.abortController.signal : null
+          signal: this.abortController ? this.abortController.signal : null,
+          json: true
         });
         Logger.info('AgentEngine', `[LLM_RAW_OUTPUT]\n${responseText}`);
       } catch (err) {
@@ -841,17 +957,39 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       });
 
       if (actionResult.error) {
-        Logger.warn('AgentEngine', `[PARSE_ERROR] Step ${this.stepCount} parsing failed`, actionResult.error);
+        consecutiveParseErrors++;
+        Logger.warn('AgentEngine', `[PARSE_ERROR] Step ${this.stepCount} parsing failed (${consecutiveParseErrors}/${MAX_PARSE_ERRORS})`, actionResult.error);
         this.history.push({
           step: this.stepCount,
           type: 'execution_result',
           success: false,
-          error: actionResult.error
+          error: `${actionResult.error} Reply with a single JSON object containing an "action" key and nothing else.`
         });
+
+        if (consecutiveParseErrors >= MAX_PARSE_ERRORS) {
+          const empty = /empty output/i.test(actionResult.error || '');
+          const detail = empty
+            ? `The model [${settings.model}] returned an empty response ${MAX_PARSE_ERRORS} times in a row. For a local model this is almost always one of: the model is a reasoning model whose output never left the thinking phase, the reply was truncated by the generation cap, or the prompt overflowed the context window. Check the [OLLAMA_*] warnings above.`
+            : `The model [${settings.model}] failed to produce a usable action ${MAX_PARSE_ERRORS} times in a row. Last parser error: ${actionResult.error}`;
+
+          this.status = 'idle';
+          this.isLoopActive = false;
+          this.currentPhase = '';
+          Logger.error('AgentEngine', `[PARSE_CIRCUIT_BREAK] Stopping after ${MAX_PARSE_ERRORS} unusable replies. ${detail}`);
+          this.history.push({
+            type: 'error',
+            content: `Stopped early — ${detail}`
+          });
+          this.notifyStateChange();
+          break;
+        }
+
         this.notifyStateChange();
         await new Promise(r => setTimeout(r, 1000));
         continue;
       }
+
+      consecutiveParseErrors = 0;
 
       const actionObj = actionResult.action;
       
@@ -1146,6 +1284,10 @@ Your objective is to choose the single best action to complete the user's goal i
 3. **Silent Action Failures / Error Debugging**:
    - If an action succeeds but the page state remains unchanged, use "read_network_requests" to inspect API responses or "execute_js" to verify state instead of blindly retrying.
 
+4. **Domain Navigation Safety**:
+   - DO NOT guess top-level domain extensions (e.g. .de, .org, .com) blindly if you do not know the exact working website URL!
+   - If you are not already on the correct website, navigate to Google search (https://www.google.com/search?q=...) to find the official valid page link first instead of guessing non-existent domains.
+
 ### Available Actions:
 1. Click element:
    {"action": "click", "element_id": <number>, "reason": "<explanation>"}
@@ -1309,18 +1451,14 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     // 2. Extract JSON from ```json ... ``` or ``` ... ```
     const codeBlockMatch = cleanText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
     if (codeBlockMatch) {
-      try {
-        actionObj = JSON.parse(codeBlockMatch[1].trim());
-      } catch (_) { /* continue to fallback extractors */ }
+      actionObj = parsePartialOrTruncatedJson(codeBlockMatch[1].trim());
     }
 
     // 3. Extract JSON object containing "action" key
     if (!actionObj) {
       const braceMatch = cleanText.match(/\{[\s\S]*?"action"\s*:[\s\S]*?\}/i);
       if (braceMatch) {
-        try {
-          actionObj = JSON.parse(braceMatch[0].trim());
-        } catch (_) { /* continue */ }
+        actionObj = parsePartialOrTruncatedJson(braceMatch[0].trim());
       }
     }
 
@@ -1328,13 +1466,11 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     if (!actionObj) {
       const matches = cleanText.match(/\{[\s\S]*?\}/g) || [];
       for (let i = matches.length - 1; i >= 0; i--) {
-        try {
-          const parsed = JSON.parse(matches[i]);
-          if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.execute_js || parsed.browser_batch || parsed.read_network_requests)) {
-            actionObj = parsed;
-            break;
-          }
-        } catch (_) { /* ignore */ }
+        const parsed = parsePartialOrTruncatedJson(matches[i]);
+        if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.execute_js || parsed.browser_batch || parsed.read_network_requests)) {
+          actionObj = parsed;
+          break;
+        }
       }
     }
 
@@ -1371,8 +1507,10 @@ Choose your next action based on the goal: "${this.currentTask}"`;
       }
     }
 
-    // 6. Freeform Text Auto-Wrapping Guardrail
-    if (!actionObj && cleanText.length > 5) {
+    // 6. Freeform Text Auto-Wrapping Guardrail (PROTECTED AGAINST TRUNCATED JSON PAYLOADS)
+    const looksLikeActionJson = /"action"\s*:|"execute_js"|"browser_batch"|```json/i.test(cleanText);
+
+    if (!actionObj && cleanText.length > 5 && !looksLikeActionJson) {
       Logger.info('AgentEngine', '[UNIVERSAL_GUARDRAIL] Model provided direct text response. Auto-wrapping into finish action.');
       actionObj = {
         action: 'finish',
@@ -1382,7 +1520,7 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     }
 
     if (!actionObj) {
-      return { thought, error: 'No valid action or response text found in model output.', raw: text };
+      return { thought, error: 'Model output contained a truncated or malformed action JSON. Retrying with simpler prompt.', raw: text };
     }
 
     // 7. Action Schema & Element ID Sanitizer

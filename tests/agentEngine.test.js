@@ -106,6 +106,19 @@ test('AgentEngine - Parse execute_js Action', () => {
   assert.equal(result.action.code, 'return document.title');
 });
 
+test('AgentEngine - Parse Truncated execute_js Action Payload', () => {
+  const engine = new AgentEngine();
+  const truncatedOutput = `\`\`\`json
+{
+  "action": "execute_js",
+  "code": "const reject = document.querySelector('#cookie_action_close_header_reject'); if (reject) reject.click(); const sel = document.querySelector('select'); if (sel) { sel.value = '1'; } const order = [...document.querySelectorAll('button')].find(b => /order now/i.test(b.textContent`;
+
+  const result = engine.parseResponse(truncatedOutput, 10);
+  assert.equal(result.action.action, 'execute_js');
+  assert.ok(result.action.code.includes('cookie_action_close_header_reject'));
+  assert.notEqual(result.action.action, 'finish'); // Proves it did not wrongly fall back to finish action!
+});
+
 test('AgentEngine - Parse read_network_requests Action', () => {
   const engine = new AgentEngine();
   const output = `\`\`\`json

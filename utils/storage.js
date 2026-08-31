@@ -25,6 +25,12 @@ export const DEFAULT_SETTINGS = {
   // answers would otherwise park the agent loop indefinitely, with the keepalive actively
   // preventing Chrome from reclaiming the worker.
   llmTimeoutMs: 120000,
+  // Ollama-only. Ollama caps context at 4096 tokens by default no matter how large a window
+  // the model actually supports, and truncates overflow from the FRONT — silently discarding
+  // the system prompt and the user's goal. 8192 comfortably fits a page snapshot plus history.
+  ollamaNumCtx: 8192,
+  // Ceiling on a single local generation, so a model that starts rambling cannot stall a step.
+  ollamaNumPredict: 1024,
   actionDelayMs: 1000,
   showElementBadges: true,
   autoScroll: true,

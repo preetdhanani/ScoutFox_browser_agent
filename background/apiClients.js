@@ -41,6 +41,23 @@ function extractTextFromLLMResponse(data) {
   // 3. Direct text fields: data.response, data.text, data.message, data.output
   if (typeof data.response === 'string') return data.response;
   if (typeof data.text === 'string') return data.text;
+  // 3b. Ollama /api/chat format: data.message = { role, content, thinking }
+  // This must be tested BEFORE the `typeof data.message === 'string'` check below, which
+  // never matches because Ollama sends an object. Without this branch every single Ollama
+  // response fell through all the way to `return ''`, so the model generated a perfectly
+  // good answer for 30 seconds and the agent saw an empty string and burned a step.
+  // Thinking models (qwen3, gemma3, deepseek-r1) split their output: reasoning goes to
+  // `thinking` and the real answer to `content`. If generation is cut short by num_predict
+  // the model can still be mid-reasoning, leaving `content` empty — fall back to `thinking`
+  // so the JSON the model was building is still recoverable by the parser.
+  if (data.message && typeof data.message === 'object') {
+    if (typeof data.message.content === 'string' && data.message.content.trim()) {
+      return data.message.content;
+    }
+    if (typeof data.message.thinking === 'string' && data.message.thinking.trim()) {
+      return data.message.thinking;
+    }
+  }
   if (typeof data.message === 'string') return data.message;
   if (typeof data.output === 'string') return data.output;
 
@@ -51,6 +68,10 @@ function extractTextFromLLMResponse(data) {
 
   return '';
 }
+
+// Models that rejected the `think` field once. Cached so the fallback retry is paid at most
+// once per model per service-worker lifetime.
+const OLLAMA_THINK_UNSUPPORTED = new Set();
 
 export const ApiClients = {
   /**
@@ -71,7 +92,7 @@ export const ApiClients = {
         case 'agent_router':
           return this.callAgentRouter(settings, messages, systemPrompt);
         case 'ollama':
-          return this.callOllama(settings, messages, systemPrompt);
+          return this.callOllama(settings, messages, systemPrompt, options);
         case 'openai_compatible':
         case 'openai':
           return this.callOpenAI(settings, messages, systemPrompt);
@@ -442,10 +463,32 @@ export const ApiClients = {
 
   /**
    * Ollama API Client
+   *
+   * Local models need considerably more scaffolding than hosted ones. Three settings here
+   * are the difference between a 9B model driving the browser and it doing nothing at all:
+   *
+   *   think:false  — every current local agent model (qwen3.x, gemma3/4, deepseek-r1) ships
+   *                  with reasoning ON. Ollama routes that reasoning into `message.thinking`
+   *                  and leaves `message.content` empty until it finishes. A 9B model can
+   *                  spend 30s+ deliberating over a 120-element page and still be mid-thought
+   *                  when num_predict runs out, yielding an empty answer. We do our own
+   *                  reasoning in the prompt, so native thinking buys nothing and costs the
+   *                  entire step. Not every model accepts the flag, so a rejection is cached
+   *                  and the call retried once without it.
+   *   num_ctx      — Ollama defaults to a 4096-token context REGARDLESS of what the model
+   *                  supports (qwen3.5:9b advertises 262144). A page snapshot plus history
+   *                  overflows that easily, and llama.cpp truncates from the FRONT — which
+   *                  silently deletes the system prompt and the goal, so the model no longer
+   *                  knows it is a browser agent or what it was asked to do. Nothing is
+   *                  logged when this happens; the output just turns to garbage.
+   *   format:json  — constrains decoding to valid JSON at the sampler. This is far more
+   *                  reliable than asking a small model to emit JSON and then repairing the
+   *                  result, and it removes the prose-before-JSON failure mode entirely.
    */
-  async callOllama(settings, messages, systemPrompt) {
+  async callOllama(settings, messages, systemPrompt, options = {}) {
     const baseUrl = (settings.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
     const url = `${baseUrl}/api/chat`;
+    const model = settings.model || 'qwen2.5:14b';
     const startTime = Date.now();
 
     const formattedMessages = [
@@ -453,37 +496,78 @@ export const ApiClients = {
       ...messages.map(m => ({ role: m.role, content: m.content }))
     ];
 
-    const body = {
-      model: settings.model || 'qwen2.5:14b',
-      messages: formattedMessages,
-      stream: false,
-      options: { temperature: settings.temperature ?? 0.1 }
+    const numCtx = Number(settings.ollamaNumCtx) > 0 ? Number(settings.ollamaNumCtx) : 8192;
+    const numPredict = Number(settings.ollamaNumPredict) > 0 ? Number(settings.ollamaNumPredict) : 1024;
+
+    const buildBody = (withThink) => {
+      const body = {
+        model,
+        messages: formattedMessages,
+        stream: false,
+        options: {
+          temperature: settings.temperature ?? 0.1,
+          num_ctx: numCtx,
+          num_predict: numPredict
+        }
+      };
+      if (withThink) body.think = false;
+      if (options.json) body.format = 'json';
+      return body;
     };
 
+    const post = async (withThink) => fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildBody(withThink))
+    });
+
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
+      let sendThink = !OLLAMA_THINK_UNSUPPORTED.has(model);
+      let response = await post(sendThink);
+
+      // Older builds, and models with no reasoning mode, reject the `think` field outright.
+      // Remember that for the rest of the session so only the first call pays for the retry.
+      if (!response.ok && sendThink && (response.status === 400 || response.status === 422)) {
+        const probe = await response.clone().text().catch(() => '');
+        if (/think/i.test(probe)) {
+          OLLAMA_THINK_UNSUPPORTED.add(model);
+          Logger.info('ApiClients', `[OLLAMA_THINK] Model [${model}] does not accept "think" — retrying without it and skipping the flag from now on.`);
+          sendThink = false;
+          response = await post(false);
+        }
+      }
 
       const elapsed = Date.now() - startTime;
 
       if (!response.ok) {
         const errText = await response.text();
         if (response.status === 404) {
-          throw new Error(`Model "${settings.model}" not found in Ollama. Please run "ollama pull ${settings.model}" in terminal.`);
+          throw new Error(`Model "${model}" not found in Ollama. Please run "ollama pull ${model}" in terminal.`);
         }
         throw new Error(`Ollama API error (${response.status}): ${errText}`);
       }
 
       const data = await response.json();
       const content = extractTextFromLLMResponse(data);
+
+      // Truncation is the most common silent failure on a local model, and Ollama reports it
+      // plainly in done_reason. Surfacing it turns "the agent behaved oddly" into a one-line
+      // instruction to raise num_predict.
+      if (data && data.done_reason === 'length') {
+        Logger.warn('ApiClients', `[OLLAMA_TRUNCATED] Model [${model}] hit the ${numPredict}-token generation cap mid-answer. The reply is incomplete; raise ollamaNumPredict if this repeats.`);
+      }
+      if (data && data.prompt_eval_count > numCtx * 0.9) {
+        Logger.warn('ApiClients', `[OLLAMA_CTX_PRESSURE] Prompt used ${data.prompt_eval_count} of ${numCtx} context tokens. Ollama truncates from the front, which drops the system prompt first — raise ollamaNumCtx.`);
+      }
+      if (!content && data && data.message && typeof data.message === 'object') {
+        Logger.warn('ApiClients', `[OLLAMA_EMPTY] Model [${model}] returned no usable text (done_reason=${data.done_reason || 'unknown'}). Keys present on message: ${Object.keys(data.message).join(', ') || 'none'}.`);
+      }
+
       Logger.info('ApiClients', `[NETWORK] 200 OK (${elapsed}ms) - Output length: ${content.length} chars`);
       return content;
     } catch (err) {
       Logger.error('OllamaClient', `[NETWORK] Failed connection to Ollama at ${url}`, err.message);
-      if (err.message.includes('not found in Ollama')) throw err;
+      if (err.message.includes('not found in Ollama') || err.message.startsWith('Ollama API error')) throw err;
       throw new Error(`Cannot connect to Ollama at ${url}. Ensure Ollama is running ('OLLAMA_ORIGINS="*" ollama serve'). Details: ${err.message}`);
     }
   },

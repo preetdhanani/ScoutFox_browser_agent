@@ -158,9 +158,18 @@ function renderModelOptions(modelsList) {
   const optionsContainer = document.getElementById('modelComboboxOptions');
   if (!optionsContainer) return;
 
+  const activeProvider = document.getElementById('providerSelect')?.value || currentSettings.provider;
+  const savedModel = currentSettings.providerConfigs?.[activeProvider]?.model || currentSettings.model;
+  const currentSelected = (selectEl && selectEl.value) ? selectEl.value : savedModel;
+
+  const combinedList = [...modelsList];
+  if (savedModel && savedModel !== '__custom__' && !combinedList.includes(savedModel)) {
+    combinedList.unshift(savedModel);
+  }
+
   if (selectEl) {
     selectEl.innerHTML = '';
-    modelsList.forEach(m => {
+    combinedList.forEach(m => {
       const opt = document.createElement('option');
       opt.value = m;
       opt.textContent = m;
@@ -172,20 +181,19 @@ function renderModelOptions(modelsList) {
     selectEl.appendChild(customOpt);
   }
 
-  const activeProvider = document.getElementById('providerSelect').value;
-  const currentSelected = selectEl?.value || currentSettings.providerConfigs?.[activeProvider]?.model || currentSettings.model;
-
-  if (modelsList.length === 0) {
+  if (combinedList.length === 0 && savedModel !== '__custom__') {
     optionsContainer.innerHTML = `<div class="subtext-hint" style="padding: 10px; text-align: center;">No matching models found.</div>`;
     return;
   }
 
-  let html = modelsList.map(modelName => {
-    const isSelected = modelName === currentSelected;
+  const activeModel = currentSelected || savedModel || combinedList[0];
+
+  let html = combinedList.map(modelName => {
+    const isSelected = modelName === activeModel;
     return `<div class="combobox-option-item ${isSelected ? 'selected' : ''}" data-value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</div>`;
   }).join('');
 
-  html += `<div class="combobox-option-item custom-option" data-value="__custom__">✏️ Enter custom model name...</div>`;
+  html += `<div class="combobox-option-item custom-option ${activeModel === '__custom__' ? 'selected' : ''}" data-value="__custom__">✏️ Enter custom model name...</div>`;
 
   optionsContainer.innerHTML = html;
 
@@ -198,11 +206,7 @@ function renderModelOptions(modelsList) {
     });
   });
 
-  if (modelsList.length > 0 && !modelsList.includes(currentSelected) && currentSelected !== '__custom__') {
-    updateSelectedModel(modelsList[0]);
-  } else {
-    updateSelectedModel(currentSelected);
-  }
+  updateSelectedModel(activeModel);
 }
 
 function initCombobox() {
@@ -670,11 +674,14 @@ function initEventListeners() {
     document.getElementById('baseUrlInput').value = savedCfg.baseUrl || '';
     document.getElementById('apiKeyInput').value = savedCfg.apiKey || '';
 
+    const modelToSet = savedCfg.model || (DEFAULT_PROVIDER_CONFIGS[provider] ? DEFAULT_PROVIDER_CONFIGS[provider].model : currentSettings.model);
+    updateSelectedModel(modelToSet);
+
     // Update settings object
     currentSettings.provider = provider;
     currentSettings.baseUrl = savedCfg.baseUrl || '';
     currentSettings.apiKey = savedCfg.apiKey || '';
-    if (savedCfg.model) currentSettings.model = savedCfg.model;
+    currentSettings.model = modelToSet;
 
     await autoSaveCurrentForm();
 
