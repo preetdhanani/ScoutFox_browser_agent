@@ -2,13 +2,15 @@
   "manifest_version": 3,
   "name": "ScoutFox AI Browser Agent",
   "version": "1.0.0",
-  "description": "Autonomous AI Browser Agent for Local & Cloud LLMs (Ollama, Gemini, OpenAI, Claude, Groq).",
+  "description": "Autonomous AI Browser Agent for Local & Cloud LLMs (Ollama, Gemini, OpenAI, Claude, Groq, OpenRouter, AgentRouter).",
   "permissions": [
     "sidePanel",
     "activeTab",
     "scripting",
     "storage",
-    "tabs"
+    "tabs",
+    "alarms",
+    "declarativeNetRequest"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -32,6 +34,15 @@
         "content/content.js"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "content/net-recorder.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
     }
   ],
   "icons": {

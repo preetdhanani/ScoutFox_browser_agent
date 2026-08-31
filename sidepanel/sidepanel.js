@@ -1,48 +1,306 @@
 /**
  * Sidepanel Controller Script for ScoutFox AI Agent
  * Connects to Background Agent Engine, renders timeline, session history drawer, plan checklist, progress banner, settings, and backend logs.
- * Employs persistent model caching to prevent redundant API fetches on sidepanel open.
+ * Employs persistent per-provider API key storage, automatic model fetching, instant key auto-saving, and a smart searchable combobox component.
  */
 
-import { Storage, DEFAULT_SETTINGS } from '../utils/storage.js';
+import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../utils/storage.js';
 
 let backgroundPort = null;
 let currentSettings = { ...DEFAULT_SETTINGS };
 let currentSessionId = null;
 let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
+let apiKeyFetchDebounce = null;
+let allFetchedModels = [];
+let portReconnectAttempts = 0;
+let portReconnectTimer = null;
+
+// Out-of-order render guard. The live port and the GET_AGENT_STATE resync are two independent
+// async channels with no ordering guarantee, so a slow resync reply can arrive after a newer
+// live push and roll the UI backwards. stateVersion orders them — but it restarts near zero
+// whenever Chrome rebuilds the service worker, so it is only comparable within one boot.
+// bootId scopes the comparison; a new boot resets the watermark instead of silently discarding
+// every update from the fresh worker forever (which would freeze the panel permanently).
+let lastRenderedStateVersion = -1;
+let lastBootId = null;
+
+/**
+ * Inline icon set — thin-line SVGs matching the Studio Mono system.
+ */
+const ICONS = {
+  check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>',
+  cross: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
+  dot: '<svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4" fill="currentColor"/></svg>',
+  circle: '<svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
+  warning: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L2 20h20L12 3z"/><line x1="12" y1="9" x2="12" y2="14"/><circle cx="12" cy="17.3" r="0.6" fill="currentColor" stroke="none"/></svg>',
+  complete: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.3 2.3L16 10"/></svg>',
+  clock: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>',
+  trash: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/></svg>',
+  copy: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="1.5"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>',
+  search: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+  star: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l2.6 5.4 5.9.8-4.3 4.2 1 5.9L12 16.3 6.8 19.3l1-5.9-4.3-4.2 5.9-.8z"/></svg>',
+  doc: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5"/><line x1="7" y1="9" x2="17" y2="9"/><line x1="7" y1="13" x2="17" y2="13"/><line x1="7" y1="17" x2="13" y2="17"/></svg>',
+  aim: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>'
+};
+
+/**
+ * Log filter chips -> the tag prefixes the codebase actually emits.
+ *
+ * These used to be matched as a literal `[DOM]` / `[LLM]` / `[EXECUTION]` token, but nothing
+ * anywhere logs those exact strings — the real tags are [DOM_SNAPSHOT_INPUT], [LLM_RAW_OUTPUT],
+ * [ACTION_DISPATCH] and so on. Four of the five chips therefore matched nothing at all and
+ * rendered a permanently empty pane. Match on real prefixes instead, case-insensitively.
+ */
+const LOG_FILTER_KEYWORDS = {
+  DOM: ['[DOM', '[SNAPSHOT', '[PAGE', 'DOMCOMPRESSOR'],
+  LLM: ['[LLM', '[PLANNER', '[PARSE', '[UNIVERSAL_GUARDRAIL', 'APICLIENT'],
+  EXECUTION: ['[ACTION', '[EXEC', '[TASK', '[STEP', '[GUARDRAIL', '[STOPPED', '[PAUSED', '[RESUMED'],
+  NETWORK: ['[NET', '[DNR', '[FETCH', '[KEEPALIVE', '[PORT', '[BROADCAST', '[WORKER', '[RESYNC']
+};
+
+const THEME_MODES = ['system', 'light', 'dark'];
+const THEME_ICON = {
+  system: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
+  light: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>',
+  dark: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>'
+};
+const THEME_LABEL = { system: 'Auto (matches system)', light: 'Light', dark: 'Dark' };
+
+function applyTheme(mode) {
+  const root = document.documentElement;
+  if (mode === 'light' || mode === 'dark') {
+    root.setAttribute('data-theme', mode);
+  } else {
+    root.removeAttribute('data-theme');
+  }
+  const btn = document.getElementById('btnThemeToggle');
+  if (btn) {
+    btn.innerHTML = THEME_ICON[mode] || THEME_ICON.system;
+    btn.title = `Theme: ${THEME_LABEL[mode] || THEME_LABEL.system}`;
+  }
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
   initTabs();
   initPortConnection();
   initEventListeners();
+  initCombobox();
   await loadSessionHistory();
   await fetchDynamicModels(false);
 });
 
 /**
- * Load settings into form controls
+ * Load settings into form controls with per-provider memory restoration
  */
 async function loadSettings() {
   currentSettings = await Storage.getSettings();
+  applyTheme(currentSettings.theme || 'system');
 
-  document.getElementById('providerSelect').value = currentSettings.provider || 'gemini';
-  document.getElementById('baseUrlInput').value = currentSettings.baseUrl || 'http://localhost:11434';
-  document.getElementById('apiKeyInput').value = currentSettings.apiKey || '';
+  const activeProvider = currentSettings.provider || 'openrouter';
+  const providerCfg = (currentSettings.providerConfigs && currentSettings.providerConfigs[activeProvider]) || DEFAULT_PROVIDER_CONFIGS[activeProvider] || {};
+
+  document.getElementById('providerSelect').value = activeProvider;
+  document.getElementById('baseUrlInput').value = providerCfg.baseUrl || currentSettings.baseUrl || '';
+  document.getElementById('apiKeyInput').value = providerCfg.apiKey || currentSettings.apiKey || '';
   document.getElementById('maxStepsInput').value = currentSettings.maxSteps || 25;
   document.getElementById('delayInput').value = currentSettings.actionDelayMs || 1000;
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
 
-  updateModelBadge(currentSettings.model);
+  updateSelectedModel(providerCfg.model || currentSettings.model);
 }
 
 /**
- * Fetch dynamic models with storage caching
+ * Update active model label and backing select element
+ */
+function updateSelectedModel(modelName) {
+  const labelEl = document.getElementById('modelSelectedLabel');
+  const selectEl = document.getElementById('modelSelect');
+  const customInput = document.getElementById('modelCustomInput');
+
+  if (labelEl) labelEl.textContent = modelName || 'Select a model...';
+  if (selectEl) selectEl.value = modelName;
+  updateModelBadge(modelName);
+
+  if (modelName === '__custom__') {
+    if (customInput) customInput.style.display = 'block';
+  } else {
+    if (customInput) customInput.style.display = 'none';
+  }
+}
+
+/**
+ * Render model options into custom searchable combobox menu
+ */
+function renderModelOptions(modelsList) {
+  const selectEl = document.getElementById('modelSelect');
+  const optionsContainer = document.getElementById('modelComboboxOptions');
+  if (!optionsContainer) return;
+
+  if (selectEl) {
+    selectEl.innerHTML = '';
+    modelsList.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      selectEl.appendChild(opt);
+    });
+    const customOpt = document.createElement('option');
+    customOpt.value = '__custom__';
+    customOpt.textContent = 'Custom model name…';
+    selectEl.appendChild(customOpt);
+  }
+
+  const activeProvider = document.getElementById('providerSelect').value;
+  const currentSelected = selectEl?.value || currentSettings.providerConfigs?.[activeProvider]?.model || currentSettings.model;
+
+  if (modelsList.length === 0) {
+    optionsContainer.innerHTML = `<div class="subtext-hint" style="padding: 10px; text-align: center;">No matching models found.</div>`;
+    return;
+  }
+
+  let html = modelsList.map(modelName => {
+    const isSelected = modelName === currentSelected;
+    return `<div class="combobox-option-item ${isSelected ? 'selected' : ''}" data-value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</div>`;
+  }).join('');
+
+  html += `<div class="combobox-option-item custom-option" data-value="__custom__">✏️ Enter custom model name...</div>`;
+
+  optionsContainer.innerHTML = html;
+
+  optionsContainer.querySelectorAll('.combobox-option-item').forEach(item => {
+    item.addEventListener('click', async () => {
+      const val = item.getAttribute('data-value');
+      updateSelectedModel(val);
+      closeComboboxMenu();
+      await autoSaveCurrentForm();
+    });
+  });
+
+  if (modelsList.length > 0 && !modelsList.includes(currentSelected) && currentSelected !== '__custom__') {
+    updateSelectedModel(modelsList[0]);
+  } else {
+    updateSelectedModel(currentSelected);
+  }
+}
+
+function initCombobox() {
+  const trigger = document.getElementById('modelComboboxTrigger');
+  const menu = document.getElementById('modelComboboxMenu');
+  const searchInput = document.getElementById('modelSearchInside');
+
+  if (trigger && menu) {
+    trigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isVisible = menu.style.display === 'flex';
+      if (isVisible) {
+        closeComboboxMenu();
+      } else {
+        openComboboxMenu();
+      }
+    });
+  }
+
+  if (searchInput) {
+    searchInput.addEventListener('click', (e) => e.stopPropagation());
+    searchInput.addEventListener('input', (e) => {
+      const query = e.target.value.toLowerCase().trim();
+      if (!query) {
+        renderModelOptions(allFetchedModels);
+      } else {
+        const filtered = allFetchedModels.filter(m => m.toLowerCase().includes(query));
+        renderModelOptions(filtered);
+      }
+    });
+  }
+
+  document.addEventListener('click', () => {
+    closeComboboxMenu();
+  });
+}
+
+function openComboboxMenu() {
+  const menu = document.getElementById('modelComboboxMenu');
+  const combobox = document.getElementById('modelCombobox');
+  const searchInput = document.getElementById('modelSearchInside');
+
+  if (menu && combobox) {
+    const triggerRect = combobox.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - triggerRect.bottom;
+
+    if (spaceBelow < 260 && triggerRect.top > 260) {
+      menu.style.top = 'auto';
+      menu.style.bottom = '100%';
+      menu.style.borderTop = '1px solid var(--accent)';
+      menu.style.borderBottom = 'none';
+      menu.style.borderTopLeftRadius = '9px';
+      menu.style.borderTopRightRadius = '9px';
+      menu.style.borderBottomLeftRadius = '0';
+      menu.style.borderBottomRightRadius = '0';
+      menu.style.boxShadow = '0 -10px 25px rgba(0, 0, 0, 0.25)';
+    } else {
+      menu.style.top = '100%';
+      menu.style.bottom = 'auto';
+      menu.style.borderTop = 'none';
+      menu.style.borderBottom = '1px solid var(--accent)';
+      menu.style.borderTopLeftRadius = '0';
+      menu.style.borderTopRightRadius = '0';
+      menu.style.borderBottomLeftRadius = '9px';
+      menu.style.borderBottomRightRadius = '9px';
+      menu.style.boxShadow = '0 10px 25px rgba(0, 0, 0, 0.25)';
+    }
+
+    menu.style.display = 'flex';
+    combobox.classList.add('open');
+    if (searchInput) {
+      searchInput.value = '';
+      renderModelOptions(allFetchedModels);
+      setTimeout(() => searchInput.focus(), 50);
+    }
+  }
+}
+
+function closeComboboxMenu() {
+  const menu = document.getElementById('modelComboboxMenu');
+  const combobox = document.getElementById('modelCombobox');
+  if (menu && combobox) {
+    menu.style.display = 'none';
+    combobox.classList.remove('open');
+  }
+}
+
+/**
+ * Auto-save active form fields to Storage silently
+ */
+async function autoSaveCurrentForm() {
+  const provider = document.getElementById('providerSelect').value;
+  const selectVal = document.getElementById('modelSelect').value;
+  const customVal = document.getElementById('modelCustomInput').value.trim();
+  const finalModel = (selectVal === '__custom__' && customVal) ? customVal : selectVal;
+
+  const apiKey = document.getElementById('apiKeyInput').value.trim();
+  const baseUrl = document.getElementById('baseUrlInput').value.trim();
+
+  const newSettings = {
+    provider,
+    baseUrl,
+    apiKey,
+    model: finalModel,
+    maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || 25,
+    actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || 1000,
+    showElementBadges: document.getElementById('badgesToggle').checked
+  };
+
+  currentSettings = await Storage.saveSettings(newSettings);
+  updateModelBadge(finalModel);
+}
+
+/**
+ * Fetch dynamic models with storage caching & search filter support
  */
 async function fetchDynamicModels(forceRefresh = false) {
   const statusEl = document.getElementById('modelFetchStatus');
-  const selectEl = document.getElementById('modelSelect');
   const btnFetch = document.getElementById('btnFetchModels');
 
   if (statusEl) {
@@ -62,44 +320,20 @@ async function fetchDynamicModels(forceRefresh = false) {
       if (btnFetch) btnFetch.disabled = false;
 
       if (res && res.success && res.models && res.models.length > 0) {
-        selectEl.innerHTML = '';
-        res.models.forEach(modelName => {
-          const opt = document.createElement('option');
-          opt.value = modelName;
-          opt.textContent = modelName;
-          selectEl.appendChild(opt);
-        });
-
-        const customOpt = document.createElement('option');
-        customOpt.value = '__custom__';
-        customOpt.textContent = '✏️ Custom Model Name...';
-        selectEl.appendChild(customOpt);
-
-        if (currentSettings.model && res.models.includes(currentSettings.model)) {
-          selectEl.value = currentSettings.model;
-        } else if (res.models.length > 0) {
-          selectEl.value = res.models[0];
-          currentSettings.model = res.models[0];
-        }
+        allFetchedModels = res.models;
+        renderModelOptions(allFetchedModels);
 
         if (statusEl) {
           statusEl.textContent = forceRefresh
             ? `Retrieved ${res.models.length} model(s) fresh from API!`
-            : `Loaded ${res.models.length} model(s) instantly from local storage cache.`;
+            : `Loaded ${res.models.length} model(s) from local cache (${allFetchedModels.length} total).`;
         }
-        updateModelBadge(selectEl.value);
         resolve(res.models);
       } else {
         if (statusEl) statusEl.textContent = `Could not fetch models (${res?.error || 'Unreachable'}). Using fallbacks.`;
-        const fallbacks = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp', 'qwen2.5:14b', 'gpt-4o-mini'];
-        selectEl.innerHTML = '';
-        fallbacks.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m;
-          opt.textContent = m;
-          selectEl.appendChild(opt);
-        });
-        resolve(fallbacks);
+        allFetchedModels = ['anthropic/claude-3.5-sonnet', 'meta-llama/llama-3.3-70b-instruct', 'google/gemini-2.0-flash-001', 'deepseek/deepseek-r1', 'qwen2.5:14b', 'gpt-4o-mini'];
+        renderModelOptions(allFetchedModels);
+        resolve(allFetchedModels);
       }
     });
   });
@@ -129,38 +363,189 @@ function initTabs() {
   });
 }
 
+/**
+ * Connection to the background service worker.
+ *
+ * Chrome terminates MV3 service workers aggressively, which kills this port. Without an
+ * onDisconnect handler the panel keeps holding a dead port forever: the agent keeps running
+ * and driving the browser, but every STATE_UPDATE and LOG_ENTRY it emits goes nowhere — the
+ * timeline freezes and the log pane stays empty. That is exactly the "everything goes blank"
+ * failure. So: detect the drop, tell the user, and reconnect with backoff.
+ */
 function initPortConnection() {
-  if (typeof chrome !== 'undefined' && chrome.runtime) {
-    backgroundPort = chrome.runtime.connect({ name: 'scoutfox_sidepanel' });
+  connectPort();
+}
 
-    backgroundPort.onMessage.addListener((msg) => {
+function connectPort() {
+  if (typeof chrome === 'undefined' || !chrome.runtime) return;
+
+  try {
+    backgroundPort = chrome.runtime.connect({ name: 'scoutfox_sidepanel' });
+  } catch (err) {
+    reportClientError('sidepanel:port-connect', err);
+    setConnectionBanner(true);
+    scheduleReconnect();
+    return;
+  }
+
+  backgroundPort.onMessage.addListener((msg) => {
+    try {
       if (msg.type === 'STATE_UPDATE') {
         renderState(msg.payload);
         autoSaveActiveSession(msg.payload);
-      }
-    });
-
-    chrome.runtime.onMessage.addListener((msg) => {
-      if (msg.type === 'LOG_ENTRY') {
+      } else if (msg.type === 'LOG_ENTRY') {
         rawLogsCache.push(msg.payload);
         if (rawLogsCache.length > 300) rawLogsCache.shift();
         renderFilteredLogs();
       }
-    });
+    } catch (err) {
+      reportClientError('sidepanel:port-message', err);
+    }
+  });
 
-    chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE' }, (res) => {
-      if (res) {
-        renderState(res);
-        if (res.logs) {
-          rawLogsCache = res.logs;
-          renderFilteredLogs();
-        }
+  backgroundPort.onDisconnect.addListener(() => {
+    // chrome.runtime.lastError must be read here or Chrome logs an unchecked-error warning.
+    const reason = chrome.runtime.lastError ? chrome.runtime.lastError.message : 'service worker terminated';
+    backgroundPort = null;
+    appendLocalLog('WARN', 'Sidepanel', `[PORT_LOST] Connection to the background worker dropped (${reason}). Reconnecting…`);
+    setConnectionBanner(true);
+    scheduleReconnect();
+  });
+
+  if (portReconnectTimer) {
+    clearTimeout(portReconnectTimer);
+    portReconnectTimer = null;
+  }
+  setConnectionBanner(false);
+  resyncAgentState();
+}
+
+function scheduleReconnect() {
+  if (portReconnectTimer) return;
+  portReconnectAttempts++;
+  const delayMs = Math.min(5000, 300 * portReconnectAttempts);
+  portReconnectTimer = setTimeout(() => {
+    portReconnectTimer = null;
+    connectPort();
+  }, delayMs);
+}
+
+/**
+ * Pull authoritative state after every (re)connect. This doubles as the wake-up call that
+ * revives a sleeping service worker, and its response is the only confirmation that the
+ * round trip actually works — which is why the backoff counter resets here rather than in
+ * connectPort(). chrome.runtime.connect() succeeds optimistically even against a dead
+ * context, so resetting on connect alone would pin the backoff at its 300ms floor forever.
+ */
+function resyncAgentState() {
+  if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
+
+  chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE' }, (res) => {
+    if (chrome.runtime.lastError) {
+      appendLocalLog('WARN', 'Sidepanel', `[RESYNC_FAILED] Background worker did not answer GET_AGENT_STATE (${chrome.runtime.lastError.message}). Will retry.`);
+      setConnectionBanner(true);
+      scheduleReconnect();
+      return;
+    }
+
+    portReconnectAttempts = 0;
+    setConnectionBanner(false);
+
+    if (res) {
+      renderState(res);
+      if (res.logs) {
+        rawLogsCache = res.logs;
+        renderFilteredLogs();
       }
-    });
+    }
+  });
+}
+
+/**
+ * Send a control command and REPORT whether it landed.
+ *
+ * Pause / Stop / New Session were previously fire-and-forget with no callback and no
+ * lastError check. If the service worker was asleep or mid-restart the command evaporated
+ * silently — the button appeared to work while the agent carried on driving the page. For
+ * Stop in particular that is a safety problem, not just a cosmetic one.
+ */
+function sendControlMessage(action, done) {
+  if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
+
+  chrome.runtime.sendMessage({ action }, (res) => {
+    if (chrome.runtime.lastError) {
+      const msg = chrome.runtime.lastError.message;
+      appendLocalLog('ERROR', 'Sidepanel', `[CONTROL_FAILED] ${action} did not reach the background worker (${msg}).`);
+      showTaskError(`"${action.replace(/_/g, ' ').toLowerCase()}" did not reach the agent: ${msg}`);
+      scheduleReconnect();
+      if (done) done(false);
+      return;
+    }
+    if (res && res.success === false) {
+      appendLocalLog('ERROR', 'Sidepanel', `[CONTROL_REJECTED] ${action} was rejected: ${res.error || 'no reason given'}`);
+      showTaskError(res.error || `${action} was rejected by the agent.`);
+      if (done) done(false);
+      return;
+    }
+    appendLocalLog('INFO', 'Sidepanel', `[CONTROL_OK] ${action} acknowledged.`);
+    if (done) done(true);
+  });
+}
+
+function setConnectionBanner(isDisconnected) {
+  const pill = document.getElementById('statusPill');
+  const textEl = document.getElementById('statusText');
+  if (!pill) return;
+  pill.classList.toggle('reconnecting', isDisconnected);
+  if (isDisconnected && textEl) textEl.textContent = 'Reconnecting…';
+}
+
+/**
+ * Push a log entry generated in the panel itself into the log pane. Failures on this side of
+ * the boundary (a dead port, most importantly) cannot reach the background logger, so without
+ * this they would leave no trace anywhere — the "logs were empty too" symptom.
+ */
+function appendLocalLog(level, module, message) {
+  rawLogsCache.push({
+    timestamp: new Date().toLocaleTimeString(),
+    level,
+    module,
+    message,
+    data: null
+  });
+  if (rawLogsCache.length > 300) rawLogsCache.shift();
+  try { renderFilteredLogs(); } catch (_) { /* log pane may not exist yet during boot */ }
+  console.warn(`[${module}]`, message);
+}
+
+/**
+ * Forward panel-side exceptions to the background log so nothing fails invisibly.
+ */
+function reportClientError(source, err) {
+  const message = (err && err.message) || String(err);
+  appendLocalLog('ERROR', 'Sidepanel', `[${source}] ${message}`);
+  try {
+    chrome.runtime.sendMessage({
+      action: 'CLIENT_ERROR',
+      payload: { source, message, stack: (err && err.stack) || null }
+    }, () => { void chrome.runtime.lastError; });
+  } catch (_) {
+    // Extension context invalidated — the local log above is the only record, by design.
   }
 }
 
+window.addEventListener('error', (event) => reportClientError('window.onerror', event.error || event.message));
+window.addEventListener('unhandledrejection', (event) => reportClientError('unhandledrejection', event.reason));
+
 function initEventListeners() {
+  document.getElementById('btnThemeToggle').addEventListener('click', async () => {
+    const current = currentSettings.theme || 'system';
+    const next = THEME_MODES[(THEME_MODES.indexOf(current) + 1) % THEME_MODES.length];
+    currentSettings.theme = next;
+    applyTheme(next);
+    await Storage.saveSettings({ theme: next });
+  });
+
   document.getElementById('btnStartTask').addEventListener('click', startTask);
   document.getElementById('taskInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -172,20 +557,20 @@ function initEventListeners() {
   document.getElementById('btnPause').addEventListener('click', () => {
     const btn = document.getElementById('btnPause');
     const isPaused = btn.textContent.trim().includes('Resume');
-    if (isPaused) {
-      chrome.runtime.sendMessage({ action: 'RESUME_TASK' });
-    } else {
-      chrome.runtime.sendMessage({ action: 'PAUSE_TASK' });
-    }
+    sendControlMessage(isPaused ? 'RESUME_TASK' : 'PAUSE_TASK');
   });
 
   document.getElementById('btnStop').addEventListener('click', () => {
-    chrome.runtime.sendMessage({ action: 'STOP_TASK' });
+    sendControlMessage('STOP_TASK');
   });
 
   document.getElementById('btnNewSession').addEventListener('click', () => {
-    currentSessionId = null;
-    chrome.runtime.sendMessage({ action: 'CLEAR_HISTORY' }, () => {
+    sendControlMessage('CLEAR_HISTORY', (ok) => {
+      // Only clear the UI if the background actually cleared its state. Wiping the timeline
+      // regardless used to leave the panel looking empty while the engine still held the
+      // old session — which then reappeared on the next state broadcast.
+      if (!ok) return;
+      currentSessionId = null;
       const planContainer = document.getElementById('planContainer');
       if (planContainer) planContainer.style.display = 'none';
       renderEmptyState();
@@ -219,8 +604,8 @@ function initEventListeners() {
     const outputText = document.getElementById('logOutput').textContent;
     navigator.clipboard.writeText(outputText).then(() => {
       const copyBtn = document.getElementById('btnCopyLogs');
-      copyBtn.textContent = '✓ Copied!';
-      setTimeout(() => copyBtn.textContent = '📋 Copy', 2000);
+      copyBtn.innerHTML = `${ICONS.check} Copied`;
+      setTimeout(() => copyBtn.innerHTML = `${ICONS.copy} Copy`, 2000);
     });
   });
 
@@ -233,52 +618,53 @@ function initEventListeners() {
     fetchDynamicModels(true);
   });
 
-  document.getElementById('providerSelect').addEventListener('change', () => {
+  // Auto-fetch models & auto-save settings on API Key input / paste / blur
+  const autoFetchAndSaveOnKeyInput = async () => {
+    const key = document.getElementById('apiKeyInput').value.trim();
+    await autoSaveCurrentForm();
+    if (key.length >= 8) {
+      if (apiKeyFetchDebounce) clearTimeout(apiKeyFetchDebounce);
+      apiKeyFetchDebounce = setTimeout(() => {
+        fetchDynamicModels(true);
+      }, 500);
+    }
+  };
+
+  document.getElementById('apiKeyInput').addEventListener('input', autoFetchAndSaveOnKeyInput);
+  document.getElementById('apiKeyInput').addEventListener('change', autoFetchAndSaveOnKeyInput);
+  document.getElementById('apiKeyInput').addEventListener('blur', autoSaveCurrentForm);
+  document.getElementById('baseUrlInput').addEventListener('blur', autoSaveCurrentForm);
+  document.getElementById('apiKeyInput').addEventListener('paste', () => {
+    setTimeout(async () => {
+      await autoSaveCurrentForm();
+      fetchDynamicModels(true);
+    }, 200);
+  });
+
+  // Switch per-provider memory when provider dropdown changes
+  document.getElementById('providerSelect').addEventListener('change', async () => {
     const provider = document.getElementById('providerSelect').value;
-    if (provider === 'ollama') {
-      document.getElementById('baseUrlInput').value = 'http://localhost:11434';
-    } else if (provider === 'openai') {
-      document.getElementById('baseUrlInput').value = 'https://api.openai.com';
-    } else if (provider === 'anthropic') {
-      document.getElementById('baseUrlInput').value = 'https://api.anthropic.com';
-    }
-    fetchDynamicModels(true);
-  });
+    const providerConfigs = currentSettings.providerConfigs || DEFAULT_PROVIDER_CONFIGS;
+    const savedCfg = providerConfigs[provider] || DEFAULT_PROVIDER_CONFIGS[provider] || {};
 
-  document.getElementById('apiKeyInput').addEventListener('change', () => {
-    fetchDynamicModels(true);
-  });
+    document.getElementById('baseUrlInput').value = savedCfg.baseUrl || '';
+    document.getElementById('apiKeyInput').value = savedCfg.apiKey || '';
 
-  document.getElementById('modelSelect').addEventListener('change', () => {
-    const val = document.getElementById('modelSelect').value;
-    const customInput = document.getElementById('modelCustomInput');
-    if (val === '__custom__') {
-      customInput.style.display = 'block';
-    } else {
-      customInput.style.display = 'none';
-      updateModelBadge(val);
-    }
+    // Update settings object
+    currentSettings.provider = provider;
+    currentSettings.baseUrl = savedCfg.baseUrl || '';
+    currentSettings.apiKey = savedCfg.apiKey || '';
+    if (savedCfg.model) currentSettings.model = savedCfg.model;
+
+    await autoSaveCurrentForm();
+
+    const hasKeyOrOllama = provider === 'ollama' || (savedCfg.apiKey && savedCfg.apiKey.length > 5);
+    await fetchDynamicModels(hasKeyOrOllama);
   });
 
   document.getElementById('btnSaveSettings').addEventListener('click', async () => {
-    const selectVal = document.getElementById('modelSelect').value;
-    const customVal = document.getElementById('modelCustomInput').value.trim();
-    const finalModel = (selectVal === '__custom__' && customVal) ? customVal : selectVal;
-
-    const newSettings = {
-      provider: document.getElementById('providerSelect').value,
-      baseUrl: document.getElementById('baseUrlInput').value.trim(),
-      apiKey: document.getElementById('apiKeyInput').value.trim(),
-      model: finalModel,
-      maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || 25,
-      actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || 1000,
-      showElementBadges: document.getElementById('badgesToggle').checked
-    };
-
-    await Storage.saveSettings(newSettings);
-    currentSettings = newSettings;
-    updateModelBadge(finalModel);
-    alert(`Settings saved! Active model: ${finalModel}`);
+    await autoSaveCurrentForm();
+    alert(`Settings saved! Provider [${currentSettings.provider}] configured with model [${currentSettings.model}].`);
   });
 
   document.querySelectorAll('.sample-chip').forEach(chip => {
@@ -290,28 +676,61 @@ function initEventListeners() {
   });
 }
 
-function startTask() {
+async function startTask() {
   const prompt = document.getElementById('taskInput').value.trim();
   if (!prompt) return;
 
+  // Auto-sync form state into Storage before launching task
+  await autoSaveCurrentForm();
+
   currentSessionId = `session_${Date.now()}`;
 
+  appendLocalLog('INFO', 'Sidepanel', `[TASK_SUBMIT] Sending task to background worker: "${prompt}"`);
+
   chrome.runtime.sendMessage({ action: 'START_TASK', payload: { prompt } }, (res) => {
+    // Without this check a failed wake-up leaves res undefined and the whole submission
+    // vanishes with no alert, no log and no UI change — the task simply never starts.
+    if (chrome.runtime.lastError) {
+      const msg = chrome.runtime.lastError.message;
+      appendLocalLog('ERROR', 'Sidepanel', `[TASK_SUBMIT_FAILED] Background worker did not accept the task (${msg}). Reconnecting and retrying is usually enough.`);
+      showTaskError(`Could not reach the background worker: ${msg}`);
+      scheduleReconnect();
+      return;
+    }
+
     if (res && res.success) {
       document.getElementById('taskInput').value = '';
       const emptyState = document.getElementById('emptyState');
       if (emptyState) emptyState.style.display = 'none';
       document.getElementById('controlBar').style.display = 'flex';
-    } else if (res && res.error) {
-      alert(`Error starting task: ${res.error}`);
+      appendLocalLog('INFO', 'Sidepanel', `[TASK_ACCEPTED] Running against tab [${res.tabId}] — ${res.tabUrl || 'unknown URL'}`);
+    } else {
+      const msg = (res && res.error) || 'The background worker returned no response.';
+      appendLocalLog('ERROR', 'Sidepanel', `[TASK_SUBMIT_FAILED] ${msg}`);
+      showTaskError(msg);
     }
   });
+}
+
+/**
+ * Surface a task-level failure in the timeline rather than a modal alert(), which the user
+ * has to dismiss and which leaves no record of what went wrong.
+ */
+function showTaskError(message) {
+  const timeline = document.getElementById('timeline');
+  if (!timeline) return;
+  const card = document.createElement('div');
+  card.className = 'result-badge error';
+  card.style.cssText = 'margin-top: 8px; padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.5; align-items: flex-start;';
+  card.innerHTML = `${ICONS.warning}<span><strong>Could not start task:</strong><br>${escapeHtml(message)}</span>`;
+  timeline.appendChild(card);
+  timeline.scrollTop = timeline.scrollHeight;
 }
 
 async function loadSessionHistory() {
   const sessions = await Storage.getSessions();
   const historyBtn = document.getElementById('btnToggleHistory');
-  if (historyBtn) historyBtn.textContent = `📜 History (${sessions.length})`;
+  if (historyBtn) historyBtn.innerHTML = `${ICONS.clock} History (${sessions.length})`;
 
   const listContainer = document.getElementById('historySessionsList');
   if (!listContainer) return;
@@ -329,7 +748,7 @@ async function loadSessionHistory() {
           <span class="history-item-title">${escapeHtml(session.task || 'Untitled Session')}</span>
           <span class="history-item-meta">${session.timestamp || ''} • ${session.model || ''}</span>
         </div>
-        <button class="btn-delete-session" data-delete-id="${session.id}">🗑️</button>
+        <button class="btn-delete-session" data-delete-id="${session.id}">${ICONS.trash}</button>
       </div>
     `;
   }).join('');
@@ -372,7 +791,7 @@ async function autoSaveActiveSession(state) {
   await Storage.saveSession(sessionObj);
   const sessions = await Storage.getSessions();
   const historyBtn = document.getElementById('btnToggleHistory');
-  if (historyBtn) historyBtn.textContent = `📜 History (${sessions.length})`;
+  if (historyBtn) historyBtn.innerHTML = `${ICONS.clock} History (${sessions.length})`;
 }
 
 async function loadSelectedSession(sessionId) {
@@ -399,13 +818,13 @@ function renderEmptyState() {
   if (timeline) {
     timeline.innerHTML = `
       <div class="empty-state" id="emptyState">
-        <div class="sparkle-icon">✨</div>
+        <div class="empty-icon-tile">${ICONS.aim}</div>
         <h3>What would you like to automate?</h3>
         <p>Enter a task below. ScoutFox will read the page, index elements, and execute browser actions step-by-step.</p>
         <div class="sample-prompts">
-          <span class="sample-chip" data-prompt="Search Google for open-source AI browser frameworks">🔍 Search Google for AI agents</span>
-          <span class="sample-chip" data-prompt="Find top trending repositories on GitHub for python">⭐ Top Python GitHub repos</span>
-          <span class="sample-chip" data-prompt="Summarize the main articles on news.ycombinator.com">📰 Summarize Hacker News</span>
+          <span class="sample-chip" data-prompt="Search Google for open-source AI browser frameworks">${ICONS.search} Search Google for AI agents</span>
+          <span class="sample-chip" data-prompt="Find top trending repositories on GitHub for python">${ICONS.star} Top Python GitHub repos</span>
+          <span class="sample-chip" data-prompt="Summarize the main articles on news.ycombinator.com">${ICONS.doc} Summarize Hacker News</span>
         </div>
       </div>
     `;
@@ -424,7 +843,21 @@ function renderEmptyState() {
  */
 function renderState(state) {
   if (!state) return;
+
+  if (typeof state.stateVersion === 'number') {
+    if (state.bootId && state.bootId !== lastBootId) {
+      if (lastBootId !== null) {
+        appendLocalLog('WARN', 'Sidepanel', '[WORKER_RESTARTED] The background worker was restarted by Chrome. Re-syncing the panel to the new instance.');
+      }
+      lastBootId = state.bootId;
+      lastRenderedStateVersion = -1;
+    }
+    if (state.stateVersion <= lastRenderedStateVersion) return; // stale/duplicate
+    lastRenderedStateVersion = state.stateVersion;
+  }
+
   const { status, stepCount, history, planSteps, currentPhase } = state;
+  const isDisconnected = backgroundPort === null;
 
   const statusPill = document.getElementById('statusPill');
   const statusText = document.getElementById('statusText');
@@ -437,8 +870,10 @@ function renderState(state) {
   const btnStartTask = document.getElementById('btnStartTask');
 
   if (statusPill && statusText) {
-    statusPill.className = `status-indicator ${status}`;
-    statusText.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    statusPill.className = `status-indicator ${status}${isDisconnected ? ' reconnecting' : ''}`;
+    statusText.textContent = isDisconnected
+      ? 'Reconnecting…'
+      : status.charAt(0).toUpperCase() + status.slice(1);
   }
 
   renderPlanChecklist(planSteps);
@@ -479,39 +914,39 @@ function renderState(state) {
     let html = '';
     history.forEach(item => {
       if (item.type === 'user_goal') {
-        html += `<div class="user-goal-card">🎯 <strong>Goal:</strong> ${escapeHtml(item.prompt)}</div>`;
+        html += `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(item.prompt)}</div>`;
       } else if (item.type === 'step_start') {
         html += `
           <div class="timeline-card">
             <div class="timeline-header">
               <span class="step-badge">Step ${item.step}</span>
-              <span style="color: #94a3b8;">${escapeHtml(item.pageTitle || item.url || '')}</span>
+              <span>${escapeHtml(item.pageTitle || item.url || '')}</span>
             </div>
         `;
       } else if (item.type === 'agent_response') {
         if (item.thought) {
-          html += `<div class="thought-text">💭 ${escapeHtml(item.thought)}</div>`;
+          html += `<div class="thought-text">${escapeHtml(item.thought)}</div>`;
         }
         if (item.action) {
           const actionStr = formatActionPill(item.action);
-          html += `<div class="action-pill">⚡ Action: ${actionStr}</div>`;
+          html += `<div class="action-pill">${actionStr}</div>`;
         }
       } else if (item.type === 'execution_result') {
         const cls = item.success ? 'success' : 'error';
         html += `
-            <div class="result-badge ${cls}">${item.success ? '✓' : '✗'} ${escapeHtml(item.message || item.error || '')}</div>
+            <div class="result-badge ${cls}">${item.success ? ICONS.check : ICONS.cross} ${escapeHtml(item.message || item.error || '')}</div>
           </div>
         `;
       } else if (item.type === 'error') {
         html += `
-          <div class="result-badge error" style="margin-top: 8px; padding: 12px; border-radius: 8px; font-size: 12px; line-height: 1.5; border: 1px solid rgba(248,113,113,0.4); background: rgba(248,113,113,0.12);">
-            🚨 <strong>Error Diagnostic:</strong><br>${escapeHtml(item.content)}
+          <div class="result-badge error" style="margin-top: 8px; padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.5; align-items: flex-start;">
+            ${ICONS.warning}<span><strong>Error Diagnostic:</strong><br>${escapeHtml(item.content)}</span>
           </div>
         `;
       } else if (item.type === 'finish') {
         html += `
           <div class="finish-card">
-            <div class="finish-title">🎉 Task Complete</div>
+            <div class="finish-title">${ICONS.complete} Task Complete</div>
             <div class="finish-body">${formatMarkdownText(item.answer)}</div>
           </div>
         `;
@@ -540,13 +975,13 @@ function renderPlanChecklist(planSteps) {
   if (planProgressPill) planProgressPill.textContent = `${completedCount}/${planSteps.length} Done`;
 
   planItemsList.innerHTML = planSteps.map((step) => {
-    let icon = '⚪';
+    let icon = ICONS.circle;
     let cls = 'pending';
     if (step.status === 'completed') {
-      icon = '✅';
+      icon = ICONS.check;
       cls = 'completed';
     } else if (step.status === 'in_progress') {
-      icon = '🔄';
+      icon = ICONS.dot;
       cls = 'in_progress';
     }
 
@@ -570,8 +1005,12 @@ function renderFilteredLogs() {
 
   const filtered = rawLogsCache.filter(log => {
     if (currentActiveLogFilter === 'all') return true;
-    const msg = (log.message || '') + (log.module || '');
-    return msg.includes(`[${currentActiveLogFilter}]`) || log.module.includes(currentActiveLogFilter);
+    const keywords = LOG_FILTER_KEYWORDS[currentActiveLogFilter];
+    if (!keywords) return true;
+    // Coalesce BOTH fields — an entry with an undefined module used to throw inside
+    // .filter(), which killed the whole render and froze the log pane permanently.
+    const haystack = `${log.message || ''} ${log.module || ''}`.toUpperCase();
+    return keywords.some(k => haystack.includes(k));
   });
 
   if (filtered.length === 0) {
@@ -584,7 +1023,7 @@ function renderFilteredLogs() {
     const level = log.level || 'INFO';
     const mod = log.module || 'System';
     const msg = log.message || '';
-    const dataStr = log.data ? `\n   📦 Payload: ${log.data}` : '';
+    const dataStr = log.data ? `\n   Payload: ${log.data}` : '';
     return `[${time}] [${level}] [${mod}] ${msg}${dataStr}`;
   }).join('\n\n');
 
@@ -596,17 +1035,17 @@ function formatActionPill(actionObj) {
   const { action, element_id, text, url, direction, answer, question } = actionObj;
   switch (action) {
     case 'click':
-      return `Click [${element_id}]`;
+      return `click → [${element_id}]`;
     case 'type':
-      return `Type "${escapeHtml(text || '')}" in [${element_id}]`;
+      return `type → [${element_id}] "${escapeHtml(text || '')}"`;
     case 'scroll':
-      return `Scroll ${direction || 'down'}`;
+      return `scroll → ${direction || 'down'}`;
     case 'navigate':
-      return `Navigate to ${escapeHtml(url || '')}`;
+      return `navigate → ${escapeHtml(url || '')}`;
     case 'finish':
-      return `Finish (${escapeHtml(answer || '')})`;
+      return `finish → ${escapeHtml(answer || '')}`;
     case 'ask_user':
-      return `Ask User: "${escapeHtml(question || '')}"`;
+      return `ask → "${escapeHtml(question || '')}"`;
     default:
       return `${action} ${element_id ? `[${element_id}]` : ''}`;
   }

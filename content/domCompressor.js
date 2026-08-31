@@ -1,184 +1,244 @@
 /**
  * DOMCompressor - Extracts interactive elements from the webpage and produces a concise,
  * clean structured snapshot optimized for small LLMs (8B, 9B, 27B, 32B).
+ * Encapsulated in an IIFE to prevent V8 parse-time redeclaration errors upon re-injection.
  */
 
-class DOMCompressor {
-  constructor() {
-    this.elementMap = new Map(); // Maps numeric ID to DOM Element reference
-    this.counter = 0;
-  }
-
-  /**
-   * Main method to generate DOM snapshot
-   */
-  getSnapshot(options = {}) {
-    const maxElements = options.maxElements || 120;
-    this.elementMap.clear();
-    this.counter = 0;
-
-    const interactiveElements = this.findInteractiveElements();
-    const formattedElements = [];
-
-    for (const el of interactiveElements) {
-      if (this.counter >= maxElements) break;
-
-      this.counter++;
-      const id = this.counter;
-      this.elementMap.set(id, el);
-
-      // Store ID on element attribute for visual highlighting
-      el.setAttribute('data-agent-id', id);
-
-      const info = this.getElementSummary(el, id);
-      formattedElements.push(info);
+(function() {
+  class DOMCompressor {
+    constructor() {
+      this.elementMap = new Map(); // Maps numeric ID to DOM Element reference
+      this.counter = 0;
     }
 
-    const title = document.title || 'Untitled Page';
-    const url = window.location.href;
-    const scrollY = Math.round(window.scrollY);
-    const pageHeight = Math.round(document.documentElement.scrollHeight);
-    const viewportHeight = window.innerHeight;
+    /**
+     * Main method to generate DOM snapshot
+     */
+    getSnapshot(options = {}) {
+      const maxElements = options.maxElements || 120;
+      this.elementMap.clear();
+      this.counter = 0;
 
-    return {
-      title,
-      url,
-      scrollState: { scrollY, pageHeight, viewportHeight },
-      elementCount: formattedElements.length,
-      elementsText: formattedElements.map(e => e.formatted).join('\n'),
-      elements: formattedElements
-    };
-  }
+      const interactiveElements = this.findInteractiveElements();
+      const formattedElements = [];
 
-  /**
-   * Retrieve element by assigned ID
-   */
-  getElement(id) {
-    return this.elementMap.get(Number(id));
-  }
+      for (const el of interactiveElements) {
+        if (this.counter >= maxElements) break;
 
-  /**
-   * Find interactive and focusable elements on the page
-   */
-  findInteractiveElements() {
-    const selector = [
-      'a[href]',
-      'button',
-      'input:not([type="hidden"])',
-      'select',
-      'textarea',
-      '[role="button"]',
-      '[role="link"]',
-      '[role="checkbox"]',
-      '[role="textbox"]',
-      '[role="combobox"]',
-      '[role="tab"]',
-      '[tabindex="0"]',
-      '[onclick]'
-    ].join(',');
+        this.counter++;
+        const id = this.counter;
+        this.elementMap.set(id, el);
 
-    const candidates = Array.from(document.querySelectorAll(selector));
-    
-    return candidates.filter(el => this.isVisible(el));
-  }
+        // Store ID on element attribute for visual highlighting
+        el.setAttribute('data-agent-id', id);
 
-  /**
-   * Check if element is visible on screen
-   */
-  isVisible(el) {
-    if (!el) return false;
-    
-    const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-      return false;
+        const info = this.getElementSummary(el, id);
+        formattedElements.push(info);
+      }
+
+      const title = document.title || 'Untitled Page';
+      const url = window.location.href;
+      const scrollY = Math.round(window.scrollY);
+      const pageHeight = Math.round(document.documentElement.scrollHeight);
+      const viewportHeight = window.innerHeight;
+
+      return {
+        title,
+        url,
+        scrollState: { scrollY, pageHeight, viewportHeight },
+        elementCount: formattedElements.length,
+        elementsText: formattedElements.map(e => e.formatted).join('\n'),
+        elements: formattedElements,
+        pageText: this.extractPageText()
+      };
     }
 
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return false;
+    /**
+     * Dedicated Scroll-Aware Text Body Extraction Module
+     * Extracts readable text content relative to current scroll viewport or full document.
+     */
+    extractPageText() {
+      try {
+        // 1. Raw Markdown / Plain Text Pages (e.g. raw.githubusercontent.com)
+        if (window.location.hostname.includes('raw.githubusercontent.com') || (document.contentType && document.contentType.startsWith('text/'))) {
+          const rawText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+          return rawText.trim().slice(0, 4500);
+        }
 
-    // Check if within bounds or reasonable scroll distance
-    const inViewport = (
-      rect.top < window.innerHeight * 1.5 &&
-      rect.bottom > -window.innerHeight * 0.5 &&
-      rect.left < window.innerWidth * 1.5 &&
-      rect.right > -window.innerWidth * 0.5
-    );
+        // 2. Targeted Article / README / Documentation Containers
+        const targetedContainer = document.querySelector('article, main, #readme, .markdown-body, [role="main"]');
+        const container = targetedContainer || document.body;
+        if (!container) return '';
 
-    return inViewport;
-  }
+        // Extract headings, paragraphs, list items, table text, and code snippets
+        const allTextNodes = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, td, th, pre, code, blockquote'));
+        
+        let textNodes = allTextNodes;
 
-  /**
-   * Summarize element into concise string for prompt context
-   */
-  getElementSummary(el, id) {
-    const tagName = el.tagName.toLowerCase();
-    const type = el.getAttribute('type') || '';
-    let role = el.getAttribute('role') || '';
-    
-    // Determine label / text content
-    let label = (
-      el.getAttribute('aria-label') ||
-      el.getAttribute('placeholder') ||
-      el.getAttribute('title') ||
-      el.getAttribute('alt') ||
-      this.getLabelForInput(el) ||
-      el.innerText ||
-      el.textContent ||
-      ''
-    ).replace(/\s+/g, ' ').trim();
+        // If page is scrolled down, filter nodes to current viewport window so scrolling reveals new text
+        if (window.scrollY > 200 && allTextNodes.length > 30) {
+          const vHeight = window.innerHeight || 800;
+          textNodes = allTextNodes.filter(node => {
+            const rect = node.getBoundingClientRect();
+            return rect.bottom >= -200 && rect.top <= vHeight + 1500;
+          });
+          if (textNodes.length < 10) {
+            textNodes = allTextNodes.slice(-50); // Fallback to lower section
+          }
+        } else {
+          textNodes = allTextNodes.slice(0, 90);
+        }
 
-    if (label.length > 50) {
-      label = label.substring(0, 47) + '...';
-    }
+        let extractedText = '';
 
-    // Determine current value for inputs/selects
-    let valueStr = '';
-    if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
-      if (type === 'checkbox' || type === 'radio') {
-        valueStr = el.checked ? ' [checked]' : ' [unchecked]';
-      } else if (el.value) {
-        const val = el.value.length > 30 ? el.value.substring(0, 27) + '...' : el.value;
-        valueStr = ` value="${val}"`;
+        if (textNodes.length > 0) {
+          extractedText = textNodes
+            .map(node => {
+              const str = node.textContent.trim().replace(/\s+/g, ' ');
+              if (/^h[1-6]$/i.test(node.tagName)) {
+                return `\n### ${str}\n`;
+              }
+              return str;
+            })
+            .filter(t => t.length > 3)
+            .join('\n');
+        }
+
+        // Fallback to container innerText if targeted extraction is sparse
+        if (!extractedText || extractedText.length < 100) {
+          extractedText = (container.innerText || container.textContent || '').trim();
+        }
+
+        return extractedText.slice(0, 4500);
+      } catch (_) {
+        return (document.body ? (document.body.innerText || document.body.textContent || '') : '').slice(0, 3000);
       }
     }
 
-    let hrefStr = '';
-    if (tagName === 'a' && el.getAttribute('href')) {
-      const href = el.getAttribute('href');
-      if (href.startsWith('http') || href.startsWith('/')) {
-        hrefStr = ` href="${href.length > 40 ? href.substring(0, 37) + '...' : href}"`;
+    /**
+     * Retrieve element by assigned ID
+     */
+    getElement(id) {
+      return this.elementMap.get(Number(id));
+    }
+
+    /**
+     * Compute stable CSS selector path for an element
+     */
+    getCssPath(el) {
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
+      if (el.id) return `#${CSS.escape ? CSS.escape(el.id) : el.id}`;
+      
+      const path = [];
+      let current = el;
+      while (current && current.nodeType === Node.ELEMENT_NODE && current !== document.body) {
+        let selector = current.tagName.toLowerCase();
+        if (current.id) {
+          selector = `#${CSS.escape ? CSS.escape(current.id) : current.id}`;
+          path.unshift(selector);
+          break;
+        } else {
+          let sibling = current;
+          let nth = 1;
+          while (sibling = sibling.previousElementSibling) {
+            if (sibling.tagName.toLowerCase() === selector) nth++;
+          }
+          if (nth > 1) selector += `:nth-of-type(${nth})`;
+        }
+        path.unshift(selector);
+        current = current.parentElement;
       }
+      return path.join(' > ');
     }
 
-    let tagDescription = tagName;
-    if (type) tagDescription += `:${type}`;
-    else if (role) tagDescription += `:${role}`;
+    /**
+     * Find interactive and focusable elements on the page
+     */
+    findInteractiveElements() {
+      const selector = [
+        'a[href]',
+        'button',
+        'input:not([type="hidden"])',
+        'select',
+        'textarea',
+        '[role="button"]',
+        '[role="link"]',
+        '[role="checkbox"]',
+        '[role="textbox"]',
+        '[role="combobox"]',
+        '[role="tab"]',
+        '[tabindex="0"]',
+        '[onclick]'
+      ].join(',');
 
-    const formatted = `[${id}] ${tagDescription}${label ? ` "${label}"` : ''}${valueStr}${hrefStr}`;
-
-    return {
-      id,
-      tagName,
-      type,
-      label,
-      value: el.value || '',
-      formatted
-    };
-  }
-
-  /**
-   * Helper to check associated label tag for inputs
-   */
-  getLabelForInput(el) {
-    if (el.id) {
-      const labelEl = document.querySelector(`label[for="${el.id}"]`);
-      if (labelEl) return labelEl.innerText;
+      const candidates = Array.from(document.querySelectorAll(selector));
+      
+      return candidates.filter(el => this.isVisible(el));
     }
-    const parentLabel = el.closest('label');
-    if (parentLabel) return parentLabel.innerText;
-    return '';
-  }
-}
 
-// Global instance for content script
-window.domCompressor = new DOMCompressor();
+    /**
+     * Check if element is visible on screen
+     */
+    isVisible(el) {
+      if (!el) return false;
+      
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+        return false;
+      }
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return false;
+
+      return true;
+    }
+
+    /**
+     * Produce concise element string representation with stable locator descriptors
+     */
+    getElementSummary(el, id) {
+      const tagName = el.tagName.toLowerCase();
+      const type = el.getAttribute('type') || '';
+      const placeholder = el.getAttribute('placeholder') || '';
+      const ariaLabel = el.getAttribute('aria-label') || '';
+      const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+
+      let desc = `<${tagName}`;
+      if (type) desc += ` type="${type}"`;
+      if (placeholder) desc += ` placeholder="${placeholder}"`;
+      if (ariaLabel) desc += ` label="${ariaLabel}"`;
+      desc += '>';
+
+      let labelText = text || ariaLabel || placeholder || 'element';
+
+      const locator = {
+        index: id,
+        tag: tagName,
+        text: labelText,
+        role: el.getAttribute('role') || tagName,
+        cssPath: this.getCssPath(el),
+        attrs: {
+          id: el.id || '',
+          name: el.getAttribute('name') || '',
+          'data-testid': el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('data-cy') || ''
+        }
+      };
+
+      return {
+        id,
+        tagName,
+        type,
+        text: labelText,
+        locator,
+        formatted: `[${id}] ${tagName}${type ? `[${type}]` : ''} "${labelText}" (${desc})`
+      };
+    }
+  }
+
+  // Window global attachment with re-injection protection & key alias fallback
+  if (typeof window !== 'undefined') {
+    window.DOMCompressor = window.DOMCompressor || DOMCompressor;
+    window.domCompressorInstance = window.domCompressorInstance || new DOMCompressor();
+    window.domCompressor = window.domCompressor || window.domCompressorInstance;
+  }
+})();
