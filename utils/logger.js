@@ -7,25 +7,6 @@
 const logsHistory = [];
 let logBroadcastCallback = null;
 
-// Restore logs from storage on startup
-if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-  chrome.storage.local.get(['agent_logs_history'], (res) => {
-    if (res && Array.isArray(res.agent_logs_history)) {
-      logsHistory.push(...res.agent_logs_history.slice(-300));
-    }
-  });
-}
-
-function persistLogsToStorage() {
-  try {
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ agent_logs_history: logsHistory.slice(-300) });
-    }
-  } catch (e) {
-    // Ignore storage write errors during shutdown
-  }
-}
-
 export const Logger = {
   setBroadcastCallback(cb) {
     logBroadcastCallback = cb;
@@ -37,7 +18,9 @@ export const Logger = {
 
   clearLogs() {
     logsHistory.length = 0;
-    persistLogsToStorage();
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local && typeof chrome.storage.local.remove === 'function') {
+      chrome.storage.local.remove(['agent_logs_history']);
+    }
   },
 
   addLog(level, module, message, data = null, options = {}) {
@@ -66,8 +49,6 @@ export const Logger = {
 
       logsHistory.push(entry);
       if (logsHistory.length > 300) logsHistory.shift();
-
-      persistLogsToStorage();
 
       if (logBroadcastCallback && !options.silent) {
         logBroadcastCallback(entry);

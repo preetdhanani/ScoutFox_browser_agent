@@ -588,32 +588,7 @@ function initEventListeners() {
     sendControlMessage('STOP_TASK');
   });
 
-  document.getElementById('btnNewSession').addEventListener('click', () => {
-    sendControlMessage('CLEAR_HISTORY', (ok) => {
-      // Only clear the UI if the background actually cleared its state. Wiping the timeline
-      // regardless used to leave the panel looking empty while the engine still held the
-      // old session — which then reappeared on the next state broadcast.
-      if (!ok) return;
-      currentSessionId = null;
-      const planContainer = document.getElementById('planContainer');
-      if (planContainer) planContainer.style.display = 'none';
-      renderEmptyState();
-    });
-  });
 
-  document.getElementById('btnToggleHistory').addEventListener('click', async () => {
-    const drawer = document.getElementById('historyDrawer');
-    if (drawer.style.display === 'none' || !drawer.style.display) {
-      await loadSessionHistory();
-      drawer.style.display = 'flex';
-    } else {
-      drawer.style.display = 'none';
-    }
-  });
-
-  document.getElementById('btnCloseHistory').addEventListener('click', () => {
-    document.getElementById('historyDrawer').style.display = 'none';
-  });
 
   document.querySelectorAll('.log-filter-chip').forEach(chip => {
     chip.addEventListener('click', () => {
@@ -799,26 +774,8 @@ async function loadSessionHistory() {
 }
 
 async function autoSaveActiveSession(state) {
-  if (!state || !state.task || !state.history || state.history.length === 0) return;
-
-  if (!currentSessionId) {
-    currentSessionId = `session_${Date.now()}`;
-  }
-
-  const sessionObj = {
-    id: currentSessionId,
-    task: state.task,
-    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    date: new Date().toLocaleDateString(),
-    history: state.history,
-    planSteps: state.planSteps || [],
-    model: currentSettings.model || 'Model'
-  };
-
-  await Storage.saveSession(sessionObj);
-  const sessions = await Storage.getSessions();
-  const historyBtn = document.getElementById('btnToggleHistory');
-  if (historyBtn) historyBtn.innerHTML = `${ICONS.clock} History (${sessions.length})`;
+  // Old session auto-saving disabled by user preference - chats start fresh on every new opening
+  return;
 }
 
 async function loadSelectedSession(sessionId) {

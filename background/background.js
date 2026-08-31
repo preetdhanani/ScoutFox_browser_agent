@@ -19,13 +19,25 @@ self.addEventListener('unhandledrejection', (event) => {
 
 const agentEngine = new AgentEngine();
 
-// Clean network request buffers when tab is closed
-if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onRemoved) {
-  chrome.tabs.onRemoved.addListener((tabId) => {
-    if (agentEngine.networkBuffers.has(tabId)) {
-      agentEngine.networkBuffers.delete(tabId);
-    }
-  });
+// Clean network request buffers when tab is closed & track ScoutFox tab group removal
+if (typeof chrome !== 'undefined') {
+  if (chrome.tabs && chrome.tabs.onRemoved) {
+    chrome.tabs.onRemoved.addListener((tabId) => {
+      if (agentEngine.networkBuffers.has(tabId)) {
+        agentEngine.networkBuffers.delete(tabId);
+      }
+    });
+  }
+
+  if (chrome.tabGroups && chrome.tabGroups.onRemoved) {
+    chrome.tabGroups.onRemoved.addListener((group) => {
+      if (group && group.id === agentEngine.scoutFoxGroupId) {
+        Logger.info('Background', `[TAB_SANDBOX] ScoutFox tab group [${group.id}] was closed by user.`);
+        agentEngine.scoutFoxGroupId = null;
+        agentEngine.persistState();
+      }
+    });
+  }
 }
 
 // Initialize declarativeNetRequest rules for AgentRouter network-layer header spoofing
@@ -66,6 +78,28 @@ Logger.setBroadcastCallback((logEntry) => {
   broadcastToSidepanel('LOG_ENTRY', logEntry);
 });
 
+// Configure Chrome Sidepanel to open on extension action icon click
+if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+}
+
+// Handle explicit extension action icon clicks to group current active tab immediately
+if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
+  chrome.action.onClicked.addListener(async (tab) => {
+    if (tab && tab.id && isValidWebTab(tab)) {
+      if (chrome.sidePanel && chrome.sidePanel.setOptions) {
+        chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+          try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+        });
+      }
+      await agentEngine.ensureScoutFoxGroup(tab.id);
+      if (chrome.sidePanel && chrome.sidePanel.open) {
+        chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
+      }
+    }
+  });
+}
+
 let activeSidepanelPorts = new Set();
 let lastBroadcastHadNoListeners = false;
 
@@ -80,6 +114,11 @@ chrome.runtime.onConnect.addListener((port) => {
       Logger.info('Background', `[PORT_DISCONNECT] Sidepanel UI disconnected. Active ports: ${activeSidepanelPorts.size}`);
     });
 
+    // When opening sidepanel while idle, start completely fresh: clear old chats and logs
+    if (agentEngine.status === 'idle') {
+      agentEngine.clearHistory();
+    }
+
     try {
       port.postMessage({
         type: 'STATE_UPDATE',
@@ -90,15 +129,28 @@ chrome.runtime.onConnect.addListener((port) => {
           history: agentEngine.history,
           planSteps: agentEngine.planSteps,
           currentPhase: agentEngine.currentPhase,
-          // Logs intentionally omitted — the panel pulls them via GET_AGENT_STATE immediately
-          // after connecting, so duplicating the ring here just doubles the payload.
           stateVersion: agentEngine.stateVersion,
-          bootId: agentEngine.bootId
+          bootId: agentEngine.bootId,
+          scoutFoxGroupId: agentEngine.scoutFoxGroupId
         }
       });
     } catch (err) {
       Logger.warn('Background', 'Failed sending initial state update on port connect', err);
     }
+
+    // Auto-label opening tab into 'ScoutFox' tab group immediately on sidepanel open
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+      const activeTab = tabs && tabs[0];
+      if (activeTab && isValidWebTab(activeTab)) {
+        agentEngine.ensureScoutFoxGroup(activeTab.id).then((groupId) => {
+          if (groupId && typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setOptions) {
+            chrome.sidePanel.setOptions({ tabId: activeTab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+              try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+            });
+          }
+        }).catch(() => {});
+      }
+    });
   }
 });
 
@@ -219,16 +271,19 @@ Logger.info('Background', `[WORKER_BOOT] Service worker started (boot ${agentEng
 // Track active tab switching when links open new tabs & auto-group into ScoutFox Sandbox
 if (typeof chrome !== 'undefined' && chrome.tabs) {
   chrome.tabs.onCreated.addListener((tab) => {
-    if (agentEngine.status === 'running') {
-      if (agentEngine.scoutFoxGroupId && typeof chrome.tabs.group === 'function') {
-        chrome.tabs.group({ tabIds: tab.id, groupId: agentEngine.scoutFoxGroupId }, () => {
-          const err = chrome.runtime.lastError;
-          if (!err) {
-            Logger.info('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'ScoutFox' tab group [${agentEngine.scoutFoxGroupId}]`);
-          }
-        });
-      }
+    if (agentEngine.scoutFoxGroupId && typeof chrome.tabs.group === 'function') {
+      chrome.tabs.group({ tabIds: tab.id, groupId: agentEngine.scoutFoxGroupId }, () => {
+        try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+        Logger.info('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'ScoutFox' tab group [${agentEngine.scoutFoxGroupId}]`);
+        if (typeof chrome.sidePanel !== 'undefined' && chrome.sidePanel.setOptions) {
+          chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+            try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+          });
+        }
+      });
+    }
 
+    if (agentEngine.status === 'running') {
       setTimeout(() => {
         chrome.tabs.get(tab.id, (createdTab) => {
           if (createdTab && isValidWebTab(createdTab)) {
@@ -239,6 +294,55 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
       }, 500);
     }
   });
+
+  // Scope side panel visibility: hide side panel when user switches to a tab outside the ScoutFox tab group
+  if (chrome.tabs.onActivated) {
+    chrome.tabs.onActivated.addListener(async (activeInfo) => {
+      if (!agentEngine.scoutFoxGroupId || typeof chrome.sidePanel === 'undefined' || !chrome.sidePanel.setOptions) return;
+      const tabId = activeInfo.tabId;
+
+      try {
+        const tab = await new Promise((resolve) => {
+          chrome.tabs.get(tabId, (t) => {
+            try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+            resolve(t);
+          });
+        });
+
+        if (tab) {
+          const isInScoutFoxGroup = tab.groupId === agentEngine.scoutFoxGroupId;
+          if (isInScoutFoxGroup) {
+            chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+              try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+            });
+          } else {
+            chrome.sidePanel.setOptions({ tabId, enabled: false }, () => {
+              try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+            });
+          }
+        }
+      } catch (_) {}
+    });
+  }
+
+  // Handle dynamic group changes (e.g. user dragging tab into/out of ScoutFox group)
+  if (chrome.tabs.onUpdated) {
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+      if (!agentEngine.scoutFoxGroupId || typeof chrome.sidePanel === 'undefined' || !chrome.sidePanel.setOptions) return;
+      if (changeInfo.groupId !== undefined) {
+        const isInScoutFoxGroup = changeInfo.groupId === agentEngine.scoutFoxGroupId;
+        if (isInScoutFoxGroup) {
+          chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+            try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+          });
+        } else {
+          chrome.sidePanel.setOptions({ tabId, enabled: false }, () => {
+            try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+          });
+        }
+      }
+    });
+  }
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -347,18 +451,22 @@ function routeMessage(request, sender, sendResponse) {
  * Prioritizes tabs inside the active 'ScoutFox' Tab Group sandbox when active.
  */
 async function getActiveTab() {
-  if (agentEngine.status === 'running' && agentEngine.scoutFoxGroupId && typeof chrome.tabs.query === 'function') {
+  // 1. ALWAYS prioritize the user's currently focused active tab in the window!
+  const focused = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0] || 
+                  (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
+
+  if (focused && isValidWebTab(focused)) {
+    return focused;
+  }
+
+  // 2. If focused tab is in ScoutFox group and valid:
+  if (agentEngine.scoutFoxGroupId && typeof chrome.tabs.query === 'function') {
     try {
       const groupTabs = await chrome.tabs.query({ groupId: agentEngine.scoutFoxGroupId });
-      const activeInGroup = groupTabs.find(t => t.active && isValidWebTab(t));
-      if (activeInGroup) return activeInGroup;
       const validInGroup = groupTabs.find(isValidWebTab);
       if (validInGroup) return validInGroup;
     } catch (_) {}
   }
-
-  const focused = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0] || null;
-  if (focused && isValidWebTab(focused)) return focused;
 
   if (focused) {
     Logger.warn('Background', `[TAB_NOT_AUTOMATABLE] The focused tab (${focused.url || 'unknown URL'}) cannot be automated — browsers block extensions from scripting internal pages. Looking for another tab.`);
@@ -371,8 +479,26 @@ async function getActiveTab() {
 
   if (validTab) {
     Logger.warn('Background', `[TAB_SUBSTITUTED] Running against tab [${validTab.id}] (${validTab.url}) instead, because the focused tab cannot be scripted. Switch to the page you want automated if this is not it.`);
+    return validTab;
   }
-  return validTab;
+
+  // AUTO-CREATE FRESH WEB TAB FALLBACK ONLY IF sitting on chrome:// internal page:
+  Logger.info('Background', '[AUTO_CREATE_TAB] No scriptable web tab found. Auto-opening a fresh tab to https://www.google.com...');
+  const newTab = await new Promise((resolve) => {
+    if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.create) {
+      chrome.tabs.create({ url: 'https://www.google.com', active: true }, (t) => {
+        resolve(t);
+      });
+    } else {
+      resolve({ id: 999, url: 'https://www.google.com' });
+    }
+  });
+
+  if (agentEngine && agentEngine.waitForTabComplete) {
+    await agentEngine.waitForTabComplete(newTab.id, 4000);
+  }
+
+  return newTab;
 }
 
 function isValidWebTab(tab) {

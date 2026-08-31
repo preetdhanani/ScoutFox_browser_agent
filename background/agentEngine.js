@@ -205,24 +205,24 @@ export class AgentEngine {
       this.stepCount = stored.stepCount || 0;
       this.currentPlanIndex = stored.currentPlanIndex || 0;
       this.activeTabId = stored.activeTabId || null;
+      this.scoutFoxGroupId = stored.scoutFoxGroupId || null;
 
       // Keep the version counter monotonic across worker restarts so the sidepanel's
       // out-of-order guard still holds even within a single boot.
       this.stateVersion = (stored.stateVersion || 0) + 1;
 
       if (stored.status === 'running' || stored.status === 'paused') {
-        // The loop that owned this status died with the previous worker. Never silently
-        // pretend it finished — surface it in the timeline AND the logs.
+        // The loop that owned this status died with the previous worker. Surface interruption.
         this.status = 'idle';
         this.currentPhase = '';
         this.history.push({
           type: 'error',
           content: `Previous task was interrupted — Chrome shut down the extension's background worker mid-run (this happens after ~30s idle or when the browser reclaims memory). Progress up to step ${this.stepCount} is preserved above. Re-run the task to continue.`
         });
-        Logger.warn('AgentEngine', `[STATE_RESTORE_INTERRUPTED] Recovered a session that was still marked "${stored.status}" at step ${this.stepCount}. The execution loop did not survive the worker restart; status forced to idle and the interruption surfaced to the user.`);
+        Logger.warn('AgentEngine', `[STATE_RESTORE_INTERRUPTED] Recovered a session that was still marked "${stored.status}" at step ${this.stepCount}.`);
       } else {
         this.status = stored.status || 'idle';
-        Logger.info('AgentEngine', `[STATE_RESTORE] Restored session "${this.currentTask || 'none'}" (status=${this.status}, step=${this.stepCount}, ${this.history.length} history entries, boot ${this.bootId.slice(0, 8)}).`);
+        Logger.info('AgentEngine', `[STATE_RESTORE] Restored session "${this.currentTask || 'none'}" (status=${this.status}, step=${this.stepCount}, boot ${this.bootId.slice(0, 8)}).`);
       }
 
       this.notifyStateChange();
@@ -243,7 +243,8 @@ export class AgentEngine {
             status: this.status,
             currentPlanIndex: this.currentPlanIndex,
             activeTabId: this.activeTabId,
-            stateVersion: this.stateVersion
+            stateVersion: this.stateVersion,
+            scoutFoxGroupId: this.scoutFoxGroupId
           }
         }, () => {
           const err = lastRuntimeError();
@@ -265,8 +266,9 @@ export class AgentEngine {
     this.stepCount = 0;
     this.currentPlanIndex = 0;
     this.currentTask = null;
+    Logger.clearLogs();
     this.notifyStateChange();
-    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history and plan cleared.');
+    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history, logs, and plan cleared for fresh session.');
   }
 
   /**
@@ -354,50 +356,82 @@ export class AgentEngine {
 
       if (!tab) return null;
 
-      let groupId = tab.groupId;
-      const TAB_GROUP_ID_NONE = typeof chrome.tabGroups !== 'undefined' && chrome.tabGroups.TAB_GROUP_ID_NONE !== undefined
+      const TAB_GROUP_ID_NONE = (typeof chrome.tabGroups !== 'undefined' && chrome.tabGroups.TAB_GROUP_ID_NONE !== undefined)
         ? chrome.tabGroups.TAB_GROUP_ID_NONE
         : -1;
 
-      let needsGroup = false;
-
-      if (groupId && groupId !== TAB_GROUP_ID_NONE) {
+      // 1. Check if our recorded scoutFoxGroupId is still valid and active in Chrome
+      let activeGroupValid = false;
+      if (this.scoutFoxGroupId && this.scoutFoxGroupId !== TAB_GROUP_ID_NONE) {
         if (chrome.tabGroups && chrome.tabGroups.get) {
-          const grp = await new Promise((resolve) => {
-            chrome.tabGroups.get(groupId, (g) => {
+          const activeGrp = await new Promise((resolve) => {
+            chrome.tabGroups.get(this.scoutFoxGroupId, (g) => {
               lastRuntimeError();
               resolve(g);
             });
           });
-          if (!grp || grp.title !== 'ScoutFox') {
-            needsGroup = true;
+          if (activeGrp) {
+            activeGroupValid = true;
           }
+        } else {
+          activeGroupValid = true;
         }
-      } else {
-        needsGroup = true;
       }
 
-      if (needsGroup) {
-        groupId = await new Promise((resolve) => {
-          chrome.tabs.group({ tabIds: tabId }, (newId) => {
-            lastRuntimeError();
-            resolve(newId);
-          });
-        });
+      if (!activeGroupValid) {
+        this.scoutFoxGroupId = null;
+      }
 
-        if (groupId && chrome.tabGroups && chrome.tabGroups.update) {
+      // 2. If valid ScoutFox group exists and tab is not yet in it -> join tab into existing group
+      if (activeGroupValid && this.scoutFoxGroupId) {
+        if (tab.groupId !== this.scoutFoxGroupId) {
           await new Promise((resolve) => {
-            chrome.tabGroups.update(groupId, { title: 'ScoutFox', color: 'orange' }, () => {
+            chrome.tabs.group({ tabIds: tabId, groupId: this.scoutFoxGroupId }, (gid) => {
               lastRuntimeError();
-              resolve();
+              resolve(gid);
             });
           });
         }
+        Logger.info('AgentEngine', `[TAB_SANDBOX] Tab [${tabId}] joined active 'ScoutFox' tab group (GroupID: ${this.scoutFoxGroupId})`);
+        return this.scoutFoxGroupId;
       }
 
-      this.scoutFoxGroupId = groupId;
-      Logger.info('AgentEngine', `[TAB_SANDBOX] Active task sandboxed inside 'ScoutFox' tab group (GroupID: ${groupId})`);
-      return groupId;
+      // 3. Check if target tab is already in a titled ScoutFox group
+      if (tab.groupId && tab.groupId !== TAB_GROUP_ID_NONE && chrome.tabGroups && chrome.tabGroups.get) {
+        const currentGrp = await new Promise((resolve) => {
+          chrome.tabGroups.get(tab.groupId, (g) => {
+            lastRuntimeError();
+            resolve(g);
+          });
+        });
+        if (currentGrp && currentGrp.title === 'ScoutFox') {
+          this.scoutFoxGroupId = tab.groupId;
+          this.persistState();
+          return tab.groupId;
+        }
+      }
+
+      // 4. Create fresh 'ScoutFox' tab group
+      const newGroupId = await new Promise((resolve) => {
+        chrome.tabs.group({ tabIds: tabId }, (gid) => {
+          lastRuntimeError();
+          resolve(gid);
+        });
+      });
+
+      if (newGroupId && chrome.tabGroups && chrome.tabGroups.update) {
+        await new Promise((resolve) => {
+          chrome.tabGroups.update(newGroupId, { title: 'ScoutFox', color: 'orange' }, () => {
+            lastRuntimeError();
+            resolve();
+          });
+        });
+      }
+
+      this.scoutFoxGroupId = newGroupId;
+      this.persistState();
+      Logger.info('AgentEngine', `[TAB_SANDBOX] Created fresh 'ScoutFox' tab group (GroupID: ${newGroupId}) for tab [${tabId}]`);
+      return newGroupId;
     } catch (err) {
       Logger.warn('AgentEngine', '[TAB_SANDBOX_WARN] Could not sandbox tab into ScoutFox group', err.message);
       return null;
