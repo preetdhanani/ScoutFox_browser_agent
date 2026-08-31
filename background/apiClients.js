@@ -56,27 +56,66 @@ export const ApiClients = {
   /**
    * Main completion method dispatching to selected provider
    */
-  async generateCompletion(settings, messages, systemPrompt) {
+  async generateCompletion(settings, messages, systemPrompt, options = {}) {
     const provider = settings.provider || 'gemini';
+    const timeoutMs = Number(settings.llmTimeoutMs) > 0 ? Number(settings.llmTimeoutMs) : 120000;
+    const signal = options.signal || null;
 
-    Logger.info('ApiClients', `[NETWORK] Dispatching completion request to provider [${provider}] with model [${settings.model}]`);
+    Logger.info('ApiClients', `[NETWORK] Dispatching completion request to provider [${provider}] with model [${settings.model}] (timeout ${Math.round(timeoutMs / 1000)}s)`);
 
-    switch (provider) {
-      case 'openrouter':
-        return this.callOpenRouter(settings, messages, systemPrompt);
-      case 'agent_router':
-        return this.callAgentRouter(settings, messages, systemPrompt);
-      case 'ollama':
-        return this.callOllama(settings, messages, systemPrompt);
-      case 'openai_compatible':
-      case 'openai':
-        return this.callOpenAI(settings, messages, systemPrompt);
-      case 'anthropic':
-        return this.callAnthropic(settings, messages, systemPrompt);
-      case 'gemini':
-        return this.callGemini(settings, messages, systemPrompt);
-      default:
-        throw new Error(`Unsupported LLM provider: ${provider}`);
+    const startedAt = Date.now();
+    const dispatch = () => {
+      switch (provider) {
+        case 'openrouter':
+          return this.callOpenRouter(settings, messages, systemPrompt);
+        case 'agent_router':
+          return this.callAgentRouter(settings, messages, systemPrompt);
+        case 'ollama':
+          return this.callOllama(settings, messages, systemPrompt);
+        case 'openai_compatible':
+        case 'openai':
+          return this.callOpenAI(settings, messages, systemPrompt);
+        case 'anthropic':
+          return this.callAnthropic(settings, messages, systemPrompt);
+        case 'gemini':
+          return this.callGemini(settings, messages, systemPrompt);
+        default:
+          throw new Error(`Unsupported LLM provider: ${provider}`);
+      }
+    };
+
+    // A provider that accepts the connection and then never answers used to park the agent
+    // loop forever — and because the keepalive holds the service worker awake during a task,
+    // Chrome would never reclaim it either. That turns a recoverable stall into a permanent
+    // hang with no error anywhere. Race the call against a deadline and the task's abort
+    // signal so the loop always regains control and always reports why.
+    let timer = null;
+    let onAbort = null;
+
+    try {
+      return await Promise.race([
+        dispatch(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`Provider [${provider}] did not respond within ${Math.round(timeoutMs / 1000)}s. The request was abandoned — check that the endpoint and model are reachable, or raise llmTimeoutMs in settings.`));
+          }, timeoutMs);
+        }),
+        new Promise((_, reject) => {
+          if (!signal) return;
+          if (signal.aborted) {
+            reject(new Error('LLM request cancelled before dispatch (task stopped or paused).'));
+            return;
+          }
+          onAbort = () => reject(new Error('LLM request cancelled (task stopped or paused).'));
+          signal.addEventListener('abort', onAbort, { once: true });
+        })
+      ]);
+    } catch (err) {
+      Logger.warn('ApiClients', `[NETWORK_ABORTED] Completion via [${provider}] ended after ${Date.now() - startedAt}ms: ${err.message}`);
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
     }
   },
 

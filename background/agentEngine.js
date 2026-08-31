@@ -10,6 +10,46 @@ import { ApiClients } from './apiClients.js';
 import { Storage } from '../utils/storage.js';
 import { Logger } from '../utils/logger.js';
 
+/**
+ * Safely read chrome.runtime.lastError. It MUST be read inside every chrome.* callback or
+ * Chrome emits an "unchecked runtime.lastError" warning, but chrome.runtime itself is absent
+ * in test and non-extension contexts — so a bare read would throw and swallow the callback.
+ */
+function lastRuntimeError() {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError) {
+      return chrome.runtime.lastError;
+    }
+  } catch (_) { /* context invalidated */ }
+  return null;
+}
+
+/**
+ * Explain why a URL cannot be automated, or return null if it can be.
+ *
+ * Chrome forbids extensions from injecting scripts into its own internal pages and the Web
+ * Store, and no permission unlocks it — it is a hard browser restriction, not a bug and not
+ * something a page reload fixes. Saying so plainly is the only useful response.
+ */
+function describeRestrictedUrl(url) {
+  if (!url) {
+    return 'That tab has not finished loading a page yet. Wait for it to load, then start the task again.';
+  }
+  if (/^chrome:\/\//i.test(url) || /^edge:\/\//i.test(url) || /^about:/i.test(url) || /^brave:\/\//i.test(url)) {
+    return `ScoutFox cannot read ${url} — Chrome blocks all extensions from accessing its own internal pages, so no extension can automate this screen. Switch to a normal website tab (anything starting with http:// or https://) and start the task again.`;
+  }
+  if (/^chrome-extension:\/\//i.test(url) || /^moz-extension:\/\//i.test(url)) {
+    return `ScoutFox cannot read ${url} — browsers block extensions from scripting other extensions' pages. Switch to a normal website tab and start the task again.`;
+  }
+  if (/^https:\/\/chromewebstore\.google\.com/i.test(url) || /^https:\/\/chrome\.google\.com\/webstore/i.test(url)) {
+    return 'ScoutFox cannot read the Chrome Web Store — Chrome blocks extensions from scripting it. Switch to another site and start the task again.';
+  }
+  if (/^(file|view-source|devtools|data):/i.test(url)) {
+    return `ScoutFox cannot read ${url.split(':')[0]}: pages. Switch to a normal website tab and start the task again.`;
+  }
+  return null;
+}
+
 export class AgentEngine {
   constructor() {
     this.status = 'idle'; // 'idle' | 'running' | 'paused' | 'stopped'
@@ -25,35 +65,90 @@ export class AgentEngine {
     this.recentActionSignatures = [];
     this.currentPlanIndex = 0;
     this.networkBuffers = new Map(); // tabId -> Array of Network Requests (capped at 100)
-    
-    this.restoreState();
+
+    // Identifies THIS service-worker incarnation. MV3 terminates the worker aggressively
+    // (idle timeout, memory pressure, Chrome's hard cap on port-based keepalive), and every
+    // restart builds a brand-new AgentEngine with stateVersion back at 0. Without a boot id
+    // the sidepanel cannot distinguish "an older, out-of-order message" from "the backend
+    // restarted and its counter rewound", so it would silently discard every update forever.
+    this.bootId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `boot_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+
+    // Set by EVERY entry point that mutates engine state. restoreState() consults it after its
+    // async storage read resolves: if anything has touched the engine in the meantime, the
+    // snapshot on disk is already stale and applying it would silently undo the user's action.
+    // startTask awaits restorePromise so it is ordered correctly, but clearHistory/pause/
+    // resume/stop are synchronous message handlers that cannot — this flag covers them.
+    this.dirty = false;
+
+    // restoreState() is async. Anything that mutates engine state MUST await this first,
+    // otherwise a late-landing storage read overwrites a task that has already started.
+    this.restorePromise = this.restoreState();
   }
 
   async restoreState() {
     try {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(['agent_session'], (res) => {
-          if (res && res.agent_session) {
-            this.history = res.agent_session.history || [];
-            this.planSteps = res.agent_session.planSteps || [];
-            this.currentTask = res.agent_session.task || null;
-            this.stepCount = res.agent_session.stepCount || 0;
-            this.currentPlanIndex = res.agent_session.currentPlanIndex || 0;
-            
-            if (res.agent_session.status === 'running' && !this.isLoopActive) {
-              Logger.info('AgentEngine', '[STATE_RESTORE] Service worker restarted. Resetting zombie running state to idle.');
-              this.status = 'idle';
-              this.currentPhase = '';
-            } else {
-              this.status = res.agent_session.status || 'idle';
-            }
-            
-            this.notifyStateChange();
-          }
-        });
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+        Logger.info('AgentEngine', '[STATE_RESTORE] chrome.storage unavailable — starting from a clean engine state.');
+        return;
       }
+
+      const stored = await new Promise((resolve) => {
+        chrome.storage.local.get(['agent_session'], (res) => {
+          const err = lastRuntimeError();
+          if (err) {
+            Logger.warn('AgentEngine', '[STATE_RESTORE_FAILED] Could not read persisted session', err.message);
+            resolve(null);
+            return;
+          }
+          resolve(res && res.agent_session ? res.agent_session : null);
+        });
+      });
+
+      // GUARD: a START_TASK message can cold-boot this worker and begin mutating state while
+      // the storage read above is still in flight. Restoring here would wipe the live task's
+      // history/plan and reset status to 'idle', leaving the loop dead and the panel showing
+      // the PREVIOUS run's checklist. Callers await restorePromise, but keep this as a hard stop.
+      if (this.isLoopActive || this.status === 'running' || this.dirty) {
+        Logger.warn('AgentEngine', '[STATE_RESTORE_SKIPPED] The engine was modified while the persisted session was being read. Discarding the stale snapshot rather than clobbering live state.');
+        return;
+      }
+
+      if (!stored) {
+        Logger.info('AgentEngine', `[STATE_RESTORE] No persisted session found. Fresh engine (boot ${this.bootId.slice(0, 8)}).`);
+        return;
+      }
+
+      this.history = stored.history || [];
+      this.planSteps = stored.planSteps || [];
+      this.currentTask = stored.task || null;
+      this.stepCount = stored.stepCount || 0;
+      this.currentPlanIndex = stored.currentPlanIndex || 0;
+      this.activeTabId = stored.activeTabId || null;
+
+      // Keep the version counter monotonic across worker restarts so the sidepanel's
+      // out-of-order guard still holds even within a single boot.
+      this.stateVersion = (stored.stateVersion || 0) + 1;
+
+      if (stored.status === 'running' || stored.status === 'paused') {
+        // The loop that owned this status died with the previous worker. Never silently
+        // pretend it finished — surface it in the timeline AND the logs.
+        this.status = 'idle';
+        this.currentPhase = '';
+        this.history.push({
+          type: 'error',
+          content: `Previous task was interrupted — Chrome shut down the extension's background worker mid-run (this happens after ~30s idle or when the browser reclaims memory). Progress up to step ${this.stepCount} is preserved above. Re-run the task to continue.`
+        });
+        Logger.warn('AgentEngine', `[STATE_RESTORE_INTERRUPTED] Recovered a session that was still marked "${stored.status}" at step ${this.stepCount}. The execution loop did not survive the worker restart; status forced to idle and the interruption surfaced to the user.`);
+      } else {
+        this.status = stored.status || 'idle';
+        Logger.info('AgentEngine', `[STATE_RESTORE] Restored session "${this.currentTask || 'none'}" (status=${this.status}, step=${this.stepCount}, ${this.history.length} history entries, boot ${this.bootId.slice(0, 8)}).`);
+      }
+
+      this.notifyStateChange();
     } catch (e) {
-      Logger.warn('AgentEngine', 'Could not restore state', e);
+      Logger.error('AgentEngine', '[STATE_RESTORE_ERROR] Unexpected failure restoring persisted session', e);
     }
   }
 
@@ -67,16 +162,24 @@ export class AgentEngine {
             task: this.currentTask,
             stepCount: this.stepCount,
             status: this.status,
-            currentPlanIndex: this.currentPlanIndex
+            currentPlanIndex: this.currentPlanIndex,
+            activeTabId: this.activeTabId,
+            stateVersion: this.stateVersion
+          }
+        }, () => {
+          const err = lastRuntimeError();
+          if (err) {
+            Logger.warn('AgentEngine', '[STATE_PERSIST_FAILED] Could not write session to storage', err.message);
           }
         });
       }
     } catch (e) {
-      Logger.warn('AgentEngine', 'Could not persist state', e);
+      Logger.warn('AgentEngine', '[STATE_PERSIST_ERROR] Could not persist state', e);
     }
   }
 
   clearHistory() {
+    this.dirty = true;
     this.history = [];
     this.planSteps = [];
     this.stepCount = 0;
@@ -102,8 +205,13 @@ export class AgentEngine {
           history: this.history,
           planSteps: this.planSteps,
           currentPhase: this.currentPhase,
-          logs: Logger.getLogsHistory(),
+          // Deliberately NOT sending Logger.getLogsHistory() here. setPhase() calls this
+          // ~7 times per loop iteration, and shipping the whole 300-entry ring (which holds
+          // full [LLM_RAW_OUTPUT] bodies) meant several hundred KB structure-cloned across
+          // the port per step. Logs already stream incrementally via LOG_ENTRY; the panel
+          // only needs the bulk array on an explicit GET_AGENT_STATE resync.
           stateVersion: this.stateVersion,
+          bootId: this.bootId,
           ...extraData
         });
       } catch (err) {
@@ -322,8 +430,24 @@ export class AgentEngine {
   }
 
   async startTask(userPrompt, tabId) {
-    if (!userPrompt || !userPrompt.trim()) return;
+    if (!userPrompt || !userPrompt.trim()) {
+      Logger.warn('AgentEngine', '[START_TASK_REJECTED] Ignoring empty task prompt.');
+      return;
+    }
 
+    // A START_TASK message is what cold-boots this worker in the common case, so the
+    // constructor's persisted-session read is almost always still in flight right now.
+    // Let it land and be applied FIRST, then overwrite it deliberately below. Skipping this
+    // await is what caused tasks to silently die with the previous run's checklist on screen.
+    try {
+      await this.restorePromise;
+    } catch (err) {
+      Logger.warn('AgentEngine', '[START_TASK] Session restore failed; continuing with a clean state', err);
+    }
+
+    Logger.info('AgentEngine', `[START_TASK] Starting task on tab [${tabId}]: "${userPrompt.trim()}"`);
+
+    this.dirty = true;
     this.status = 'running';
     this.currentTask = userPrompt.trim();
     this.history = [];
@@ -332,6 +456,7 @@ export class AgentEngine {
     this.currentPlanIndex = 0;
     this.activeTabId = tabId;
     this.isLoopActive = true;
+    this.abortController = new AbortController();
 
     this.history.push({
       type: 'user_goal',
@@ -424,31 +549,63 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     this.notifyStateChange();
   }
 
-  pause() {
-    if (this.status === 'running') {
-      this.status = 'paused';
-      this.setPhase('Task paused by user');
-      Logger.info('AgentEngine', '[PAUSED] Task paused by user.');
+  /**
+   * Cancel whatever the loop is currently blocked on. Without this, pause/stop only flip a
+   * flag that is read once per iteration — so a Stop pressed during a 60s LLM call would let
+   * the loop wake up afterwards and still drive a real click into the user's page.
+   */
+  abortInFlight(reason) {
+    if (this.abortController && !this.abortController.signal.aborted) {
+      try {
+        this.abortController.abort();
+        Logger.info('AgentEngine', `[ABORT_IN_FLIGHT] Cancelled the in-flight request (${reason}).`);
+      } catch (err) {
+        Logger.warn('AgentEngine', '[ABORT_FAILED] Could not abort the in-flight request', err);
+      }
     }
+  }
+
+  pause() {
+    this.dirty = true;
+    if (this.status !== 'running') {
+      Logger.warn('AgentEngine', `[PAUSE_IGNORED] Pause requested while status is "${this.status}" — nothing to pause.`);
+      return { success: false, error: `Cannot pause: the agent is ${this.status}, not running.` };
+    }
+    this.status = 'paused';
+    this.abortInFlight('paused by user');
+    this.setPhase('Task paused by user');
+    Logger.info('AgentEngine', '[PAUSED] Task paused by user.');
+    return { success: true };
   }
 
   resume() {
-    if (this.status === 'paused') {
-      this.status = 'running';
-      this.setPhase('Resuming task...');
-      Logger.info('AgentEngine', '[RESUMED] Task resumed by user.');
-      this.runLoop().catch((err) => {
-        Logger.error('AgentEngine', '[RESUME_ERROR] Uncaught exception resuming loop', err);
-      });
+    this.dirty = true;
+    if (this.status !== 'paused') {
+      // restoreState deliberately converts a persisted 'paused' back to 'idle' after a worker
+      // restart, so Resume can legitimately find nothing to resume. Say so instead of
+      // answering success and doing nothing.
+      Logger.warn('AgentEngine', `[RESUME_IGNORED] Resume requested while status is "${this.status}". The paused task did not survive; re-run it to continue.`);
+      return { success: false, error: `Cannot resume: the agent is ${this.status}. The paused task did not survive a background restart — please re-run it.` };
     }
+    this.status = 'running';
+    this.abortController = new AbortController();
+    this.setPhase('Resuming task...');
+    Logger.info('AgentEngine', '[RESUMED] Task resumed by user.');
+    this.runLoop().catch((err) => {
+      Logger.error('AgentEngine', '[RESUME_ERROR] Uncaught exception resuming loop', err);
+    });
+    return { success: true };
   }
 
   stop() {
+    this.dirty = true;
     this.status = 'stopped';
     this.isLoopActive = false;
     this.currentPhase = '';
+    this.abortInFlight('stopped by user');
     Logger.info('AgentEngine', '[STOPPED] Task stopped by user.');
     this.notifyStateChange({ message: 'Task stopped.' });
+    return { success: true };
   }
 
   async runLoop() {
@@ -537,7 +694,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       let responseText = '';
       try {
         const messages = this.formatMessagesForLLM(userMessage);
-        responseText = await ApiClients.generateCompletion(settings, messages, systemPrompt);
+        responseText = await ApiClients.generateCompletion(settings, messages, systemPrompt, {
+          signal: this.abortController ? this.abortController.signal : null
+        });
         Logger.info('AgentEngine', `[LLM_RAW_OUTPUT]\n${responseText}`);
       } catch (err) {
         Logger.error('AgentEngine', '[LLM_API_ERROR] Connection failure', err);
@@ -609,8 +768,24 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       }
 
       // 4. Action Execution on Web Page
+      // Last checkpoint before we touch the user's page. The status is only tested once per
+      // iteration, at the top of the while loop — but Pause/Stop can land at any moment during
+      // the seconds spent in the LLM call above. Without this re-check, a Stop pressed mid-think
+      // flips the UI to "Stopped" and then still fires a real click into the page.
+      if (this.status !== 'running') {
+        Logger.warn('AgentEngine', `[ABORTED_MIDSTEP] Status changed to "${this.status}" during step ${this.stepCount}. Discarding the pending [${actionObj.action}] instead of executing it.`);
+        this.history.push({
+          step: this.stepCount,
+          type: 'execution_result',
+          success: false,
+          error: `Action [${actionObj.action}] was discarded because the task was ${this.status}.`
+        });
+        this.notifyStateChange();
+        break;
+      }
+
       this.setPhase(`⚡ Step ${this.stepCount}/${maxSteps}: Executing ${formatActionSummary(actionObj)}...`);
-      
+
       try {
         const execResult = await this.executeActionOnTab(this.activeTabId, actionObj);
         Logger.info('AgentEngine', `[ACTION_RESULT] ${execResult.success ? 'Success' : 'Failed'}: ${execResult.message || execResult.error}`);
@@ -698,19 +873,40 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     });
   }
 
+  /**
+   * Read the DOM of the tab we are actually driving, injecting the content scripts if the
+   * page does not have them yet (a fresh tab, or one whose scripts were invalidated by an
+   * extension reload).
+   *
+   * This used to resolve the tab with chrome.tabs.query({active:true}) and then inject into
+   * THAT tab rather than the tabId it was handed. So the moment the user's focus sat on a
+   * different tab — very commonly chrome://extensions right after reloading the extension —
+   * it injected into the wrong page and reported the wrong page's URL in the failure.
+   */
   async getTabDOMWithAutoInject(tabId, showBadges = true) {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const tab = tabs[0];
-    if (!tab) throw new Error('No active browser tab detected');
+    if (!tabId) throw new Error('No target tab was selected for this task.');
+
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch (err) {
+      throw new Error(`The target tab [${tabId}] no longer exists (it was probably closed). Open the page you want automated and start the task again.`);
+    }
+
+    const restriction = describeRestrictedUrl(tab.url);
+    if (restriction) {
+      // Fail with the truth. The old message said "refresh the page and try again", which for
+      // a chrome:// page is advice that can never work and loops the user indefinitely.
+      throw new Error(restriction);
+    }
 
     try {
-      const responseData = await this.sendTabMessage(tabId, { action: 'GET_DOM_SNAPSHOT', payload: { showBadges } });
-      return responseData;
+      return await this.sendTabMessage(tabId, { action: 'GET_DOM_SNAPSHOT', payload: { showBadges } });
     } catch (err) {
-      Logger.info('AgentEngine', `Content script not active on tab [${tabId}]. Injecting script dependencies...`);
+      Logger.info('AgentEngine', `[INJECT] Content script not active on tab [${tabId}] (${tab.url}). Injecting script dependencies...`);
       try {
         await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
+          target: { tabId },
           files: [
             'content/domCompressor.js',
             'content/actionExecutor.js',
@@ -718,11 +914,24 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           ]
         });
 
+        // The network recorder lives in the MAIN world and so needs its own call. Omitting it
+        // here meant a recovered tab never recorded traffic, and read_network_requests then
+        // answered "no requests captured" — indistinguishable from "no requests were made".
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId, allFrames: true },
+            world: 'MAIN',
+            files: ['content/net-recorder.js']
+          });
+        } catch (netErr) {
+          Logger.warn('AgentEngine', `[INJECT_PARTIAL] Page scripts loaded, but the network recorder could not be injected into tab [${tabId}]. read_network_requests will be empty for this page.`, netErr);
+        }
+
         await new Promise(r => setTimeout(r, 400));
         return await this.sendTabMessage(tabId, { action: 'GET_DOM_SNAPSHOT', payload: { showBadges } });
       } catch (injectErr) {
-        Logger.error('AgentEngine', 'Script injection failed on tab', injectErr);
-        throw new Error(`Could not connect to tab (${tab.url}). Please refresh the web page tab once (press Cmd+R or F5) and try again.`);
+        Logger.error('AgentEngine', `[INJECT_FAILED] Could not inject page scripts into tab [${tabId}] (${tab.url})`, injectErr);
+        throw new Error(`Could not read the page at ${tab.url} — ${injectErr.message}. Reload that tab (Cmd+R) and start the task again.`);
       }
     }
   }

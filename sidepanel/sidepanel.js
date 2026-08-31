@@ -13,6 +13,17 @@ let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
 let apiKeyFetchDebounce = null;
 let allFetchedModels = [];
+let portReconnectAttempts = 0;
+let portReconnectTimer = null;
+
+// Out-of-order render guard. The live port and the GET_AGENT_STATE resync are two independent
+// async channels with no ordering guarantee, so a slow resync reply can arrive after a newer
+// live push and roll the UI backwards. stateVersion orders them — but it restarts near zero
+// whenever Chrome rebuilds the service worker, so it is only comparable within one boot.
+// bootId scopes the comparison; a new boot resets the watermark instead of silently discarding
+// every update from the fresh worker forever (which would freeze the panel permanently).
+let lastRenderedStateVersion = -1;
+let lastBootId = null;
 
 /**
  * Inline icon set — thin-line SVGs matching the Studio Mono system.
@@ -31,6 +42,21 @@ const ICONS = {
   star: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l2.6 5.4 5.9.8-4.3 4.2 1 5.9L12 16.3 6.8 19.3l1-5.9-4.3-4.2 5.9-.8z"/></svg>',
   doc: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5"/><line x1="7" y1="9" x2="17" y2="9"/><line x1="7" y1="13" x2="17" y2="13"/><line x1="7" y1="17" x2="13" y2="17"/></svg>',
   aim: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>'
+};
+
+/**
+ * Log filter chips -> the tag prefixes the codebase actually emits.
+ *
+ * These used to be matched as a literal `[DOM]` / `[LLM]` / `[EXECUTION]` token, but nothing
+ * anywhere logs those exact strings — the real tags are [DOM_SNAPSHOT_INPUT], [LLM_RAW_OUTPUT],
+ * [ACTION_DISPATCH] and so on. Four of the five chips therefore matched nothing at all and
+ * rendered a permanently empty pane. Match on real prefixes instead, case-insensitively.
+ */
+const LOG_FILTER_KEYWORDS = {
+  DOM: ['[DOM', '[SNAPSHOT', '[PAGE', 'DOMCOMPRESSOR'],
+  LLM: ['[LLM', '[PLANNER', '[PARSE', '[UNIVERSAL_GUARDRAIL', 'APICLIENT'],
+  EXECUTION: ['[ACTION', '[EXEC', '[TASK', '[STEP', '[GUARDRAIL', '[STOPPED', '[PAUSED', '[RESUMED'],
+  NETWORK: ['[NET', '[DNR', '[FETCH', '[KEEPALIVE', '[PORT', '[BROADCAST', '[WORKER', '[RESYNC']
 };
 
 const THEME_MODES = ['system', 'light', 'dark'];
@@ -337,11 +363,33 @@ function initTabs() {
   });
 }
 
+/**
+ * Connection to the background service worker.
+ *
+ * Chrome terminates MV3 service workers aggressively, which kills this port. Without an
+ * onDisconnect handler the panel keeps holding a dead port forever: the agent keeps running
+ * and driving the browser, but every STATE_UPDATE and LOG_ENTRY it emits goes nowhere — the
+ * timeline freezes and the log pane stays empty. That is exactly the "everything goes blank"
+ * failure. So: detect the drop, tell the user, and reconnect with backoff.
+ */
 function initPortConnection() {
-  if (typeof chrome !== 'undefined' && chrome.runtime) {
-    backgroundPort = chrome.runtime.connect({ name: 'scoutfox_sidepanel' });
+  connectPort();
+}
 
-    backgroundPort.onMessage.addListener((msg) => {
+function connectPort() {
+  if (typeof chrome === 'undefined' || !chrome.runtime) return;
+
+  try {
+    backgroundPort = chrome.runtime.connect({ name: 'scoutfox_sidepanel' });
+  } catch (err) {
+    reportClientError('sidepanel:port-connect', err);
+    setConnectionBanner(true);
+    scheduleReconnect();
+    return;
+  }
+
+  backgroundPort.onMessage.addListener((msg) => {
+    try {
       if (msg.type === 'STATE_UPDATE') {
         renderState(msg.payload);
         autoSaveActiveSession(msg.payload);
@@ -350,19 +398,144 @@ function initPortConnection() {
         if (rawLogsCache.length > 300) rawLogsCache.shift();
         renderFilteredLogs();
       }
-    });
+    } catch (err) {
+      reportClientError('sidepanel:port-message', err);
+    }
+  });
 
-    chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE' }, (res) => {
-      if (res) {
-        renderState(res);
-        if (res.logs) {
-          rawLogsCache = res.logs;
-          renderFilteredLogs();
-        }
+  backgroundPort.onDisconnect.addListener(() => {
+    // chrome.runtime.lastError must be read here or Chrome logs an unchecked-error warning.
+    const reason = chrome.runtime.lastError ? chrome.runtime.lastError.message : 'service worker terminated';
+    backgroundPort = null;
+    appendLocalLog('WARN', 'Sidepanel', `[PORT_LOST] Connection to the background worker dropped (${reason}). Reconnecting…`);
+    setConnectionBanner(true);
+    scheduleReconnect();
+  });
+
+  if (portReconnectTimer) {
+    clearTimeout(portReconnectTimer);
+    portReconnectTimer = null;
+  }
+  setConnectionBanner(false);
+  resyncAgentState();
+}
+
+function scheduleReconnect() {
+  if (portReconnectTimer) return;
+  portReconnectAttempts++;
+  const delayMs = Math.min(5000, 300 * portReconnectAttempts);
+  portReconnectTimer = setTimeout(() => {
+    portReconnectTimer = null;
+    connectPort();
+  }, delayMs);
+}
+
+/**
+ * Pull authoritative state after every (re)connect. This doubles as the wake-up call that
+ * revives a sleeping service worker, and its response is the only confirmation that the
+ * round trip actually works — which is why the backoff counter resets here rather than in
+ * connectPort(). chrome.runtime.connect() succeeds optimistically even against a dead
+ * context, so resetting on connect alone would pin the backoff at its 300ms floor forever.
+ */
+function resyncAgentState() {
+  if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
+
+  chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE' }, (res) => {
+    if (chrome.runtime.lastError) {
+      appendLocalLog('WARN', 'Sidepanel', `[RESYNC_FAILED] Background worker did not answer GET_AGENT_STATE (${chrome.runtime.lastError.message}). Will retry.`);
+      setConnectionBanner(true);
+      scheduleReconnect();
+      return;
+    }
+
+    portReconnectAttempts = 0;
+    setConnectionBanner(false);
+
+    if (res) {
+      renderState(res);
+      if (res.logs) {
+        rawLogsCache = res.logs;
+        renderFilteredLogs();
       }
-    });
+    }
+  });
+}
+
+/**
+ * Send a control command and REPORT whether it landed.
+ *
+ * Pause / Stop / New Session were previously fire-and-forget with no callback and no
+ * lastError check. If the service worker was asleep or mid-restart the command evaporated
+ * silently — the button appeared to work while the agent carried on driving the page. For
+ * Stop in particular that is a safety problem, not just a cosmetic one.
+ */
+function sendControlMessage(action, done) {
+  if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
+
+  chrome.runtime.sendMessage({ action }, (res) => {
+    if (chrome.runtime.lastError) {
+      const msg = chrome.runtime.lastError.message;
+      appendLocalLog('ERROR', 'Sidepanel', `[CONTROL_FAILED] ${action} did not reach the background worker (${msg}).`);
+      showTaskError(`"${action.replace(/_/g, ' ').toLowerCase()}" did not reach the agent: ${msg}`);
+      scheduleReconnect();
+      if (done) done(false);
+      return;
+    }
+    if (res && res.success === false) {
+      appendLocalLog('ERROR', 'Sidepanel', `[CONTROL_REJECTED] ${action} was rejected: ${res.error || 'no reason given'}`);
+      showTaskError(res.error || `${action} was rejected by the agent.`);
+      if (done) done(false);
+      return;
+    }
+    appendLocalLog('INFO', 'Sidepanel', `[CONTROL_OK] ${action} acknowledged.`);
+    if (done) done(true);
+  });
+}
+
+function setConnectionBanner(isDisconnected) {
+  const pill = document.getElementById('statusPill');
+  const textEl = document.getElementById('statusText');
+  if (!pill) return;
+  pill.classList.toggle('reconnecting', isDisconnected);
+  if (isDisconnected && textEl) textEl.textContent = 'Reconnecting…';
+}
+
+/**
+ * Push a log entry generated in the panel itself into the log pane. Failures on this side of
+ * the boundary (a dead port, most importantly) cannot reach the background logger, so without
+ * this they would leave no trace anywhere — the "logs were empty too" symptom.
+ */
+function appendLocalLog(level, module, message) {
+  rawLogsCache.push({
+    timestamp: new Date().toLocaleTimeString(),
+    level,
+    module,
+    message,
+    data: null
+  });
+  if (rawLogsCache.length > 300) rawLogsCache.shift();
+  try { renderFilteredLogs(); } catch (_) { /* log pane may not exist yet during boot */ }
+  console.warn(`[${module}]`, message);
+}
+
+/**
+ * Forward panel-side exceptions to the background log so nothing fails invisibly.
+ */
+function reportClientError(source, err) {
+  const message = (err && err.message) || String(err);
+  appendLocalLog('ERROR', 'Sidepanel', `[${source}] ${message}`);
+  try {
+    chrome.runtime.sendMessage({
+      action: 'CLIENT_ERROR',
+      payload: { source, message, stack: (err && err.stack) || null }
+    }, () => { void chrome.runtime.lastError; });
+  } catch (_) {
+    // Extension context invalidated — the local log above is the only record, by design.
   }
 }
+
+window.addEventListener('error', (event) => reportClientError('window.onerror', event.error || event.message));
+window.addEventListener('unhandledrejection', (event) => reportClientError('unhandledrejection', event.reason));
 
 function initEventListeners() {
   document.getElementById('btnThemeToggle').addEventListener('click', async () => {
@@ -384,20 +557,20 @@ function initEventListeners() {
   document.getElementById('btnPause').addEventListener('click', () => {
     const btn = document.getElementById('btnPause');
     const isPaused = btn.textContent.trim().includes('Resume');
-    if (isPaused) {
-      chrome.runtime.sendMessage({ action: 'RESUME_TASK' });
-    } else {
-      chrome.runtime.sendMessage({ action: 'PAUSE_TASK' });
-    }
+    sendControlMessage(isPaused ? 'RESUME_TASK' : 'PAUSE_TASK');
   });
 
   document.getElementById('btnStop').addEventListener('click', () => {
-    chrome.runtime.sendMessage({ action: 'STOP_TASK' });
+    sendControlMessage('STOP_TASK');
   });
 
   document.getElementById('btnNewSession').addEventListener('click', () => {
-    currentSessionId = null;
-    chrome.runtime.sendMessage({ action: 'CLEAR_HISTORY' }, () => {
+    sendControlMessage('CLEAR_HISTORY', (ok) => {
+      // Only clear the UI if the background actually cleared its state. Wiping the timeline
+      // regardless used to leave the panel looking empty while the engine still held the
+      // old session — which then reappeared on the next state broadcast.
+      if (!ok) return;
+      currentSessionId = null;
       const planContainer = document.getElementById('planContainer');
       if (planContainer) planContainer.style.display = 'none';
       renderEmptyState();
@@ -512,16 +685,46 @@ async function startTask() {
 
   currentSessionId = `session_${Date.now()}`;
 
+  appendLocalLog('INFO', 'Sidepanel', `[TASK_SUBMIT] Sending task to background worker: "${prompt}"`);
+
   chrome.runtime.sendMessage({ action: 'START_TASK', payload: { prompt } }, (res) => {
+    // Without this check a failed wake-up leaves res undefined and the whole submission
+    // vanishes with no alert, no log and no UI change — the task simply never starts.
+    if (chrome.runtime.lastError) {
+      const msg = chrome.runtime.lastError.message;
+      appendLocalLog('ERROR', 'Sidepanel', `[TASK_SUBMIT_FAILED] Background worker did not accept the task (${msg}). Reconnecting and retrying is usually enough.`);
+      showTaskError(`Could not reach the background worker: ${msg}`);
+      scheduleReconnect();
+      return;
+    }
+
     if (res && res.success) {
       document.getElementById('taskInput').value = '';
       const emptyState = document.getElementById('emptyState');
       if (emptyState) emptyState.style.display = 'none';
       document.getElementById('controlBar').style.display = 'flex';
-    } else if (res && res.error) {
-      alert(`Error starting task: ${res.error}`);
+      appendLocalLog('INFO', 'Sidepanel', `[TASK_ACCEPTED] Running against tab [${res.tabId}] — ${res.tabUrl || 'unknown URL'}`);
+    } else {
+      const msg = (res && res.error) || 'The background worker returned no response.';
+      appendLocalLog('ERROR', 'Sidepanel', `[TASK_SUBMIT_FAILED] ${msg}`);
+      showTaskError(msg);
     }
   });
+}
+
+/**
+ * Surface a task-level failure in the timeline rather than a modal alert(), which the user
+ * has to dismiss and which leaves no record of what went wrong.
+ */
+function showTaskError(message) {
+  const timeline = document.getElementById('timeline');
+  if (!timeline) return;
+  const card = document.createElement('div');
+  card.className = 'result-badge error';
+  card.style.cssText = 'margin-top: 8px; padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.5; align-items: flex-start;';
+  card.innerHTML = `${ICONS.warning}<span><strong>Could not start task:</strong><br>${escapeHtml(message)}</span>`;
+  timeline.appendChild(card);
+  timeline.scrollTop = timeline.scrollHeight;
 }
 
 async function loadSessionHistory() {
@@ -640,7 +843,21 @@ function renderEmptyState() {
  */
 function renderState(state) {
   if (!state) return;
+
+  if (typeof state.stateVersion === 'number') {
+    if (state.bootId && state.bootId !== lastBootId) {
+      if (lastBootId !== null) {
+        appendLocalLog('WARN', 'Sidepanel', '[WORKER_RESTARTED] The background worker was restarted by Chrome. Re-syncing the panel to the new instance.');
+      }
+      lastBootId = state.bootId;
+      lastRenderedStateVersion = -1;
+    }
+    if (state.stateVersion <= lastRenderedStateVersion) return; // stale/duplicate
+    lastRenderedStateVersion = state.stateVersion;
+  }
+
   const { status, stepCount, history, planSteps, currentPhase } = state;
+  const isDisconnected = backgroundPort === null;
 
   const statusPill = document.getElementById('statusPill');
   const statusText = document.getElementById('statusText');
@@ -653,8 +870,10 @@ function renderState(state) {
   const btnStartTask = document.getElementById('btnStartTask');
 
   if (statusPill && statusText) {
-    statusPill.className = `status-indicator ${status}`;
-    statusText.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    statusPill.className = `status-indicator ${status}${isDisconnected ? ' reconnecting' : ''}`;
+    statusText.textContent = isDisconnected
+      ? 'Reconnecting…'
+      : status.charAt(0).toUpperCase() + status.slice(1);
   }
 
   renderPlanChecklist(planSteps);
@@ -786,8 +1005,12 @@ function renderFilteredLogs() {
 
   const filtered = rawLogsCache.filter(log => {
     if (currentActiveLogFilter === 'all') return true;
-    const msg = (log.message || '') + (log.module || '');
-    return msg.includes(`[${currentActiveLogFilter}]`) || log.module.includes(currentActiveLogFilter);
+    const keywords = LOG_FILTER_KEYWORDS[currentActiveLogFilter];
+    if (!keywords) return true;
+    // Coalesce BOTH fields — an entry with an undefined module used to throw inside
+    // .filter(), which killed the whole render and froze the log pane permanently.
+    const haystack = `${log.message || ''} ${log.module || ''}`.toUpperCase();
+    return keywords.some(k => haystack.includes(k));
   });
 
   if (filtered.length === 0) {

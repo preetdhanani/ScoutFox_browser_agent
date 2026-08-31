@@ -21,6 +21,10 @@ export const DEFAULT_SETTINGS = {
   providerConfigs: DEFAULT_PROVIDER_CONFIGS,
   temperature: 0.1,
   maxSteps: 25,
+  // Hard ceiling on a single LLM call. A provider that accepts the connection and never
+  // answers would otherwise park the agent loop indefinitely, with the keepalive actively
+  // preventing Chrome from reclaiming the worker.
+  llmTimeoutMs: 120000,
   actionDelayMs: 1000,
   showElementBadges: true,
   autoScroll: true,

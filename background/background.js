@@ -90,8 +90,10 @@ chrome.runtime.onConnect.addListener((port) => {
           history: agentEngine.history,
           planSteps: agentEngine.planSteps,
           currentPhase: agentEngine.currentPhase,
-          logs: Logger.getLogsHistory(),
-          stateVersion: agentEngine.stateVersion
+          // Logs intentionally omitted — the panel pulls them via GET_AGENT_STATE immediately
+          // after connecting, so duplicating the ring here just doubles the payload.
+          stateVersion: agentEngine.stateVersion,
+          bootId: agentEngine.bootId
         }
       });
     } catch (err) {
@@ -100,46 +102,119 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
+/**
+ * Fan a message out to every connected sidepanel.
+ *
+ * Re-entrancy is the hazard here: Logger broadcasts each new entry through this very function,
+ * so ANY log call made from inside it calls it again. Two rules keep that finite:
+ *   - remove a failing port from the set BEFORE logging about it, or the recursive call
+ *     retries the same dead port and recurses without bound;
+ *   - use Logger.warnSilent for diagnostics about the broadcast channel itself, so the entry
+ *     is still recorded and persisted but is not pushed back through this function.
+ * The isBroadcasting flag is a final backstop.
+ */
+let isBroadcasting = false;
+
 function broadcastToSidepanel(type, payload) {
+  if (isBroadcasting) return;
+
   if (activeSidepanelPorts.size === 0) {
     if (!lastBroadcastHadNoListeners) {
-      lastBroadcastHadNoListeners = true;
-      Logger.warn('Background', `[BROADCAST_DROPPED] No sidepanel connected — "${type}" updates are being generated but nothing can receive them until the panel reconnects.`);
+      lastBroadcastHadNoListeners = true; // set BEFORE logging
+      Logger.warnSilent('Background', `[BROADCAST_DROPPED] No sidepanel connected — "${type}" updates are being generated but nothing can receive them until the panel reconnects.`);
     }
     return;
   }
 
   lastBroadcastHadNoListeners = false;
-  activeSidepanelPorts.forEach((port) => {
-    try {
-      port.postMessage({ type, payload });
-    } catch (err) {
-      Logger.warn('Background', 'Error posting to sidepanel port', err);
-      activeSidepanelPorts.delete(port);
+  isBroadcasting = true;
+  try {
+    // Snapshot the set: the loop below mutates it on failure.
+    for (const port of Array.from(activeSidepanelPorts)) {
+      try {
+        port.postMessage({ type, payload });
+      } catch (err) {
+        activeSidepanelPorts.delete(port); // remove FIRST, then report
+        Logger.warnSilent('Background', `[BROADCAST_ERROR] Dropped a dead sidepanel port while sending "${type}": ${err.message}. Active ports: ${activeSidepanelPorts.size}`);
+      }
     }
-  });
+  } finally {
+    isBroadcasting = false;
+  }
 }
 
+/**
+ * Keeping the MV3 service worker alive while a task is running.
+ *
+ * Chrome terminates an extension service worker after ~30s of inactivity. An in-flight
+ * `await` on an LLM call does NOT count as activity, so a slow model response is enough to
+ * get the whole agent loop killed mid-step. Two independent mechanisms defend against that:
+ *
+ *   1. A ~20s interval invoking a trivial extension API. Each call resets the idle timer.
+ *      This is the primary defence and is what actually keeps a running task alive.
+ *   2. A chrome.alarms heartbeat. Alarms survive worker termination, so if the worker is
+ *      killed anyway (memory pressure, or Chrome's hard cap on keepalive), the alarm
+ *      re-wakes it and the restart becomes visible in the log instead of silent.
+ *
+ * Both are scoped strictly to an active task — nothing runs while the agent is idle.
+ */
+const KEEPALIVE_ALARM_NAME = 'scoutfox_keepalive';
+const KEEPALIVE_INTERVAL_MS = 20000;
+let keepaliveIntervalId = null;
+
 function syncKeepaliveAlarm(agentStatus) {
-  if (typeof chrome === 'undefined' || !chrome.alarms) return;
-  if (agentStatus === 'running') {
-    chrome.alarms.get('scoutfox_keepalive', (alarm) => {
-      if (!alarm) {
-        chrome.alarms.create('scoutfox_keepalive', { periodInMinutes: 0.5 });
+  const shouldRun = agentStatus === 'running' || agentStatus === 'paused';
+
+  if (shouldRun && keepaliveIntervalId === null) {
+    keepaliveIntervalId = setInterval(() => {
+      try {
+        // Any extension API round-trip resets the service worker's idle timer.
+        chrome.runtime.getPlatformInfo(() => { void chrome.runtime.lastError; });
+      } catch (err) {
+        Logger.warn('Background', '[KEEPALIVE] Idle-timer ping failed', err);
       }
-    });
-  } else {
-    chrome.alarms.clear('scoutfox_keepalive');
+    }, KEEPALIVE_INTERVAL_MS);
+    Logger.info('Background', '[KEEPALIVE_ON] Task active — holding the service worker awake.');
+  } else if (!shouldRun && keepaliveIntervalId !== null) {
+    clearInterval(keepaliveIntervalId);
+    keepaliveIntervalId = null;
+    Logger.info('Background', '[KEEPALIVE_OFF] No task active — releasing the service worker.');
+  }
+
+  if (typeof chrome === 'undefined' || !chrome.alarms) return;
+  try {
+    if (shouldRun) {
+      chrome.alarms.get(KEEPALIVE_ALARM_NAME, (alarm) => {
+        if (chrome.runtime.lastError) {
+          Logger.warn('Background', '[KEEPALIVE] Could not read keepalive alarm', chrome.runtime.lastError.message);
+          return;
+        }
+        if (!alarm) chrome.alarms.create(KEEPALIVE_ALARM_NAME, { periodInMinutes: 0.5 });
+      });
+    } else {
+      chrome.alarms.clear(KEEPALIVE_ALARM_NAME);
+    }
+  } catch (err) {
+    Logger.warn('Background', '[KEEPALIVE] Could not sync keepalive alarm', err);
   }
 }
 
 if (typeof chrome !== 'undefined' && chrome.alarms) {
   chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'scoutfox_keepalive') {
-      Logger.info('Background', `[KEEPALIVE] Heartbeat (task running, step ${agentEngine.stepCount}).`);
+    if (alarm.name === KEEPALIVE_ALARM_NAME) {
+      Logger.info('Background', `[KEEPALIVE] Heartbeat — status=${agentEngine.status}, step ${agentEngine.stepCount}.`);
+      // If the alarm fires while a task is supposedly running but the interval ping is gone,
+      // the worker was terminated and restarted. Re-arm so the task is not left unprotected.
+      if (agentEngine.status === 'running' && keepaliveIntervalId === null) {
+        syncKeepaliveAlarm(agentEngine.status);
+      }
     }
   });
 }
+
+// Every service-worker boot is logged, so an unexplained mid-task restart is visible
+// in the log pane instead of appearing as the UI mysteriously going quiet.
+Logger.info('Background', `[WORKER_BOOT] Service worker started (boot ${agentEngine.bootId.slice(0, 8)}). MV3 restarts the worker frequently — this line marks a fresh incarnation.`);
 
 // Track active tab switching when links open new tabs
 if (typeof chrome !== 'undefined' && chrome.tabs) {
@@ -202,7 +277,8 @@ function routeMessage(request, sender, sendResponse) {
       planSteps: agentEngine.planSteps,
       currentPhase: agentEngine.currentPhase,
       logs: Logger.getLogsHistory(),
-      stateVersion: agentEngine.stateVersion
+      stateVersion: agentEngine.stateVersion,
+      bootId: agentEngine.bootId
     });
     return true;
   }
@@ -211,12 +287,12 @@ function routeMessage(request, sender, sendResponse) {
     getActiveTab()
       .then((tab) => {
         if (!tab) {
-          throw new Error('No active web browser tab found. Please open a webpage like https://google.com first.');
+          throw new Error('No automatable tab found. ScoutFox cannot script Chrome\'s internal pages (chrome://…) — open a normal website such as https://google.com and try again.');
         }
         agentEngine.startTask(payload.prompt, tab.id).catch((err) => {
           Logger.error('Background', '[START_TASK_ERROR] Uncaught exception starting task', err);
         });
-        sendResponse({ success: true, tabId: tab.id });
+        sendResponse({ success: true, tabId: tab.id, tabUrl: tab.url, tabTitle: tab.title });
       })
       .catch((err) => {
         Logger.error('Background', 'Failed to start task', err);
@@ -225,21 +301,20 @@ function routeMessage(request, sender, sendResponse) {
     return true;
   }
 
+  // These now report whether they actually did anything, instead of always answering success.
+  // A Resume that finds nothing to resume (common after a worker restart) must say so.
   if (action === 'PAUSE_TASK') {
-    agentEngine.pause();
-    sendResponse({ success: true });
+    sendResponse(agentEngine.pause());
     return true;
   }
 
   if (action === 'RESUME_TASK') {
-    agentEngine.resume();
-    sendResponse({ success: true });
+    sendResponse(agentEngine.resume());
     return true;
   }
 
   if (action === 'STOP_TASK') {
-    agentEngine.stop();
-    sendResponse({ success: true });
+    sendResponse(agentEngine.stop());
     return true;
   }
 
@@ -248,21 +323,40 @@ function routeMessage(request, sender, sendResponse) {
     sendResponse({ success: true });
     return true;
   }
+
+  // Anything unrecognised used to fall off the end returning undefined, which closes the
+  // message channel with no reply — the caller's callback then fires with res === undefined
+  // and no lastError, indistinguishable from success.
+  Logger.warn('Background', `[UNKNOWN_ACTION] Received an unrecognised message action: "${action}". Ignoring.`);
+  sendResponse({ success: false, error: `Unknown action: ${action}` });
+  return true;
 }
 
+/**
+ * Pick the tab to automate.
+ *
+ * The focused tab wins when it is automatable. When it is not — most often because the user
+ * is sitting on chrome://extensions — we fall back to another tab in the window, but that
+ * substitution is announced loudly. Silently driving a page the user is not looking at is
+ * confusing enough that it reads as a bug.
+ */
 async function getActiveTab() {
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (tabs && tabs.length > 0) {
-    const tab = tabs[0];
-    if (isValidWebTab(tab)) return tab;
+  const focused = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0] || null;
+  if (focused && isValidWebTab(focused)) return focused;
+
+  if (focused) {
+    Logger.warn('Background', `[TAB_NOT_AUTOMATABLE] The focused tab (${focused.url || 'unknown URL'}) cannot be automated — browsers block extensions from scripting internal pages. Looking for another tab.`);
   }
 
-  const allTabs = await chrome.tabs.query({ active: true });
-  const validTab = allTabs.find(isValidWebTab);
-  if (validTab) return validTab;
+  const validTab =
+    (await chrome.tabs.query({ active: true })).find(isValidWebTab) ||
+    (await chrome.tabs.query({ currentWindow: true })).find(isValidWebTab) ||
+    null;
 
-  const anyWebTabs = await chrome.tabs.query({ currentWindow: true });
-  return anyWebTabs.find(isValidWebTab) || null;
+  if (validTab) {
+    Logger.warn('Background', `[TAB_SUBSTITUTED] Running against tab [${validTab.id}] (${validTab.url}) instead, because the focused tab cannot be scripted. Switch to the page you want automated if this is not it.`);
+  }
+  return validTab;
 }
 
 function isValidWebTab(tab) {
