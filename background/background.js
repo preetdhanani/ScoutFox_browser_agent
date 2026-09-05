@@ -108,18 +108,34 @@ if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setPan
 
 // Handle explicit extension action icon clicks to group current active tab immediately
 if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
-  chrome.action.onClicked.addListener(async (tab) => {
-    if (tab && tab.id && isValidWebTab(tab)) {
-      if (chrome.sidePanel && chrome.sidePanel.setOptions) {
-        chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-          try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
-        });
-      }
-      await agentEngine.ensureScoutFoxGroup(tab.id);
-      if (chrome.sidePanel && chrome.sidePanel.open) {
-        chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
-      }
+  chrome.action.onClicked.addListener((tab) => {
+    if (!(tab && tab.id && isValidWebTab(tab))) return;
+
+    if (chrome.sidePanel && chrome.sidePanel.setOptions) {
+      chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+        try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+      });
     }
+
+    // MUST be called synchronously in this same tick, with nothing awaited above it. Chrome
+    // only honors sidePanel.open() as a genuine response to the click's user gesture for as
+    // long as the call stack stays synchronous; crossing even one await (ensureScoutFoxGroup
+    // below does real async work - tabs.group, storage) loses that gesture and open() then
+    // fails silently, since it's a fire-and-forget .catch(). That silent failure is exactly
+    // what broke "click the icon to open the extension" the moment ensureScoutFoxGroup was
+    // awaited ahead of this line. setOptions() above is fire-and-forget too (callback style,
+    // not awaited), so it does not cross that boundary either.
+    if (chrome.sidePanel && chrome.sidePanel.open) {
+      chrome.sidePanel.open({ tabId: tab.id }).catch((err) => {
+        Logger.warn('Background', '[SIDEPANEL_OPEN_FAILED] chrome.sidePanel.open() was rejected', err);
+      });
+    }
+
+    // Grouping has no gesture requirement, so it is safe to run after - and it still finishes
+    // well before the panel's own script connects and needs scoutFoxGroupId to be set.
+    agentEngine.ensureScoutFoxGroup(tab.id).catch((err) => {
+      Logger.warn('Background', '[TAB_SANDBOX_ERROR] ensureScoutFoxGroup failed on icon click', err);
+    });
   });
 }
 
