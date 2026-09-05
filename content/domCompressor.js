@@ -60,7 +60,18 @@
     extractPageText() {
       try {
         // 1. Raw Markdown / Plain Text Pages (e.g. raw.githubusercontent.com)
-        if (window.location.hostname.includes('raw.githubusercontent.com') || (document.contentType && document.contentType.startsWith('text/'))) {
+        //
+        // document.contentType for an ORDINARY rendered HTML page is "text/html" - which also
+        // starts with "text/". A bare .startsWith('text/') check therefore matched every
+        // normal web page, not just genuinely raw text/markdown files, and returned early with
+        // unstructured innerText before ever reaching the targeted-container selection,
+        // heading-aware formatting, or the scroll-viewport-aware extraction below - all of
+        // which never actually ran on a real page as a result. Excluding the structured
+        // document types (html, xml) that also happen to start with "text/" is what makes this
+        // check match only what its own name says: raw markdown/plain text, not rendered HTML.
+        const rawContentType = document.contentType && document.contentType.startsWith('text/')
+          && document.contentType !== 'text/html' && document.contentType !== 'text/xml';
+        if (window.location.hostname.includes('raw.githubusercontent.com') || rawContentType) {
           const rawText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
           return rawText.trim().slice(0, 4500);
         }
@@ -83,7 +94,19 @@
             return rect.bottom >= -200 && rect.top <= vHeight + 1500;
           });
           if (textNodes.length < 10) {
-            textNodes = allTextNodes.slice(-50); // Fallback to lower section
+            // A sparse match (a handful of huge <p> tags, or a page that leans on <div>s
+            // instead of the semantic tags this selector looks for) can leave fewer than 10
+            // nodes in the whole generous +-window above, even with plenty of on-screen text.
+            // allTextNodes.slice(-50) picked the last 50 nodes in DOCUMENT order regardless of
+            // where the user has scrolled to - on a long docs page that is the footer, not
+            // whatever is actually visible. Sort every node by its distance from the viewport
+            // instead, so the fallback always centers on where the user is looking, not on
+            // wherever the document happens to end.
+            textNodes = allTextNodes
+              .map(node => ({ node, dist: Math.abs(node.getBoundingClientRect().top) }))
+              .sort((a, b) => a.dist - b.dist)
+              .slice(0, 50)
+              .map(entry => entry.node);
           }
         } else {
           textNodes = allTextNodes.slice(0, 90);

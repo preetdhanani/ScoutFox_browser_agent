@@ -13,7 +13,7 @@
  * window it actually came from - never assumed to be a single global one.
  */
 
-import { AgentEngine } from './agentEngine.js';
+import { AgentEngine, describeRestrictedUrl } from './agentEngine.js';
 import { ApiClients } from './apiClients.js';
 import { Logger } from '../utils/logger.js';
 
@@ -704,11 +704,18 @@ async function getActiveTab(windowId) {
   return newTab;
 }
 
+/**
+ * Is this tab one the agent can actually script?
+ *
+ * Delegates to describeRestrictedUrl() (agentEngine.js), which already covers the Chrome Web
+ * Store and file:/view-source:/devtools:/data: pages that this check used to miss - it only
+ * ever recognised chrome://, chrome-extension://, edge:// and about:. A tab sitting on the Web
+ * Store or a file:// page slipped through as "valid", and the script injection that followed
+ * failed immediately anyway; this just makes the earlier check agree with the one that
+ * actually has to inject into the page. Two separate lists for "can this tab be scripted" were
+ * always going to drift apart - this makes describeRestrictedUrl the single source of truth.
+ */
 function isValidWebTab(tab) {
   if (!tab || !tab.url) return false;
-  const url = tab.url;
-  return !url.startsWith('chrome://') &&
-         !url.startsWith('chrome-extension://') &&
-         !url.startsWith('edge://') &&
-         !url.startsWith('about:');
+  return describeRestrictedUrl(tab.url) === null;
 }

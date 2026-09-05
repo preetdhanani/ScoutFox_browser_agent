@@ -20,7 +20,11 @@ import assert from 'node:assert/strict';
 function makeMock() {
   const tabs = new Map([
     [100, { id: 100, url: 'chrome://newtab/', groupId: -1 }],   // a brand new, ordinary tab
-    [200, { id: 200, url: 'https://example.com/a', groupId: -1 }]
+    [200, { id: 200, url: 'https://example.com/a', groupId: -1 }],
+    // Previously missed entirely by isValidWebTab's own separate, narrower URL list - it only
+    // recognised chrome://, chrome-extension://, edge:// and about:.
+    [300, { id: 300, url: 'https://chromewebstore.google.com/detail/foo', groupId: -1 }],
+    [400, { id: 400, url: 'file:///Users/me/notes.txt', groupId: -1 }]
   ]);
   const noop = () => {};
   const listeners = {};
@@ -92,6 +96,32 @@ test('a restricted tab is not added to the ScoutFox automation group', async () 
 
   assert.equal(mock.__tabs.get(100).groupId, -1,
     'a tab that cannot be scripted should not be grouped for automation - isValidWebTab should still gate THIS, just not panel visibility');
+});
+
+test('a Chrome Web Store tab is recognised as restricted, not grouped for automation', async () => {
+  mock.__callOrder.length = 0;
+  mock.__tabs.get(300).groupId = -1;
+
+  mock.__listeners.onClicked(mock.__tabs.get(300));
+  await new Promise((r) => setTimeout(r, 30));
+
+  const openCall = mock.__callOrder.find((c) => c.call === 'open' && c.opts.tabId === 300);
+  assert.ok(openCall, 'the panel must still open on a Web Store tab');
+  assert.equal(mock.__tabs.get(300).groupId, -1,
+    'a Web Store tab must not be grouped for automation - it used to slip through isValidWebTab\'s narrower, separate URL list as "valid"');
+});
+
+test('a file:// tab is recognised as restricted, not grouped for automation', async () => {
+  mock.__callOrder.length = 0;
+  mock.__tabs.get(400).groupId = -1;
+
+  mock.__listeners.onClicked(mock.__tabs.get(400));
+  await new Promise((r) => setTimeout(r, 30));
+
+  const openCall = mock.__callOrder.find((c) => c.call === 'open' && c.opts.tabId === 400);
+  assert.ok(openCall, 'the panel must still open on a file:// tab');
+  assert.equal(mock.__tabs.get(400).groupId, -1,
+    'a file:// tab must not be grouped for automation - also previously missed by isValidWebTab\'s narrower, separate URL list');
 });
 
 test('clicking the icon on a normal, scriptable tab still opens the panel AND groups it', async () => {

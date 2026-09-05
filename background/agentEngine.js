@@ -31,7 +31,7 @@ function lastRuntimeError() {
  * Store, and no permission unlocks it — it is a hard browser restriction, not a bug and not
  * something a page reload fixes. Saying so plainly is the only useful response.
  */
-function describeRestrictedUrl(url) {
+export function describeRestrictedUrl(url) {
   if (!url) {
     return 'That tab has not finished loading a page yet. Wait for it to load, then start the task again.';
   }

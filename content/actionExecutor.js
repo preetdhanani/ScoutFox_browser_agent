@@ -310,8 +310,14 @@
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       this.highlightElement(el);
 
-      // Dispatch click mouse events
-      ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click'].forEach(eventType => {
+      // Dispatch the realistic hover/press sequence a real pointer produces before the click
+      // itself - some listeners (tooltips, CSS :hover-driven state, press effects) key off
+      // these specifically. 'click' is deliberately NOT in this list: el.click() below already
+      // fires a proper click event on its own (and handles native defaults like toggling a
+      // checkbox or submitting a form), so dispatching a synthetic 'click' here too fired TWO
+      // click events per action - visibly flipping a checkbox on and back off, or double-
+      // submitting a form, in immediate succession.
+      ['mouseenter', 'mouseover', 'mousedown', 'mouseup'].forEach(eventType => {
         const event = new MouseEvent(eventType, {
           view: window,
           bubbles: true,
@@ -322,6 +328,8 @@
 
       if (typeof el.click === 'function') {
         el.click();
+      } else {
+        el.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true }));
       }
 
       const clickLabel = this.describeElement(el);
