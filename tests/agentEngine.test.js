@@ -189,12 +189,18 @@ test('AgentEngine - clearHistory resets state', () => {
 });
 
 test('AgentEngine - Zombie Running State Reset on Service Worker Restore', async () => {
+  // Keyed by windowId ('default', since this engine is constructed with none) - restoreState
+  // reads agent_sessions now, not a single global agent_session slot. Seeding the old key here
+  // would make this test pass vacuously (nothing restored, status defaults to idle anyway)
+  // rather than actually exercising the zombie-status reset it is named for.
   global.chrome.storage.local.get = (keys, cb) => cb({
-    agent_session: {
-      history: [],
-      planSteps: [],
-      stepCount: 4,
-      status: 'running'
+    agent_sessions: {
+      default: {
+        history: [],
+        planSteps: [],
+        stepCount: 4,
+        status: 'running'
+      }
     }
   });
 

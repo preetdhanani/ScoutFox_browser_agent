@@ -44,19 +44,27 @@ global.chrome = {
 
 const { AgentEngine } = await import('../background/agentEngine.js');
 
-/** A session persisted by a previous run that was killed mid-task. */
+/**
+ * A session persisted by a previous run that was killed mid-task.
+ *
+ * Keyed under agent_sessions.default because AgentEngine() with no windowId argument (as
+ * every test in this file constructs it) defaults this.windowId to 'default' - one engine
+ * per window means persistence is keyed by windowId, not a single global slot.
+ */
 const STALE_SESSION = {
-  agent_session: {
-    history: [{ type: 'user_goal', prompt: 'the OLD task' }],
-    planSteps: [
-      { id: 1, text: 'old step one', status: 'completed' },
-      { id: 2, text: 'old step two', status: 'completed' }
-    ],
-    task: 'the OLD task',
-    stepCount: 7,
-    status: 'running',
-    currentPlanIndex: 2,
-    stateVersion: 42
+  agent_sessions: {
+    default: {
+      history: [{ type: 'user_goal', prompt: 'the OLD task' }],
+      planSteps: [
+        { id: 1, text: 'old step one', status: 'completed' },
+        { id: 2, text: 'old step two', status: 'completed' }
+      ],
+      task: 'the OLD task',
+      stepCount: 7,
+      status: 'running',
+      currentPlanIndex: 2,
+      stateVersion: 42
+    }
   }
 };
 
@@ -231,8 +239,8 @@ test('DOM read targets the tab it was given, not whichever tab is focused', asyn
 
   const injectedInto = [];
   const tabsById = {
-    [TARGET]: { id: TARGET, url: 'https://example.com/products' },
-    [FOCUSED]: { id: FOCUSED, url: 'chrome://extensions/' }
+    [TARGET]: { id: TARGET, url: 'https://example.com/products', windowId: 1, groupId: 500 },
+    [FOCUSED]: { id: FOCUSED, url: 'chrome://extensions/', windowId: 1, groupId: -1 }
   };
 
   // The content script is NOT yet present on the target tab, so the first read fails and the
@@ -263,6 +271,9 @@ test('DOM read targets the tab it was given, not whichever tab is focused', asyn
 
   const engine = new AgentEngine();
   await engine.restorePromise;
+  // The access wall only allows tabs inside this session's own ScoutFox group - the target
+  // tab's window/group, established here exactly as ensureScoutFoxGroup would in production.
+  engine.scoutFoxGroupIds.set(1, 500);
 
   const snap = await engine.getTabDOMWithAutoInject(TARGET, false);
 
@@ -277,11 +288,12 @@ test('a restricted URL fails with the real reason, not "refresh and try again"',
   resetStorage();
   storageReadDelayMs = 0;
 
-  global.chrome.tabs.get = async () => ({ id: 42, url: 'chrome://extensions/' });
+  global.chrome.tabs.get = async () => ({ id: 42, url: 'chrome://extensions/', windowId: 1, groupId: 500 });
   global.chrome.scripting = { executeScript: async () => { throw new Error('should never be reached'); } };
 
   const engine = new AgentEngine();
   await engine.restorePromise;
+  engine.scoutFoxGroupIds.set(1, 500);
 
   await assert.rejects(
     () => engine.getTabDOMWithAutoInject(42, false),

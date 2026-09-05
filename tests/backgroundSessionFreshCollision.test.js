@@ -7,17 +7,20 @@
  * TAB_SANDBOX handler). When the agent's own navigation opened a second tab and that tab
  * became active, Chrome loaded a genuinely separate side-panel DOCUMENT for it - its own JS
  * realm, with its own honest hasConnectedBefore=false. That document's first connection named
- * itself '_fresh', which onConnect's SESSION_FRESH check (added earlier this session) trusted
- * at face value and cleared the shared AgentEngine history - wiping the result the FIRST,
+ * itself '_fresh', which onConnect's SESSION_FRESH check (in place at the time) trusted at
+ * face value and cleared the shared AgentEngine history - wiping the result the FIRST,
  * still-open panel was showing.
  *
- * The observed log sequence this reproduces exactly:
+ * The observed log sequence this reproduced exactly:
  *   PORT_CONNECT  Active ports: 1     <- the real panel reconnecting after a worker restart
  *   PORT_CONNECT  Active ports: 2     <- a second, different panel connecting for the first time
  *   SESSION_FRESH ...clearHistory()   <- the second one wipes the first one's visible result
  *
- * Fix: '_fresh' only clears when it is the SOLE connected panel. A second panel connecting
- * fresh while another is already up suppresses the clear instead.
+ * That auto-clear-on-fresh-open mechanism has since been removed entirely (see
+ * multiWindowSessionIsolation.test.js): with one session per window, reopening the panel on a
+ * window that already has a session - by any port, in any count - always reflects it rather
+ * than auto-clearing, so this exact collision cannot recur structurally, not just when a port
+ * count happens to allow it. These tests now assert that stronger invariant directly.
  */
 
 import test from 'node:test';
@@ -30,18 +33,23 @@ const REAL_HISTORY = [
 
 function makeBackgroundChromeMock() {
   // Seeded as if a run just completed and persisted itself - the exact state
-  // agentEngine.persistState()/restoreState() produce for a finished task.
+  // agentEngine.persistState()/restoreState() produce for a finished task. Keyed under
+  // agent_sessions.legacy: this test's ports carry no windowId suffix ('scoutfox_sidepanel',
+  // not 'scoutfox_sidepanel:42'), and background.js's onConnect routes any port name it can't
+  // parse a windowId out of into a single shared 'legacy' session bucket.
   const storage = {
-    agent_session: {
-      history: REAL_HISTORY,
-      planSteps: [],
-      task: 'a task the user just ran',
-      stepCount: 2,
-      status: 'idle',
-      currentPlanIndex: 0,
-      activeTabId: 42,
-      stateVersion: 1,
-      scoutFoxGroupId: 5001
+    agent_sessions: {
+      legacy: {
+        history: REAL_HISTORY,
+        planSteps: [],
+        task: 'a task the user just ran',
+        stepCount: 2,
+        status: 'idle',
+        currentPlanIndex: 0,
+        activeTabId: 42,
+        stateVersion: 1,
+        scoutFoxGroupId: 5001
+      }
     }
   };
   const noop = () => {};
@@ -99,16 +107,15 @@ global.chrome = makeBackgroundChromeMock();
 
 await import('../background/background.js');
 
-// AgentEngine's constructor kicks off an async restoreState() read of agent_session. Give it
-// a tick to land before either port connects, matching the real STATE_RESTORE-before-
-// PORT_CONNECT ordering seen in the actual log.
-await new Promise((r) => setTimeout(r, 20));
-
 test('a second panel connecting fresh does not wipe a session the first panel is still showing', async () => {
   // Port 1: the real panel reconnecting after a worker restart - matches the log exactly,
   // where this connection was NOT named '_fresh' and correctly did not clear anything.
+  // Sessions are created lazily (on first connect), so this ALSO constructs the engine and
+  // starts its async restoreState() - the onConnect handler itself awaits that before posting
+  // anything, so a short wait here is for THAT, not an arbitrary delay.
   const port1 = makeFakePort('scoutfox_sidepanel');
   global.__connectListener(port1);
+  await new Promise((r) => setTimeout(r, 20));
 
   const baseline = lastStateUpdate(port1);
   assert.ok(baseline, 'port1 must receive an initial STATE_UPDATE on connect');
@@ -120,6 +127,7 @@ test('a second panel connecting fresh does not wipe a session the first panel is
   // view this really is a first-ever connection, hence '_fresh'.
   const port2 = makeFakePort('scoutfox_sidepanel_fresh');
   global.__connectListener(port2);
+  await new Promise((r) => setTimeout(r, 20));
 
   // The bug: this second connection called agentEngine.clearHistory(), and the NEXT broadcast
   // to port1 would carry an empty history - silently wiping the result out from under the
@@ -133,17 +141,19 @@ test('a second panel connecting fresh does not wipe a session the first panel is
   port2._disconnect();
 });
 
-test('a genuinely solitary fresh open still starts a clean session (unchanged intended behavior)', async () => {
-  // Re-seed a fresh non-empty session and reconnect with the same single-port sequence a real
-  // standalone "reopen the extension" flow produces, to confirm the historical "chats start
-  // fresh on every new opening" behavior is untouched by this fix for the normal, single-panel
-  // case - only the multi-panel collision is now guarded.
+test('a solitary fresh open ALSO reflects the existing session, not just a collision with a second panel', async () => {
+  // Historically this window's "chats start fresh on every new opening" behavior would have
+  // cleared here, since only ONE port is connected - no collision to guard against at all.
+  // Per an explicit later decision, reopening the panel on a window that already has a session
+  // must reflect it regardless: the auto-clear was removed outright rather than narrowed, so a
+  // solitary reconnect and a colliding one now behave identically - neither ever clears.
   const port = makeFakePort('scoutfox_sidepanel_fresh');
   global.__connectListener(port);
+  await new Promise((r) => setTimeout(r, 20));
 
   const msg = lastStateUpdate(port);
-  assert.deepEqual(msg.payload.history, [],
-    'a solitary fresh-open connection must still clear history exactly as before this fix');
+  assert.deepEqual(msg.payload.history, REAL_HISTORY,
+    'reopening the panel - even solitary, even naming itself fresh - must reflect the session that is actually there');
 
   port._disconnect();
 });

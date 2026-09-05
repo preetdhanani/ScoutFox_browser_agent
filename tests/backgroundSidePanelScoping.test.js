@@ -22,9 +22,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 function makeMock() {
+  // windowId: 1 on every tab, matching the onActivated calls further down - one session per
+  // window means those calls need an already-created session for window 1 to find at all.
   const tabs = new Map([
-    [100, { id: 100, url: 'https://example.com/a', groupId: -1 }],
-    [200, { id: 200, url: 'https://example.com/b', groupId: -1 }] // unrelated, pre-existing tab
+    [100, { id: 100, url: 'https://example.com/a', groupId: -1, windowId: 1 }],
+    [200, { id: 200, url: 'https://example.com/b', groupId: -1, windowId: 1 }] // unrelated, pre-existing tab
   ]);
   let groupCounter = 5000;
   const noop = () => {};

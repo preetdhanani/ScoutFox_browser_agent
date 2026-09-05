@@ -129,7 +129,16 @@ function parsePartialOrTruncatedJson(str) {
 }
 
 export class AgentEngine {
-  constructor() {
+  /**
+   * @param {number|string} [windowId] Which browser window this engine belongs to. One
+   *   engine exists per window (see background.js's session map) so that each window runs a
+   *   fully independent automation: its own tab group, its own history, its own Stop/Pause,
+   *   never able to see or touch a tab outside its own group. Optional and defaults to
+   *   'default' so every existing test and any non-windowed context (the standalone Python
+   *   runner analog, direct unit tests) keeps working unchanged with a single implicit session.
+   */
+  constructor(windowId) {
+    this.windowId = windowId !== undefined && windowId !== null ? windowId : 'default';
     this.status = 'idle'; // 'idle' | 'running' | 'paused' | 'stopped'
     this.currentTask = null;
     this.history = [];
@@ -143,7 +152,15 @@ export class AgentEngine {
     this.recentActionSignatures = [];
     this.currentPlanIndex = 0;
     this.networkBuffers = new Map(); // tabId -> Array of Network Requests (capped at 100)
-    this.scoutFoxGroupId = null; // Sandboxed Chrome Tab Group ID
+
+    // Sandboxed Chrome Tab Group ID(s). A Chrome tab group is intrinsically single-window, but
+    // one session can span MORE than one window (an agent-opened new window stays part of the
+    // SAME running session/history rather than starting a second, disconnected one) - so this
+    // is a map of windowId -> groupId, not a single value. scoutFoxGroupId below is a
+    // convenience accessor for THIS engine's own primary window, which is what almost all
+    // existing code (including ensureScoutFoxGroup itself) reads and writes, so that logic did
+    // not need to change to support the map.
+    this.scoutFoxGroupIds = new Map();
 
     // Identifies THIS service-worker incarnation. MV3 terminates the worker aggressively
     // (idle timeout, memory pressure, Chrome's hard cap on port-based keepalive), and every
@@ -166,6 +183,55 @@ export class AgentEngine {
     this.restorePromise = this.restoreState();
   }
 
+  /** This engine's own tab group, in its own (primary) window. */
+  get scoutFoxGroupId() {
+    const v = this.scoutFoxGroupIds.get(this.windowId);
+    return v === undefined ? null : v;
+  }
+
+  set scoutFoxGroupId(groupId) {
+    if (groupId === null || groupId === undefined) {
+      this.scoutFoxGroupIds.delete(this.windowId);
+    } else {
+      this.scoutFoxGroupIds.set(this.windowId, groupId);
+    }
+  }
+
+  /**
+   * The hard access wall: is this tab one the agent is actually allowed to act on?
+   *
+   * A tab is in scope only if it sits in a Chrome tab group THIS session owns - i.e. its
+   * groupId matches the group this engine tracks for that tab's OWN window. This is checked
+   * at the single choke point every step passes through (getTabDOMWithAutoInject) as a safety
+   * net, on top of background.js only ever handing this engine tabIds from its own window(s)
+   * in the first place. Outside the group: no access, no reads, no actions - by design.
+   */
+  async isTabInScope(tabId) {
+    if (!tabId) return false;
+    if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.get) return true; // no tab API to check against (tests, non-extension context)
+
+    // chrome.tabs.get supports both the classic callback form and, when no callback is
+    // meaningfully used, a returned Promise - and some test doubles in this codebase mock it
+    // as promise-only regardless of a callback being passed. Handling both keeps this robust
+    // to either shape instead of hanging forever waiting on a callback that never fires.
+    const tab = await new Promise((resolve, reject) => {
+      const maybePromise = chrome.tabs.get(tabId, (t) => { lastRuntimeError(); resolve(t); });
+      if (maybePromise && typeof maybePromise.then === 'function') {
+        maybePromise.then(resolve, reject);
+      }
+    });
+    if (!tab) return false;
+
+    const ownGroupForThatWindow = this.scoutFoxGroupIds.get(tab.windowId);
+    if (ownGroupForThatWindow === undefined || ownGroupForThatWindow === null) {
+      // This session has not sandboxed anything in that tab's window at all yet - nothing to
+      // be in scope of. (startTask always establishes the group before acting, so in normal
+      // operation this only trips for a tab that genuinely has nothing to do with this session.)
+      return false;
+    }
+    return tab.groupId === ownGroupForThatWindow;
+  }
+
   async restoreState() {
     try {
       if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
@@ -173,15 +239,18 @@ export class AgentEngine {
         return;
       }
 
+      // Keyed by windowId, not a single global slot - one engine exists per window, and each
+      // must restore only ITS OWN session, never another window's.
       const stored = await new Promise((resolve) => {
-        chrome.storage.local.get(['agent_session'], (res) => {
+        chrome.storage.local.get(['agent_sessions'], (res) => {
           const err = lastRuntimeError();
           if (err) {
             Logger.warn('AgentEngine', '[STATE_RESTORE_FAILED] Could not read persisted session', err.message);
             resolve(null);
             return;
           }
-          resolve(res && res.agent_session ? res.agent_session : null);
+          const all = res && res.agent_sessions;
+          resolve(all && all[String(this.windowId)] ? all[String(this.windowId)] : null);
         });
       });
 
@@ -234,8 +303,14 @@ export class AgentEngine {
   async persistState() {
     try {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({
-          agent_session: {
+        // Read-modify-write: chrome.storage.set() replaces agent_sessions WHOLESALE, and it is
+        // one shared key across every window's engine. Blindly overwriting it with only this
+        // engine's own entry would silently erase every OTHER window's persisted session on
+        // whichever engine happens to persist last.
+        chrome.storage.local.get(['agent_sessions'], (res) => {
+          lastRuntimeError();
+          const all = (res && res.agent_sessions) || {};
+          all[String(this.windowId)] = {
             history: this.history,
             planSteps: this.planSteps,
             task: this.currentTask,
@@ -245,16 +320,33 @@ export class AgentEngine {
             activeTabId: this.activeTabId,
             stateVersion: this.stateVersion,
             scoutFoxGroupId: this.scoutFoxGroupId
-          }
-        }, () => {
-          const err = lastRuntimeError();
-          if (err) {
-            Logger.warn('AgentEngine', '[STATE_PERSIST_FAILED] Could not write session to storage', err.message);
-          }
+          };
+          chrome.storage.local.set({ agent_sessions: all }, () => {
+            const err = lastRuntimeError();
+            if (err) {
+              Logger.warn('AgentEngine', '[STATE_PERSIST_FAILED] Could not write session to storage', err.message);
+            }
+          });
         });
       }
     } catch (e) {
       Logger.warn('AgentEngine', '[STATE_PERSIST_ERROR] Could not persist state', e);
+    }
+  }
+
+  /** Remove this window's persisted session entirely - called when its window closes. */
+  static forgetWindow(windowId) {
+    try {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
+      chrome.storage.local.get(['agent_sessions'], (res) => {
+        lastRuntimeError();
+        const all = (res && res.agent_sessions) || {};
+        if (!(String(windowId) in all)) return;
+        delete all[String(windowId)];
+        chrome.storage.local.set({ agent_sessions: all }, () => { lastRuntimeError(); });
+      });
+    } catch (e) {
+      Logger.warn('AgentEngine', '[STATE_FORGET_ERROR] Could not remove closed window\'s persisted session', e);
     }
   }
 
@@ -1236,6 +1328,14 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       tab = await chrome.tabs.get(tabId);
     } catch (err) {
       throw new Error(`The target tab [${tabId}] no longer exists (it was probably closed). Open the page you want automated and start the task again.`);
+    }
+
+    // The hard access wall. This session is confined to its own ScoutFox tab group(s); a tab
+    // outside them gets no reads and no actions, full stop - even if some upstream event ever
+    // handed this engine a foreign tabId by mistake, this is the one place every single step
+    // passes through before touching a page, so it is the right place to refuse.
+    if (!(await this.isTabInScope(tabId))) {
+      throw new Error(`Tab [${tabId}] is outside this session's ScoutFox group and cannot be automated from here. Each window's ScoutFox session only acts on tabs within its own group.`);
     }
 
     const restriction = describeRestrictedUrl(tab.url);

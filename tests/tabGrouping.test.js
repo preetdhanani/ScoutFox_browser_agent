@@ -401,20 +401,25 @@ test('4.1 scoutFoxGroupId Persistence - persistState writes scoutFoxGroupId to c
 
   await engine.persistState();
 
-  assert.ok(env.storageData.agent_session, 'agent_session must exist in storage');
-  assert.equal(env.storageData.agent_session.scoutFoxGroupId, 8888, 'scoutFoxGroupId must be persisted');
+  // Keyed by windowId ('default' here, since this engine was constructed with none) - one
+  // engine per window means persistence lives under agent_sessions, not a single global slot.
+  assert.ok(env.storageData.agent_sessions, 'agent_sessions must exist in storage');
+  assert.ok(env.storageData.agent_sessions.default, 'this engine\'s own window entry must exist');
+  assert.equal(env.storageData.agent_sessions.default.scoutFoxGroupId, 8888, 'scoutFoxGroupId must be persisted');
 });
 
 test('4.2 scoutFoxGroupId Persistence - restoreState restores scoutFoxGroupId across service worker cold boot', async () => {
   const env = createMockChromeEnv();
   global.chrome = env.mockChrome;
 
-  env.storageData.agent_session = {
-    task: 'Restored Task',
-    status: 'idle',
-    scoutFoxGroupId: 9999,
-    history: [],
-    planSteps: []
+  env.storageData.agent_sessions = {
+    default: {
+      task: 'Restored Task',
+      status: 'idle',
+      scoutFoxGroupId: 9999,
+      history: [],
+      planSteps: []
+    }
   };
 
   const engine = new AgentEngine();

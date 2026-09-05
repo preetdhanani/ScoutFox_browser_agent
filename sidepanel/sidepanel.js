@@ -8,6 +8,21 @@ import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../utils/st
 
 let backgroundPort = null;
 let currentSettings = { ...DEFAULT_SETTINGS };
+
+// This panel's own browser window. One AgentEngine session exists per window (background.js
+// keeps a Map keyed by windowId), so every message this panel sends must say which window it
+// belongs to - resolved once at startup via chrome.windows.getCurrent(), which always reflects
+// whichever window this document is actually rendered in, unlike any Chrome API sender-tab
+// nuance for a side-panel document that would need guessing at.
+let myWindowId = null;
+
+/**
+ * Send a message to the background worker, always tagged with this panel's own windowId so it
+ * can be routed to the correct per-window session rather than whichever one happens to exist.
+ */
+function sendBgMessage(msg, cb) {
+  chrome.runtime.sendMessage({ ...msg, windowId: myWindowId }, cb);
+}
 let currentSessionId = null;
 let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
@@ -121,6 +136,17 @@ function applyTheme(mode) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  // Resolve which window this panel belongs to BEFORE connecting - the port name and every
+  // message sent from here need it to reach the right per-window session.
+  try {
+    if (typeof chrome !== 'undefined' && chrome.windows && chrome.windows.getCurrent) {
+      const win = await new Promise((resolve) => chrome.windows.getCurrent((w) => resolve(w)));
+      myWindowId = win ? win.id : null;
+    }
+  } catch (err) {
+    reportClientError('sidepanel:resolve-window', err);
+  }
+
   // Logs are restored via initPortConnection() -> resyncAgentState() -> GET_AGENT_STATE below,
   // not read directly from storage here. That used to be a second, racing path: the background
   // worker's own restore of persisted logs is async, so a resync landing before it finished got
@@ -384,7 +410,7 @@ async function fetchDynamicModels(forceRefresh = false) {
   };
 
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'FETCH_MODELS', payload: tempSettings }, (res) => {
+    sendBgMessage({ action: 'FETCH_MODELS', payload: tempSettings }, (res) => {
       if (btnFetch) btnFetch.disabled = false;
 
       if (res && res.success && res.models && res.models.length > 0) {
@@ -450,11 +476,16 @@ function connectPort() {
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
   try {
-    // Tell the worker whether this is a genuine panel open or an automatic reconnect. Only
-    // the first connection of this panel instance may clear the previous session; every
-    // later one is recovering from the worker being reclaimed and must preserve the run.
-    const portName = hasConnectedBefore ? 'scoutfox_sidepanel' : 'scoutfox_sidepanel_fresh';
+    // The '_fresh'/plain distinction is kept only for the background worker's own connect log
+    // line - one session exists per window now, and reopening the panel on a window that
+    // already has one (running or finished) always reflects it rather than clearing on a
+    // "genuine open". Deliberately starting over is CLEAR_HISTORY's job, not a side effect of
+    // reconnecting. What actually matters here is windowId, so this panel is routed to ITS OWN
+    // window's session rather than a shared global one - riding in the port name itself is
+    // simple, synchronous, and available the instant the port is created.
+    const base = hasConnectedBefore ? 'scoutfox_sidepanel' : 'scoutfox_sidepanel_fresh';
     hasConnectedBefore = true;
+    const portName = myWindowId !== null ? `${base}:${myWindowId}` : base;
     backgroundPort = chrome.runtime.connect({ name: portName });
   } catch (err) {
     reportClientError('sidepanel:port-connect', err);
@@ -515,7 +546,7 @@ function scheduleReconnect() {
 function resyncAgentState() {
   if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
 
-  chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE' }, (res) => {
+  sendBgMessage({ action: 'GET_AGENT_STATE' }, (res) => {
     if (chrome.runtime.lastError) {
       appendLocalLog('WARN', 'Sidepanel', `[RESYNC_FAILED] Background worker did not answer GET_AGENT_STATE (${chrome.runtime.lastError.message}). Will retry.`);
       setConnectionBanner(true);
@@ -547,7 +578,7 @@ function resyncAgentState() {
 function sendControlMessage(action, done) {
   if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
 
-  chrome.runtime.sendMessage({ action }, (res) => {
+  sendBgMessage({ action }, (res) => {
     if (chrome.runtime.lastError) {
       const msg = chrome.runtime.lastError.message;
       appendLocalLog('ERROR', 'Sidepanel', `[CONTROL_FAILED] ${action} did not reach the background worker (${msg}).`);
@@ -600,7 +631,7 @@ function reportClientError(source, err) {
   const message = (err && err.message) || String(err);
   appendLocalLog('ERROR', 'Sidepanel', `[${source}] ${message}`);
   try {
-    chrome.runtime.sendMessage({
+    sendBgMessage({
       action: 'CLIENT_ERROR',
       payload: { source, message, stack: (err && err.stack) || null }
     }, () => { void chrome.runtime.lastError; });
@@ -794,7 +825,7 @@ async function startTaskInner(prompt) {
 
   appendLocalLog('INFO', 'Sidepanel', `[TASK_SUBMIT] Sending task to background worker: "${prompt}"`);
 
-  chrome.runtime.sendMessage({ action: 'START_TASK', payload: { prompt } }, (res) => {
+  sendBgMessage({ action: 'START_TASK', payload: { prompt } }, (res) => {
     // Without this check a failed wake-up leaves res undefined and the whole submission
     // vanishes with no alert, no log and no UI change — the task simply never starts.
     if (chrome.runtime.lastError) {
