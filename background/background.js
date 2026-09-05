@@ -78,9 +78,32 @@ Logger.setBroadcastCallback((logEntry) => {
   broadcastToSidepanel('LOG_ENTRY', logEntry);
 });
 
-// Configure Chrome Sidepanel to open on extension action icon click
+/**
+ * Scope the side panel to one tab at a time, not the whole browser.
+ *
+ * manifest.json declares side_panel.default_path, which registers the panel globally on
+ * EVERY tab as Chrome's fallback. The per-tab enable/disable calls below (onConnect,
+ * onCreated, onActivated) are not enough to override that on their own - this is a
+ * documented Chrome limitation, not a logic bug: setOptions({tabId, enabled:false}) does not
+ * reliably close a panel a global default_path is still offering everywhere else. The fix
+ * Chrome's own team and extension samples describe is to explicitly disable the panel
+ * EVERYWHERE at startup, so nothing is ever enabled except the specific tab(s) this code
+ * turns on. https://github.com/GoogleChrome/chrome-extensions-samples/issues/987
+ */
+if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setOptions) {
+  chrome.sidePanel.setOptions({ enabled: false }, () => {
+    try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+  });
+}
+
+// openPanelOnActionClick:true and chrome.action.onClicked are mutually exclusive by Chrome's
+// own design - the former means the panel auto-opens globally on click and onClicked NEVER
+// fires. That auto-open used the global default_path with no tab scoping applied yet, which
+// is exactly the "shows on every tab" symptom. false (Chrome's own default; set explicitly so
+// the intent reads plainly) makes onClicked fire instead, and its handler below enables the
+// panel for ONLY the clicked tab before opening it.
 if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
 }
 
 // Handle explicit extension action icon clicks to group current active tab immediately
