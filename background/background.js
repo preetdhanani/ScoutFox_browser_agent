@@ -49,6 +49,19 @@ function getOrCreateSession(windowId) {
     syncKeepaliveAlarm();
   });
 
+  // When this engine opens a brand-new window (AgentEngine.openNewWindow, the "open_window"
+  // action), register that new window against this SAME session object - not a new one -
+  // before anything else touches it. Without this, a panel opened in the new window would hit
+  // getOrCreateSession(newWindowId), find nothing there yet, and start a second, disconnected
+  // session with its own blank history, defeating the entire point of opening the window as
+  // part of this one. sessions is a plain Map<windowId, session>, so multiple keys can (and
+  // here, deliberately do) point at the exact same session object.
+  engine.setWindowOpenedCallback((newWindowId) => {
+    if (sessions.get(newWindowId) === session) return; // already registered, nothing to do
+    sessions.set(newWindowId, session);
+    Logger.info('Background', `[SESSION_EXTENDED] Session for window [${windowId}] now also covers window [${newWindowId}].`);
+  });
+
   Logger.info('Background', `[SESSION_CREATED] New session for window [${windowId}].`);
   return session;
 }
@@ -87,7 +100,20 @@ if (typeof chrome !== 'undefined') {
       const session = sessions.get(windowId);
       if (!session) return;
       sessions.delete(windowId);
-      AgentEngine.forgetWindow(windowId);
+
+      // A session opened into more than one window (openNewWindow) is one session object
+      // reachable from multiple Map keys. Closing ONE of those windows must not end the
+      // session outright while another window still shows it - only forget the engine
+      // (persisted state, its own tab group here) and drop its keepalive contribution once no
+      // window reference to it remains at all.
+      const stillReferenced = Array.from(sessions.values()).some((s) => s === session);
+      if (stillReferenced) {
+        session.engine.scoutFoxGroupIds.delete(windowId);
+        Logger.info('Background', `[WINDOW_CLOSED] Window [${windowId}] closed, but its session continues in another window.`);
+        return;
+      }
+
+      AgentEngine.forgetWindow(session.engine.windowId);
       Logger.info('Background', `[SESSION_CLOSED] Window [${windowId}] closed. Session and its persisted state removed.`);
       syncKeepaliveAlarm();
     });
@@ -254,7 +280,9 @@ chrome.runtime.onConnect.addListener((port) => {
           currentPhase: session.engine.currentPhase,
           stateVersion: session.engine.stateVersion,
           bootId: session.engine.bootId,
-          scoutFoxGroupId: session.engine.scoutFoxGroupId
+          // THIS window's own group - not necessarily the session's primary window's, if this
+          // panel belongs to a window the session was later extended into (openNewWindow).
+          scoutFoxGroupId: typeof windowId === 'number' ? session.engine.groupIdForWindow(windowId) : session.engine.scoutFoxGroupId
         }
       });
     } catch (err) {
@@ -417,10 +445,14 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
     const session = sessions.get(tab.windowId);
     if (!session) return; // this window has no ScoutFox session - nothing to auto-group into
 
-    if (session.engine.scoutFoxGroupId && typeof chrome.tabs.group === 'function') {
-      chrome.tabs.group({ tabIds: tab.id, groupId: session.engine.scoutFoxGroupId }, () => {
+    // THIS tab's own window's group - grouping into a DIFFERENT window's group (e.g. the
+    // session's primary window, if this tab was created in a secondary one opened via
+    // openNewWindow) fails outright, since a Chrome tab group cannot span windows.
+    const groupIdForThisWindow = session.engine.groupIdForWindow(tab.windowId);
+    if (groupIdForThisWindow && typeof chrome.tabs.group === 'function') {
+      chrome.tabs.group({ tabIds: tab.id, groupId: groupIdForThisWindow }, () => {
         try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
-        Logger.info('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'ScoutFox' tab group [${session.engine.scoutFoxGroupId}] (window [${tab.windowId}])`);
+        Logger.info('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'ScoutFox' tab group [${groupIdForThisWindow}] (window [${tab.windowId}])`);
         if (typeof chrome.sidePanel !== 'undefined' && chrome.sidePanel.setOptions) {
           chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
             try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
@@ -446,7 +478,10 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
   if (chrome.tabs.onActivated) {
     chrome.tabs.onActivated.addListener(async (activeInfo) => {
       const session = sessions.get(activeInfo.windowId);
-      if (!session || !session.engine.scoutFoxGroupId || typeof chrome.sidePanel === 'undefined' || !chrome.sidePanel.setOptions) return;
+      // THIS window's own group - a session extended into more than one window (openNewWindow)
+      // tracks a separate group per window, and a tab switch always happens WITHIN one window.
+      const groupIdForThisWindow = session ? session.engine.groupIdForWindow(activeInfo.windowId) : null;
+      if (!session || !groupIdForThisWindow || typeof chrome.sidePanel === 'undefined' || !chrome.sidePanel.setOptions) return;
       const tabId = activeInfo.tabId;
 
       try {
@@ -458,7 +493,7 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
         });
 
         if (tab) {
-          const isInScoutFoxGroup = tab.groupId === session.engine.scoutFoxGroupId;
+          const isInScoutFoxGroup = tab.groupId === groupIdForThisWindow;
           if (isInScoutFoxGroup) {
             chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
               try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
@@ -478,9 +513,11 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       const windowId = tab ? tab.windowId : undefined;
       const session = windowId !== undefined ? sessions.get(windowId) : undefined;
-      if (!session || !session.engine.scoutFoxGroupId || typeof chrome.sidePanel === 'undefined' || !chrome.sidePanel.setOptions) return;
+      // THIS tab's own window's group - see the same note in onCreated/onActivated above.
+      const groupIdForThisWindow = session ? session.engine.groupIdForWindow(windowId) : null;
+      if (!session || !groupIdForThisWindow || typeof chrome.sidePanel === 'undefined' || !chrome.sidePanel.setOptions) return;
       if (changeInfo.groupId !== undefined) {
-        const isInScoutFoxGroup = changeInfo.groupId === session.engine.scoutFoxGroupId;
+        const isInScoutFoxGroup = changeInfo.groupId === groupIdForThisWindow;
         if (isInScoutFoxGroup) {
           chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
             try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
@@ -647,7 +684,9 @@ function routeMessage(request, sender, sendResponse) {
  */
 async function getActiveTab(windowId) {
   const session = windowId !== undefined ? sessions.get(windowId) : undefined;
-  const scoutFoxGroupId = session ? session.engine.scoutFoxGroupId : null;
+  // THIS requested window's own group - the session may cover more than one window
+  // (openNewWindow), and each has its own separate tab group.
+  const scoutFoxGroupId = session && typeof windowId === 'number' ? session.engine.groupIdForWindow(windowId) : null;
 
   // 1. ALWAYS prioritize the currently focused active tab WITHIN THIS WINDOW - never whichever
   // window happens to be globally OS-focused, which could belong to a different session.

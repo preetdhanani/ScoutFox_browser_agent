@@ -148,6 +148,11 @@ export class AgentEngine {
     this.currentPhase = '';
     this.isLoopActive = false;
     this.onStateChangeCallback = null;
+    // Fired when this session opens a brand-new browser window (see openNewWindow()), so
+    // background.js can register that window's id against THIS session instead of creating a
+    // second, disconnected one the moment a panel is opened there. AgentEngine has no direct
+    // access to background.js's own window->session registry; this callback is the seam.
+    this.onWindowOpenedCallback = null;
     this.stateVersion = 0;
     this.recentActionSignatures = [];
     this.currentPlanIndex = 0;
@@ -185,8 +190,7 @@ export class AgentEngine {
 
   /** This engine's own tab group, in its own (primary) window. */
   get scoutFoxGroupId() {
-    const v = this.scoutFoxGroupIds.get(this.windowId);
-    return v === undefined ? null : v;
+    return this.groupIdForWindow(this.windowId);
   }
 
   set scoutFoxGroupId(groupId) {
@@ -195,6 +199,20 @@ export class AgentEngine {
     } else {
       this.scoutFoxGroupIds.set(this.windowId, groupId);
     }
+  }
+
+  /**
+   * This session's tab group in a SPECIFIC window - not necessarily its primary one.
+   *
+   * A session extended into more than one window (openNewWindow) tracks one group per window
+   * it touches; scoutFoxGroupId (above) only ever answers for this engine's own primary
+   * window, which is wrong the moment a caller means some OTHER window this same session also
+   * covers - grouping a tab into a group that belongs to a different Chrome window fails
+   * outright, since a tab group cannot span windows.
+   */
+  groupIdForWindow(windowId) {
+    const v = this.scoutFoxGroupIds.get(windowId);
+    return v === undefined ? null : v;
   }
 
   /**
@@ -403,6 +421,10 @@ export class AgentEngine {
     this.onStateChangeCallback = cb;
   }
 
+  setWindowOpenedCallback(cb) {
+    this.onWindowOpenedCallback = cb;
+  }
+
   notifyStateChange(extraData = {}) {
     this.stateVersion++;
     this.persistState();
@@ -434,7 +456,16 @@ export class AgentEngine {
   /**
    * Ensures target tab and all agent automation tabs are sandboxed into a 'ScoutFox' Chrome Tab Group
    */
-  async ensureScoutFoxGroup(tabId) {
+  /**
+   * @param {number} tabId
+   * @param {number|string} [windowId] Defaults to this engine's own primary window
+   *   (this.windowId, via the scoutFoxGroupId getter/setter every existing caller and test
+   *   already relies on). Pass the tab's OWN window explicitly when sandboxing a tab in some
+   *   OTHER window this session has been extended into (see openNewWindow()) - a Chrome tab
+   *   group cannot span windows, so a session spanning more than one tracks one group PER
+   *   window it touches, in scoutFoxGroupIds.
+   */
+  async ensureScoutFoxGroup(tabId, windowId = this.windowId) {
     if (!tabId || typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.group) return null;
 
     try {
@@ -451,12 +482,15 @@ export class AgentEngine {
         ? chrome.tabGroups.TAB_GROUP_ID_NONE
         : -1;
 
-      // 1. Check if our recorded scoutFoxGroupId is still valid and active in Chrome
+      let recordedGroupId = this.scoutFoxGroupIds.get(windowId);
+      if (recordedGroupId === undefined) recordedGroupId = null;
+
+      // 1. Check if our recorded group for THIS window is still valid and active in Chrome
       let activeGroupValid = false;
-      if (this.scoutFoxGroupId && this.scoutFoxGroupId !== TAB_GROUP_ID_NONE) {
+      if (recordedGroupId && recordedGroupId !== TAB_GROUP_ID_NONE) {
         if (chrome.tabGroups && chrome.tabGroups.get) {
           const activeGrp = await new Promise((resolve) => {
-            chrome.tabGroups.get(this.scoutFoxGroupId, (g) => {
+            chrome.tabGroups.get(recordedGroupId, (g) => {
               lastRuntimeError();
               resolve(g);
             });
@@ -470,21 +504,22 @@ export class AgentEngine {
       }
 
       if (!activeGroupValid) {
-        this.scoutFoxGroupId = null;
+        recordedGroupId = null;
+        this.scoutFoxGroupIds.delete(windowId);
       }
 
       // 2. If valid ScoutFox group exists and tab is not yet in it -> join tab into existing group
-      if (activeGroupValid && this.scoutFoxGroupId) {
-        if (tab.groupId !== this.scoutFoxGroupId) {
+      if (activeGroupValid && recordedGroupId) {
+        if (tab.groupId !== recordedGroupId) {
           await new Promise((resolve) => {
-            chrome.tabs.group({ tabIds: tabId, groupId: this.scoutFoxGroupId }, (gid) => {
+            chrome.tabs.group({ tabIds: tabId, groupId: recordedGroupId }, (gid) => {
               lastRuntimeError();
               resolve(gid);
             });
           });
         }
-        Logger.info('AgentEngine', `[TAB_SANDBOX] Tab [${tabId}] joined active 'ScoutFox' tab group (GroupID: ${this.scoutFoxGroupId})`);
-        return this.scoutFoxGroupId;
+        Logger.info('AgentEngine', `[TAB_SANDBOX] Tab [${tabId}] joined active 'ScoutFox' tab group (GroupID: ${recordedGroupId}, window [${windowId}])`);
+        return recordedGroupId;
       }
 
       // 3. Check if target tab is already in a titled ScoutFox group
@@ -496,7 +531,7 @@ export class AgentEngine {
           });
         });
         if (currentGrp && currentGrp.title === 'ScoutFox') {
-          this.scoutFoxGroupId = tab.groupId;
+          this.scoutFoxGroupIds.set(windowId, tab.groupId);
           this.persistState();
           return tab.groupId;
         }
@@ -519,13 +554,71 @@ export class AgentEngine {
         });
       }
 
-      this.scoutFoxGroupId = newGroupId;
+      this.scoutFoxGroupIds.set(windowId, newGroupId);
       this.persistState();
-      Logger.info('AgentEngine', `[TAB_SANDBOX] Created fresh 'ScoutFox' tab group (GroupID: ${newGroupId}) for tab [${tabId}]`);
+      Logger.info('AgentEngine', `[TAB_SANDBOX] Created fresh 'ScoutFox' tab group (GroupID: ${newGroupId}) for tab [${tabId}] (window [${windowId}])`);
       return newGroupId;
     } catch (err) {
       Logger.warn('AgentEngine', '[TAB_SANDBOX_WARN] Could not sandbox tab into ScoutFox group', err.message);
       return null;
+    }
+  }
+
+  /**
+   * Open a brand-new browser window and keep it part of THIS SAME session, sharing history -
+   * rather than starting a second, disconnected one the moment its own panel is opened. Most
+   * tasks never need this; it exists for the rare one that genuinely does (comparing two
+   * pages side by side, a flow that opens in a fresh window by design, etc).
+   *
+   * A Chrome tab group cannot span windows, so the new window's tab gets its OWN ScoutFox
+   * group - tracked in scoutFoxGroupIds under the new window's id, alongside this engine's
+   * other window(s) - while history, status, and everything else stay the ONE shared session.
+   * background.js learns about the new window via onWindowOpenedCallback, so a panel opened
+   * there finds this same session instead of creating a second one.
+   */
+  async openNewWindow(url) {
+    if (typeof chrome === 'undefined' || !chrome.windows || !chrome.windows.create) {
+      return { success: false, error: 'chrome.windows is unavailable in this context, so a new window cannot be opened.' };
+    }
+
+    const targetUrl = url && /^https?:\/\//i.test(url) ? url : (url || 'https://www.google.com');
+
+    try {
+      const win = await new Promise((resolve, reject) => {
+        chrome.windows.create({ url: targetUrl, focused: true }, (w) => {
+          const err = lastRuntimeError();
+          if (err) { reject(new Error(err.message)); return; }
+          resolve(w);
+        });
+      });
+
+      const newTab = win && Array.isArray(win.tabs) ? win.tabs[0] : null;
+      if (!win || !newTab) {
+        return { success: false, error: 'The new window was created, but no tab was found in it.' };
+      }
+
+      if (this.onWindowOpenedCallback) {
+        try { this.onWindowOpenedCallback(win.id); } catch (err) {
+          Logger.warn('AgentEngine', '[WINDOW_OPENED_CALLBACK_ERROR] onWindowOpenedCallback threw', err);
+        }
+      }
+
+      await this.ensureScoutFoxGroup(newTab.id, win.id);
+
+      // Drive the new window from here - opening it is presumably in service of the very
+      // next step, not an end in itself.
+      this.activeTabId = newTab.id;
+      this.notifyStateChange();
+
+      Logger.info('AgentEngine', `[WINDOW_OPENED] Opened a new window [${win.id}] at ${targetUrl}, now driving tab [${newTab.id}] there. Still the same session.`);
+      return {
+        success: true,
+        message: `Opened a new window at ${targetUrl} and switched to it.`,
+        windowId: win.id,
+        tabId: newTab.id
+      };
+    } catch (err) {
+      return { success: false, error: `Could not open a new window: ${err.message}` };
     }
   }
 
@@ -1240,7 +1333,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           this.updatePlanProgress(actionObj, false);
         }
 
-        if (actionObj.action === 'click' || actionObj.action === 'navigate' || (actionObj.action === 'type' && actionObj.submit)) {
+        if (actionObj.action === 'click' || actionObj.action === 'navigate' || actionObj.action === 'open_window' || (actionObj.action === 'type' && actionObj.submit)) {
           await this.waitForTabComplete(this.activeTabId, 4000);
         }
 
@@ -1401,6 +1494,13 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       return this.executeJs(tabId, actionPayload.code, actionPayload.world || 'MAIN');
     }
 
+    if (actionPayload.action === 'open_window') {
+      // A background-only browser API, not a content-script action - dispatched here directly
+      // rather than via chrome.tabs.sendMessage(tabId, ...) below, which targets a page's own
+      // content script and has nothing to do with creating a new window.
+      return this.openNewWindow(actionPayload.url);
+    }
+
     if (actionPayload.action === 'read_network_requests') {
       const netFormatted = this.readNetworkRequests(tabId, actionPayload.filter, actionPayload.includeBody !== false, actionPayload.limit || 10);
       return { success: true, message: `Recent Network Activity:\n${netFormatted}` };
@@ -1509,6 +1609,13 @@ Your objective is to choose the single best action to complete the user's goal i
 
 11. Ask user for input/help:
    {"action": "ask_user", "question": "<question_text>", "reason": "<explanation>"}
+
+12. Open a brand-new browser window (RARE - most tasks never need this; prefer "navigate" for
+    an ordinary new page in the SAME window). Use this only when the task genuinely requires a
+    separate window - comparing two pages side by side, a flow that only works in a fresh
+    window. The new window stays part of this same task and history; you keep driving it
+    afterward exactly as you were driving the tab before:
+   {"action": "open_window", "url": "<https://...>", "reason": "<explanation>"}
 
 ### FEW-SHOT OUTPUT EXAMPLES (Always follow these exact output patterns):
 
@@ -1733,6 +1840,7 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     if (act.action === 'eval_js' || act.action === 'run_js' || act.action === 'javascript') act.action = 'execute_js';
     if (act.action === 'read_network' || act.action === 'network_requests' || act.action === 'get_network') act.action = 'read_network_requests';
     if (act.action === 'batch' || act.action === 'batch_actions') act.action = 'browser_batch';
+    if (act.action === 'new_window' || act.action === 'open_new_window' || act.action === 'create_window') act.action = 'open_window';
 
     if (act.element_id === undefined) {
       if (act.element !== undefined) act.element_id = act.element;
@@ -1771,5 +1879,6 @@ function formatActionSummary(act) {
   if (act.action === 'execute_js') return `Execute JS`;
   if (act.action === 'read_network_requests') return `Read network requests`;
   if (act.action === 'browser_batch') return `Batch (${act.steps ? act.steps.length : 0} steps)`;
+  if (act.action === 'open_window') return `Open new window at ${act.url || ''}`;
   return act.action;
 }

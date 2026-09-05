@@ -1163,6 +1163,7 @@ function describeAction(action, outcome) {
     case 'execute_js':    return { icon: ICONS.code, text: 'Ran JavaScript' };
     case 'read_network_requests': return { icon: ICONS.network, text: 'Checked network activity' };
     case 'browser_batch': return { icon: ICONS.layers, text: `Ran ${(action.steps || []).length} actions in one batch` };
+    case 'open_window':   return { icon: ICONS.globe, text: `Opened a new window at ${quote(host(action.url || ''))}` };
     case 'ask_user':      return { icon: ICONS.ask, text: `Asked ${quote(action.question || 'a question')}` };
     default:              return { icon: ICONS.dot, text: escapeHtml(action.action || 'Acted') };
   }
