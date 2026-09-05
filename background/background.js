@@ -109,8 +109,13 @@ if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setPan
 // Handle explicit extension action icon clicks to group current active tab immediately
 if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
   chrome.action.onClicked.addListener((tab) => {
-    if (!(tab && tab.id && isValidWebTab(tab))) return;
+    if (!(tab && tab.id)) return;
 
+    // Enable + open the panel for the clicked tab UNCONDITIONALLY - isValidWebTab exists to
+    // gate whether a tab can be SCRIPTED for automation (content-script injection), not
+    // whether the panel UI can be shown at all. Gating this whole handler on it meant clicking
+    // the icon while sitting on chrome://newtab - an entirely ordinary starting point for a
+    // browser session - silently did nothing: setOptions and open() never even ran.
     if (chrome.sidePanel && chrome.sidePanel.setOptions) {
       chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
         try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
@@ -131,11 +136,14 @@ if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
       });
     }
 
-    // Grouping has no gesture requirement, so it is safe to run after - and it still finishes
-    // well before the panel's own script connects and needs scoutFoxGroupId to be set.
-    agentEngine.ensureScoutFoxGroup(tab.id).catch((err) => {
-      Logger.warn('Background', '[TAB_SANDBOX_ERROR] ensureScoutFoxGroup failed on icon click', err);
-    });
+    // Automation sandboxing (tab grouping) only makes sense on a page that can actually be
+    // scripted, so THIS is where isValidWebTab belongs - gating the panel opening at all was
+    // the bug. Grouping has no gesture requirement either way, so it is safe to run after.
+    if (isValidWebTab(tab)) {
+      agentEngine.ensureScoutFoxGroup(tab.id).catch((err) => {
+        Logger.warn('Background', '[TAB_SANDBOX_ERROR] ensureScoutFoxGroup failed on icon click', err);
+      });
+    }
   });
 }
 
