@@ -347,7 +347,7 @@ export const ApiClients = {
           model,
           system: systemPrompt,
           messages: formattedMessages,
-          max_tokens: 1024,
+          max_tokens: Number(settings.maxTokens) > 0 ? Number(settings.maxTokens) : 4096,
           temperature: settings.temperature ?? 0.1
         })
       });
@@ -715,7 +715,7 @@ export const ApiClients = {
           model: settings.model || 'claude-3-5-sonnet-20241022',
           system: systemPrompt,
           messages: formattedMessages,
-          max_tokens: 1024,
+          max_tokens: Number(settings.maxTokens) > 0 ? Number(settings.maxTokens) : 4096,
           temperature: settings.temperature ?? 0.1
         })
       });
