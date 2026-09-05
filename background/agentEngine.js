@@ -647,9 +647,31 @@ export class AgentEngine {
     }
   }
 
+  /**
+   * Synchronously reserve the engine for one task, or refuse.
+   *
+   * Must be called from the message handler BEFORE any await. startTask() cannot guard on
+   * this.status alone: it awaits restorePromise first, so a second START_TASK arriving a few
+   * milliseconds later still observes 'idle' and starts a second concurrent loop against the
+   * same tab, interleaving actions and performing every non-idempotent step twice.
+   */
+  claimForTask() {
+    if (this.status === 'running' || this.isLoopActive || this.taskClaimed) {
+      Logger.warn('AgentEngine', `[START_TASK_REJECTED] A task is already active (status=${this.status}, loop=${this.isLoopActive}, claimed=${!!this.taskClaimed}).`);
+      return { success: false, error: 'A task is already running. Stop it before starting another.' };
+    }
+    this.taskClaimed = true;
+    return { success: true };
+  }
+
+  releaseTaskClaim() {
+    this.taskClaimed = false;
+  }
+
   async startTask(userPrompt, tabId) {
     if (!userPrompt || !userPrompt.trim()) {
       Logger.warn('AgentEngine', '[START_TASK_REJECTED] Ignoring empty task prompt.');
+      this.releaseTaskClaim();
       return;
     }
 
@@ -698,7 +720,11 @@ export class AgentEngine {
     await this.generatePlan(userPrompt, settings);
 
     this.notifyStateChange();
-    await this.runLoop();
+    try {
+      await this.runLoop();
+    } finally {
+      this.releaseTaskClaim();
+    }
   }
 
   async generatePlan(userPrompt, settings) {

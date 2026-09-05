@@ -15,9 +15,9 @@
 * 📡 **Backend Telemetry Console**: Filter step-by-step DOM snapshots, raw LLM outputs, parser results, and network latency (`(842ms)`).
 * ⚡ **Persistent Storage Model Caching**: Instant 0ms model dropdown loading on panel open.
 * 🦙 **Universal Multi-Provider LLM Support**:
-  * **Google Gemini API** (`gemini-1.5-flash`, `gemini-1.5-pro`, `gemini-2.0-flash-exp`)
+  * **Google Gemini API** (`gemini-2.0-flash`, `gemini-1.5-flash`, `gemini-1.5-pro`)
   * **Ollama (Local Host)** (`qwen2.5:14b`, `llama3.1:8b`, `gemma2:9b`)
-  * **Groq Cloud / OpenAI-Compatible** (`llama-3.1-70b-versatile`)
+  * **Groq Cloud / OpenAI-Compatible** (`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`)
   * **OpenAI Official** (`gpt-4o-mini`, `gpt-4o`)
   * **Anthropic Claude** (`claude-3-5-sonnet-20241022`)
 * 🐍 **Standalone Python Playwright Agent**: Run terminal-based Playwright browser automation without registering a Web Store developer account!

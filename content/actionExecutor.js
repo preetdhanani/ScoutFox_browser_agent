@@ -341,23 +341,91 @@
       this.highlightElement(el);
 
       el.focus();
-      el.value = text;
 
-      // Dispatch input and change events so modern frameworks register changes
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      const applied = this.setFieldValue(el, text);
+      if (!applied.success) {
+        // Report the failure instead of answering success, so the model can pick a different
+        // element or strategy rather than being told a no-op worked and moving on.
+        return { success: false, error: applied.error };
+      }
 
       if (submit) {
         const form = el.closest('form');
         if (form) {
-          form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+          // A dispatched 'submit' Event runs listeners but does NOT submit a native form.
+          // requestSubmit() fires the event AND submits, and honours validation.
+          if (typeof form.requestSubmit === 'function') {
+            form.requestSubmit();
+          } else {
+            form.submit();
+          }
         } else {
-          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+          const enter = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+          el.dispatchEvent(new KeyboardEvent('keydown', enter));
+          el.dispatchEvent(new KeyboardEvent('keypress', enter));
+          el.dispatchEvent(new KeyboardEvent('keyup', enter));
         }
       }
 
       const typeLabel = this.describeElement(el);
       return { success: true, label: typeLabel, submitted: !!submit, message: `Typed "${text}" into element [${elementId}]${typeLabel ? ` ("${typeLabel}")` : ''}` };
+    }
+
+    /**
+     * Put `text` into whatever kind of field `el` actually is.
+     *
+     * Assigning el.value directly is the problem this exists to solve. React installs a value
+     * tracker on every controlled input; on an 'input' event it compares the node's value
+     * against its own tracked value, and a direct assignment updates BOTH, so React concludes
+     * nothing changed and drops the event. The text is visible on screen but never reaches
+     * component state, which is why searches stayed empty and submit buttons stayed disabled.
+     * Going through the prototype's native setter leaves the tracker stale, so the event lands.
+     *
+     * <select> and contenteditable have no meaningful .value semantics here at all and need
+     * their own handling; previously both silently no-opped and reported success.
+     */
+    setFieldValue(el, text) {
+      const tag = (el.tagName || '').toUpperCase();
+      const str = text == null ? '' : String(text);
+
+      if (tag === 'SELECT') {
+        const options = Array.from(el.options || []);
+        const match =
+          options.find(o => o.value === str) ||
+          options.find(o => (o.textContent || '').trim() === str.trim()) ||
+          options.find(o => (o.textContent || '').trim().toLowerCase() === str.trim().toLowerCase());
+        if (!match) {
+          const available = options.map(o => (o.textContent || o.value || '').trim()).filter(Boolean).slice(0, 12);
+          return { success: false, error: `No option matching "${str}" in this dropdown. Available: ${available.join(' | ') || '(none)'}` };
+        }
+        el.value = match.value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true };
+      }
+
+      const isTextField = tag === 'INPUT' || tag === 'TEXTAREA';
+      if (isTextField) {
+        const proto = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (setter && setter.set) {
+          setter.set.call(el, str);
+        } else {
+          el.value = str;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true };
+      }
+
+      if (el.isContentEditable || el.getAttribute('role') === 'textbox') {
+        el.textContent = str;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: str, inputType: 'insertText' }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true };
+      }
+
+      return { success: false, error: `Element <${tag.toLowerCase()}> is not a text field, dropdown or editable region, so it cannot be typed into.` };
     }
 
     /**

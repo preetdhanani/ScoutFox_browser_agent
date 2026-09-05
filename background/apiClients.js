@@ -88,18 +88,18 @@ export const ApiClients = {
     const dispatch = () => {
       switch (provider) {
         case 'openrouter':
-          return this.callOpenRouter(settings, messages, systemPrompt);
+          return this.callOpenRouter(settings, messages, systemPrompt, options);
         case 'agent_router':
-          return this.callAgentRouter(settings, messages, systemPrompt);
+          return this.callAgentRouter(settings, messages, systemPrompt, options);
         case 'ollama':
           return this.callOllama(settings, messages, systemPrompt, options);
         case 'openai_compatible':
         case 'openai':
-          return this.callOpenAI(settings, messages, systemPrompt);
+          return this.callOpenAI(settings, messages, systemPrompt, options);
         case 'anthropic':
-          return this.callAnthropic(settings, messages, systemPrompt);
+          return this.callAnthropic(settings, messages, systemPrompt, options);
         case 'gemini':
-          return this.callGemini(settings, messages, systemPrompt);
+          return this.callGemini(settings, messages, systemPrompt, options);
         default:
           throw new Error(`Unsupported LLM provider: ${provider}`);
       }
@@ -298,7 +298,7 @@ export const ApiClients = {
         return ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'];
       case 'openai':
       case 'openai_compatible':
-        return ['gpt-4o', 'gpt-4o-mini', 'llama-3.1-70b-versatile'];
+        return ['gpt-4o', 'gpt-4o-mini', 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
       default:
         return ['gemini-2.0-flash', 'gemini-1.5-flash', 'qwen2.5:14b', 'gpt-4o-mini'];
     }
@@ -308,7 +308,7 @@ export const ApiClients = {
    * Dedicated AgentRouter Client (https://agentrouter.org)
    * Emulates Claude CLI wire image headers and extracts response text using universal payload extractor.
    */
-  async callAgentRouter(settings, messages, systemPrompt) {
+  async callAgentRouter(settings, messages, systemPrompt, options = {}) {
     const rawBaseUrl = (settings.baseUrl || 'https://agentrouter.org/v1').replace(/\/$/, '');
     const baseUrl = rawBaseUrl.endsWith('/v1') ? rawBaseUrl : `${rawBaseUrl}/v1`;
     const apiKey = (settings.apiKey || settings.providerConfigs?.agent_router?.apiKey || '').trim();
@@ -341,6 +341,7 @@ export const ApiClients = {
       const messagesUrl = `${baseUrl}/messages`;
       const response = await fetch(messagesUrl, {
         method: 'POST',
+        signal: options.signal || null,
         headers,
         body: JSON.stringify({
           model,
@@ -377,6 +378,7 @@ export const ApiClients = {
 
       const resp2 = await fetch(completionsUrl, {
         method: 'POST',
+        signal: options.signal || null,
         headers,
         body: JSON.stringify({
           model,
@@ -407,7 +409,7 @@ export const ApiClients = {
   /**
    * OpenRouter API Client
    */
-  async callOpenRouter(settings, messages, systemPrompt) {
+  async callOpenRouter(settings, messages, systemPrompt, options = {}) {
     const url = 'https://openrouter.ai/api/v1/chat/completions';
     const apiKey = (settings.apiKey || settings.providerConfigs?.openrouter?.apiKey || '').trim();
     const startTime = Date.now();
@@ -437,6 +439,7 @@ export const ApiClients = {
     try {
       const response = await fetch(url, {
         method: 'POST',
+        signal: options.signal || null,
         headers,
         body: JSON.stringify(body)
       });
@@ -517,6 +520,7 @@ export const ApiClients = {
 
     const post = async (withThink) => fetch(url, {
       method: 'POST',
+      signal: options.signal || null,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(buildBody(withThink))
     });
@@ -575,7 +579,7 @@ export const ApiClients = {
   /**
    * Google Gemini API Client
    */
-  async callGemini(settings, messages, systemPrompt) {
+  async callGemini(settings, messages, systemPrompt, options = {}) {
     const model = settings.model || 'gemini-1.5-flash';
     const apiKey = (settings.apiKey || settings.providerConfigs?.gemini?.apiKey || '').trim();
     const startTime = Date.now();
@@ -600,6 +604,7 @@ export const ApiClients = {
     try {
       const response = await fetch(url, {
         method: 'POST',
+        signal: options.signal || null,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
@@ -627,7 +632,7 @@ export const ApiClients = {
   /**
    * OpenAI & OpenAI-compatible Client
    */
-  async callOpenAI(settings, messages, systemPrompt) {
+  async callOpenAI(settings, messages, systemPrompt, options = {}) {
     const provider = settings.provider || 'openai';
     let defaultBase = 'https://api.openai.com';
     if (provider === 'openai_compatible') defaultBase = 'https://api.groq.com/openai/v1';
@@ -654,6 +659,7 @@ export const ApiClients = {
     try {
       const response = await fetch(url, {
         method: 'POST',
+        signal: options.signal || null,
         headers,
         body: JSON.stringify(body)
       });
@@ -678,7 +684,7 @@ export const ApiClients = {
   /**
    * Anthropic Claude API Client
    */
-  async callAnthropic(settings, messages, systemPrompt) {
+  async callAnthropic(settings, messages, systemPrompt, options = {}) {
     const url = 'https://api.anthropic.com/v1/messages';
     const apiKey = (settings.apiKey || settings.providerConfigs?.anthropic?.apiKey || '').trim();
     const startTime = Date.now();
@@ -695,11 +701,15 @@ export const ApiClients = {
     try {
       const response = await fetch(url, {
         method: 'POST',
+        signal: options.signal || null,
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': apiKey,
           'anthropic-version': '2023-06-01',
-          'dangerously-allow-browser': 'true'
+          // The real header. `dangerously-allow-browser` is the JS SDK's client OPTION name,
+          // not a header, and sending it made every request fail CORS preflight because it
+          // is not in Anthropic's Access-Control-Allow-Headers.
+          'anthropic-dangerous-direct-browser-access': 'true'
         },
         body: JSON.stringify({
           model: settings.model || 'claude-3-5-sonnet-20241022',

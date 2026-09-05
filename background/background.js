@@ -104,7 +104,12 @@ let activeSidepanelPorts = new Set();
 let lastBroadcastHadNoListeners = false;
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === 'scoutfox_sidepanel' || port.name === 'strawberry_sidepanel') {
+  // '_fresh' marks a first connection from a newly opened panel; the bare names are
+  // reconnects. 'strawberry_sidepanel' is deliberate backwards compatibility for a panel
+  // still running from a pre-rename build, not a leftover; it can go once no such panel
+  // can still be open, i.e. one release after this one.
+  const SIDEPANEL_PORTS = ['scoutfox_sidepanel', 'scoutfox_sidepanel_fresh', 'strawberry_sidepanel'];
+  if (SIDEPANEL_PORTS.includes(port.name)) {
     activeSidepanelPorts.add(port);
     lastBroadcastHadNoListeners = false;
     Logger.info('Background', `[PORT_CONNECT] Sidepanel UI connected. Active ports: ${activeSidepanelPorts.size}`);
@@ -114,8 +119,19 @@ chrome.runtime.onConnect.addListener((port) => {
       Logger.info('Background', `[PORT_DISCONNECT] Sidepanel UI disconnected. Active ports: ${activeSidepanelPorts.size}`);
     });
 
-    // When opening sidepanel while idle, start completely fresh: clear old chats and logs
-    if (agentEngine.status === 'idle') {
+    // Start fresh only when the panel is genuinely being OPENED, never on a reconnect.
+    //
+    // onConnect fires for both. Chrome reclaims an idle MV3 worker after ~30s, and the panel
+    // reconnects automatically with backoff, so a finished run reliably hit this path with
+    // status 'idle' and had its results deleted while the user was still reading them. It
+    // also defeated restoreState(), which maps a persisted running/paused back to a
+    // non-running status after a cold boot, only for the next reconnect to wipe it.
+    //
+    // The panel tells us which it is via the port name; anything else is treated as a
+    // reconnect, so the safe default is to keep the history.
+    const isFreshOpen = port.name.endsWith('_fresh');
+    if (isFreshOpen && agentEngine.status === 'idle') {
+      Logger.info('Background', '[SESSION_FRESH] Panel opened while idle. Starting a clean session.');
       agentEngine.clearHistory();
     }
 
@@ -398,9 +414,19 @@ function routeMessage(request, sender, sendResponse) {
   }
 
   if (action === 'START_TASK') {
+    // Claim synchronously, before any await, so a double-clicked send button cannot open two
+    // concurrent runs. onMessage handlers are serialized, so this is the one point where the
+    // second request is guaranteed to see the first.
+    const claim = agentEngine.claimForTask();
+    if (!claim.success) {
+      sendResponse(claim);
+      return true;
+    }
+
     getActiveTab()
       .then((tab) => {
         if (!tab) {
+          agentEngine.releaseTaskClaim();
           throw new Error('No automatable tab found. ScoutFox cannot script Chrome\'s internal pages (chrome://…) — open a normal website such as https://google.com and try again.');
         }
         agentEngine.startTask(payload.prompt, tab.id).catch((err) => {
@@ -409,6 +435,7 @@ function routeMessage(request, sender, sendResponse) {
         sendResponse({ success: true, tabId: tab.id, tabUrl: tab.url, tabTitle: tab.title });
       })
       .catch((err) => {
+        agentEngine.releaseTaskClaim();
         Logger.error('Background', 'Failed to start task', err);
         sendResponse({ success: false, error: err.message });
       });

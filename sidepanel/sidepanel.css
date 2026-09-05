@@ -135,6 +135,13 @@ a:hover { color: var(--text-main); }
   color: var(--text-muted);
   letter-spacing: 0.02em;
   margin-top: 1px;
+  /* Model ids are long and slash-separated ("anthropic/claude-3.5-sonnet"), so left to wrap
+     they take two or three lines and the header grows to match. One line, truncated, with
+     the full id on hover via the title attribute. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .header-actions {
@@ -1375,4 +1382,84 @@ a:hover { color: var(--text-main); }
 @media (prefers-reduced-motion: reduce) {
   .act-chev { transition: none; }
   .act-state.live { animation: none; opacity: 0.85; }
+}
+
+/* Utility: used by renderState() to show/hide the sandbox indicator. */
+.hidden {
+  display: none !important;
+}
+
+/* Shown while the active tab is inside the ScoutFox tab group. */
+.sandbox-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  margin-left: 4px;
+  border-radius: 5px;
+  background: var(--success-soft);
+  color: var(--success);
+  border: 1px solid var(--success-soft);
+  font-family: var(--font-body);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Compact enough to sit beside the theme toggle and status pill at 320px. */
+.btn-history-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.btn-history-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-history-toggle:focus-visible,
+.history-session-item:focus-visible,
+.btn-delete-session:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Nothing in the header may push the status pill past the edge. The brand column is the
+   flexible one; the controls keep their size. */
+.app-header .brand {
+  min-width: 0;
+}
+
+.app-header .brand-text {
+  min-width: 0;
+}
+
+.header-actions {
+  flex-shrink: 0;
+}
+
+/* A Chrome side panel can be dragged down to roughly 320px. At that width the History
+   button's label is what overflows, so drop the word and keep the icon and the count. */
+@media (max-width: 380px) {
+  .history-toggle-label {
+    display: none;
+  }
+
+  .btn-history-toggle {
+    gap: 3px;
+    padding: 4px 6px;
+  }
 }

@@ -20,9 +20,11 @@
         <div class="brand-text">
           <h1>ScoutFox</h1>
           <span class="badge-tag" id="currentModelBadge">Gemini 1.5 Flash</span>
+          <span class="sandbox-badge hidden" id="sandboxBadge" title="This tab is inside the ScoutFox tab group. The agent is scoped to it.">Sandboxed</span>
         </div>
       </div>
       <div class="header-actions">
+        <button class="btn-history-toggle" id="btnToggleHistory" title="Saved sessions" aria-expanded="false" aria-controls="historyDrawer">History (0)</button>
         <button class="theme-toggle" id="btnThemeToggle" title="Theme: Auto"></button>
         <div class="status-indicator" id="statusPill">
           <span class="status-dot"></span>
@@ -46,6 +48,15 @@
         Logs
       </button>
     </nav>
+
+    <!-- SESSION HISTORY DRAWER -->
+    <div class="history-drawer" id="historyDrawer" style="display: none;">
+      <div class="history-drawer-header">
+        <span>Saved sessions</span>
+        <button class="btn btn-secondary btn-xs" id="btnCloseHistory">Close</button>
+      </div>
+      <div class="history-sessions-list" id="historySessionsList"></div>
+    </div>
 
     <!-- Tab Contents -->
     <main class="tab-content">

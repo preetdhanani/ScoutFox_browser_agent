@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Strawberry Standalone AI Agentic Browser (Python + Playwright)
+ScoutFox Standalone AI Agentic Browser (Python + Playwright)
 Runs web browser automation directly from terminal using local Ollama (8B/9B/14B/27B) or Cloud LLMs.
 No Chrome Extension or $5 developer account required!
 """
@@ -9,9 +9,11 @@ import sys
 import json
 import time
 import re
+import os
 import argparse
 import urllib.request
 import urllib.error
+import urllib.parse
 from playwright.sync_api import sync_playwright
 
 SYSTEM_PROMPT = """You are an autonomous web browsing AI agent.
@@ -81,11 +83,11 @@ def extract_dom_elements(page, max_elements=120):
       const elements = [];
       let count = 0;
 
-      const oldContainer = document.getElementById('strawberry-py-badges');
+      const oldContainer = document.getElementById('scoutfox-py-badges');
       if (oldContainer) oldContainer.remove();
 
       const badgeContainer = document.createElement('div');
-      badgeContainer.id = 'strawberry-py-badges';
+      badgeContainer.id = 'scoutfox-py-badges';
       badgeContainer.style.position = 'absolute';
       badgeContainer.style.top = '0';
       badgeContainer.style.left = '0';
@@ -226,7 +228,7 @@ def parse_action(text):
         return thought, None, f"JSON parse error: {e}"
 
 def run_agent(goal, start_url, provider, base_url, api_key, model, max_steps, headless):
-    print(f"\n🚀 Launching Strawberry Standalone Agent...")
+    print(f"\n🦊 Launching ScoutFox Standalone Agent...")
     print(f"🎯 Goal: {goal}")
     print(f"🌐 Start URL: {start_url}")
     print(f"🦙 Provider: {provider} | Model: {model}\n")
@@ -321,18 +323,47 @@ Choose your next action:"""
         browser.close()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Strawberry Standalone AI Agentic Browser")
+    parser = argparse.ArgumentParser(description="ScoutFox Standalone AI Agentic Browser")
     parser.add_argument("--goal", type=str, default="Search Google for open source AI agents", help="User task goal")
     parser.add_argument("--url", type=str, default="https://google.com", help="Initial webpage URL")
     parser.add_argument("--provider", type=str, default="ollama", choices=["ollama", "openai"], help="LLM Provider")
-    parser.add_argument("--base-url", type=str, default="http://localhost:11434", help="API Base URL")
-    parser.add_argument("--api-key", type=str, default="", help="API Key (for OpenAI/Groq)")
-    parser.add_argument("--model", type=str, default="qwen2.5:14b", help="Model name")
+    # No single default can be right for both providers. A fixed Ollama default meant
+    # `--provider openai` sent the user's OpenAI key to http://localhost:11434, so the key
+    # went to whatever was listening on that port and the error gave no hint why.
+    parser.add_argument("--base-url", type=str, default=None,
+                        help="API Base URL (defaults per provider: Ollama localhost, OpenAI api.openai.com)")
+    parser.add_argument("--api-key", type=str, default=os.environ.get("OPENAI_API_KEY", ""),
+                        help="API key. Defaults to $OPENAI_API_KEY so it need not appear in shell history.")
+    parser.add_argument("--model", type=str, default=None,
+                        help="Model name (defaults per provider: qwen2.5:14b for Ollama, gpt-4o-mini for OpenAI)")
     parser.add_argument("--list-models", action="store_true", help="List all available models dynamically from provider API")
     parser.add_argument("--max-steps", type=int, default=20, help="Max execution steps")
     parser.add_argument("--headless", action="store_true", help="Run browser in background headless mode")
 
     args = parser.parse_args()
+
+    PROVIDER_DEFAULT_BASE_URL = {
+        "ollama": "http://localhost:11434",
+        "openai": "https://api.openai.com/v1",
+    }
+    PROVIDER_DEFAULT_MODEL = {
+        "ollama": "qwen2.5:14b",
+        "openai": "gpt-4o-mini",
+    }
+    if args.base_url is None:
+        args.base_url = PROVIDER_DEFAULT_BASE_URL[args.provider]
+    if args.model is None:
+        args.model = PROVIDER_DEFAULT_MODEL[args.provider]
+
+    # Refuse the mistake outright rather than leaking the key to a local port and failing
+    # with a confusing error the user is likely to retry.
+    if args.provider != "ollama" and args.api_key:
+        host = urllib.parse.urlparse(args.base_url).hostname or ""
+        if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            parser.error(
+                f"Refusing to send a {args.provider} API key to {args.base_url}. "
+                f"Pass --base-url for your provider, or drop --api-key if you meant to use Ollama."
+            )
 
     if args.list_models:
         print(f"\n🔍 Fetching dynamic models from {args.provider} at {args.base_url}...")

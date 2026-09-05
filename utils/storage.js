@@ -9,7 +9,7 @@ export const DEFAULT_PROVIDER_CONFIGS = {
   gemini: { baseUrl: '', apiKey: '', model: 'gemini-1.5-flash' },
   ollama: { baseUrl: 'http://localhost:11434', apiKey: '', model: 'qwen2.5:14b' },
   openai: { baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o-mini' },
-  openai_compatible: { baseUrl: 'https://api.groq.com/openai/v1', apiKey: '', model: 'llama-3.1-70b-versatile' },
+  openai_compatible: { baseUrl: 'https://api.groq.com/openai/v1', apiKey: '', model: 'llama-3.3-70b-versatile' },
   anthropic: { baseUrl: 'https://api.anthropic.com', apiKey: '', model: 'claude-3-5-sonnet-20241022' }
 };
 

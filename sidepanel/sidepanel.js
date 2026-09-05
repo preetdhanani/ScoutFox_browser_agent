@@ -13,8 +13,28 @@ let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
 let apiKeyFetchDebounce = null;
 let allFetchedModels = [];
+
+// The authoritative selected model.
+//
+// This used to be read back out of the hidden <select id="modelSelect">, but that element
+// only holds options from the last renderModelOptions() call. Assigning a value with no
+// matching <option> silently leaves select.value === '', so switching to a provider whose
+// default was not already in the list persisted model: '' and then fell back to whatever
+// happened to be first in the hardcoded list. Keep the truth here instead of in the DOM.
+let selectedModel = null;
+// Guards the window between clicking send and the background confirming the task started.
+let isSubmittingTask = false;
+// Mirrors the engine status the panel last rendered, so the submit guard knows whether
+// renderState() has taken ownership of the send button.
+let isTaskActive = false;
 let portReconnectAttempts = 0;
 let portReconnectTimer = null;
+// False only for this panel instance's very first connect. Distinguishes opening the panel
+// from reconnecting after Chrome reclaimed the service worker.
+let hasConnectedBefore = false;
+// Terminal state is broadcast more than once for the same run; this keeps the write to one
+// per (session, history length) rather than one per broadcast.
+const savedSessionIds = new Set();
 
 // Out-of-order render guard. The live port and the GET_AGENT_STATE resync are two independent
 // async channels with no ordering guarantee, so a slow resync reply can arrive after a newer
@@ -139,8 +159,20 @@ function updateSelectedModel(modelName) {
   const selectEl = document.getElementById('modelSelect');
   const customInput = document.getElementById('modelCustomInput');
 
+  selectedModel = modelName || null;
+
   if (labelEl) labelEl.textContent = modelName || 'Select a model...';
-  if (selectEl) selectEl.value = modelName;
+  if (selectEl) {
+    // Keep the backing <select> in step for anything that still reads it, adding the option
+    // when it is absent so the assignment cannot silently no-op.
+    if (modelName && !Array.from(selectEl.options).some(o => o.value === modelName)) {
+      const opt = document.createElement('option');
+      opt.value = modelName;
+      opt.textContent = modelName;
+      selectEl.appendChild(opt);
+    }
+    selectEl.value = modelName || '';
+  }
   updateModelBadge(modelName);
 
   if (modelName === '__custom__') {
@@ -299,25 +331,29 @@ function closeComboboxMenu() {
  */
 async function autoSaveCurrentForm() {
   const provider = document.getElementById('providerSelect').value;
-  const selectVal = document.getElementById('modelSelect').value;
   const customVal = document.getElementById('modelCustomInput').value.trim();
-  const finalModel = (selectVal === '__custom__' && customVal) ? customVal : selectVal;
+  const finalModel = (selectedModel === '__custom__' && customVal) ? customVal : (selectedModel || '');
 
   const apiKey = document.getElementById('apiKeyInput').value.trim();
   const baseUrl = document.getElementById('baseUrlInput').value.trim();
+
+  const previousModel = (currentSettings.providerConfigs && currentSettings.providerConfigs[provider]
+    && currentSettings.providerConfigs[provider].model) || '';
 
   const newSettings = {
     provider,
     baseUrl,
     apiKey,
-    model: finalModel,
+    // Guard against writing an empty model over a good one. Even with selectedModel as the
+    // source of truth, an empty value here would silently clear the provider's saved choice.
+    model: finalModel || previousModel,
     maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || 25,
     actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || 1000,
     showElementBadges: document.getElementById('badgesToggle').checked
   };
 
   currentSettings = await Storage.saveSettings(newSettings);
-  updateModelBadge(finalModel);
+  updateModelBadge(newSettings.model);
 }
 
 /**
@@ -367,6 +403,8 @@ function updateModelBadge(modelName) {
   const badge = document.getElementById('currentModelBadge');
   if (badge) {
     badge.textContent = modelName || 'Model';
+    // The badge truncates to one line, so the full id has to stay reachable on hover.
+    badge.title = modelName || '';
   }
 }
 
@@ -404,7 +442,12 @@ function connectPort() {
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
   try {
-    backgroundPort = chrome.runtime.connect({ name: 'scoutfox_sidepanel' });
+    // Tell the worker whether this is a genuine panel open or an automatic reconnect. Only
+    // the first connection of this panel instance may clear the previous session; every
+    // later one is recovering from the worker being reclaimed and must preserve the run.
+    const portName = hasConnectedBefore ? 'scoutfox_sidepanel' : 'scoutfox_sidepanel_fresh';
+    hasConnectedBefore = true;
+    backgroundPort = chrome.runtime.connect({ name: portName });
   } catch (err) {
     reportClientError('sidepanel:port-connect', err);
     setConnectionBanner(true);
@@ -570,6 +613,26 @@ function initEventListeners() {
     await Storage.saveSettings({ theme: next });
   });
 
+  const historyToggle = document.getElementById('btnToggleHistory');
+  const historyDrawer = document.getElementById('historyDrawer');
+  const historyClose = document.getElementById('btnCloseHistory');
+
+  if (historyToggle && historyDrawer) {
+    historyToggle.addEventListener('click', async () => {
+      const willOpen = historyDrawer.style.display === 'none';
+      historyDrawer.style.display = willOpen ? 'flex' : 'none';
+      historyToggle.setAttribute('aria-expanded', String(willOpen));
+      if (willOpen) await loadSessionHistory();
+    });
+  }
+
+  if (historyClose && historyDrawer) {
+    historyClose.addEventListener('click', () => {
+      historyDrawer.style.display = 'none';
+      if (historyToggle) historyToggle.setAttribute('aria-expanded', 'false');
+    });
+  }
+
   document.getElementById('btnStartTask').addEventListener('click', startTask);
   document.getElementById('taskInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -679,9 +742,29 @@ function initEventListeners() {
 }
 
 async function startTask() {
+  const btn = document.getElementById('btnStartTask');
   const prompt = document.getElementById('taskInput').value.trim();
   if (!prompt) return;
 
+  // Claim synchronously, before the first await. renderState() does disable this button, but
+  // only once a running STATE_UPDATE has made the round trip, and both the click handler and
+  // the Enter key land here directly. The engine guards this too; this half is what stops the
+  // duplicate message being sent at all, and gives immediate visual feedback.
+  if (isSubmittingTask) return;
+  isSubmittingTask = true;
+  if (btn) btn.disabled = true;
+
+  try {
+    await startTaskInner(prompt);
+  } finally {
+    isSubmittingTask = false;
+    // renderState() owns the button from here: it re-disables while the task runs, and
+    // re-enables when it ends. Only release it if the task never got that far.
+    if (btn && !isTaskActive) btn.disabled = false;
+  }
+}
+
+async function startTaskInner(prompt) {
   // Auto-sync form state into Storage before launching task
   await autoSaveCurrentForm();
 
@@ -732,7 +815,12 @@ function showTaskError(message) {
 async function loadSessionHistory() {
   const sessions = await Storage.getSessions();
   const historyBtn = document.getElementById('btnToggleHistory');
-  if (historyBtn) historyBtn.innerHTML = `${ICONS.clock} History (${sessions.length})`;
+  // The word is wrapped so it can be dropped at narrow panel widths, leaving the clock and
+  // the count. Without that the button pushes the status pill past the header edge at 320px.
+  if (historyBtn) {
+    historyBtn.innerHTML = `${ICONS.clock}<span class="history-toggle-label">History</span> (${sessions.length})`;
+    historyBtn.title = `Saved sessions (${sessions.length})`;
+  }
 
   const listContainer = document.getElementById('historySessionsList');
   if (!listContainer) return;
@@ -745,7 +833,7 @@ async function loadSessionHistory() {
   listContainer.innerHTML = sessions.map(session => {
     const isSelected = session.id === currentSessionId;
     return `
-      <div class="history-session-item ${isSelected ? 'active' : ''}" data-id="${session.id}">
+      <div class="history-session-item ${isSelected ? 'active' : ''}" data-id="${session.id}" tabindex="0" role="button">
         <div class="history-item-info">
           <span class="history-item-title">${escapeHtml(session.task || 'Untitled Session')}</span>
           <span class="history-item-meta">${session.timestamp || ''} • ${session.model || ''}</span>
@@ -756,10 +844,13 @@ async function loadSessionHistory() {
   }).join('');
 
   listContainer.querySelectorAll('.history-session-item').forEach(item => {
-    item.addEventListener('click', (e) => {
-      if (e.target.classList.contains('btn-delete-session')) return;
-      const sessionId = item.getAttribute('data-id');
-      loadSelectedSession(sessionId);
+    const open = (e) => {
+      if (e.target.closest('.btn-delete-session')) return;
+      loadSelectedSession(item.getAttribute('data-id'));
+    };
+    item.addEventListener('click', open);
+    item.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); }
     });
   });
 
@@ -773,9 +864,39 @@ async function loadSessionHistory() {
   });
 }
 
+/**
+ * Persist a run once it reaches a terminal state.
+ *
+ * Only terminal states are saved, so a run is written once rather than on every one of the
+ * ~7 state broadcasts per step. The panel still OPENS on a clean timeline (the worker clears
+ * history on a fresh connect); this is what makes that previous run recoverable afterwards
+ * instead of simply lost.
+ */
 async function autoSaveActiveSession(state) {
-  // Old session auto-saving disabled by user preference - chats start fresh on every new opening
-  return;
+  if (!state) return;
+
+  const TERMINAL = ['idle', 'stopped', 'complete', 'completed', 'error'];
+  if (!TERMINAL.includes(state.status)) return;
+  if (!state.task) return;
+  if (!Array.isArray(state.history) || state.history.length === 0) return;
+  if (!currentSessionId) return;
+  if (savedSessionIds.has(currentSessionId + ':' + state.history.length)) return;
+
+  savedSessionIds.add(currentSessionId + ':' + state.history.length);
+
+  try {
+    await Storage.saveSession({
+      id: currentSessionId,
+      task: state.task,
+      timestamp: new Date().toLocaleString(),
+      model: currentSettings.model || '',
+      history: state.history,
+      planSteps: state.planSteps || []
+    });
+    await loadSessionHistory();
+  } catch (err) {
+    reportClientError('sidepanel:session-save', err);
+  }
 }
 
 async function loadSelectedSession(sessionId) {
@@ -784,7 +905,10 @@ async function loadSelectedSession(sessionId) {
   if (!target) return;
 
   currentSessionId = target.id;
-  document.getElementById('historyDrawer').style.display = 'none';
+  const drawer = document.getElementById('historyDrawer');
+  if (drawer) drawer.style.display = 'none';
+  const toggle = document.getElementById('btnToggleHistory');
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
 
   renderState({
     status: 'idle',
@@ -882,6 +1006,7 @@ function renderState(state) {
     const pct = Math.min(100, Math.round(((stepCount || 1) / maxSteps) * 100));
     if (progressBarFill) progressBarFill.style.width = `${pct}%`;
 
+    isTaskActive = true;
     if (controlBar) controlBar.style.display = 'flex';
     if (taskInput) taskInput.disabled = true;
     if (btnStartTask) btnStartTask.disabled = true;
@@ -894,6 +1019,7 @@ function renderState(state) {
       }
     }
   } else {
+    isTaskActive = false;
     if (processingBanner) processingBanner.style.display = 'none';
     if (controlBar) controlBar.style.display = 'none';
     if (taskInput) taskInput.disabled = false;
