@@ -11,3 +11,10 @@ __pycache__/
 *.log
 .env
 .env.local
+
+# Agent Customizations & Skills
+.agents/
+agents/
+.agent/
+_agents/
+_agent/
