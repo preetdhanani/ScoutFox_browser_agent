@@ -347,7 +347,7 @@ export const ApiClients = {
           model,
           system: systemPrompt,
           messages: formattedMessages,
-          max_tokens: Number(settings.maxTokens) > 0 ? Number(settings.maxTokens) : 4096,
+          max_tokens: Number(settings.maxTokens) > 0 ? Number(settings.maxTokens) : 8192,
           temperature: settings.temperature ?? 0.1
         })
       });
@@ -500,18 +500,23 @@ export const ApiClients = {
     ];
 
     const numCtx = Number(settings.ollamaNumCtx) > 0 ? Number(settings.ollamaNumCtx) : 8192;
-    const numPredict = Number(settings.ollamaNumPredict) > 0 ? Number(settings.ollamaNumPredict) : 1024;
+    const numPredict = settings.ollamaNumPredict !== undefined && settings.ollamaNumPredict !== null
+      ? (Number(settings.ollamaNumPredict) > 0 ? Number(settings.ollamaNumPredict) : undefined)
+      : undefined;
 
     const buildBody = (withThink) => {
+      const optionsObj = {
+        temperature: settings.temperature ?? 0.1,
+        num_ctx: numCtx
+      };
+      if (numPredict !== undefined) {
+        optionsObj.num_predict = numPredict;
+      }
       const body = {
         model,
         messages: formattedMessages,
         stream: false,
-        options: {
-          temperature: settings.temperature ?? 0.1,
-          num_ctx: numCtx,
-          num_predict: numPredict
-        }
+        options: optionsObj
       };
       if (withThink) body.think = false;
       if (options.json) body.format = 'json';
@@ -715,7 +720,7 @@ export const ApiClients = {
           model: settings.model || 'claude-3-5-sonnet-20241022',
           system: systemPrompt,
           messages: formattedMessages,
-          max_tokens: Number(settings.maxTokens) > 0 ? Number(settings.maxTokens) : 4096,
+          max_tokens: Number(settings.maxTokens) > 0 ? Number(settings.maxTokens) : 8192,
           temperature: settings.temperature ?? 0.1
         })
       });
