@@ -266,9 +266,8 @@ export class AgentEngine {
     this.stepCount = 0;
     this.currentPlanIndex = 0;
     this.currentTask = null;
-    Logger.clearLogs();
     this.notifyStateChange();
-    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history, logs, and plan cleared for fresh session.');
+    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history and plan cleared for fresh session.');
   }
 
   /**
@@ -703,6 +702,10 @@ export class AgentEngine {
     this.isLoopActive = true;
     this.abortController = new AbortController();
 
+    Logger.info('AgentEngine', `─────────────────────────────────────────────────────────────────────────────`);
+    Logger.info('AgentEngine', `[NEW_SESSION_RUN] 🚀 Run #${this.turnIndex} Started: "${userPrompt.trim()}"`);
+    Logger.info('AgentEngine', `─────────────────────────────────────────────────────────────────────────────`);
+
     // Sandbox automation inside 'ScoutFox' Chrome Tab Group
     await this.ensureScoutFoxGroup(tabId);
 
@@ -710,7 +713,8 @@ export class AgentEngine {
       type: 'user_goal',
       turn: this.turnIndex,
       prompt: userPrompt.trim(),
-      timestamp: new Date().toLocaleTimeString()
+      timestamp: new Date().toLocaleTimeString(),
+      isNewRun: true
     });
     this.trimHistory();
 

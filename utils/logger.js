@@ -6,6 +6,35 @@
 
 const logsHistory = [];
 let logBroadcastCallback = null;
+let persistTimer = null;
+
+function persistLogsToStorage() {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local || typeof chrome.storage.local.set !== 'function') return;
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try {
+      chrome.storage.local.set({ agent_logs_history: logsHistory.slice(-300) }, () => {
+        if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError;
+      });
+    } catch (_) {}
+  }, 100);
+}
+
+// Auto-restore persisted logs on cold boot
+if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local && typeof chrome.storage.local.get === 'function') {
+  try {
+    chrome.storage.local.get(['agent_logs_history'], (res) => {
+      if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError;
+      if (Array.isArray(res?.agent_logs_history) && res.agent_logs_history.length > 0) {
+        const existingKeys = new Set(logsHistory.map(e => `${e.timestamp}_${e.message}`));
+        const toAdd = res.agent_logs_history.filter(e => !existingKeys.has(`${e.timestamp}_${e.message}`));
+        logsHistory.unshift(...toAdd);
+        if (logsHistory.length > 300) logsHistory.splice(0, logsHistory.length - 300);
+      }
+    });
+  } catch (_) {}
+}
 
 export const Logger = {
   setBroadcastCallback(cb) {
@@ -19,7 +48,9 @@ export const Logger = {
   clearLogs() {
     logsHistory.length = 0;
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local && typeof chrome.storage.local.remove === 'function') {
-      chrome.storage.local.remove(['agent_logs_history']);
+      chrome.storage.local.remove(['agent_logs_history'], () => {
+        if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError;
+      });
     }
   },
 
@@ -49,6 +80,8 @@ export const Logger = {
 
       logsHistory.push(entry);
       if (logsHistory.length > 300) logsHistory.shift();
+
+      persistLogsToStorage();
 
       if (logBroadcastCallback && !options.silent) {
         logBroadcastCallback(entry);

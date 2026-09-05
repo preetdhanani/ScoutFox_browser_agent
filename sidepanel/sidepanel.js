@@ -121,6 +121,18 @@ function applyTheme(mode) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get(['agent_logs_history'], (res) => {
+      if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError;
+      if (Array.isArray(res?.agent_logs_history) && res.agent_logs_history.length > 0) {
+        if (!rawLogsCache || rawLogsCache.length === 0) {
+          rawLogsCache = res.agent_logs_history;
+          try { renderFilteredLogs(); } catch (_) {}
+        }
+      }
+    });
+  }
+
   await loadSettings();
   initTabs();
   initTimelineInteraction();
@@ -674,6 +686,11 @@ function initEventListeners() {
   document.getElementById('btnClearLogs').addEventListener('click', () => {
     rawLogsCache = [];
     document.getElementById('logOutput').textContent = '// Logs cleared.';
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.remove(['agent_logs_history'], () => {
+        if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError;
+      });
+    }
   });
 
   document.getElementById('btnFetchModels').addEventListener('click', () => {
@@ -1056,12 +1073,20 @@ function buildTurns(history) {
   let cur = null;
   (history || []).forEach((item, idx) => {
     if (item.type === 'user_goal') {
-      cur = { turn: item.turn || turns.length + 1, goal: item.prompt, entries: [], answer: null, failed: false };
+      cur = {
+        turn: item.turn || turns.length + 1,
+        goal: item.prompt,
+        entries: [],
+        answer: null,
+        failed: false,
+        timestamp: item.timestamp || null,
+        isNewRun: !!item.isNewRun
+      };
       turns.push(cur);
       return;
     }
     if (!cur) {
-      cur = { turn: turns.length + 1, goal: null, entries: [], answer: null, failed: false };
+      cur = { turn: turns.length + 1, goal: null, entries: [], answer: null, failed: false, timestamp: null, isNewRun: false };
       turns.push(cur);
     }
     if (item.type === 'agent_response' && item.action) {
@@ -1177,7 +1202,15 @@ function renderTurns(history, status, planSteps, currentPhase) {
       ? `<div class="act-phase">${escapeHtml(currentPhase)}</div>`
       : '';
 
+    const sessionDivider = (turn.turn > 1 || turn.isNewRun)
+      ? `<div class="session-divider">
+          <span class="session-tag">⚡ Run #${turn.turn}</span>
+          ${turn.timestamp ? `<span class="session-time">${escapeHtml(turn.timestamp)}</span>` : ''}
+        </div>`
+      : '';
+
     return `<div class="turn">
+      ${sessionDivider}
       ${turn.goal ? `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(turn.goal)}</div>` : ''}
       ${count || turn.entries.length ? `<div class="act-group${open ? ' open' : ''}">
         <button class="act-head" data-turn="${turn.turn}" aria-expanded="${open}">
@@ -1299,6 +1332,9 @@ function renderFilteredLogs() {
     const mod = log.module || 'System';
     const msg = log.message || '';
     const dataStr = log.data ? `\n   Payload: ${log.data}` : '';
+    if (msg.includes('[NEW_SESSION_RUN]')) {
+      return `\n════════════════════════════════════════════════════════════════\n[${time}] [${level}] [${mod}] ${msg}${dataStr}\n════════════════════════════════════════════════════════════════`;
+    }
     return `[${time}] [${level}] [${mod}] ${msg}${dataStr}`;
   }).join('\n\n');
 
