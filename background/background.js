@@ -130,9 +130,21 @@ chrome.runtime.onConnect.addListener((port) => {
     // The panel tells us which it is via the port name; anything else is treated as a
     // reconnect, so the safe default is to keep the history.
     const isFreshOpen = port.name.endsWith('_fresh');
+    // '_fresh' is only trustworthy when THIS is the sole connected panel. The tab-creation
+    // handler below auto-enables the side panel for every tab it groups into ScoutFox, and
+    // any of those becoming the active tab loads an entirely separate panel document with its
+    // own honest hasConnectedBefore=false - its first connection is genuinely fresh from ITS
+    // own point of view, with no way to know a sibling panel is already connected and showing
+    // a result the user is still reading. Without this guard that sibling document's honest
+    // first-open silently wiped the shared session out from under the panel actually in use.
+    const isOnlyConnection = activeSidepanelPorts.size === 1;
     if (isFreshOpen && agentEngine.status === 'idle') {
-      Logger.info('Background', '[SESSION_FRESH] Panel opened while idle. Starting a clean session.');
-      agentEngine.clearHistory();
+      if (isOnlyConnection) {
+        Logger.info('Background', '[SESSION_FRESH] Panel opened while idle. Starting a clean session.');
+        agentEngine.clearHistory();
+      } else {
+        Logger.warn('Background', `[SESSION_FRESH_SUPPRESSED] A panel opened fresh while ${activeSidepanelPorts.size - 1} other panel(s) were already connected. Not clearing - another panel may still be showing this session.`);
+      }
     }
 
     try {
