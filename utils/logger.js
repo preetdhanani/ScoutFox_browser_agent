@@ -21,7 +21,16 @@ function persistLogsToStorage() {
   }, 100);
 }
 
-// Auto-restore persisted logs on cold boot
+// Auto-restore persisted logs on cold boot.
+//
+// This is async, and GET_AGENT_STATE used to answer with getLogsHistory() immediately -
+// so a sidepanel resync landing before this restore finished got back an empty array, which
+// the panel then trusted and used to overwrite whatever it had already shown. logsRestored
+// lets any caller that needs the complete history wait for this to finish first, rather than
+// racing it.
+let resolveLogsRestored;
+const logsRestored = new Promise((resolve) => { resolveLogsRestored = resolve; });
+
 if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local && typeof chrome.storage.local.get === 'function') {
   try {
     chrome.storage.local.get(['agent_logs_history'], (res) => {
@@ -32,8 +41,13 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local && t
         logsHistory.unshift(...toAdd);
         if (logsHistory.length > 300) logsHistory.splice(0, logsHistory.length - 300);
       }
+      resolveLogsRestored();
     });
-  } catch (_) {}
+  } catch (_) {
+    resolveLogsRestored();
+  }
+} else {
+  resolveLogsRestored();
 }
 
 export const Logger = {
@@ -43,6 +57,16 @@ export const Logger = {
 
   getLogsHistory() {
     return logsHistory;
+  },
+
+  /**
+   * Resolves once the cold-boot restore above has completed (or immediately, if
+   * chrome.storage was unavailable). Callers that need the COMPLETE history - GET_AGENT_STATE
+   * chief among them - must await this before reading getLogsHistory(), or they can return an
+   * empty array while the restore is still in flight.
+   */
+  logsRestored() {
+    return logsRestored;
   },
 
   clearLogs() {

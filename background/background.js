@@ -398,17 +398,23 @@ function routeMessage(request, sender, sendResponse) {
   }
 
   if (action === 'GET_AGENT_STATE') {
-    sendResponse({
-      status: agentEngine.status,
-      stepCount: agentEngine.stepCount,
-      task: agentEngine.currentTask,
-      history: agentEngine.history,
-      planSteps: agentEngine.planSteps,
-      currentPhase: agentEngine.currentPhase,
-      logs: Logger.getLogsHistory(),
-      stateVersion: agentEngine.stateVersion,
-      bootId: agentEngine.bootId,
-      scoutFoxGroupId: agentEngine.scoutFoxGroupId
+    // Logger's own cold-boot restore is itself async. Answering with getLogsHistory()
+    // immediately used to race it: a resync landing before the restore finished got back an
+    // empty array, which the panel trusted and used to overwrite logs it had already shown.
+    // Waiting here makes the answer always complete, so nothing downstream has to guess.
+    Logger.logsRestored().then(() => {
+      sendResponse({
+        status: agentEngine.status,
+        stepCount: agentEngine.stepCount,
+        task: agentEngine.currentTask,
+        history: agentEngine.history,
+        planSteps: agentEngine.planSteps,
+        currentPhase: agentEngine.currentPhase,
+        logs: Logger.getLogsHistory(),
+        stateVersion: agentEngine.stateVersion,
+        bootId: agentEngine.bootId,
+        scoutFoxGroupId: agentEngine.scoutFoxGroupId
+      });
     });
     return true;
   }
@@ -461,6 +467,15 @@ function routeMessage(request, sender, sendResponse) {
 
   if (action === 'CLEAR_HISTORY') {
     agentEngine.clearHistory();
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (action === 'CLEAR_LOGS') {
+    // Logger keeps its own in-memory logsHistory independent of what the panel displays.
+    // Without telling it too, the next log call's persistLogsToStorage() would rewrite
+    // everything the panel just cleared straight back into storage.
+    Logger.clearLogs();
     sendResponse({ success: true });
     return true;
   }

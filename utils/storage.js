@@ -30,7 +30,9 @@ export const DEFAULT_SETTINGS = {
   // the system prompt and the user's goal. 8192 comfortably fits a page snapshot plus history.
   ollamaNumCtx: 8192,
   // Ceiling on a single local generation, so a model that starts rambling cannot stall a step.
-  ollamaNumPredict: 1024,
+  // Exposed in Settings; 8192 is generous enough that a real answer is unlikely to hit it,
+  // while still bounding a model that never stops.
+  ollamaNumPredict: 8192,
   actionDelayMs: 1000,
   showElementBadges: true,
   autoScroll: true,

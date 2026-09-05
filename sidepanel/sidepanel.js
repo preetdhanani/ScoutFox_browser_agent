@@ -121,18 +121,12 @@ function applyTheme(mode) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get(['agent_logs_history'], (res) => {
-      if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError;
-      if (Array.isArray(res?.agent_logs_history) && res.agent_logs_history.length > 0) {
-        if (!rawLogsCache || rawLogsCache.length === 0) {
-          rawLogsCache = res.agent_logs_history;
-          try { renderFilteredLogs(); } catch (_) {}
-        }
-      }
-    });
-  }
-
+  // Logs are restored via initPortConnection() -> resyncAgentState() -> GET_AGENT_STATE below,
+  // not read directly from storage here. That used to be a second, racing path: the background
+  // worker's own restore of persisted logs is async, so a resync landing before it finished got
+  // back an empty array and this direct read's result was overwritten with it. The background
+  // now awaits its own restore before answering GET_AGENT_STATE (see logger.js/background.js),
+  // so it is the single, complete, authoritative source and this duplicate is no longer needed.
   await loadSettings();
   initTabs();
   initTimelineInteraction();
@@ -158,6 +152,7 @@ async function loadSettings() {
   document.getElementById('apiKeyInput').value = providerCfg.apiKey || currentSettings.apiKey || '';
   document.getElementById('maxStepsInput').value = currentSettings.maxSteps || 25;
   document.getElementById('delayInput').value = currentSettings.actionDelayMs || 1000;
+  document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || 8192;
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
 
   updateSelectedModel(providerCfg.model || currentSettings.model);
@@ -361,6 +356,7 @@ async function autoSaveCurrentForm() {
     model: finalModel || previousModel,
     maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || 25,
     actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || 1000,
+    ollamaNumPredict: parseInt(document.getElementById('ollamaNumPredictInput').value, 10) || 8192,
     showElementBadges: document.getElementById('badgesToggle').checked
   };
 
@@ -691,6 +687,15 @@ function initEventListeners() {
         if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError;
       });
     }
+
+    // The background worker keeps its own in-memory copy of every log entry and rewrites
+    // agent_logs_history from it on the very next log call, regardless of the storage.remove
+    // above. Without telling the worker too, cleared logs silently came back.
+    sendControlMessage('CLEAR_LOGS', (ok) => {
+      if (!ok) {
+        appendLocalLog('WARN', 'Sidepanel', '[CLEAR_LOGS_INCOMPLETE] The background worker did not confirm the clear - it may still hold these logs in memory and rewrite them on its next log event.');
+      }
+    });
   });
 
   document.getElementById('btnFetchModels').addEventListener('click', () => {

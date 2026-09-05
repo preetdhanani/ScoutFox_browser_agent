@@ -204,6 +204,15 @@
             </div>
           </div>
 
+          <!-- Ollama-only: local models have no vendor-side output cap, so this is the only
+               ceiling on a single generation. Always shown rather than hidden per-provider,
+               matching how the API Key label above names its providers instead of hiding. -->
+          <div class="form-group" id="ollamaNumPredictGroup">
+            <label class="form-label" for="ollamaNumPredictInput">Ollama Max Output Tokens (num_predict)</label>
+            <input type="number" id="ollamaNumPredictInput" class="form-input" value="8192" min="1" step="256">
+            <span class="subtext-hint">Ollama only. Raise this if replies get cut off mid-answer (check Logs for OLLAMA_TRUNCATED).</span>
+          </div>
+
           <!-- Feature Toggles -->
           <div class="form-group toggle-group">
             <label class="toggle-label" for="badgesToggle">
