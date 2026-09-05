@@ -83,7 +83,7 @@
             return rect.bottom >= -200 && rect.top <= vHeight + 1500;
           });
           if (textNodes.length < 10) {
-            textNodes = allTextNodes.slice(-50); // Fallback to lower section
+            textNodes = allTextNodes.slice(0, 90); // Fallback to main content
           }
         } else {
           textNodes = allTextNodes.slice(0, 90);

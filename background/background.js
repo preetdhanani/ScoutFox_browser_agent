@@ -361,9 +361,19 @@ async function getActiveTab() {
 
 function isValidWebTab(tab) {
   if (!tab || !tab.url) return false;
-  const url = tab.url;
+  const url = tab.url.toLowerCase();
+
+  if (url.includes('chromewebstore.google.com') || url.includes('chrome.google.com/webstore')) {
+    return false;
+  }
+
   return !url.startsWith('chrome://') && 
          !url.startsWith('chrome-extension://') && 
+         !url.startsWith('chrome-search://') && 
+         !url.startsWith('chrome-untrusted://') && 
          !url.startsWith('edge://') && 
-         !url.startsWith('about:');
+         !url.startsWith('about:') && 
+         !url.startsWith('view-source:') && 
+         !url.startsWith('devtools:') && 
+         !url.startsWith('data:');
 }

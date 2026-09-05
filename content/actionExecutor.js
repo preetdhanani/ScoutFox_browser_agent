@@ -290,8 +290,8 @@
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       this.highlightElement(el);
 
-      // Dispatch click mouse events
-      ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click'].forEach(eventType => {
+      // Dispatch pre-click pointer & mouse events
+      ['mouseenter', 'mouseover', 'mousedown', 'mouseup'].forEach(eventType => {
         const event = new MouseEvent(eventType, {
           view: window,
           bubbles: true,
@@ -302,6 +302,13 @@
 
       if (typeof el.click === 'function') {
         el.click();
+      } else {
+        const clickEvent = new MouseEvent('click', {
+          view: window,
+          bubbles: true,
+          cancelable: true
+        });
+        el.dispatchEvent(clickEvent);
       }
 
       return { success: true, message: `Clicked element [${elementId}]` };
