@@ -968,7 +968,7 @@ function describeAction(action, outcome) {
   switch (action.action) {
     case 'navigate':      return { icon: ICONS.globe, text: `Opened ${quote(host(action.url || ''))}` };
     case 'read_page_text':return { icon: ICONS.eye, text: 'Read page text' };
-    case 'click':         return { icon: ICONS.pointer, text: label ? `Clicked ${quote(label)}` : `Clicked element ${action.element_id}` };
+    case 'click':         return { icon: ICONS.pointer, text: label ? `Clicked ${quote(label)}` : `Clicked element ${escapeHtml(String(action.element_id))}` };
     case 'type':          return { icon: ICONS.keyboard, text: `Typed ${quote(action.text || '')}${label ? ` into ${quote(label)}` : ''}` };
     case 'scroll':        return { icon: ICONS.scrollIco, text: `Scrolled ${escapeHtml(action.direction || 'down')}` };
     case 'go_back':       return { icon: ICONS.back, text: 'Went back' };

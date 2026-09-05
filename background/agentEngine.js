@@ -793,6 +793,19 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     }
   }
 
+  /**
+   * Did this error come from the user pressing Pause or Stop, rather than the provider?
+   *
+   * Checks three independent signals because not every provider surfaces an abort the same
+   * way: a genuine DOMException AbortError, the controller's own aborted flag, and the
+   * engine status the user's action already set. Any one of them is enough.
+   */
+  isUserAbort(err) {
+    if (err && (err.name === 'AbortError' || /abort/i.test(err.message || ''))) return true;
+    if (this.abortController && this.abortController.signal.aborted) return true;
+    return this.status === 'paused' || this.status === 'stopped';
+  }
+
   pause() {
     this.dirty = true;
     if (this.status !== 'running') {
@@ -965,6 +978,17 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         });
         Logger.info('AgentEngine', `[LLM_RAW_OUTPUT]\n${responseText}`);
       } catch (err) {
+        // Pause and Stop both abort the in-flight request, so an abort landing here is the
+        // user's own action, not a provider failure. Treating it as one used to overwrite
+        // 'paused'/'stopped' with 'idle' and record a fabricated connection error, which
+        // destroyed the run and made Resume impossible.
+        if (this.isUserAbort(err)) {
+          Logger.info('AgentEngine', `[LLM_ABORTED] In-flight request cancelled by user (status=${this.status}).`);
+          this.isLoopActive = false;
+          this.notifyStateChange();
+          return;
+        }
+
         Logger.error('AgentEngine', '[LLM_API_ERROR] Connection failure', err);
         this.history.push({
           step: this.stepCount,
@@ -1586,8 +1610,18 @@ Choose your next action based on the goal: "${this.currentTask}"`;
       else if (act.elementId !== undefined) act.element_id = act.elementId;
     }
 
-    if (act.element_id !== undefined && typeof act.element_id === 'number') {
-      act.element_id = parseInt(act.element_id, 10) || 1;
+    // Coerce unconditionally, NOT only when the value already happens to be a number.
+    // Gating on `typeof === 'number'` let a string element_id through untouched, and page
+    // content is attacker-controlled input to the model, so a prompt-injected reply could put
+    // arbitrary markup in this field and have it rendered straight into the side panel.
+    if (act.element_id !== undefined) {
+      const parsed = parseInt(act.element_id, 10);
+      if (!Number.isFinite(parsed) || parsed < 1) {
+        Logger.warn('AgentEngine', `[GUARDRAIL_TYPE] Model returned a non-numeric element_id (${JSON.stringify(act.element_id)}). Coercing to 1.`);
+        act.element_id = 1;
+      } else {
+        act.element_id = parsed;
+      }
       if (maxElementCount > 0 && act.element_id > maxElementCount) {
         Logger.warn('AgentEngine', `[GUARDRAIL_BOUNDS] Model selected hallucinated element_id [${act.element_id}]. Clamping to valid range [1..${maxElementCount}]`);
         act.element_id = Math.min(act.element_id, maxElementCount);
