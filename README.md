@@ -20,6 +20,8 @@
   * **Groq Cloud / OpenAI-Compatible** (`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`)
   * **OpenAI Official** (`gpt-4o-mini`, `gpt-4o`)
   * **Anthropic Claude** (`claude-3-5-sonnet-20241022`)
+  * **OpenRouter** (`anthropic/claude-3.5-sonnet`, `deepseek/deepseek-r1`, and any other model OpenRouter hosts)
+  * **AgentRouter** (`claude-3-5-sonnet`, `gpt-4o`, `deepseek-r1`)
 * 🐍 **Standalone Python Playwright Agent**: Run terminal-based Playwright browser automation without registering a Web Store developer account!
 
 ---

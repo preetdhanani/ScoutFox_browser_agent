@@ -33,7 +33,7 @@ Right-click anywhere inside the SidePanel UI and select **Inspect** to open DevT
 
 Before packaging for the Chrome Web Store:
 1. **Manifest V3 Verification**: Ensure `"manifest_version": 3` in `manifest.json`.
-2. **Permissions Audit**: `manifest.json` currently requests `sidePanel`, `activeTab`, `scripting`, `storage`, `tabs`, `tabGroups`, `alarms` and `declarativeNetRequest`, plus `host_permissions: ["<all_urls>"]`.
+2. **Permissions Audit**: `manifest.json` currently requests `sidePanel`, `scripting`, `storage`, `tabs`, `tabGroups`, `alarms` and `declarativeNetRequest`, plus `host_permissions: ["<all_urls>"]`.
    Confirm each is still used before submitting.
    Store reviewers question `<all_urls>` and `declarativeNetRequest` most often, so have a justification ready for both.
 3. **Icons Audit**: Ensure `icon16.png`, `icon48.png`, and `icon128.png` are present in `/icons`.
