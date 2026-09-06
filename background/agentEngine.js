@@ -10,6 +10,12 @@ import { ApiClients } from './apiClients.js';
 import { Storage } from '../utils/storage.js';
 import { Logger } from '../utils/logger.js';
 
+// Sessions are multi-turn and would otherwise grow without bound, and the whole array is
+// serialised to chrome.storage on every state change.
+const MAX_HISTORY = 400;
+// How many completed-turn recaps previousTurnsSummary() keeps for a follow-up prompt.
+const PREVIOUS_TURNS_LIMIT = 4;
+
 /**
  * Safely read chrome.runtime.lastError. It MUST be read inside every chrome.* callback or
  * Chrome emits an "unchecked runtime.lastError" warning, but chrome.runtime itself is absent
@@ -22,6 +28,26 @@ export function lastRuntimeError() {
     }
   } catch (_) { /* context invalidated */ }
   return null;
+}
+
+/**
+ * Read-modify-write chrome.storage.local's agent_sessions key. It's one key shared across
+ * every window's engine, so a blind overwrite would silently erase every OTHER window's
+ * persisted session on whichever engine happens to write last - mutate() is handed the whole
+ * map and decides what this call changes for just its own window. Return `false` from mutate
+ * to skip the write entirely (nothing changed).
+ */
+function updateAgentSessions(mutate, onError) {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
+  chrome.storage.local.get(['agent_sessions'], (res) => {
+    lastRuntimeError();
+    const all = (res && res.agent_sessions) || {};
+    if (mutate(all) === false) return;
+    chrome.storage.local.set({ agent_sessions: all }, () => {
+      const err = lastRuntimeError();
+      if (err && onError) onError(err);
+    });
+  });
 }
 
 /**
@@ -320,33 +346,21 @@ export class AgentEngine {
 
   async persistState() {
     try {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        // Read-modify-write: chrome.storage.set() replaces agent_sessions WHOLESALE, and it is
-        // one shared key across every window's engine. Blindly overwriting it with only this
-        // engine's own entry would silently erase every OTHER window's persisted session on
-        // whichever engine happens to persist last.
-        chrome.storage.local.get(['agent_sessions'], (res) => {
-          lastRuntimeError();
-          const all = (res && res.agent_sessions) || {};
-          all[String(this.windowId)] = {
-            history: this.history,
-            planSteps: this.planSteps,
-            task: this.currentTask,
-            stepCount: this.stepCount,
-            status: this.status,
-            currentPlanIndex: this.currentPlanIndex,
-            activeTabId: this.activeTabId,
-            stateVersion: this.stateVersion,
-            scoutFoxGroupId: this.scoutFoxGroupId
-          };
-          chrome.storage.local.set({ agent_sessions: all }, () => {
-            const err = lastRuntimeError();
-            if (err) {
-              Logger.warn('AgentEngine', '[STATE_PERSIST_FAILED] Could not write session to storage', err.message);
-            }
-          });
-        });
-      }
+      updateAgentSessions((all) => {
+        all[String(this.windowId)] = {
+          history: this.history,
+          planSteps: this.planSteps,
+          task: this.currentTask,
+          stepCount: this.stepCount,
+          status: this.status,
+          currentPlanIndex: this.currentPlanIndex,
+          activeTabId: this.activeTabId,
+          stateVersion: this.stateVersion,
+          scoutFoxGroupId: this.scoutFoxGroupId
+        };
+      }, (err) => {
+        Logger.warn('AgentEngine', '[STATE_PERSIST_FAILED] Could not write session to storage', err.message);
+      });
     } catch (e) {
       Logger.warn('AgentEngine', '[STATE_PERSIST_ERROR] Could not persist state', e);
     }
@@ -355,13 +369,9 @@ export class AgentEngine {
   /** Remove this window's persisted session entirely - called when its window closes. */
   static forgetWindow(windowId) {
     try {
-      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
-      chrome.storage.local.get(['agent_sessions'], (res) => {
-        lastRuntimeError();
-        const all = (res && res.agent_sessions) || {};
-        if (!(String(windowId) in all)) return;
+      updateAgentSessions((all) => {
+        if (!(String(windowId) in all)) return false; // nothing to remove, skip the write
         delete all[String(windowId)];
-        chrome.storage.local.set({ agent_sessions: all }, () => { lastRuntimeError(); });
       });
     } catch (e) {
       Logger.warn('AgentEngine', '[STATE_FORGET_ERROR] Could not remove closed window\'s persisted session', e);
@@ -384,9 +394,9 @@ export class AgentEngine {
    * Cap total history. Sessions are multi-turn now and would otherwise grow without bound,
    * and the whole array is serialised to chrome.storage on every state change.
    */
-  trimHistory(max = 400) {
-    if (this.history.length > max) {
-      this.history.splice(0, this.history.length - max);
+  trimHistory() {
+    if (this.history.length > MAX_HISTORY) {
+      this.history.splice(0, this.history.length - MAX_HISTORY);
     }
   }
 
@@ -402,7 +412,7 @@ export class AgentEngine {
    * Compact recap of earlier COMPLETED turns, so a follow-up has context without replaying
    * every step of every previous task into the prompt.
    */
-  previousTurnsSummary(limit = 4) {
+  previousTurnsSummary() {
     const lines = [];
     let goal = null;
     for (const item of this.history) {
@@ -414,7 +424,7 @@ export class AgentEngine {
         goal = null;
       }
     }
-    return lines.slice(-limit);
+    return lines.slice(-PREVIOUS_TURNS_LIMIT);
   }
 
   setStateChangeCallback(cb) {
