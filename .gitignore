@@ -18,3 +18,5 @@ agents/
 .agent/
 _agents/
 _agent/
+.claude/
+.claude
