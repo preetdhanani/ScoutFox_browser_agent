@@ -52,11 +52,14 @@
 
     if (action === 'GET_DOM_SNAPSHOT') {
       try {
-        const compressor = window.domCompressor || window.domCompressorInstance || (window.DOMCompressor ? new window.DOMCompressor() : null);
-        if (!compressor) {
+        // manifest.json injects domCompressor.js -> actionExecutor.js -> content.js in that
+        // fixed order, into this same window, so window.domCompressor is always already set
+        // by the time this listener can even run - the null guard covers only the unusual
+        // case of the engine somehow not having attached itself.
+        if (!window.domCompressor) {
           return sendResponse({ success: false, error: 'DOMCompressor engine not initialized on page.' });
         }
-        const snapshot = compressor.getSnapshot(payload || {});
+        const snapshot = window.domCompressor.getSnapshot(payload || {});
         if (payload?.showBadges && window.actionExecutor) {
           window.actionExecutor.renderBadges(snapshot.elements);
         }
@@ -69,14 +72,11 @@
 
     if (action === 'EXECUTE_ACTION') {
       try {
-        const executor = window.actionExecutor || window.actionExecutorInstance || (window.ActionExecutor ? new window.ActionExecutor() : null);
-        if (!executor) {
+        if (!window.actionExecutor) {
           return sendResponse({ success: false, error: 'ActionExecutor engine not initialized on page.' });
         }
 
-        const compressor = window.domCompressor || window.domCompressorInstance || (window.DOMCompressor ? new window.DOMCompressor() : null);
-
-        executor.execute(payload, compressor)
+        window.actionExecutor.execute(payload)
           .then((res) => sendResponse(res))
           .catch((err) => sendResponse({ success: false, error: err.message }));
       } catch (err) {

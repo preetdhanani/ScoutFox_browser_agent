@@ -200,14 +200,16 @@
     }
 
     /**
-     * Check if element is visible on screen
+     * Check if element is visible on screen.
+     *
+     * checkVisibility() (Chrome 105+, well below the 111+ this extension's MAIN-world
+     * injection already requires) also walks ANCESTOR opacity/visibility, which a
+     * getComputedStyle(el) read on the element itself cannot see at all.
      */
     isVisible(el) {
       if (!el) return false;
-      
-      const style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-        return false;
+      if (typeof el.checkVisibility === 'function') {
+        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
       }
 
       const rect = el.getBoundingClientRect();
@@ -226,11 +228,12 @@
       const ariaLabel = el.getAttribute('aria-label') || '';
       const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
 
-      let desc = `<${tagName}`;
-      if (type) desc += ` type="${type}"`;
-      if (placeholder) desc += ` placeholder="${placeholder}"`;
-      if (ariaLabel) desc += ` label="${ariaLabel}"`;
-      desc += '>';
+      // tagName/type are already in `formatted`'s own prefix below - only placeholder/aria-label
+      // are worth repeating here, since labelText can drop one of them (e.g. real innerText
+      // wins over an aria-label that says something different, like an icon button).
+      let extraAttrs = '';
+      if (placeholder) extraAttrs += ` placeholder="${placeholder}"`;
+      if (ariaLabel) extraAttrs += ` label="${ariaLabel}"`;
 
       let labelText = text || ariaLabel || placeholder || 'element';
 
@@ -253,7 +256,7 @@
         type,
         text: labelText,
         locator,
-        formatted: `[${id}] ${tagName}${type ? `[${type}]` : ''} "${labelText}" (${desc})`
+        formatted: `[${id}] ${tagName}${type ? `[${type}]` : ''} "${labelText}"${extraAttrs ? ` (${extraAttrs.trim()})` : ''}`
       };
     }
   }

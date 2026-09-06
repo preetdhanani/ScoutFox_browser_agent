@@ -5,6 +5,8 @@
  */
 
 (function() {
+  const ACCENT_COLOR = '#a85f34'; // Studio Mono copper accent
+
   class ActionExecutor {
     constructor() {
       this.badgeContainer = null;
@@ -39,7 +41,7 @@
         badge.style.position = 'absolute';
         badge.style.top = `${rect.top + window.scrollY}px`;
         badge.style.left = `${rect.left + window.scrollX}px`;
-        badge.style.backgroundColor = '#a85f34'; // Studio Mono copper accent
+        badge.style.backgroundColor = ACCENT_COLOR;
         badge.style.color = '#ffffff';
         badge.style.fontFamily = 'monospace, sans-serif';
         badge.style.fontSize = '11px';
@@ -70,7 +72,7 @@
      * Re-resolve element using Stable Locator descriptors to prevent stale index execution
      */
     resolveElement(elementId) {
-      const compressor = window.domCompressor || window.domCompressorInstance;
+      const compressor = window.domCompressor;
       const liveNode = compressor ? compressor.getElement(elementId) : null;
 
       // 1. Live Node Reference (if still attached to DOM)
@@ -152,8 +154,7 @@
           return { success: true, message: 'Going forward' };
         case 'read_page_text':
         case 'extract_page_text': {
-          const compressor = window.domCompressor || window.domCompressorInstance || (window.DOMCompressor ? new window.DOMCompressor() : null);
-          const pageText = compressor ? compressor.extractPageText() : (document.body ? document.body.innerText : '');
+          const pageText = window.domCompressor ? window.domCompressor.extractPageText() : (document.body ? document.body.innerText : '');
           return { success: true, message: `Extracted text snippet (${pageText.length} chars):\n"""\n${pageText.slice(0, 1500)}\n"""` };
         }
         case 'browser_batch':
@@ -463,7 +464,7 @@
       const origTransition = el.style.transition;
 
       el.style.transition = 'outline 0.2s ease';
-      el.style.outline = '3px solid #a85f34';
+      el.style.outline = `3px solid ${ACCENT_COLOR}`;
 
       setTimeout(() => {
         el.style.outline = origOutline;

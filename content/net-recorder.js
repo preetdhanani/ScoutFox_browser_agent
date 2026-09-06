@@ -19,6 +19,8 @@
     return str.slice(0, MAX_BODY_BYTES);
   }
 
+  const genId = () => Math.random().toString(36).substring(2, 9);
+
   function emitRequest(reqData) {
     try {
       window.postMessage({
@@ -71,7 +73,7 @@
       let reqBody = args[1] && args[1].body ? safeCloneBody(args[1].body) : null;
 
       const record = (extra) => emitRequest(Object.assign({
-        id: Math.random().toString(36).substring(2, 9),
+        id: genId(),
         method,
         url,
         status: 0,
@@ -148,7 +150,7 @@
         } catch (_) {}
 
         emitRequest({
-          id: Math.random().toString(36).substring(2, 9),
+          id: genId(),
           method,
           url,
           status: this.status,
