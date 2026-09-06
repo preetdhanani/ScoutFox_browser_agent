@@ -176,9 +176,9 @@ async function loadSettings() {
   document.getElementById('providerSelect').value = activeProvider;
   document.getElementById('baseUrlInput').value = providerCfg.baseUrl || currentSettings.baseUrl || '';
   document.getElementById('apiKeyInput').value = providerCfg.apiKey || currentSettings.apiKey || '';
-  document.getElementById('maxStepsInput').value = currentSettings.maxSteps || 25;
-  document.getElementById('delayInput').value = currentSettings.actionDelayMs || 1000;
-  document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || 8192;
+  document.getElementById('maxStepsInput').value = currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
+  document.getElementById('delayInput').value = currentSettings.actionDelayMs || DEFAULT_SETTINGS.actionDelayMs;
+  document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || DEFAULT_SETTINGS.ollamaNumPredict;
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
 
   updateSelectedModel(providerCfg.model || currentSettings.model);
@@ -380,9 +380,9 @@ async function autoSaveCurrentForm() {
     // Guard against writing an empty model over a good one. Even with selectedModel as the
     // source of truth, an empty value here would silently clear the provider's saved choice.
     model: finalModel || previousModel,
-    maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || 25,
-    actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || 1000,
-    ollamaNumPredict: parseInt(document.getElementById('ollamaNumPredictInput').value, 10) || 8192,
+    maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || DEFAULT_SETTINGS.maxSteps,
+    actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || DEFAULT_SETTINGS.actionDelayMs,
+    ollamaNumPredict: parseInt(document.getElementById('ollamaNumPredictInput').value, 10) || DEFAULT_SETTINGS.ollamaNumPredict,
     showElementBadges: document.getElementById('badgesToggle').checked
   };
 
@@ -1046,16 +1046,11 @@ function renderState(state) {
     }
   }
 
-  // The standalone plan card is folded into the action-group header now — one element
-  // instead of two. The full checklist still shows inside the expanded group while running.
-  const planContainerEl = document.getElementById('planContainer');
-  if (planContainerEl) planContainerEl.style.display = 'none';
-
   if (status === 'running' || status === 'paused') {
     if (processingBanner) processingBanner.style.display = 'flex';
     if (processingPhaseText) processingPhaseText.textContent = currentPhase || `Processing step ${stepCount}...`;
     
-    const maxSteps = currentSettings.maxSteps || 25;
+    const maxSteps = currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
     const pct = Math.min(100, Math.round(((stepCount || 1) / maxSteps) * 100));
     if (progressBarFill) progressBarFill.style.width = `${pct}%`;
 
@@ -1303,42 +1298,6 @@ function initTimelineInteraction() {
   });
 }
 
-function renderPlanChecklist(planSteps) {
-  const planContainer = document.getElementById('planContainer');
-  const planItemsList = document.getElementById('planItemsList');
-  const planProgressPill = document.getElementById('planProgressPill');
-
-  if (!planContainer || !planItemsList) return;
-
-  if (!planSteps || planSteps.length === 0) {
-    planContainer.style.display = 'none';
-    return;
-  }
-
-  planContainer.style.display = 'flex';
-  const completedCount = planSteps.filter(s => s.status === 'completed').length;
-  if (planProgressPill) planProgressPill.textContent = `${completedCount}/${planSteps.length} Done`;
-
-  planItemsList.innerHTML = planSteps.map((step) => {
-    let icon = ICONS.circle;
-    let cls = 'pending';
-    if (step.status === 'completed') {
-      icon = ICONS.check;
-      cls = 'completed';
-    } else if (step.status === 'in_progress') {
-      icon = ICONS.dot;
-      cls = 'in_progress';
-    }
-
-    return `
-      <div class="plan-item ${cls}">
-        <span class="plan-icon">${icon}</span>
-        <span>${escapeHtml(step.text)}</span>
-      </div>
-    `;
-  }).join('');
-}
-
 function renderFilteredLogs() {
   const logOutput = document.getElementById('logOutput');
   if (!logOutput) return;
@@ -1377,26 +1336,6 @@ function renderFilteredLogs() {
 
   logOutput.textContent = formattedLines;
   logOutput.scrollTop = logOutput.scrollHeight;
-}
-
-function formatActionPill(actionObj) {
-  const { action, element_id, text, url, direction, answer, question } = actionObj;
-  switch (action) {
-    case 'click':
-      return `click → [${element_id}]`;
-    case 'type':
-      return `type → [${element_id}] "${escapeHtml(text || '')}"`;
-    case 'scroll':
-      return `scroll → ${direction || 'down'}`;
-    case 'navigate':
-      return `navigate → ${escapeHtml(url || '')}`;
-    case 'finish':
-      return `finish → ${escapeHtml(answer || '')}`;
-    case 'ask_user':
-      return `ask → "${escapeHtml(question || '')}"`;
-    default:
-      return `${action} ${element_id ? `[${element_id}]` : ''}`;
-  }
 }
 
 function formatMarkdownText(text) {
