@@ -115,11 +115,6 @@ export const Logger = {
     }
   },
 
-  log(module, message, data = null) {
-    this.addLog('INFO', module, message, data);
-    console.log(`[${module}]`, message, data || '');
-  },
-
   info(module, message, data = null) {
     this.addLog('INFO', module, message, data);
     console.info(`[${module}]`, message, data || '');

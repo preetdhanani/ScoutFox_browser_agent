@@ -46,64 +46,32 @@ export const Storage = {
    */
   async getSettings() {
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(['agent_settings'], (result) => {
-          const loaded = result.agent_settings || {};
-          const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
-          const provider = loaded.provider || DEFAULT_SETTINGS.provider;
-          const activeCfg = mergedConfigs[provider] || {};
+      chrome.storage.local.get(['agent_settings'], (result) => {
+        const loaded = result.agent_settings || {};
+        const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
+        const provider = loaded.provider || DEFAULT_SETTINGS.provider;
+        const activeCfg = mergedConfigs[provider] || {};
 
-          const apiKey = (loaded.apiKey !== undefined && loaded.apiKey !== '') 
-            ? loaded.apiKey 
-            : (activeCfg.apiKey || '');
-          const baseUrl = (loaded.baseUrl !== undefined && loaded.baseUrl !== '') 
-            ? loaded.baseUrl 
-            : (activeCfg.baseUrl || '');
-          const model = (loaded.model !== undefined && loaded.model !== '') 
-            ? loaded.model 
-            : (activeCfg.model || DEFAULT_SETTINGS.model);
+        const apiKey = (loaded.apiKey !== undefined && loaded.apiKey !== '')
+          ? loaded.apiKey
+          : (activeCfg.apiKey || '');
+        const baseUrl = (loaded.baseUrl !== undefined && loaded.baseUrl !== '')
+          ? loaded.baseUrl
+          : (activeCfg.baseUrl || '');
+        const model = (loaded.model !== undefined && loaded.model !== '')
+          ? loaded.model
+          : (activeCfg.model || DEFAULT_SETTINGS.model);
 
-          resolve({
-            ...DEFAULT_SETTINGS,
-            ...loaded,
-            provider,
-            apiKey,
-            baseUrl,
-            model,
-            providerConfigs: mergedConfigs
-          });
+        resolve({
+          ...DEFAULT_SETTINGS,
+          ...loaded,
+          provider,
+          apiKey,
+          baseUrl,
+          model,
+          providerConfigs: mergedConfigs
         });
-      } else {
-        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('agent_settings') : null;
-        if (saved) {
-          const loaded = JSON.parse(saved);
-          const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
-          const provider = loaded.provider || DEFAULT_SETTINGS.provider;
-          const activeCfg = mergedConfigs[provider] || {};
-
-          const apiKey = (loaded.apiKey !== undefined && loaded.apiKey !== '') 
-            ? loaded.apiKey 
-            : (activeCfg.apiKey || '');
-          const baseUrl = (loaded.baseUrl !== undefined && loaded.baseUrl !== '') 
-            ? loaded.baseUrl 
-            : (activeCfg.baseUrl || '');
-          const model = (loaded.model !== undefined && loaded.model !== '') 
-            ? loaded.model 
-            : (activeCfg.model || DEFAULT_SETTINGS.model);
-
-          resolve({
-            ...DEFAULT_SETTINGS,
-            ...loaded,
-            provider,
-            apiKey,
-            baseUrl,
-            model,
-            providerConfigs: mergedConfigs
-          });
-        } else {
-          resolve(DEFAULT_SETTINGS);
-        }
-      }
+      });
     });
   },
 
@@ -145,14 +113,7 @@ export const Storage = {
     };
     
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ agent_settings: updated }, () => resolve(updated));
-      } else {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('agent_settings', JSON.stringify(updated));
-        }
-        resolve(updated);
-      }
+      chrome.storage.local.set({ agent_settings: updated }, () => resolve(updated));
     });
   },
 
@@ -202,14 +163,9 @@ export const Storage = {
    */
   async getSessions() {
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(['saved_sessions'], (res) => {
-          resolve(res.saved_sessions || []);
-        });
-      } else {
-        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('saved_sessions') : null;
-        resolve(saved ? JSON.parse(saved) : []);
-      }
+      chrome.storage.local.get(['saved_sessions'], (res) => {
+        resolve(res.saved_sessions || []);
+      });
     });
   },
 
@@ -229,14 +185,7 @@ export const Storage = {
     const trimmed = sessions.slice(0, 50);
 
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ saved_sessions: trimmed }, () => resolve(trimmed));
-      } else {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('saved_sessions', JSON.stringify(trimmed));
-        }
-        resolve(trimmed);
-      }
+      chrome.storage.local.set({ saved_sessions: trimmed }, () => resolve(trimmed));
     });
   },
 
@@ -248,14 +197,7 @@ export const Storage = {
     const updated = sessions.filter(s => s.id !== sessionId);
 
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ saved_sessions: updated }, () => resolve(updated));
-      } else {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('saved_sessions', JSON.stringify(updated));
-        }
-        resolve(updated);
-      }
+      chrome.storage.local.set({ saved_sessions: updated }, () => resolve(updated));
     });
   }
 };
