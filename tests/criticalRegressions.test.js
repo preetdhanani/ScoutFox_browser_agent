@@ -76,14 +76,9 @@ test('#7 parseResponse rejects zero, negative and NaN element_id values', () => 
   }
 });
 
-test('#7 element_id clamping still holds for a plain hallucinated number', () => {
-  const engine = new AgentEngine();
-  const raw = JSON.stringify({ action: 'click', element_id: 99, reason: 'hallucinated' });
-
-  const result = engine.parseResponse(raw, 10);
-
-  assert.equal(result.action.element_id, 10, 'must clamp to maxElementCount');
-});
+// Plain-number element_id clamping (as opposed to the string-coercion bug #7 is actually
+// about) is already covered by tests/agentEngine.test.js's "Element ID Clamping Guardrail" -
+// not duplicated here.
 
 
 /* ------------------------------------------------------------------ *

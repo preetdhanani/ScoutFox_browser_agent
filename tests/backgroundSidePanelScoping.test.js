@@ -118,3 +118,14 @@ test('switching back to the grouped tab re-enables the panel there', async () =>
   const enableCall = mock.__setOptionsCalls.find((c) => c.tabId === 100 && c.enabled === true);
   assert.ok(enableCall, 'switching back to the originally-opened tab must re-enable the panel there');
 });
+
+test('onActivated is a no-op for a window that never opened ScoutFox at all', async () => {
+  mock.__setOptionsCalls.length = 0;
+  // windowId 999 never had its session created (no icon click, no port connect) - the real
+  // handler must resolve "no session for this window" and return before touching the panel.
+  await mock.__listeners.onActivated({ tabId: 100, windowId: 999 });
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.deepEqual(mock.__setOptionsCalls, [],
+    'a window with no session (and so no group) must produce zero setOptions calls');
+});

@@ -11,6 +11,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { makeFakePort, lastStateUpdate, sendMessage } from './helpers/fakePort.js';
 
 function makeMultiWindowMock() {
   const tabs = new Map();
@@ -89,25 +90,6 @@ function makeMultiWindowMock() {
       sidePanel: { setPanelBehavior: () => Promise.resolve(), setOptions: (opts, cb) => cb && cb(), open: () => Promise.resolve() }
     }
   };
-}
-
-function makeFakePort(name) {
-  const disconnectListeners = [];
-  return {
-    name,
-    received: [],
-    postMessage(msg) { this.received.push(msg); },
-    onDisconnect: { addListener: (fn) => disconnectListeners.push(fn) },
-    _disconnect() { disconnectListeners.forEach((fn) => fn()); }
-  };
-}
-
-function lastStateUpdate(port) {
-  return [...port.received].reverse().find((m) => m.type === 'STATE_UPDATE');
-}
-
-function sendMessage(listeners, msg) {
-  return new Promise((resolve) => listeners.onMessage(msg, {}, resolve));
 }
 
 global.self = { addEventListener: () => {} };

@@ -189,34 +189,6 @@ global.chrome = createMockChromeEnv().mockChrome;
 
 const { AgentEngine } = await import('../background/agentEngine.js');
 
-// Helper handler to simulate tab activation logic from background.js
-async function simulateTabActivated(activeInfo, agentEngine, chromeMock) {
-  if (!agentEngine.scoutFoxGroupId || typeof chromeMock.sidePanel === 'undefined' || !chromeMock.sidePanel.setOptions) return;
-  const tabId = activeInfo.tabId;
-
-  try {
-    const tab = await new Promise((resolve) => {
-      chromeMock.tabs.get(tabId, (t) => {
-        try { if (chromeMock.runtime && chromeMock.runtime.lastError) void chromeMock.runtime.lastError; } catch (_) {}
-        resolve(t);
-      });
-    });
-
-    if (tab) {
-      const isInScoutFoxGroup = tab.groupId === agentEngine.scoutFoxGroupId;
-      if (isInScoutFoxGroup) {
-        chromeMock.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-          try { if (chromeMock.runtime && chromeMock.runtime.lastError) void chromeMock.runtime.lastError; } catch (_) {}
-        });
-      } else {
-        chromeMock.sidePanel.setOptions({ tabId, enabled: false }, () => {
-          try { if (chromeMock.runtime && chromeMock.runtime.lastError) void chromeMock.runtime.lastError; } catch (_) {}
-        });
-      }
-    }
-  } catch (_) {}
-}
-
 // Helper handler to simulate tab creation logic from background.js
 async function simulateTabCreated(tab, agentEngine, chromeMock) {
   if (agentEngine.scoutFoxGroupId && typeof chromeMock.tabs.group === 'function') {
@@ -439,63 +411,13 @@ test('4.3 scoutFoxGroupId Persistence - restoreState leaves scoutFoxGroupId null
   assert.equal(engine.scoutFoxGroupId, null, 'scoutFoxGroupId defaults to null on clean boot');
 });
 
-// ============================================================================
-// SCENARIO 5: Tab Isolation & Side Panel Scoping
-// ============================================================================
-test('5.1 Tab Isolation & Side Panel Scoping - Hides side panel when switching to tab outside ScoutFox group', async () => {
-  const env = createMockChromeEnv();
-  global.chrome = env.mockChrome;
-
-  const SCOUT_GID = 5001;
-  env.tabs.set(101, { id: 101, groupId: SCOUT_GID, url: 'https://example.com/grouped' });
-  env.tabs.set(202, { id: 202, groupId: -1, url: 'https://example.com/ungrouped' });
-
-  const engine = new AgentEngine();
-  await engine.restorePromise;
-  engine.scoutFoxGroupId = SCOUT_GID;
-
-  // User switches to ungrouped Tab 202
-  await simulateTabActivated({ tabId: 202 }, engine, env.mockChrome);
-
-  const opts202 = env.sidePanelOptions.get(202);
-  assert.ok(opts202, 'setOptions must be called for target tab');
-  assert.equal(opts202.enabled, false, 'Side panel must be disabled for tab outside ScoutFox group');
-});
-
-test('5.2 Tab Isolation & Side Panel Scoping - Re-enables side panel when returning to grouped tab', async () => {
-  const env = createMockChromeEnv();
-  global.chrome = env.mockChrome;
-
-  const SCOUT_GID = 5001;
-  env.tabs.set(101, { id: 101, groupId: SCOUT_GID, url: 'https://example.com/grouped' });
-
-  const engine = new AgentEngine();
-  await engine.restorePromise;
-  engine.scoutFoxGroupId = SCOUT_GID;
-
-  // User switches to grouped Tab 101
-  await simulateTabActivated({ tabId: 101 }, engine, env.mockChrome);
-
-  const opts101 = env.sidePanelOptions.get(101);
-  assert.ok(opts101, 'setOptions must be called for grouped tab');
-  assert.equal(opts101.enabled, true, 'Side panel must be enabled for tab in ScoutFox group');
-  assert.equal(opts101.path, 'sidepanel/sidepanel.html', 'Side panel path must point to sidepanel HTML');
-});
-
-test('5.3 Tab Isolation & Side Panel Scoping - Does not modify side panel state when no ScoutFox group exists', async () => {
-  const env = createMockChromeEnv();
-  global.chrome = env.mockChrome;
-
-  env.tabs.set(202, { id: 202, groupId: -1, url: 'https://example.com' });
-
-  const engine = new AgentEngine();
-  await engine.restorePromise;
-  engine.scoutFoxGroupId = null; // No group active
-
-  await simulateTabActivated({ tabId: 202 }, engine, env.mockChrome);
-
-  assert.equal(env.sidePanelOptions.has(202), false, 'No side panel option calls should occur when scoutFoxGroupId is null');
-});
+// Tab isolation & side panel scoping (switching away from / back to the grouped tab, and the
+// no-session/no-group no-op guard) is covered against the REAL chrome.tabs.onActivated
+// listener in tests/backgroundSidePanelScoping.test.js - not duplicated here. This file used
+// to carry its own copy via a hand-rolled simulateTabActivated() helper that checked
+// engine.scoutFoxGroupId directly; background.js has since moved to a per-window
+// session.engine.groupIdForWindow(), so that helper was silently testing logic real
+// production code no longer runs at all.
 
 // ============================================================================
 // SCENARIO 6: Multi-Tab Auto-Grouping

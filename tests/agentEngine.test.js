@@ -12,11 +12,7 @@ global.chrome = {
   tabs: {
     get: (id, cb) => cb({ id, groupId: -1, url: 'https://example.com' }),
     query: async () => [{ id: 101, url: 'https://example.com' }],
-    sendMessage: (tabId, msg, cb) => cb({ success: true }),
-    group: (opts, cb) => cb(999)
-  },
-  tabGroups: {
-    update: (id, opts, cb) => cb && cb()
+    sendMessage: (tabId, msg, cb) => cb({ success: true })
   }
 };
 
@@ -167,13 +163,9 @@ test('AgentEngine - Redact Sensitive Data in Network Payloads', () => {
   assert.ok(redacted.includes('testuser'));
 });
 
-test('AgentEngine - ensureScoutFoxGroup sandboxes tab into ScoutFox group', async () => {
-  const engine = new AgentEngine();
-  const groupId = await engine.ensureScoutFoxGroup(101);
-
-  assert.equal(groupId, 999);
-  assert.equal(engine.scoutFoxGroupId, 999);
-});
+// ensureScoutFoxGroup coverage (group creation, reuse, adoption, persistence) lives in
+// tests/tabGrouping.test.js against a fuller mock - this file's version only asserted a
+// hardcoded stub id, a strict subset of that coverage. Not duplicated here.
 
 test('AgentEngine - clearHistory resets state', () => {
   const engine = new AgentEngine();

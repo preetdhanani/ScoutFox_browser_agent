@@ -25,6 +25,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { makeFakePort, lastStateUpdate } from './helpers/fakePort.js';
 
 const REAL_HISTORY = [
   { step: 1, type: 'agent_response', thought: 'looking', action: { action: 'navigate', url: 'https://example.com' } },
@@ -78,28 +79,6 @@ function makeBackgroundChromeMock() {
     declarativeNetRequest: { updateSessionRules: () => Promise.resolve() },
     sidePanel: { setPanelBehavior: () => Promise.resolve(), setOptions: (opts, cb) => cb && cb(), open: noop }
   };
-}
-
-/** A fake port: records every postMessage payload, lets the test disconnect it. */
-function makeFakePort(name) {
-  const disconnectListeners = [];
-  return {
-    name,
-    received: [],
-    postMessage(msg) { this.received.push(msg); },
-    onDisconnect: { addListener: (fn) => disconnectListeners.push(fn) },
-    _disconnect() { disconnectListeners.forEach((fn) => fn()); }
-  };
-}
-
-/**
- * The port also receives LOG_ENTRY broadcasts interleaved with STATE_UPDATE messages (every
- * Logger call broadcasts to every connected port) - most visibly the very diagnostic logging
- * this fix itself adds (SESSION_FRESH / SESSION_FRESH_SUPPRESSED). The last message overall is
- * not reliably a STATE_UPDATE, so pick the last one that actually is.
- */
-function lastStateUpdate(port) {
-  return [...port.received].reverse().find((m) => m.type === 'STATE_UPDATE');
 }
 
 global.self = { addEventListener: () => {} };
