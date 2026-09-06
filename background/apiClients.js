@@ -73,6 +73,40 @@ function extractTextFromLLMResponse(data) {
 // once per model per service-worker lifetime.
 const OLLAMA_THINK_UNSUPPORTED = new Set();
 
+/** settings.apiKey wins if set, else the provider's own saved key. */
+function getApiKey(settings, provider) {
+  return (settings.apiKey || settings.providerConfigs?.[provider]?.apiKey || '').trim();
+}
+
+/** Strip a trailing slash and guarantee the base URL ends with /v1. */
+function withV1(baseUrl) {
+  const trimmed = baseUrl.replace(/\/$/, '');
+  return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`;
+}
+
+/** OpenAI-shaped chat messages: an explicit system message plus the turns as-is. */
+function toOpenAIMessages(messages, systemPrompt) {
+  return [{ role: 'system', content: systemPrompt }, ...messages.map(m => ({ role: m.role, content: m.content }))];
+}
+
+/** Claude-shaped chat messages: no system message, every non-assistant role folds to 'user'. */
+function toClaudeMessages(messages) {
+  return messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+}
+
+/** Wire-image headers AgentRouter expects on every request (Content-Type added by POST callers). */
+function agentRouterHeaders(apiKey) {
+  return {
+    'Authorization': `Bearer ${apiKey}`,
+    'x-api-key': apiKey,
+    'User-Agent': 'claude-cli/2.1.158 (external, sdk-cli)',
+    'x-app': 'cli',
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
+    'anthropic-dangerous-direct-browser-access': 'true'
+  };
+}
+
 export const ApiClients = {
   /**
    * Main completion method dispatching to selected provider
@@ -145,7 +179,7 @@ export const ApiClients = {
    */
   async fetchAvailableModels(settings, forceRefresh = false) {
     const provider = settings.provider || 'gemini';
-    const apiKey = (settings.apiKey || settings.providerConfigs?.[provider]?.apiKey || '').trim();
+    const apiKey = getApiKey(settings, provider);
     const apiKeyTag = apiKey ? apiKey.slice(-6) : 'none';
     const cacheKey = `${provider}_${settings.baseUrl || 'default'}_${apiKeyTag}`;
 
@@ -190,19 +224,9 @@ export const ApiClients = {
         if (models.length === 0) models = this.getFallbackModels('ollama');
         Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from Ollama`);
       } else if (provider === 'agent_router') {
-        const rawBaseUrl = (settings.baseUrl || 'https://agentrouter.org/v1').replace(/\/$/, '');
-        const baseUrl = rawBaseUrl.endsWith('/v1') ? rawBaseUrl : `${rawBaseUrl}/v1`;
+        const baseUrl = withV1(settings.baseUrl || 'https://agentrouter.org/v1');
         const url = `${baseUrl}/models`;
-
-        const headers = {
-          'Authorization': `Bearer ${apiKey}`,
-          'x-api-key': apiKey,
-          'User-Agent': 'claude-cli/2.1.158 (external, sdk-cli)',
-          'x-app': 'cli',
-          'anthropic-version': '2023-06-01',
-          'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
-          'anthropic-dangerous-direct-browser-access': 'true'
-        };
+        const headers = agentRouterHeaders(apiKey);
 
         const res = await fetch(url, { headers });
         const elapsed = Date.now() - startTime;
@@ -216,8 +240,7 @@ export const ApiClients = {
         }
         Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from AgentRouter`);
       } else if (provider === 'openai' || provider === 'openai_compatible') {
-        const baseUrl = (settings.baseUrl || 'https://api.openai.com').replace(/\/$/, '');
-        const url = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+        const url = `${withV1(settings.baseUrl || 'https://api.openai.com')}/models`;
         const headers = {};
         if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
@@ -309,32 +332,17 @@ export const ApiClients = {
    * Emulates Claude CLI wire image headers and extracts response text using universal payload extractor.
    */
   async callAgentRouter(settings, messages, systemPrompt, options = {}) {
-    const rawBaseUrl = (settings.baseUrl || 'https://agentrouter.org/v1').replace(/\/$/, '');
-    const baseUrl = rawBaseUrl.endsWith('/v1') ? rawBaseUrl : `${rawBaseUrl}/v1`;
-    const apiKey = (settings.apiKey || settings.providerConfigs?.agent_router?.apiKey || '').trim();
+    const baseUrl = withV1(settings.baseUrl || 'https://agentrouter.org/v1');
+    const apiKey = getApiKey(settings, 'agent_router');
     const startTime = Date.now();
 
     if (!apiKey) {
       throw new Error('AgentRouter API Key is missing. Please enter your AgentRouter API Key in Settings and click Save Settings.');
     }
 
-    const formattedMessages = messages.map(m => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.content
-    }));
-
+    const formattedMessages = toClaudeMessages(messages);
     const model = settings.model || 'claude-3-5-sonnet';
-
-    const headers = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-      'x-api-key': apiKey,
-      'User-Agent': 'claude-cli/2.1.158 (external, sdk-cli)',
-      'x-app': 'cli',
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    };
+    const headers = { 'Content-Type': 'application/json', ...agentRouterHeaders(apiKey) };
 
     try {
       // Attempt 1: Anthropic Messages endpoint
@@ -411,17 +419,14 @@ export const ApiClients = {
    */
   async callOpenRouter(settings, messages, systemPrompt, options = {}) {
     const url = 'https://openrouter.ai/api/v1/chat/completions';
-    const apiKey = (settings.apiKey || settings.providerConfigs?.openrouter?.apiKey || '').trim();
+    const apiKey = getApiKey(settings, 'openrouter');
     const startTime = Date.now();
 
     if (!apiKey) {
       throw new Error('OpenRouter API Key is missing. Please enter your OpenRouter API Key in Settings and click Save Settings.');
     }
 
-    const formattedMessages = [
-      { role: 'system', content: systemPrompt },
-      ...messages.map(m => ({ role: m.role, content: m.content }))
-    ];
+    const formattedMessages = toOpenAIMessages(messages, systemPrompt);
 
     const headers = {
       'Content-Type': 'application/json',
@@ -494,10 +499,7 @@ export const ApiClients = {
     const model = settings.model || 'qwen2.5:14b';
     const startTime = Date.now();
 
-    const formattedMessages = [
-      { role: 'system', content: systemPrompt },
-      ...messages.map(m => ({ role: m.role, content: m.content }))
-    ];
+    const formattedMessages = toOpenAIMessages(messages, systemPrompt);
 
     const numCtx = Number(settings.ollamaNumCtx) > 0 ? Number(settings.ollamaNumCtx) : 8192;
     const numPredict = settings.ollamaNumPredict !== undefined && settings.ollamaNumPredict !== null
@@ -586,7 +588,7 @@ export const ApiClients = {
    */
   async callGemini(settings, messages, systemPrompt, options = {}) {
     const model = settings.model || 'gemini-1.5-flash';
-    const apiKey = (settings.apiKey || settings.providerConfigs?.gemini?.apiKey || '').trim();
+    const apiKey = getApiKey(settings, 'gemini');
     const startTime = Date.now();
 
     if (!apiKey) {
@@ -642,15 +644,12 @@ export const ApiClients = {
     let defaultBase = 'https://api.openai.com';
     if (provider === 'openai_compatible') defaultBase = 'https://api.groq.com/openai/v1';
 
-    const baseUrl = (settings.baseUrl || defaultBase).replace(/\/$/, '');
-    const apiKey = (settings.apiKey || settings.providerConfigs?.[provider]?.apiKey || '').trim();
-    const url = baseUrl.endsWith('/v1') ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
+    const baseUrl = withV1(settings.baseUrl || defaultBase);
+    const apiKey = getApiKey(settings, provider);
+    const url = `${baseUrl}/chat/completions`;
     const startTime = Date.now();
 
-    const formattedMessages = [
-      { role: 'system', content: systemPrompt },
-      ...messages.map(m => ({ role: m.role, content: m.content }))
-    ];
+    const formattedMessages = toOpenAIMessages(messages, systemPrompt);
 
     const headers = { 'Content-Type': 'application/json' };
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
@@ -691,17 +690,14 @@ export const ApiClients = {
    */
   async callAnthropic(settings, messages, systemPrompt, options = {}) {
     const url = 'https://api.anthropic.com/v1/messages';
-    const apiKey = (settings.apiKey || settings.providerConfigs?.anthropic?.apiKey || '').trim();
+    const apiKey = getApiKey(settings, 'anthropic');
     const startTime = Date.now();
 
     if (!apiKey) {
       throw new Error('Anthropic Claude API Key is missing. Please enter your API Key in Settings.');
     }
 
-    const formattedMessages = messages.map(m => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.content
-    }));
+    const formattedMessages = toClaudeMessages(messages);
 
     try {
       const response = await fetch(url, {
