@@ -13,7 +13,7 @@
  * window it actually came from - never assumed to be a single global one.
  */
 
-import { AgentEngine, describeRestrictedUrl } from './agentEngine.js';
+import { AgentEngine, describeRestrictedUrl, lastRuntimeError } from './agentEngine.js';
 import { ApiClients } from './apiClients.js';
 import { Logger } from '../utils/logger.js';
 
@@ -171,7 +171,7 @@ Logger.setBroadcastCallback((logEntry) => {
  */
 if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setOptions) {
   chrome.sidePanel.setOptions({ enabled: false }, () => {
-    try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+    lastRuntimeError();
   });
 }
 
@@ -197,7 +197,7 @@ if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
     // browser session - silently did nothing: setOptions and open() never even ran.
     if (chrome.sidePanel && chrome.sidePanel.setOptions) {
       chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-        try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+        lastRuntimeError();
       });
     }
 
@@ -229,20 +229,18 @@ if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
 }
 
 chrome.runtime.onConnect.addListener((port) => {
-  // The port name's '_fresh'/plain distinction and 'strawberry_sidepanel' backwards
-  // compatibility (a pre-rename panel still running an old build) both still parse, purely for
-  // the PORT_CONNECT log line below - neither one decides whether to clear history anymore.
-  // Per-window sessions replaced that need: reopening the panel on a window that already has a
-  // session (running or finished) always reflects it, exactly like reopening a chat app shows
-  // the conversation that was already there, rather than silently starting a new one every
-  // time. A window's session is only ever genuinely empty the first time IT is ever opened -
-  // and clearing an already-empty engine is a harmless no-op, so there is nothing left to
-  // special-case here at all. Starting over on purpose is what CLEAR_HISTORY is for.
+  // The port name's '_fresh'/plain distinction still parses, purely for the PORT_CONNECT log
+  // line below - it no longer decides whether to clear history. Per-window sessions replaced
+  // that need: reopening the panel on a window that already has a session (running or
+  // finished) always reflects it, exactly like reopening a chat app shows the conversation
+  // that was already there, rather than silently starting a new one every time. A window's
+  // session is only ever genuinely empty the first time IT is ever opened - and clearing an
+  // already-empty engine is a harmless no-op, so there is nothing left to special-case here at
+  // all. Starting over on purpose is what CLEAR_HISTORY is for.
   const match = port.name.match(/^(scoutfox_sidepanel(?:_fresh)?)(?::(-?\d+))?$/);
-  const isLegacy = port.name === 'strawberry_sidepanel';
-  if (!match && !isLegacy) return;
+  if (!match) return;
 
-  const windowId = isLegacy ? 'legacy' : (match[2] !== undefined ? Number(match[2]) : 'legacy');
+  const windowId = match[2] !== undefined ? Number(match[2]) : 'legacy';
 
   const session = getOrCreateSession(windowId);
   session.ports.add(port);
@@ -299,7 +297,7 @@ chrome.runtime.onConnect.addListener((port) => {
         session.engine.ensureScoutFoxGroup(activeTab.id).then((groupId) => {
           if (groupId && typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setOptions) {
             chrome.sidePanel.setOptions({ tabId: activeTab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-              try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+              lastRuntimeError();
             });
           }
         }).catch(() => {});
@@ -451,11 +449,11 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
     const groupIdForThisWindow = session.engine.groupIdForWindow(tab.windowId);
     if (groupIdForThisWindow && typeof chrome.tabs.group === 'function') {
       chrome.tabs.group({ tabIds: tab.id, groupId: groupIdForThisWindow }, () => {
-        try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+        lastRuntimeError();
         Logger.info('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'ScoutFox' tab group [${groupIdForThisWindow}] (window [${tab.windowId}])`);
         if (typeof chrome.sidePanel !== 'undefined' && chrome.sidePanel.setOptions) {
           chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-            try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+            lastRuntimeError();
           });
         }
       });
@@ -487,7 +485,7 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
       try {
         const tab = await new Promise((resolve) => {
           chrome.tabs.get(tabId, (t) => {
-            try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+            lastRuntimeError();
             resolve(t);
           });
         });
@@ -496,11 +494,11 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
           const isInScoutFoxGroup = tab.groupId === groupIdForThisWindow;
           if (isInScoutFoxGroup) {
             chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-              try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+              lastRuntimeError();
             });
           } else {
             chrome.sidePanel.setOptions({ tabId, enabled: false }, () => {
-              try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+              lastRuntimeError();
             });
           }
         }
@@ -520,11 +518,11 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
         const isInScoutFoxGroup = changeInfo.groupId === groupIdForThisWindow;
         if (isInScoutFoxGroup) {
           chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-            try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+            lastRuntimeError();
           });
         } else {
           chrome.sidePanel.setOptions({ tabId, enabled: false }, () => {
-            try { if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError; } catch (_) {}
+            lastRuntimeError();
           });
         }
       }

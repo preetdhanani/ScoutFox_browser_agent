@@ -15,7 +15,7 @@ import { Logger } from '../utils/logger.js';
  * Chrome emits an "unchecked runtime.lastError" warning, but chrome.runtime itself is absent
  * in test and non-extension contexts — so a bare read would throw and swallow the callback.
  */
-function lastRuntimeError() {
+export function lastRuntimeError() {
   try {
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError) {
       return chrome.runtime.lastError;
