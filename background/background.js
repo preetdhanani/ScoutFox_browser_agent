@@ -462,6 +462,28 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
     // session's primary window, if this tab was created in a secondary one opened via
     // openNewWindow) fails outright, since a Chrome tab group cannot span windows.
     const groupIdForThisWindow = session.engine.groupIdForWindow(tab.windowId);
+
+    // Only adopt tabs THIS session's own automation actually caused.
+    //
+    // Chrome sets openerTabId on a tab opened BY another tab - a target="_blank" link the
+    // agent clicked, or window.open from a page it is driving - so a tab whose opener is the
+    // very tab the agent is working in is one of ours. A tab the USER opened is not: Cmd+T
+    // carries no opener at all, and a link they clicked in some other tab carries that tab.
+    //
+    // This listener used to adopt EVERY new tab in the window, which the user reported from
+    // both ends: a tab they opened next to the group silently became part of the automation
+    // sandbox, and - worse, below - a tab they opened mid-run stole the running agent's
+    // target 500ms later, pointing it at a page they had opened for themselves. Their own
+    // tabs stay their own; the agent only ever follows tabs it opened itself.
+    const openedByThisSession = tab.openerTabId !== undefined
+      && tab.openerTabId === session.engine.activeTabId;
+    if (!openedByThisSession) {
+      if (groupIdForThisWindow) {
+        Logger.info('Background', `[TAB_LEFT_ALONE] Tab [${tab.id}] was opened by the user, not by automation - leaving it outside the 'ScoutFox' group (window [${tab.windowId}]).`);
+      }
+      return;
+    }
+
     if (groupIdForThisWindow && typeof chrome.tabs.group === 'function') {
       chrome.tabs.group({ tabIds: tab.id, groupId: groupIdForThisWindow }, () => {
         lastRuntimeError();

@@ -189,34 +189,6 @@ global.chrome = createMockChromeEnv().mockChrome;
 
 const { AgentEngine } = await import('../background/agentEngine.js');
 
-// Helper handler to simulate tab creation logic from background.js
-async function simulateTabCreated(tab, agentEngine, chromeMock) {
-  if (agentEngine.scoutFoxGroupId && typeof chromeMock.tabs.group === 'function') {
-    await new Promise((resolve) => {
-      chromeMock.tabs.group({ tabIds: tab.id, groupId: agentEngine.scoutFoxGroupId }, (gid) => {
-        try { if (chromeMock.runtime && chromeMock.runtime.lastError) void chromeMock.runtime.lastError; } catch (_) {}
-        if (typeof chromeMock.sidePanel !== 'undefined' && chromeMock.sidePanel.setOptions) {
-          chromeMock.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-            try { if (chromeMock.runtime && chromeMock.runtime.lastError) void chromeMock.runtime.lastError; } catch (_) {}
-          });
-        }
-        resolve(gid);
-      });
-    });
-  }
-
-  if (agentEngine.status === 'running') {
-    const createdTab = await new Promise((resolve) => {
-      chromeMock.tabs.get(tab.id, (t) => {
-        resolve(t);
-      });
-    });
-    if (createdTab && createdTab.url && !createdTab.url.startsWith('chrome://')) {
-      agentEngine.activeTabId = createdTab.id;
-    }
-  }
-}
-
 // ============================================================================
 // SCENARIO 1: ensureScoutFoxGroup Creation
 // ============================================================================
@@ -419,62 +391,11 @@ test('4.3 scoutFoxGroupId Persistence - restoreState leaves scoutFoxGroupId null
 // session.engine.groupIdForWindow(), so that helper was silently testing logic real
 // production code no longer runs at all.
 
-// ============================================================================
-// SCENARIO 6: Multi-Tab Auto-Grouping
-// ============================================================================
-test('6.1 Multi-Tab Auto-Grouping - Automatically groups newly created tabs into ScoutFox group', async () => {
-  const env = createMockChromeEnv();
-  global.chrome = env.mockChrome;
-
-  const SCOUT_GID = 5001;
-  const engine = new AgentEngine();
-  await engine.restorePromise;
-  engine.scoutFoxGroupId = SCOUT_GID;
-
-  // A new tab is created dynamically (e.g., link target="_blank")
-  const newTab = { id: 303, groupId: -1, url: 'https://example.com/child-page' };
-  env.tabs.set(303, newTab);
-
-  await simulateTabCreated(newTab, engine, env.mockChrome);
-
-  assert.equal(env.tabs.get(303).groupId, SCOUT_GID, 'Newly created tab must be auto-grouped into ScoutFox group');
-  const panelOpts = env.sidePanelOptions.get(303);
-  assert.ok(panelOpts, 'Side panel options should be updated for auto-grouped tab');
-  assert.equal(panelOpts.enabled, true);
-  assert.equal(panelOpts.path, 'sidepanel/sidepanel.html');
-});
-
-test('6.2 Multi-Tab Auto-Grouping - Updates activeTabId when new tab is created while automation is running', async () => {
-  const env = createMockChromeEnv();
-  global.chrome = env.mockChrome;
-
-  const SCOUT_GID = 5001;
-  const engine = new AgentEngine();
-  await engine.restorePromise;
-  engine.scoutFoxGroupId = SCOUT_GID;
-  engine.status = 'running';
-  engine.activeTabId = 101;
-
-  const newTab = { id: 304, groupId: -1, url: 'https://example.com/automation-opened' };
-  env.tabs.set(304, newTab);
-
-  await simulateTabCreated(newTab, engine, env.mockChrome);
-
-  assert.equal(engine.activeTabId, 304, 'Engine activeTabId must switch to newly opened tab while running');
-});
-
-test('6.3 Multi-Tab Auto-Grouping - Ignores new tab creation when scoutFoxGroupId is null', async () => {
-  const env = createMockChromeEnv();
-  global.chrome = env.mockChrome;
-
-  const engine = new AgentEngine();
-  await engine.restorePromise;
-  engine.scoutFoxGroupId = null;
-
-  const newTab = { id: 305, groupId: -1, url: 'https://example.com/standalone' };
-  env.tabs.set(305, newTab);
-
-  await simulateTabCreated(newTab, engine, env.mockChrome);
-
-  assert.equal(env.tabs.get(305).groupId, -1, 'Tab must remain ungrouped when scoutFoxGroupId is null');
-});
+// Multi-tab auto-grouping (which newly created tabs this session adopts, and which it must
+// leave alone) is covered against the REAL chrome.tabs.onCreated listener in
+// tests/backgroundTabAdoption.test.js. This file used to carry its own copy via a hand-rolled
+// simulateTabCreated() helper that read engine.scoutFoxGroupId and re-implemented the
+// restricted-URL check as a bare 'chrome://' prefix test; background.js has since moved to a
+// per-window groupIdForWindow() and the shared describeRestrictedUrl(), and adopts a tab only
+// when its openerTabId shows the agent itself opened it - so that helper asserted behaviour
+// production no longer has.
