@@ -691,9 +691,24 @@ function routeMessage(request, sender, sendResponse) {
   return true;
 }
 
+/** Bring a tab to the front of its window, so automation is never invisible to the user. */
+function activateTab(tabId) {
+  return new Promise((resolve) => {
+    if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.update) return resolve();
+    chrome.tabs.update(tabId, { active: true }, () => {
+      lastRuntimeError();
+      resolve();
+    });
+  });
+}
+
 /**
  * Pick the tab to automate, WITHIN the requesting panel's own window.
- * Prioritizes tabs inside that window's active 'ScoutFox' Tab Group sandbox when active.
+ *
+ * Whatever this returns is the tab the user will watch the agent work in, so it must be a tab
+ * they can actually SEE: either the one already in front of them, or one opened right next to
+ * it. It deliberately never reaches for some other tab they happen to have open - see the
+ * comment on the final fallback below.
  */
 async function getActiveTab(windowId) {
   const session = windowId !== undefined ? sessions.get(windowId) : undefined;
@@ -711,43 +726,69 @@ async function getActiveTab(windowId) {
     return focused;
   }
 
-  // 2. If focused tab is in this window's ScoutFox group and valid:
+  // 2. A tab already inside THIS session's own ScoutFox group is fair game - that group IS this
+  // session's sandbox, so a tab in it is one the agent itself put there. Bring it to the front
+  // first: it is not the tab the user is looking at right now, and silently driving a
+  // background tab is exactly what made a finished run look like nothing had happened.
   if (scoutFoxGroupId && typeof chrome.tabs.query === 'function') {
     try {
       const groupTabs = await chrome.tabs.query({ groupId: scoutFoxGroupId });
       const validInGroup = groupTabs.find(isValidWebTab);
-      if (validInGroup) return validInGroup;
+      if (validInGroup) {
+        Logger.info('Background', `[TAB_REFOCUSED] Bringing this session's own tab [${validInGroup.id}] (${validInGroup.url}) to the front to run the task where it can be seen.`);
+        await activateTab(validInGroup.id);
+        return validInGroup;
+      }
     } catch (_) {}
   }
 
   if (focused) {
-    Logger.warn('Background', `[TAB_NOT_AUTOMATABLE] The focused tab (${focused.url || 'unknown URL'}) cannot be automated — browsers block extensions from scripting internal pages. Looking for another tab.`);
+    Logger.warn('Background', `[TAB_NOT_AUTOMATABLE] The focused tab (${focused.url || 'unknown URL'}) cannot be automated — browsers block extensions from scripting internal pages. Opening a fresh tab next to it instead.`);
   }
 
-  const validTab = typeof windowId === 'number'
-    ? (await chrome.tabs.query({ windowId })).find(isValidWebTab) || null
-    : (await chrome.tabs.query({ active: true })).find(isValidWebTab) ||
-      (await chrome.tabs.query({ currentWindow: true })).find(isValidWebTab) ||
-      null;
-
-  if (validTab) {
-    Logger.warn('Background', `[TAB_SUBSTITUTED] Running against tab [${validTab.id}] (${validTab.url}) instead, because the focused tab cannot be scripted. Switch to the page you want automated if this is not it.`);
-    return validTab;
-  }
-
-  // AUTO-CREATE FRESH WEB TAB FALLBACK ONLY IF sitting on chrome:// internal page:
-  Logger.info('Background', '[AUTO_CREATE_TAB] No scriptable web tab found. Auto-opening a fresh tab to https://www.google.com...');
+  // 3. Open a fresh tab immediately to the RIGHT of the tab the user is on, and run there.
+  //
+  // This deliberately replaces the old [TAB_SUBSTITUTED] behaviour, which searched the window
+  // for any scriptable tab and ran against the first one it found, in tab-strip order, without
+  // ever activating it. Two problems, both reported by the user: the run was invisible (they
+  // sat on chrome://newtab watching nothing while the agent drove a tab several positions
+  // away), and the tab it picked was whatever they happened to have open - their mail, a
+  // half-filled form - which the agent would then start clicking around in. A tab the user
+  // opened for their own purposes is theirs; the agent gets its own, right where they can see it.
+  Logger.info('Background', '[AUTO_CREATE_TAB] Opening a fresh tab to https://www.google.com for this task.');
   const newTab = await new Promise((resolve) => {
     if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.create) {
       const createOpts = { url: 'https://www.google.com', active: true };
       if (typeof windowId === 'number') createOpts.windowId = windowId;
+      // Right beside the tab it was launched from, rather than appended to the far end of the
+      // strip where the user has to go hunting for it.
+      if (focused && typeof focused.index === 'number') createOpts.index = focused.index + 1;
       chrome.tabs.create(createOpts, (t) => {
+        lastRuntimeError();
         resolve(t);
       });
     } else {
       resolve({ id: 999, url: 'https://www.google.com' });
     }
   });
+
+  // Group it and show the panel on it BEFORE handing it back, in that order. A brand-new tab
+  // has the panel disabled (boot disables it everywhere - see the setOptions comment at the top
+  // of this file), and onActivated disables it again for any tab outside the group, so without
+  // this the panel would vanish the moment this tab came to the front. ensureScoutFoxGroup is
+  // idempotent, so startTask calling it again immediately after is a no-op.
+  if (session && session.engine.ensureScoutFoxGroup) {
+    try {
+      await session.engine.ensureScoutFoxGroup(newTab.id);
+    } catch (err) {
+      Logger.warn('Background', '[TAB_SANDBOX_ERROR] Could not group the freshly opened tab', err);
+    }
+    if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setOptions) {
+      chrome.sidePanel.setOptions({ tabId: newTab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+        lastRuntimeError();
+      });
+    }
+  }
 
   if (session && session.engine.waitForTabComplete) {
     await session.engine.waitForTabComplete(newTab.id, 4000);
