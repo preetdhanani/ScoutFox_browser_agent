@@ -215,12 +215,27 @@ if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
       });
     }
 
+    // Clicking the toolbar icon is a deliberate, explicit "open ScoutFox" gesture - unlike the
+    // internal port reconnects (service worker restarts, a second tab's own panel document
+    // connecting) that must NOT clear an in-progress or just-finished run, and still resume
+    // exactly as before. An idle/finished session, though, should never resurrect a stale
+    // conversation into the next task's LLM prompt (previousTurnsSummary() would recap it)
+    // just because the panel was reopened - so start fresh here instead. Waits for any
+    // in-flight restoreState() first (restorePromise resolves immediately if it already has),
+    // so a just-constructed engine's own restore cannot clobber this clear by loading the old
+    // history right back a moment later; the status re-check inside also protects against a
+    // task that starts between the click and this running.
+    const session = getOrCreateSession(tab.windowId);
+    session.engine.restorePromise.then(() => {
+      if (session.engine.status !== 'running' && session.engine.status !== 'paused') {
+        session.engine.clearHistory();
+      }
+    });
+
     // Automation sandboxing (tab grouping) only makes sense on a page that can actually be
     // scripted, so THIS is where isValidWebTab belongs - gating the panel opening at all was
     // the bug. Grouping has no gesture requirement either way, so it is safe to run after.
-    // Resolves (creating if needed) THIS window's own session - never a shared global one.
     if (isValidWebTab(tab)) {
-      const session = getOrCreateSession(tab.windowId);
       session.engine.ensureScoutFoxGroup(tab.id).catch((err) => {
         Logger.warn('Background', '[TAB_SANDBOX_ERROR] ensureScoutFoxGroup failed on icon click', err);
       });
