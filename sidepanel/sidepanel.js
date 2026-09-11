@@ -163,6 +163,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   await fetchDynamicModels(false);
 });
 
+// Ensure tabs are initialized even if DOMContentLoaded already fired (common in some preview/extension environments)
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+  initTabs();
+}
+
 /**
  * Load settings into form controls with per-provider memory restoration
  */
@@ -446,15 +451,26 @@ function initTabs() {
   const navBtns = document.querySelectorAll('.nav-btn');
   const panels = document.querySelectorAll('.tab-panel');
 
+  if (navBtns.length === 0 || panels.length === 0) {
+    console.warn('[Sidepanel] initTabs: Navigation buttons or tab panels not found in DOM.');
+    return;
+  }
+
   navBtns.forEach(btn => {
     btn.addEventListener('click', () => {
       const targetTab = btn.getAttribute('data-tab');
+      if (!targetTab) return;
 
       navBtns.forEach(b => b.classList.remove('active'));
       panels.forEach(p => p.classList.remove('active'));
 
       btn.classList.add('active');
-      document.getElementById(`tab-${targetTab}`).classList.add('active');
+      const targetPanel = document.getElementById(`tab-${targetTab}`);
+      if (targetPanel) {
+        targetPanel.classList.add('active');
+      } else {
+        console.error(`[Sidepanel] Tab panel #${targetTab} not found.`);
+      }
     });
   });
 }

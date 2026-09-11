@@ -46,6 +46,10 @@ export const Storage = {
    */
   async getSettings() {
     return new Promise((resolve) => {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+        resolve({ ...DEFAULT_SETTINGS });
+        return;
+      }
       chrome.storage.local.get(['agent_settings'], (result) => {
         const loaded = result.agent_settings || {};
         const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
@@ -111,8 +115,12 @@ export const Storage = {
       model,
       providerConfigs: updatedProviderConfigs
     };
-    
+
     return new Promise((resolve) => {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+        resolve(updated);
+        return;
+      }
       chrome.storage.local.set({ agent_settings: updated }, () => resolve(updated));
     });
   },
@@ -163,6 +171,10 @@ export const Storage = {
    */
   async getSessions() {
     return new Promise((resolve) => {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+        resolve([]);
+        return;
+      }
       chrome.storage.local.get(['saved_sessions'], (res) => {
         resolve(res.saved_sessions || []);
       });
@@ -185,6 +197,10 @@ export const Storage = {
     const trimmed = sessions.slice(0, 50);
 
     return new Promise((resolve) => {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+        resolve(trimmed);
+        return;
+      }
       chrome.storage.local.set({ saved_sessions: trimmed }, () => resolve(trimmed));
     });
   },
@@ -197,6 +213,10 @@ export const Storage = {
     const updated = sessions.filter(s => s.id !== sessionId);
 
     return new Promise((resolve) => {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+        resolve(updated);
+        return;
+      }
       chrome.storage.local.set({ saved_sessions: updated }, () => resolve(updated));
     });
   }

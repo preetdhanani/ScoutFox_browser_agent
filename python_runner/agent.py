@@ -346,8 +346,8 @@ if __name__ == "__main__":
         "openai": "https://api.openai.com/v1",
     }
     PROVIDER_DEFAULT_MODEL = {
-        "ollama": "qwen2.5:14b",
-        "openai": "gpt-4o-mini",
+        "ollama": "qwen3.5:9b",
+        "openai": "gpt-5.4",
     }
     if args.base_url is None:
         args.base_url = PROVIDER_DEFAULT_BASE_URL[args.provider]
