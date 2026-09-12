@@ -1035,7 +1035,7 @@ function renderState(state) {
     lastRenderedStateVersion = state.stateVersion;
   }
 
-  const { status, stepCount, history, planSteps, currentPhase } = state;
+  const { status, stepCount, history, planSteps, currentPhase, pendingQuestion } = state;
   const isDisconnected = backgroundPort === null;
 
   const statusPill = document.getElementById('statusPill');
@@ -1102,7 +1102,7 @@ function renderState(state) {
     // Keep the scroll pinned to the bottom only if the user was already there, so
     // expanding a row mid-run does not yank the view away from them.
     const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
-    timeline.innerHTML = renderTurns(history, status, planSteps, currentPhase);
+    timeline.innerHTML = renderTurns(history, status, planSteps, currentPhase, pendingQuestion);
     if (nearBottom) timeline.scrollTop = timeline.scrollHeight;
   }
 }
@@ -1152,6 +1152,8 @@ function buildTurns(history) {
     } else if (item.type === 'error') {
       cur.entries.push({ kind: 'fault', idx, content: item.content });
       cur.failed = true;
+    } else if (item.type === 'user_answer') {
+      cur.entries.push({ kind: 'answer', idx, content: item.content });
     } else if (item.type === 'finish') {
       cur.answer = item.answer;
       cur.answerUnconfirmed = !!item.unconfirmed;
@@ -1194,7 +1196,7 @@ function isTurnExpanded(turn, isLive, incomplete) {
   return isLive || incomplete;
 }
 
-function renderTurns(history, status, planSteps, currentPhase) {
+function renderTurns(history, status, planSteps, currentPhase, pendingQuestion) {
   const turns = buildTurns(history);
   const busy = status === 'running' || status === 'paused';
 
@@ -1221,6 +1223,9 @@ function renderTurns(history, status, planSteps, currentPhase) {
     const rows = turn.entries.map((e) => {
       if (e.kind === 'fault') {
         return `<div class="act-row fault"><span class="act-ico">${ICONS.warning}</span><span class="act-text">${escapeHtml(e.content)}</span></div>`;
+      }
+      if (e.kind === 'answer') {
+        return `<div class="act-row answer"><span class="act-ico">${ICONS.keyboard}</span><span class="act-text">You answered: <em>${escapeHtml(e.content)}</em></span></div>`;
       }
       const d = describeAction(e.action, e.outcome);
       const key = `${turn.turn}:${e.idx}`;
@@ -1253,6 +1258,19 @@ function renderTurns(history, status, planSteps, currentPhase) {
       ? `<div class="act-phase">${escapeHtml(currentPhase)}</div>`
       : '';
 
+    // The agent called ask_user and is waiting - give the user an actual way to answer, right
+    // where the question was asked, instead of leaving them stuck at a generic Resume button
+    // with no way to say anything back.
+    const answerPrompt = (isLive && status === 'paused' && pendingQuestion)
+      ? `<div class="ask-user-prompt">
+          <div class="ask-user-question">${ICONS.ask} ${escapeHtml(pendingQuestion)}</div>
+          <div class="ask-user-input-row">
+            <input type="text" class="ask-user-input form-input" placeholder="Type your answer..." />
+            <button class="ask-user-send btn btn-primary btn-xs" type="button">Send</button>
+          </div>
+        </div>`
+      : '';
+
     const sessionDivider = (turn.turn > 1 || turn.isNewRun)
       ? `<div class="session-divider">
           <span class="session-tag">⚡ Run #${turn.turn}</span>
@@ -1268,7 +1286,7 @@ function renderTurns(history, status, planSteps, currentPhase) {
           <span class="act-chev">${ICONS.chevron}</span>
           <span class="act-head-text">${headline}</span>
         </button>
-        <div class="act-body" ${open ? '' : 'hidden'}>${planDetail}${rows}${phase}</div>
+        <div class="act-body" ${open ? '' : 'hidden'}>${planDetail}${rows}${phase}${answerPrompt}</div>
       </div>` : ''}
       ${turn.answer ? (turn.answerUnconfirmed
         ? `<div class="finish-card unconfirmed"><div class="finish-title">${ICONS.warning} Unconfirmed answer</div><div class="finish-body">${formatMarkdownText(turn.answer)}</div></div>`
@@ -1311,8 +1329,37 @@ function initTimelineInteraction() {
     return false;
   };
 
-  timeline.addEventListener('click', (e) => { toggle(e.target); });
+  const sendAnswer = (promptEl) => {
+    const input = promptEl.querySelector('.ask-user-input');
+    const btn = promptEl.querySelector('.ask-user-send');
+    const answer = (input && input.value || '').trim();
+    if (!answer) { if (input) input.focus(); return; }
+    if (input) input.disabled = true;
+    if (btn) btn.disabled = true;
+    sendBgMessage({ action: 'ANSWER_QUESTION', payload: { answer } }, (res) => {
+      if (chrome.runtime.lastError || (res && res.success === false)) {
+        const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : res.error;
+        appendLocalLog('ERROR', 'Sidepanel', `[ANSWER_FAILED] ${errMsg}`);
+        showTaskError(errMsg || 'Could not send your answer to the agent.');
+        if (input) input.disabled = false;
+        if (btn) btn.disabled = false;
+      }
+      // On success the next STATE_UPDATE broadcast replaces this prompt with the recorded
+      // answer row - nothing further to do here.
+    });
+  };
+
+  timeline.addEventListener('click', (e) => {
+    const sendBtn = e.target.closest('.ask-user-send');
+    if (sendBtn) { sendAnswer(sendBtn.closest('.ask-user-prompt')); return; }
+    toggle(e.target);
+  });
   timeline.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.classList.contains('ask-user-input')) {
+      e.preventDefault();
+      sendAnswer(e.target.closest('.ask-user-prompt'));
+      return;
+    }
     if (e.key === 'Enter' || e.key === ' ') {
       if (toggle(e.target)) e.preventDefault();
     }

@@ -175,6 +175,11 @@ export class AgentEngine {
     this.activeTabId = null;
     this.currentPhase = '';
     this.isLoopActive = false;
+    // Set when the agent calls ask_user, cleared the moment it gets an answer (or the user
+    // hits the plain Resume button instead of answering). Broadcast on every state change
+    // (see notifyStateChange) so the panel - even a fresh reconnect - always knows whether a
+    // paused run is waiting on a question, not just paused by the user or by a failed LLM call.
+    this.pendingQuestion = null;
     this.onStateChangeCallback = null;
     // Fired when this session opens a brand-new browser window (see openNewWindow()), so
     // background.js can register that window's id against THIS session instead of creating a
@@ -449,6 +454,7 @@ export class AgentEngine {
           history: this.history,
           planSteps: this.planSteps,
           currentPhase: this.currentPhase,
+          pendingQuestion: this.pendingQuestion,
           // Deliberately NOT sending Logger.getLogsHistory() here. setPhase() calls this
           // ~7 times per loop iteration, and shipping the whole 300-entry ring (which holds
           // full [LLM_RAW_OUTPUT] bodies) meant several hundred KB structure-cloned across
@@ -1056,11 +1062,44 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       return { success: false, error: `Cannot resume: the agent is ${this.status}. The paused task did not survive a background restart — please re-run it.` };
     }
     this.status = 'running';
+    // A plain Resume (not answering) is a legitimate way to unstick an ask_user pause too - the
+    // model just gets no answer and has to proceed without one. Either way, the question is no
+    // longer pending once the loop is moving again.
+    this.pendingQuestion = null;
     this.abortController = new AbortController();
     this.setPhase('Resuming task...');
     Logger.info('AgentEngine', '[RESUMED] Task resumed by user.');
     this.runLoop().catch((err) => {
       Logger.error('AgentEngine', '[RESUME_ERROR] Uncaught exception resuming loop', err);
+    });
+    return { success: true };
+  }
+
+  /**
+   * Answers a pending ask_user question and continues the run - the recourse that did not
+   * exist before: notifyStateChange({question}) had zero consumers anywhere in the repo, so
+   * an agent honest enough to ask for help had no way to actually hear back. Pushes the answer
+   * as a visible history entry (see harness/outcome.js's sibling module, formatMessagesForLLM
+   * below feeds it back to the model) and resumes exactly like the plain Resume button does.
+   */
+  answerQuestion(answerText) {
+    this.dirty = true;
+    if (this.status !== 'paused' || !this.pendingQuestion) {
+      return { success: false, error: 'There is no pending question to answer right now.' };
+    }
+    const answer = (answerText || '').trim();
+    if (!answer) {
+      return { success: false, error: 'The answer cannot be empty.' };
+    }
+
+    Logger.info('AgentEngine', `[ASK_USER_ANSWERED] "${this.pendingQuestion}" -> "${answer}"`);
+    this.pendingQuestion = null;
+    this.history.push({ type: 'user_answer', content: answer });
+    this.status = 'running';
+    this.abortController = new AbortController();
+    this.setPhase('Continuing with your answer...');
+    this.runLoop().catch((err) => {
+      Logger.error('AgentEngine', '[RESUME_ERROR] Uncaught exception resuming loop after answer', err);
     });
     return { success: true };
   }
@@ -1314,9 +1353,10 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
 
       if (actionObj.action === 'ask_user') {
         this.status = 'paused';
-        this.setPhase('Waiting for user input');
-        Logger.info('AgentEngine', '[ASK_USER] Waiting for user input.');
-        this.notifyStateChange({ question: actionObj.question });
+        this.pendingQuestion = actionObj.question || 'The agent needs more information to continue.';
+        this.setPhase('Waiting for your answer...');
+        Logger.info('AgentEngine', `[ASK_USER] Waiting for user input: ${this.pendingQuestion}`);
+        this.notifyStateChange();
         break;
       }
 
@@ -1569,6 +1609,8 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
             ? `Action Executed Successfully: ${item.message}`
             : `Action Failed: ${item.error}. Choose a different element or action.`
         });
+      } else if (item.type === 'user_answer') {
+        messages.push({ role: 'user', content: `You asked a question and the user answered: "${item.content}". Continue the task using this answer.` });
       }
     });
 
