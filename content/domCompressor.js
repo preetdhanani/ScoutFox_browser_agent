@@ -226,6 +226,21 @@
     }
 
     /**
+     * A best-effort implicit ARIA role, for elements with no explicit [role] attribute. Not a
+     * full HTML-AAM implementation - just enough for the model to tell a link from a button
+     * from a form field, which the raw tag name alone (e.g. every clickable thing is just
+     * "div" or "span" with [onclick]) does not convey.
+     */
+    computeRole(el, tagName, type) {
+      const explicit = el.getAttribute('role');
+      if (explicit) return explicit;
+      if (tagName === 'input') {
+        return { checkbox: 'checkbox', radio: 'radio', submit: 'button', reset: 'button', button: 'button', range: 'slider', search: 'searchbox' }[type] || 'textbox';
+      }
+      return { a: 'link', button: 'button', select: 'combobox', textarea: 'textbox', option: 'option' }[tagName] || tagName;
+    }
+
+    /**
      * Produce concise element string representation with stable locator descriptors
      */
     getElementSummary(el, id) {
@@ -235,12 +250,42 @@
       const ariaLabel = el.getAttribute('aria-label') || '';
       const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
 
+      const role = this.computeRole(el, tagName, type);
+      const disabled = !!(el.disabled || el.getAttribute('aria-disabled') === 'true');
+      const checked = (tagName === 'input' && (type === 'checkbox' || type === 'radio'))
+        ? !!el.checked
+        : (el.getAttribute('aria-checked') === 'true');
+      const expandedAttr = el.getAttribute('aria-expanded');
+      const expanded = expandedAttr === null ? undefined : expandedAttr === 'true';
+      // Never surface a password field's actual value - this is a snapshot the model reads and
+      // that later becomes part of the LLM prompt, not a private in-browser value.
+      const isPasswordLike = tagName === 'input' && type === 'password';
+      const valuePreview = (!isPasswordLike && (tagName === 'input' || tagName === 'textarea') && typeof el.value === 'string' && el.value)
+        ? el.value.slice(0, 40)
+        : '';
+
+      let inViewport = true;
+      try {
+        const rect = el.getBoundingClientRect();
+        const vw = (typeof window !== 'undefined' && window.innerWidth) || 0;
+        const vh = (typeof window !== 'undefined' && window.innerHeight) || 0;
+        inViewport = rect.bottom > 0 && rect.right > 0 && rect.top < vh && rect.left < vw;
+      } catch (_) {
+        // A measurement failure must never hide an element the model could otherwise act on.
+        inViewport = true;
+      }
+
       // tagName/type are already in `formatted`'s own prefix below - only placeholder/aria-label
       // are worth repeating here, since labelText can drop one of them (e.g. real innerText
       // wins over an aria-label that says something different, like an icon button).
       let extraAttrs = '';
       if (placeholder) extraAttrs += ` placeholder="${placeholder}"`;
       if (ariaLabel) extraAttrs += ` label="${ariaLabel}"`;
+      if (disabled) extraAttrs += ' disabled';
+      if (checked) extraAttrs += ' checked';
+      if (expanded === true) extraAttrs += ' expanded';
+      else if (expanded === false) extraAttrs += ' collapsed';
+      if (valuePreview) extraAttrs += ` value="${valuePreview}"`;
 
       let labelText = text || ariaLabel || placeholder || 'element';
 
@@ -248,7 +293,7 @@
         index: id,
         tag: tagName,
         text: labelText,
-        role: el.getAttribute('role') || tagName,
+        role,
         cssPath: this.getCssPath(el),
         attrs: {
           id: el.id || '',
@@ -261,9 +306,14 @@
         id,
         tagName,
         type,
+        role,
+        disabled,
+        checked,
+        expanded,
+        inViewport,
         text: labelText,
         locator,
-        formatted: `[${id}] ${tagName}${type ? `[${type}]` : ''} "${labelText}"${extraAttrs ? ` (${extraAttrs.trim()})` : ''}`
+        formatted: `[${id}] ${tagName}${type ? `[${type}]` : ''} "${labelText}"${extraAttrs ? ` (${extraAttrs.trim()})` : ''}${inViewport ? '' : ' [off-screen]'}`
       };
     }
   }
