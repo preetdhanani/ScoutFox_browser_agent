@@ -454,6 +454,13 @@ export class AgentEngine {
   }
 
   notifyStateChange(extraData = {}) {
+    // trimHistory() used to be called from only 2 of the history-mutating code paths, so the
+    // array could grow past MAX_HISTORY between them - and worse, whichever entry a splice cut
+    // first was whatever happened to be oldest at that moment, not necessarily safe to lose.
+    // Every single history push in this file is followed by a notifyStateChange() (directly, or
+    // via setPhase()) before the step ends, so trimming here once is both simpler and
+    // strictly more complete than chasing every call site individually.
+    this.trimHistory();
     this.stateVersion++;
     this.persistState();
     if (this.onStateChangeCallback) {
@@ -930,7 +937,8 @@ export class AgentEngine {
       timestamp: new Date().toLocaleTimeString(),
       isNewRun: true
     });
-    this.trimHistory();
+    // trimHistory() now runs centrally in notifyStateChange(), which every path out of this
+    // function reaches before returning.
 
     const settings = await Storage.getSettings();
 
@@ -1215,7 +1223,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       }
 
       const systemPrompt = this.buildSystemPrompt(settings.systemInstructions);
-      let userMessage = this.buildStepMessage(domSnapshot);
+      let userMessage = this.buildStepMessage(domSnapshot, maxSteps);
 
       // Universal Guardrail: Anti-Stuck Loop Detection & Auto-Inject Network Errors
       if (this.recentActionSignatures.length >= 2) {
@@ -1404,7 +1412,6 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           submitted: execResult.submitted || false,
           resultData: execResult.result || execResult.results || null
         });
-        this.trimHistory();
 
         if (execResult.success !== false) {
           this.updatePlanProgress(actionObj, false);
@@ -1785,11 +1792,18 @@ The visible documentation text provides the project title, key features, and arc
 3. Only select element_id numbers that exist in the provided Interactive Elements list.`;
   }
 
-  buildStepMessage(snapshot) {
+  buildStepMessage(snapshot, maxSteps) {
+    // planSteps has always been computed (generatePlan) and shown in the side panel's own
+    // progress bar - but buildStepMessage never included it, so the model choosing the actual
+    // next action never saw the plan it was supposedly following, or how many steps remained.
+    const planText = (this.planSteps && this.planSteps.length)
+      ? `\nPlan (step ${this.stepCount}${maxSteps ? `/${maxSteps}` : ''} overall):\n${this.planSteps.map((s, i) => `${i + 1}. [${s.status === 'completed' ? 'x' : s.status === 'in_progress' ? '>' : ' '}] ${s.text}`).join('\n')}\n`
+      : '';
+
     return `Current Page Title: "${snapshot.title}"
 Current URL: ${snapshot.url}
 Scroll Position: Y=${snapshot.scrollState.scrollY} / ${snapshot.scrollState.pageHeight}px
-
+${planText}
 Webpage Visible Text Content (Use this to read content or summarize):
 """
 ${snapshot.pageText || '(No visible text extracted)'}
