@@ -40,18 +40,21 @@ const { AgentEngine } = await import('../background/agentEngine.js');
  * #7 - element_id must be coerced whatever type the model sends
  * ------------------------------------------------------------------ */
 
-test('#7 parseResponse coerces a STRING element_id carrying markup to a safe number', () => {
+test('#7 parseResponse rejects a STRING element_id carrying markup instead of coercing and using it', () => {
   const engine = new AgentEngine();
   const injected = '<img src=x onerror=alert(1)>';
   const raw = JSON.stringify({ action: 'click', element_id: injected, reason: 'injected' });
 
   const result = engine.parseResponse(raw, 10);
 
-  assert.equal(typeof result.action.element_id, 'number',
-    'a string element_id must never survive parseResponse');
-  assert.equal(result.action.element_id, 1);
-  assert.ok(!String(result.action.element_id).includes('<'),
-    'no markup may remain in element_id');
+  // Coercing this to element 1 used to mean the agent silently clicked a REAL element the
+  // model never asked for - the injected string just happened to not survive into that
+  // particular field. Rejecting outright is the actual fix: no action at all, so nothing
+  // downstream can ever use the injected value as a real element target. (The raw string does
+  // appear in the diagnostic error TEXT, same as any other rejected value - safe, since every
+  // history 'error' entry is HTML-escaped at render time; see sidepanel.js's fault row.)
+  assert.equal(result.action, undefined, 'an unresolvable element_id must not produce an action');
+  assert.equal(typeof result.error, 'string');
 });
 
 test('#7 parseResponse coerces a numeric STRING element_id to its number', () => {
