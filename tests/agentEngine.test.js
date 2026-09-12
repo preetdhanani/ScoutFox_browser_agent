@@ -65,6 +65,27 @@ test('AgentEngine - a hallucinated out-of-range element_id is rejected, not clam
   assert.match(result.error, /99/);
 });
 
+test('AgentEngine - a hallucinated action verb is rejected as a correctable parse error, not dispatched', () => {
+  const engine = new AgentEngine();
+  const output = JSON.stringify({ action: 'delete_element', element_id: 1, reason: 'made up verb' });
+
+  const result = engine.parseResponse(output, 10);
+  // This used to sail through parsing unchanged, get pushed to history as a real action, and
+  // only fail one layer later at actionExecutor.js's default `throw new Error('Unknown
+  // action')` - after the step was already spent.
+  assert.equal(result.action, undefined);
+  assert.match(result.error, /delete_element/);
+  assert.match(result.error, /unknown action/i);
+});
+
+test('AgentEngine - a known alias for a real action is still accepted, not rejected as unknown', () => {
+  const engine = new AgentEngine();
+  const output = JSON.stringify({ action: 'click_element', element_id: 3 });
+
+  const result = engine.parseResponse(output, 10);
+  assert.equal(result.action.action, 'click', 'alias normalization must run before the allowlist check');
+});
+
 test('AgentEngine - Schema Normalization & Key Aliases', () => {
   const engine = new AgentEngine();
   const output = `\`\`\`json

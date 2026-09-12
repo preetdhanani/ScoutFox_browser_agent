@@ -18,6 +18,17 @@ const MAX_HISTORY = 400;
 // How many completed-turn recaps previousTurnsSummary() keeps for a follow-up prompt.
 const PREVIOUS_TURNS_LIMIT = 4;
 
+// Every verb the system can actually dispatch (sanitizeActionSchema's aliases already resolve
+// onto these), whether or not the current system prompt happens to declare it. An unrecognised
+// verb used to sail straight through parsing, get pushed to history, and only fail one layer
+// past the page boundary at actionExecutor.js's default `throw new Error('Unknown action')` -
+// a wasted step with a generic failure instead of a correctable parse error naming the problem.
+const KNOWN_ACTIONS = new Set([
+  'click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward',
+  'read_page_text', 'execute_js', 'read_network_requests', 'browser_batch', 'wait',
+  'finish', 'ask_user', 'open_window'
+]);
+
 /**
  * Safely read chrome.runtime.lastError. It MUST be read inside every chrome.* callback or
  * Chrome emits an "unchecked runtime.lastError" warning, but chrome.runtime itself is absent
@@ -1893,6 +1904,13 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     // 7. Action Schema & Element ID Sanitizer
     actionObj = this.sanitizeActionSchema(actionObj, maxElementCount);
 
+    if (actionObj.invalidAction) {
+      return {
+        thought,
+        error: `Unknown action "${actionObj.invalidAction}". Valid actions are: ${[...KNOWN_ACTIONS].join(', ')}.`
+      };
+    }
+
     if (actionObj.invalidElementId) {
       // A hallucinated or out-of-range element_id used to be silently clamped/coerced onto a
       // DIFFERENT, real element - the agent then confidently acted on the wrong thing instead
@@ -1925,6 +1943,15 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     if (act.action === 'read_network' || act.action === 'network_requests' || act.action === 'get_network') act.action = 'read_network_requests';
     if (act.action === 'batch' || act.action === 'batch_actions') act.action = 'browser_batch';
     if (act.action === 'new_window' || act.action === 'open_new_window' || act.action === 'create_window') act.action = 'open_window';
+
+    // After alias normalization, anything still not a real verb is a hallucination the executor
+    // would only catch one layer later (actionExecutor.js's default `throw new Error('Unknown
+    // action')`) after this action had already been pushed to history. invalidAction is read by
+    // parseResponse (the caller), which turns it into a correctable parse error instead.
+    if (!KNOWN_ACTIONS.has(act.action)) {
+      Logger.warn('AgentEngine', `[GUARDRAIL_REJECTED] Model requested an unrecognised action "${act.action}".`);
+      act.invalidAction = act.action;
+    }
 
     if (act.element_id === undefined) {
       if (act.element !== undefined) act.element_id = act.element;
