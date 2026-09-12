@@ -1154,6 +1154,7 @@ function buildTurns(history) {
       cur.failed = true;
     } else if (item.type === 'finish') {
       cur.answer = item.answer;
+      cur.answerUnconfirmed = !!item.unconfirmed;
     }
   });
   return turns;
@@ -1269,7 +1270,9 @@ function renderTurns(history, status, planSteps, currentPhase) {
         </button>
         <div class="act-body" ${open ? '' : 'hidden'}>${planDetail}${rows}${phase}</div>
       </div>` : ''}
-      ${turn.answer ? `<div class="finish-card"><div class="finish-title">${ICONS.complete} Done</div><div class="finish-body">${formatMarkdownText(turn.answer)}</div></div>` : ''}
+      ${turn.answer ? (turn.answerUnconfirmed
+        ? `<div class="finish-card unconfirmed"><div class="finish-title">${ICONS.warning} Unconfirmed answer</div><div class="finish-body">${formatMarkdownText(turn.answer)}</div></div>`
+        : `<div class="finish-card"><div class="finish-title">${ICONS.complete} Done</div><div class="finish-body">${formatMarkdownText(turn.answer)}</div></div>`) : ''}
     </div>`;
   }).join('');
 }

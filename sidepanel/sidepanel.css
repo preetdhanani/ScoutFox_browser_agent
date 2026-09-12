@@ -632,6 +632,11 @@ a:hover { color: var(--text-main); }
 
 .finish-title svg { color: var(--accent); }
 
+/* The model never actually called finish - parseResponse's freeform guardrail inferred an
+   ending from raw prose. Same card, but the border/icon must not read as a confirmed success. */
+.finish-card.unconfirmed { border-left-color: var(--danger); }
+.finish-card.unconfirmed .finish-title svg { color: var(--danger); }
+
 .finish-body {
   font-size: 12px;
   color: var(--text-main);
