@@ -9,6 +9,7 @@
 import { ApiClients } from './apiClients.js';
 import { Storage } from '../utils/storage.js';
 import { Logger } from '../utils/logger.js';
+import { callWithRetry, LLM_MAX_ATTEMPTS } from './harness/recovery.js';
 
 // Sessions are multi-turn and would otherwise grow without bound, and the whole array is
 // serialised to chrome.storage on every state change.
@@ -1197,10 +1198,19 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       let responseText = '';
       try {
         const messages = this.formatMessagesForLLM(userMessage);
-        responseText = await ApiClients.generateCompletion(settings, messages, systemPrompt, {
-          signal: this.abortController ? this.abortController.signal : null,
-          json: true
-        });
+        responseText = await callWithRetry(
+          () => ApiClients.generateCompletion(settings, messages, systemPrompt, {
+            signal: this.abortController ? this.abortController.signal : null,
+            json: true
+          }),
+          {
+            isAbort: (err) => this.isUserAbort(err),
+            shouldContinue: () => this.status === 'running',
+            onRetry: (attempt, err, delayMs) => {
+              Logger.warn('AgentEngine', `[LLM_RETRY] Attempt ${attempt}/${LLM_MAX_ATTEMPTS} failed (${err.message}). Retrying in ${delayMs}ms.`);
+            }
+          }
+        );
         Logger.info('AgentEngine', `[LLM_RAW_OUTPUT]\n${responseText}`);
       } catch (err) {
         // Pause and Stop both abort the in-flight request, so an abort landing here is the
@@ -1214,13 +1224,18 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           return;
         }
 
-        Logger.error('AgentEngine', '[LLM_API_ERROR] Connection failure', err);
+        // Every retry is spent by the time we get here (or the user paused/stopped mid-retry,
+        // in which case shouldContinue() already threw and isUserAbort() caught it above).
+        // Pausing instead of going idle means the existing Resume button - which already
+        // preserves stepCount/history/planSteps - continues this exact step, instead of the
+        // task just dying with no way back in.
+        Logger.error('AgentEngine', `[LLM_API_ERROR] Connection failure after ${LLM_MAX_ATTEMPTS} attempts`, err);
         this.history.push({
           step: this.stepCount,
           type: 'error',
-          content: `LLM Connection Error (${settings.provider}): ${err.message}`
+          content: `LLM Connection Error (${settings.provider}) after ${LLM_MAX_ATTEMPTS} attempts: ${err.message}. Task paused at step ${this.stepCount} - click Resume to try again, or check your provider settings if this keeps happening.`
         });
-        this.status = 'idle';
+        this.status = 'paused';
         this.isLoopActive = false;
         this.currentPhase = '';
         this.notifyStateChange({ error: err.message });

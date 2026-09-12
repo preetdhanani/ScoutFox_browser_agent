@@ -184,6 +184,7 @@ async function loadSettings() {
   document.getElementById('maxStepsInput').value = currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
   document.getElementById('delayInput').value = currentSettings.actionDelayMs || DEFAULT_SETTINGS.actionDelayMs;
   document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || DEFAULT_SETTINGS.ollamaNumPredict;
+  document.getElementById('llmTimeoutInput').value = currentSettings.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
 
   updateSelectedModel(providerCfg.model || currentSettings.model);
@@ -388,6 +389,7 @@ async function autoSaveCurrentForm() {
     maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || DEFAULT_SETTINGS.maxSteps,
     actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || DEFAULT_SETTINGS.actionDelayMs,
     ollamaNumPredict: parseInt(document.getElementById('ollamaNumPredictInput').value, 10) || DEFAULT_SETTINGS.ollamaNumPredict,
+    llmTimeoutMs: parseInt(document.getElementById('llmTimeoutInput').value, 10) || DEFAULT_SETTINGS.llmTimeoutMs,
     showElementBadges: document.getElementById('badgesToggle').checked
   };
 
