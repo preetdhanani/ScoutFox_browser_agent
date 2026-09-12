@@ -834,7 +834,11 @@ export class AgentEngine {
           }
         }
 
-        let serialized = serializeResult(rawVal);
+        // redactSensitiveData already strips password/token/cookie/apikey/etc.-named fields out
+        // of network request bodies - execute_js can return exactly the same shape of data
+        // (the model can ask it to read a form, a config object, a cookie) but never went
+        // through the same redaction before landing in history and the next LLM prompt.
+        let serialized = this.redactSensitiveData(serializeResult(rawVal));
         let truncated = false;
         if (typeof serialized === 'string' && serialized.length > 2000) {
           const origLen = serialized.length;
@@ -851,12 +855,21 @@ export class AgentEngine {
         };
       })();
 
+      let timeoutHandle;
       const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('execute_js timed out after 5000ms')), timeoutMs);
+        timeoutHandle = setTimeout(() => reject(new Error('execute_js timed out after 5000ms')), timeoutMs);
       });
 
-      const res = await Promise.race([resultPromise, timeoutPromise]);
-      return { success: res.ok, message: res.ok ? `Result: ${res.result}` : res.error, ...res };
+      // Same shape of bug fixed in harness/recovery.js for the LLM call: a Promise.race with no
+      // cancellation of the losing side leaves this timer pending for the full 5s regardless of
+      // how fast resultPromise actually settled - and execute_js is called potentially every
+      // step, so those pile up. Cleared unconditionally in `finally` below.
+      try {
+        const res = await Promise.race([resultPromise, timeoutPromise]);
+        return { success: res.ok, message: res.ok ? `Result: ${res.result}` : res.error, ...res };
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
     } catch (err) {
       return {
         success: false,
