@@ -1181,6 +1181,8 @@ function describeAction(action, outcome) {
     case 'browser_batch': return { icon: ICONS.layers, text: `Ran ${(action.steps || []).length} actions in one batch` };
     case 'open_window':   return { icon: ICONS.globe, text: `Opened a new window at ${quote(host(action.url || ''))}` };
     case 'ask_user':      return { icon: ICONS.ask, text: `Asked ${quote(action.question || 'a question')}` };
+    case 'press_key':     return { icon: ICONS.keyboard, text: `Pressed ${quote(action.key || 'a key')}` };
+    case 'wait':          return { icon: ICONS.clock, text: `Waited ${escapeHtml(String(action.amount || 1))}s` };
     default:              return { icon: ICONS.dot, text: escapeHtml(action.action || 'Acted') };
   }
 }
