@@ -46,7 +46,7 @@ test('AgentEngine - Plain text intent extraction for smaller LLMs', () => {
   assert.equal(result.action.element_id, 5);
 });
 
-test('AgentEngine - Element ID Clamping Guardrail', () => {
+test('AgentEngine - a hallucinated out-of-range element_id is rejected, not clamped onto a different element', () => {
   const engine = new AgentEngine();
   const output = `\`\`\`json
 {
@@ -57,7 +57,12 @@ test('AgentEngine - Element ID Clamping Guardrail', () => {
 \`\`\``;
 
   const result = engine.parseResponse(output, 12);
-  assert.equal(result.action.element_id, 12); // Clamped to max elements (12)
+  // Clamping element_id 99 to 12 used to make the agent silently click whatever REAL element
+  // happened to be #12 - not what the model asked for, and with no visible failure. It must
+  // instead come back as a correctable parse error.
+  assert.equal(result.action, undefined);
+  assert.match(result.error, /element_id/i);
+  assert.match(result.error, /99/);
 });
 
 test('AgentEngine - Schema Normalization & Key Aliases', () => {

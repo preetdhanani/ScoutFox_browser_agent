@@ -1893,6 +1893,18 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     // 7. Action Schema & Element ID Sanitizer
     actionObj = this.sanitizeActionSchema(actionObj, maxElementCount);
 
+    if (actionObj.invalidElementId) {
+      // A hallucinated or out-of-range element_id used to be silently clamped/coerced onto a
+      // DIFFERENT, real element - the agent then confidently acted on the wrong thing instead
+      // of visibly failing. Routing it through the same parse-error/retry path as malformed
+      // JSON (consecutiveParseErrors, corrective feedback, the 3-strike circuit breaker) gives
+      // the model a chance to look at the element list again instead of clicking blind.
+      return {
+        thought,
+        error: `Selected element_id ${actionObj.invalidElementId} does not exist on this page (valid range: 1-${maxElementCount}). Re-check the numbered element list and choose a real one.`
+      };
+    }
+
     return { thought, action: actionObj };
   }
 
@@ -1920,21 +1932,23 @@ Choose your next action based on the goal: "${this.currentTask}"`;
       else if (act.elementId !== undefined) act.element_id = act.elementId;
     }
 
-    // Coerce unconditionally, NOT only when the value already happens to be a number.
-    // Gating on `typeof === 'number'` let a string element_id through untouched, and page
-    // content is attacker-controlled input to the model, so a prompt-injected reply could put
-    // arbitrary markup in this field and have it rendered straight into the side panel.
+    // Parsed unconditionally, NOT only when the value already happens to be a number. Gating
+    // on `typeof === 'number'` let a string element_id through untouched, and page content is
+    // attacker-controlled input to the model, so a prompt-injected reply could put arbitrary
+    // markup in this field.
+    //
+    // A non-numeric or out-of-range id is REJECTED, not clamped/coerced. Clamping to
+    // maxElementCount or coercing to 1 used to silently redirect the action onto a different,
+    // REAL element the model never chose - a hallucinated click landed somewhere else on the
+    // page with no visible failure. invalidElementId is read by parseResponse (the caller),
+    // which turns it into a correctable parse error instead of returning this action at all.
     if (act.element_id !== undefined) {
       const parsed = parseInt(act.element_id, 10);
-      if (!Number.isFinite(parsed) || parsed < 1) {
-        Logger.warn('AgentEngine', `[GUARDRAIL_TYPE] Model returned a non-numeric element_id (${JSON.stringify(act.element_id)}). Coercing to 1.`);
-        act.element_id = 1;
+      if (!Number.isFinite(parsed) || parsed < 1 || (maxElementCount > 0 && parsed > maxElementCount)) {
+        Logger.warn('AgentEngine', `[GUARDRAIL_REJECTED] Model selected an invalid element_id (${JSON.stringify(act.element_id)}, valid range 1-${maxElementCount}). Rejecting instead of guessing a different element.`);
+        act.invalidElementId = JSON.stringify(act.element_id);
       } else {
         act.element_id = parsed;
-      }
-      if (maxElementCount > 0 && act.element_id > maxElementCount) {
-        Logger.warn('AgentEngine', `[GUARDRAIL_BOUNDS] Model selected hallucinated element_id [${act.element_id}]. Clamping to valid range [1..${maxElementCount}]`);
-        act.element_id = Math.min(act.element_id, maxElementCount);
       }
     }
 
