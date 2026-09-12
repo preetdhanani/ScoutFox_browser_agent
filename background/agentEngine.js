@@ -10,6 +10,7 @@ import { ApiClients } from './apiClients.js';
 import { Storage } from '../utils/storage.js';
 import { Logger } from '../utils/logger.js';
 import { callWithRetry, LLM_MAX_ATTEMPTS } from './harness/recovery.js';
+import { buildFinishEntry, buildMaxStepsEntry } from './harness/outcome.js';
 
 // Sessions are multi-turn and would otherwise grow without bound, and the whole array is
 // serialised to chrome.storage on every state change.
@@ -1302,11 +1303,11 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         this.isLoopActive = false;
         this.currentPhase = '';
         this.updatePlanProgress(null, true);
-        this.history.push({
-          type: 'finish',
-          answer: actionObj.answer || 'Task completed successfully.'
-        });
-        Logger.info('AgentEngine', '[TASK_FINISHED] Task completed successfully.');
+        const finishEntry = buildFinishEntry(actionObj);
+        this.history.push(finishEntry);
+        Logger.info('AgentEngine', finishEntry.unconfirmed
+          ? '[TASK_FINISHED] Model gave a direct text answer instead of a finish action - accepted, but flagged unconfirmed.'
+          : '[TASK_FINISHED] Task completed successfully.');
         this.notifyStateChange();
         break;
       }
@@ -1381,10 +1382,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       this.status = 'idle';
       this.isLoopActive = false;
       this.currentPhase = '';
-      this.history.push({
-        type: 'finish',
-        answer: `Reached maximum allowed steps (${maxSteps}) without completing task.`
-      });
+      // Pushed as an 'error', never 'finish' - see harness/outcome.js. This run did not
+      // complete, and must never render or be recapped as though it did.
+      this.history.push(buildMaxStepsEntry(maxSteps));
       this.notifyStateChange();
     }
   }
@@ -1835,7 +1835,12 @@ Choose your next action based on the goal: "${this.currentTask}"`;
       actionObj = {
         action: 'finish',
         answer: cleanText,
-        reason: 'Direct text output from model'
+        reason: 'Direct text output from model',
+        // The model never actually emitted {"action":"finish"} - it just replied in prose and
+        // this guardrail inferred an ending so the run has somewhere to go. buildFinishEntry
+        // (harness/outcome.js) turns this into an `unconfirmed` flag so it is shown as inferred,
+        // not declared. See harness/outcome.js for why that distinction matters.
+        autoWrapped: true
       };
     }
 
