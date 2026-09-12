@@ -1192,6 +1192,27 @@ a:hover { color: var(--text-main); }
   font-style: italic;
 }
 
+.act-row.answer { color: var(--text-main); }
+
+/* ask_user is waiting for a real reply, not just a generic Resume click. */
+.ask-user-prompt {
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.ask-user-question {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-main);
+  margin-bottom: 8px;
+}
+.ask-user-input-row { display: flex; gap: 6px; }
+.ask-user-input { flex: 1; }
+
 @media (prefers-reduced-motion: reduce) {
   .act-chev { transition: none; }
   .act-state.live { animation: none; opacity: 0.85; }

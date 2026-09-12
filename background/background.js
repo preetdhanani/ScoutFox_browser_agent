@@ -699,6 +699,11 @@ function routeMessage(request, sender, sendResponse) {
     return true;
   }
 
+  if (action === 'ANSWER_QUESTION') {
+    sendResponse(agentEngine.answerQuestion(payload && payload.answer));
+    return true;
+  }
+
   if (action === 'CLEAR_HISTORY') {
     agentEngine.clearHistory();
     sendResponse({ success: true });
