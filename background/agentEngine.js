@@ -978,8 +978,14 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
 ["Identify target form or section", "Execute required browser actions", "Verify result and complete task"]`}`;
 
     try {
-      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.', { json: true });
-      
+      // Previously passed no signal at all, so Pause/Stop pressed during plan generation could
+      // not cancel it - the in-flight request just ran to completion (or the full timeout)
+      // regardless. Same abortController startTask() already created for the main loop.
+      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.', {
+        json: true,
+        signal: this.abortController ? this.abortController.signal : null
+      });
+
       let planArray = [];
       const match = resp.match(/\[[\s\S]*\]/);
       if (match) {
@@ -1701,6 +1707,7 @@ Your objective is to choose the single best action to complete the user's goal i
 
 5. Go back / forward:
    {"action": "go_back", "reason": "<explanation>"}
+   {"action": "go_forward", "reason": "<explanation>"}
 
 6. Execute JavaScript in page context:
    {"action": "execute_js", "code": "return document.querySelectorAll('.result').length", "world": "MAIN", "reason": "<explanation>"}
@@ -1726,6 +1733,13 @@ Your objective is to choose the single best action to complete the user's goal i
     window. The new window stays part of this same task and history; you keep driving it
     afterward exactly as you were driving the tab before:
    {"action": "open_window", "url": "<https://...>", "reason": "<explanation>"}
+
+13. Press a keyboard key (e.g. Escape to close a modal/dropdown, Enter to submit a focused field):
+   {"action": "press_key", "key": "Escape", "reason": "<explanation>"}
+
+14. Wait a fixed number of seconds (RARE - prefer just reading the page again; use this only for
+    a page that is genuinely still loading/animating with nothing yet to act on):
+   {"action": "wait", "amount": 2, "reason": "<explanation>"}
 
 ### FEW-SHOT OUTPUT EXAMPLES (Always follow these exact output patterns):
 
