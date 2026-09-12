@@ -42,6 +42,13 @@
       const pageHeight = Math.round(document.documentElement.scrollHeight);
       const viewportHeight = window.innerHeight;
 
+      // actionExecutor.js's resolveElement() falls back to this cache (by #id, cssPath, or
+      // tag+text) when an element's live reference has gone stale - but this snapshot object
+      // was only ever returned, never stored on the instance, so that fallback chain has always
+      // read `compressor.elements` as undefined and returned null immediately. Stable-locator
+      // re-resolution has never actually run; only the live-reference tier ever worked.
+      this.elements = formattedElements;
+
       return {
         title,
         url,
