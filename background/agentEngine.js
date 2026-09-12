@@ -1573,6 +1573,18 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
   }
 
   async executeActionOnTab(tabId, actionPayload) {
+    // describeRestrictedUrl was only ever applied to the CURRENT tab's URL, before a DOM read -
+    // never to a proposed navigate/open_window TARGET. A restricted destination was reached
+    // (window.location.href = url, or chrome.windows.create) and only discovered a step later
+    // when the next DOM read failed. Gate it here instead, at the one chokepoint every
+    // top-level action already passes through, before the tab (or a new window) ever gets there.
+    if ((actionPayload.action === 'navigate' || actionPayload.action === 'open_window') && actionPayload.url) {
+      const restriction = describeRestrictedUrl(actionPayload.url);
+      if (restriction) {
+        return { success: false, error: restriction };
+      }
+    }
+
     if (actionPayload.action === 'execute_js') {
       return this.executeJs(tabId, actionPayload.code, actionPayload.world || 'MAIN');
     }
