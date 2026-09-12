@@ -231,14 +231,26 @@
         await this.waitForDomQuiet(300, 1500);
       }
 
-      const ok = completed > 0 && (abortedAt === null);
+      // `completed > 0 && abortedAt === null` misreported a batch as a total failure whenever
+      // stopOnError:false was set and ANY step failed - abortedAt is set on the first failure
+      // and never cleared, so a batch where steps 2-5 all succeeded after step 1 failed still
+      // came back success:false. What actually matters is whether every step that was
+      // ATTEMPTED succeeded - which is also true for the stopOnError:true/break-early case,
+      // since only ok:true results exist before the break.
+      const ok = results.length > 0 && results.every((r) => r.ok);
+      const summary = `${completed}/${steps.length} step(s) completed${terminatedBy ? ` (stopped by ${terminatedBy})` : ''}`;
       return {
         success: ok,
         completed,
         total: steps.length,
         results,
         abortedAt,
-        terminatedBy
+        terminatedBy,
+        // Also fixes a second bug: doBrowserBatch previously returned no top-level message/
+        // error at all, so formatMessagesForLLM's "Action Executed Successfully: ${message}" /
+        // "Action Failed: ${error}" showed the model literally the word "undefined".
+        message: ok ? summary : undefined,
+        error: ok ? undefined : `${summary}. First failure: ${(results.find((r) => !r.ok) || {}).error || 'unknown'}`
       };
     }
 
