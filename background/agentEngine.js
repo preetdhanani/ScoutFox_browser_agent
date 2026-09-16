@@ -773,24 +773,107 @@ export class AgentEngine {
   }
 
   /**
-   * Tool 1: execute_js in MAIN or ISOLATED world with 5s timeout, CSP fallback, and truncation
+   * Verify if the action's expected outcome was actually achieved.
+   * Uses the LLM to compare the prediction against the current DOM state.
    */
-  async executeJs(tabId, code, world = 'MAIN') {
+  async verifyStep(expectedOutcome, snapshot, settings) {
+    if (!expectedOutcome) return { success: true, reason: 'No expected outcome predicted.' };
+
+    const verifyPrompt = `You are a Verification Agent.
+
+    User Goal: "${this.currentTask}"
+    Action Taken: ${this.history[this.history.length - 1]?.type === 'agent_response' ? this.history[this.history.length - 1].action : 'Unknown'}
+    Expected Outcome: "${expectedOutcome}"
+
+    Current Page State:
+    Title: ${snapshot.title}
+    URL: ${snapshot.url}
+    Visible Text:
+    """
+    ${snapshot.pageText || '(No text)'}
+    """
+
+    Did the action achieve the expected outcome? Answer ONLY with a JSON object:
+    {"success": true/false, "reason": "Short explanation of why it succeeded or failed"}
+    `;
+
+    try {
+      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: verifyPrompt }], 'You are a precise verification agent. Your only job is to confirm if a browser state change happened as predicted.', {
+        json: true,
+        signal: this.abortController?.signal
+      });
+
+      const result = parsePartialOrTruncatedJson(resp);
+      if (result && typeof result.success === 'boolean') {
+        return {
+          success: result.success,
+          reason: result.reason || (result.success ? 'Outcome verified.' : 'Outcome not detected.')
+        };
+      }
+    } catch (err) {
+      Logger.warn('AgentEngine', '[VERIFY_ERROR] Verification call failed', err.message);
+    }
+
+    return { success: true, reason: 'Verification skipped due to error (assuming success to avoid loop)' };
+  }
+
+  /**
+   * Tool 1: execute_js in MAIN world with a 5s timeout and truncation.
+   *
+   * MV3 removed raw code-string injection (the old chrome.tabs.executeScript({code})), so the
+   * only way to run an arbitrary string the model hands us is chrome.scripting.executeScript's
+   * func + new Function(src) - which is functionally eval, and is exactly what a page's
+   * Content-Security-Policy (script-src without 'unsafe-eval') exists to block.
+   *
+   * Two things had to be proven with a real, CSP-sending page and a real unpacked load of this
+   * extension before trusting this code (see the executeJs investigation) rather than guessing:
+   *   1. When new Function() is CSP-blocked, chrome.scripting.executeScript's own promise does
+   *      NOT reliably reject - it can resolve cleanly with `result: null`, indistinguishable from
+   *      the model's own code legitimately returning null. That silent collision is why this used
+   *      to burn steps: every failed extraction looked identical to a successful empty one.
+   *   2. ISOLATED world is not a usable fallback for this technique at all: it enforces its own
+   *      eval restriction unconditionally, independent of whatever CSP the target page sends, so
+   *      new Function() fails there even on a page with no CSP whatsoever. There is no world
+   *      where routing arbitrary code through new Function() is guaranteed to work.
+   *
+   * The fix here isn't to smooth that over - it's to stop it from lying. The injected function
+   * wraps its own outcome in a `{__scoutfoxOk, value|error}` marker *from inside the page's own
+   * try/catch*, so a CSP block is caught right where it happens and reported as a real, actionable
+   * failure instead of silently resolving as an empty answer that reads exactly like success.
+   */
+  async executeJs(tabId, code) {
     const timeoutMs = 5000;
     const startTime = Date.now();
 
-    const executeWork = async (targetWorld) => {
+    const executeWork = async () => {
       const [inj] = await chrome.scripting.executeScript({
         target: { tabId },
-        world: targetWorld,
+        world: 'MAIN',
         func: (src) => {
-          // eslint-disable-next-line no-new-func
-          const fn = new Function(`return (async () => { ${src} })()`);
-          return fn();
+          try {
+            // eslint-disable-next-line no-new-func
+            const fn = new Function(`return (async () => { ${src} })()`);
+            return Promise.resolve(fn())
+              .then((value) => ({ __scoutfoxOk: true, value }))
+              .catch((err) => ({ __scoutfoxOk: false, error: `RUNTIME_ERROR: ${err && err.message ? err.message : String(err)}` }));
+          } catch (err) {
+            // new Function() itself threw - almost always the page's CSP refusing 'unsafe-eval'.
+            return { __scoutfoxOk: false, error: `EVAL_BLOCKED: ${err && err.message ? err.message : String(err)}` };
+          }
         },
         args: [code]
       });
-      return inj ? inj.result : undefined;
+      const wrapped = inj ? inj.result : undefined;
+      if (wrapped && typeof wrapped === 'object' && '__scoutfoxOk' in wrapped) {
+        if (wrapped.__scoutfoxOk) return { value: wrapped.value };
+        const blocked = String(wrapped.error || '').startsWith('EVAL_BLOCKED');
+        const message = blocked
+          ? "execute_js is unavailable on this page: its Content-Security-Policy blocks dynamic script execution ('unsafe-eval' not allowed). Use read_page_text, or click/type on individual elements, instead."
+          : `Your code threw: ${String(wrapped.error || '').replace(/^RUNTIME_ERROR: /, '')}`;
+        throw new Error(message);
+      }
+      // The wrapper itself never ran - e.g. the frame was gone before injection completed.
+      throw new Error('execute_js produced no result - the page may have navigated away or blocked script injection entirely.');
     };
 
     const serializeResult = (val) => {
@@ -820,18 +903,14 @@ export class AgentEngine {
     try {
       const resultPromise = (async () => {
         let rawVal;
-        let usedWorld = world;
         try {
-          rawVal = await executeWork(world);
+          const outcome = await executeWork();
+          rawVal = outcome.value;
         } catch (err) {
-          if (world === 'MAIN' && (err.message.includes('EvalError') || err.message.includes('CSP') || err.message.includes('unsafe-eval'))) {
-            usedWorld = 'ISOLATED';
-            rawVal = await executeWork('ISOLATED');
-          } else if (err.message.includes('Frame with ID') && err.message.includes('removed')) {
+          if (err.message.includes('Frame with ID') && err.message.includes('removed')) {
             return { ok: true, result: 'navigation triggered', durationMs: Date.now() - startTime };
-          } else {
-            throw err;
           }
+          throw err;
         }
 
         // redactSensitiveData already strips password/token/cookie/apikey/etc.-named fields out
@@ -849,7 +928,7 @@ export class AgentEngine {
         return {
           ok: true,
           result: serialized,
-          world: usedWorld,
+          world: 'MAIN',
           truncated,
           durationMs: Date.now() - startTime
         };
@@ -1421,18 +1500,38 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         const execResult = await this.executeActionOnTab(this.activeTabId, actionObj);
         Logger.info('AgentEngine', `[ACTION_RESULT] ${execResult.success ? 'Success' : 'Failed'}: ${execResult.message || execResult.error}`);
 
+        // RAV Verification: If the action technically succeeded, verify it achieved the expected outcome
+        let finalSuccess = execResult.success !== false;
+        let finalMessage = execResult.message;
+        let finalError = execResult.error;
+
+        if (finalSuccess && actionResult.expectedOutcome) {
+          this.setPhase(`🔍 Step ${this.stepCount}/${maxSteps}: Verifying expected outcome...`);
+          const postActionDom = await this.getTabDOMWithAutoInject(this.activeTabId, settings.showElementBadges);
+          const verification = await this.verifyStep(actionResult.expectedOutcome, postActionDom, settings);
+
+          if (!verification.success) {
+            Logger.warn('AgentEngine', `[VERIFICATION_FAILED] Expected: "${actionResult.expectedOutcome}" | Actual: ${verification.reason}`);
+            finalSuccess = false;
+            finalError = `Verification Failed: ${verification.reason}`;
+            finalMessage = `Action executed but outcome not achieved: ${verification.reason}`;
+          } else {
+            Logger.info('AgentEngine', `[VERIFICATION_OK] ${verification.reason}`);
+          }
+        }
+
         this.history.push({
           step: this.stepCount,
           type: 'execution_result',
-          success: execResult.success !== false,
-          message: execResult.message,
-          error: execResult.error,
+          success: finalSuccess,
+          message: finalMessage,
+          error: finalError,
           label: execResult.label || null,
           submitted: execResult.submitted || false,
           resultData: execResult.result || execResult.results || null
         });
 
-        if (execResult.success !== false) {
+        if (finalSuccess) {
           this.updatePlanProgress(actionObj, false);
         }
 
@@ -1605,7 +1704,10 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     }
 
     if (actionPayload.action === 'execute_js') {
-      return this.executeJs(tabId, actionPayload.code, actionPayload.world || 'MAIN');
+      // `world` is no longer accepted: ISOLATED can never run dynamic code (its own content-
+      // script CSP blocks eval unconditionally), so execute_js always runs in MAIN now - see
+      // executeJs()'s doc comment for why. Any `world` the model still sends is simply ignored.
+      return this.executeJs(tabId, actionPayload.code);
     }
 
     if (actionPayload.action === 'open_window') {
@@ -1709,8 +1811,9 @@ Your objective is to choose the single best action to complete the user's goal i
    {"action": "go_back", "reason": "<explanation>"}
    {"action": "go_forward", "reason": "<explanation>"}
 
-6. Execute JavaScript in page context:
-   {"action": "execute_js", "code": "return document.querySelectorAll('.result').length", "world": "MAIN", "reason": "<explanation>"}
+6. Execute JavaScript in page context (fails with a clear error on pages whose Content-Security-
+   Policy blocks script execution - fall back to read_page_text or click/type there instead):
+   {"action": "execute_js", "code": "return document.querySelectorAll('.result').length", "reason": "<explanation>"}
 
 7. Read recent network activity (XHR/fetch status & bodies):
    {"action": "read_network_requests", "filter": {"status": "error"|"all", "since": "last_action"}, "includeBody": true, "limit": 10, "reason": "<explanation>"}
@@ -1794,7 +1897,6 @@ I need to check the number of virtualized table rows and verify form validity us
 {
   "action": "execute_js",
   "code": "return document.querySelectorAll('.table-row').length",
-  "world": "MAIN",
   "reason": "Count table rows in page"
 }
 \`\`\`
@@ -1976,7 +2078,7 @@ Choose your next action based on the goal: "${this.currentTask}"`;
       };
     }
 
-    return { thought, action: actionObj };
+    return { thought, action: actionObj, expectedOutcome: actionObj.expected_outcome || actionObj.expectedOutcome || null };
   }
 
   /**
