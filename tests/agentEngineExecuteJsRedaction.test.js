@@ -4,6 +4,11 @@
  * exact same shape of data (the model can ask it to read a form, a config object, page
  * cookies) and never went through the same redaction before landing in history and the next
  * LLM prompt.
+ *
+ * Also covers the CSP-block detection added alongside it: the injected function always wraps
+ * its outcome as {__scoutfoxOk, value|error} (see executeJs()'s doc comment for why a CSP-
+ * blocked new Function() can't be trusted to reject chrome.scripting.executeScript's own
+ * promise), so these stubs simulate that wrapped shape rather than a bare raw value.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,8 +21,12 @@ global.chrome = {
 
 const { AgentEngine } = await import('../background/agentEngine.js');
 
-function stubExecuteScript(result) {
-  global.chrome.scripting.executeScript = async () => [{ result }];
+function stubExecuteScript(value) {
+  global.chrome.scripting.executeScript = async () => [{ result: { __scoutfoxOk: true, value } }];
+}
+
+function stubExecuteScriptError(error) {
+  global.chrome.scripting.executeScript = async () => [{ result: { __scoutfoxOk: false, error } }];
 }
 
 test('execute_js redacts sensitive keys in an object result, same as network bodies', async () => {
@@ -52,4 +61,34 @@ test('execute_js returning a bare string or number is passed through unchanged',
   stubExecuteScript('hello world');
   const strRes = await engine.executeJs(101, 'return "hello world"');
   assert.equal(strRes.result, 'hello world');
+});
+
+test('execute_js reports a legitimate null/undefined result as success, not a failure', async () => {
+  const engine = new AgentEngine();
+  stubExecuteScript(null);
+  const res = await engine.executeJs(101, 'return null');
+  assert.equal(res.ok, true);
+  assert.equal(res.result, 'null');
+});
+
+test('execute_js surfaces a CSP-blocked eval as a clear, actionable failure instead of a silent null', async () => {
+  const engine = new AgentEngine();
+  stubExecuteScriptError("EVAL_BLOCKED: Evaluating a string as JavaScript violates the following Content Security Policy directive: \"script-src 'self'\".");
+
+  const res = await engine.executeJs(101, "return document.title");
+
+  assert.equal(res.ok, false);
+  assert.equal(res.success, false);
+  assert.match(res.error, /Content-Security-Policy/);
+  assert.match(res.error, /read_page_text|click\/type/, 'should point the model at a fallback, not just say "failed"');
+});
+
+test('execute_js surfaces the model\'s own runtime error message, not a bare null', async () => {
+  const engine = new AgentEngine();
+  stubExecuteScriptError('RUNTIME_ERROR: document.querySelector(...) is null');
+
+  const res = await engine.executeJs(101, "return document.querySelector('.missing').textContent");
+
+  assert.equal(res.ok, false);
+  assert.match(res.error, /document\.querySelector\(\.\.\.\) is null/);
 });
