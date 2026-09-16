@@ -121,6 +121,23 @@ const THEME_ICON = {
 };
 const THEME_LABEL = { system: 'Auto (matches system)', light: 'Light', dark: 'Dark' };
 
+/**
+ * Simple toast notification system
+ */
+function showToast(message, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+
+  container.appendChild(toast);
+  setTimeout(() => {
+    if (toast.parentElement) toast.remove();
+  }, 3000);
+}
+
 function applyTheme(mode) {
   const root = document.documentElement;
   if (mode === 'light' || mode === 'dark') {
@@ -186,6 +203,12 @@ async function loadSettings() {
   document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || DEFAULT_SETTINGS.ollamaNumPredict;
   document.getElementById('llmTimeoutInput').value = currentSettings.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
+
+  // Visibility: Hide Ollama settings if not using Ollama
+  const ollamaGroup = document.getElementById('ollamaNumPredictGroup');
+  if (ollamaGroup) {
+    ollamaGroup.style.display = activeProvider === 'ollama' ? 'flex' : 'none';
+  }
 
   updateSelectedModel(providerCfg.model || currentSettings.model);
 }
@@ -710,6 +733,27 @@ function initEventListeners() {
 
 
 
+  // API Key visibility toggle
+  const btnToggleKey = document.getElementById('btnToggleKey');
+  if (btnToggleKey) {
+    btnToggleKey.addEventListener('click', () => {
+      const input = document.getElementById('apiKeyInput');
+      if (input) {
+        const isPassword = input.type === 'password';
+        input.type = isPassword ? 'text' : 'password';
+        btnToggleKey.title = isPassword ? 'Hide API Key' : 'Show API Key';
+      }
+    });
+  }
+
+  // Auto-save for all number inputs and toggles
+  ['maxStepsInput', 'delayInput', 'ollamaNumPredictInput', 'llmTimeoutInput', 'badgesToggle'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('change', autoSaveCurrentForm);
+    }
+  });
+
   document.querySelectorAll('.log-filter-chip').forEach(chip => {
     chip.addEventListener('click', () => {
       document.querySelectorAll('.log-filter-chip').forEach(c => c.classList.remove('active'));
@@ -717,6 +761,17 @@ function initEventListeners() {
       currentActiveLogFilter = chip.getAttribute('data-filter');
       renderFilteredLogs();
     });
+  });
+
+  document.getElementById('btnDownloadLogs').addEventListener('click', () => {
+    const text = rawLogsCache.map(log => `[${log.timestamp}] [${log.level}] [${log.module}] ${log.message}${log.data ? `\nPayload: ${log.data}` : ''}`).join('\n\n');
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `scoutfox-logs-${new Date().toISOString().slice(0,10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   });
 
   document.getElementById('btnCopyLogs').addEventListener('click', () => {
@@ -800,7 +855,7 @@ function initEventListeners() {
 
   document.getElementById('btnSaveSettings').addEventListener('click', async () => {
     await autoSaveCurrentForm();
-    alert(`Settings saved! Provider [${currentSettings.provider}] configured with model [${currentSettings.model}].`);
+    showToast(`Settings saved! Provider [${currentSettings.provider}] configured.`);
   });
 
   document.querySelectorAll('.sample-chip').forEach(chip => {
@@ -1373,7 +1428,7 @@ function renderFilteredLogs() {
   if (!logOutput) return;
 
   if (!rawLogsCache || rawLogsCache.length === 0) {
-    logOutput.textContent = '// Waiting for backend system logs...';
+    logOutput.innerHTML = '<div class="subtext-hint" style="text-align: center; padding: 20px;">// Waiting for backend system logs...</div>';
     return;
   }
 
@@ -1381,30 +1436,39 @@ function renderFilteredLogs() {
     if (currentActiveLogFilter === 'all') return true;
     const keywords = LOG_FILTER_KEYWORDS[currentActiveLogFilter];
     if (!keywords) return true;
-    // Coalesce BOTH fields — an entry with an undefined module used to throw inside
-    // .filter(), which killed the whole render and froze the log pane permanently.
     const haystack = `${log.message || ''} ${log.module || ''}`.toUpperCase();
     return keywords.some(k => haystack.includes(k));
   });
 
   if (filtered.length === 0) {
-    logOutput.textContent = `// No logs match category filter: [${currentActiveLogFilter}]`;
+    logOutput.innerHTML = `<div class="subtext-hint" style="text-align: center; padding: 20px;">// No logs match category filter: [${currentActiveLogFilter}]</div>`;
     return;
   }
 
-  const formattedLines = filtered.map(log => {
+  logOutput.innerHTML = filtered.map(log => {
     const time = log.timestamp || '';
     const level = log.level || 'INFO';
     const mod = log.module || 'System';
     const msg = log.message || '';
-    const dataStr = log.data ? `\n   Payload: ${log.data}` : '';
-    if (msg.includes('[NEW_SESSION_RUN]')) {
-      return `\n════════════════════════════════════════════════════════════════\n[${time}] [${level}] [${mod}] ${msg}${dataStr}\n════════════════════════════════════════════════════════════════`;
-    }
-    return `[${time}] [${level}] [${mod}] ${msg}${dataStr}`;
-  }).join('\n\n');
+    const payload = log.data ? `<div class="log-payload">${escapeHtml(JSON.stringify(log.data, null, 2))}</div>` : '';
 
-  logOutput.textContent = formattedLines;
+    if (msg.includes('[NEW_SESSION_RUN]')) {
+      return `<div class="log-entry" style="border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); padding: 10px 0; margin: 10px 0; font-weight: 600;">${msg}</div>`;
+    }
+
+    return `
+      <div class="log-entry">
+        <div class="log-meta">
+          <span class="log-time">${time}</span>
+          <span class="log-level-${level}">${level}</span>
+          <span>${mod}</span>
+        </div>
+        <div class="log-msg">${escapeHtml(msg)}</div>
+        ${payload}
+      </div>
+    `;
+  }).join('');
+
   logOutput.scrollTop = logOutput.scrollHeight;
 }
 
