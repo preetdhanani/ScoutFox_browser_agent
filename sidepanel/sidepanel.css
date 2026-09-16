@@ -901,6 +901,45 @@ a:hover { color: var(--text-main); }
   color: var(--text-main);
   overflow: auto;
   white-space: pre-wrap;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.log-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.log-entry:last-child { border-bottom: none; }
+
+.log-meta {
+  display: flex;
+  gap: 6px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.log-time { color: var(--text-muted); }
+.log-level-INFO { color: var(--text-main); }
+.log-level-WARN { color: var(--accent); }
+.log-level-ERROR { color: var(--danger); }
+
+.log-msg {
+  color: var(--text-main);
+  word-break: break-all;
+}
+.log-payload {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg);
+  padding: 4px 8px;
+  border-radius: 4px;
+  margin-top: 4px;
+  border: 1px solid var(--border);
 }
 
 /* Custom Searchable Combobox Component */
@@ -1296,4 +1335,64 @@ a:hover { color: var(--text-main); }
     gap: 3px;
     padding: 4px 6px;
   }
+}
+
+/* API Key Toggle */
+.input-with-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.input-with-toggle .form-input {
+  width: 100%;
+  padding-right: 32px;
+}
+.btn-toggle-visibility {
+  position: absolute;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease;
+}
+.btn-toggle-visibility:hover {
+  color: var(--accent);
+}
+
+/* Toasts */
+.toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 1000;
+  pointer-events: none;
+}
+.toast {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  animation: toastIn 0.3s ease-out, toastOut 0.3s ease-in 2.7s forwards;
+  pointer-events: auto;
+  border-left: 3px solid var(--accent);
+}
+@keyframes toastIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes toastOut {
+  to { transform: translateX(100%); opacity: 0; }
 }
