@@ -44,19 +44,27 @@ global.chrome = {
 
 const { AgentEngine } = await import('../background/agentEngine.js');
 
-/** A session persisted by a previous run that was killed mid-task. */
+/**
+ * A session persisted by a previous run that was killed mid-task.
+ *
+ * Keyed under agent_sessions.default because AgentEngine() with no windowId argument (as
+ * every test in this file constructs it) defaults this.windowId to 'default' - one engine
+ * per window means persistence is keyed by windowId, not a single global slot.
+ */
 const STALE_SESSION = {
-  agent_session: {
-    history: [{ type: 'user_goal', prompt: 'the OLD task' }],
-    planSteps: [
-      { id: 1, text: 'old step one', status: 'completed' },
-      { id: 2, text: 'old step two', status: 'completed' }
-    ],
-    task: 'the OLD task',
-    stepCount: 7,
-    status: 'running',
-    currentPlanIndex: 2,
-    stateVersion: 42
+  agent_sessions: {
+    default: {
+      history: [{ type: 'user_goal', prompt: 'the OLD task' }],
+      planSteps: [
+        { id: 1, text: 'old step one', status: 'completed' },
+        { id: 2, text: 'old step two', status: 'completed' }
+      ],
+      task: 'the OLD task',
+      stepCount: 7,
+      status: 'running',
+      currentPlanIndex: 2,
+      stateVersion: 42
+    }
   }
 };
 
@@ -87,14 +95,12 @@ test('restoreState does not clobber a task that starts during a cold boot', asyn
   assert.equal(engine.stepCount, 0, 'stepCount must not be restored from the stale session');
   assert.equal(engine.planSteps[0].text, 'new step one', 'the OLD checklist must not reappear');
   assert.ok(loopRan, 'the execution loop must actually start');
-  assert.ok(
-    engine.history.some(h => h.type === 'user_goal' && h.prompt === 'the NEW task'),
-    'history must contain the new goal'
-  );
-  assert.ok(
-    !engine.history.some(h => h.prompt === 'the OLD task'),
-    'history must not contain the previous session'
-  );
+  // Sessions are multi-turn now, so a restored earlier turn is legitimately retained — the
+  // requirement is that it stays an EARLIER turn and never displaces the live one.
+  const goals = engine.history.filter(h => h.type === 'user_goal').map(h => h.prompt);
+  assert.equal(goals[goals.length - 1], 'the NEW task', 'the new goal must be the active turn');
+  assert.equal(engine.currentTurnHistory()[0].prompt, 'the NEW task',
+    'the current turn must start at the new goal, not the restored one');
 });
 
 test('an interrupted running task is surfaced to the user, not silently dropped', async () => {
@@ -233,8 +239,8 @@ test('DOM read targets the tab it was given, not whichever tab is focused', asyn
 
   const injectedInto = [];
   const tabsById = {
-    [TARGET]: { id: TARGET, url: 'https://example.com/products' },
-    [FOCUSED]: { id: FOCUSED, url: 'chrome://extensions/' }
+    [TARGET]: { id: TARGET, url: 'https://example.com/products', windowId: 1, groupId: 500 },
+    [FOCUSED]: { id: FOCUSED, url: 'chrome://extensions/', windowId: 1, groupId: -1 }
   };
 
   // The content script is NOT yet present on the target tab, so the first read fails and the
@@ -265,6 +271,9 @@ test('DOM read targets the tab it was given, not whichever tab is focused', asyn
 
   const engine = new AgentEngine();
   await engine.restorePromise;
+  // The access wall only allows tabs inside this session's own ScoutFox group - the target
+  // tab's window/group, established here exactly as ensureScoutFoxGroup would in production.
+  engine.scoutFoxGroupIds.set(1, 500);
 
   const snap = await engine.getTabDOMWithAutoInject(TARGET, false);
 
@@ -279,11 +288,12 @@ test('a restricted URL fails with the real reason, not "refresh and try again"',
   resetStorage();
   storageReadDelayMs = 0;
 
-  global.chrome.tabs.get = async () => ({ id: 42, url: 'chrome://extensions/' });
+  global.chrome.tabs.get = async () => ({ id: 42, url: 'chrome://extensions/', windowId: 1, groupId: 500 });
   global.chrome.scripting = { executeScript: async () => { throw new Error('should never be reached'); } };
 
   const engine = new AgentEngine();
   await engine.restorePromise;
+  engine.scoutFoxGroupIds.set(1, 500);
 
   await assert.rejects(
     () => engine.getTabDOMWithAutoInject(42, false),
@@ -309,6 +319,73 @@ test('a closed target tab is reported as closed', async () => {
     () => engine.getTabDOMWithAutoInject(777, false),
     /no longer exists/i
   );
+});
+
+test('a follow-up task keeps the previous turn instead of wiping the session', async () => {
+  resetStorage();
+  storageReadDelayMs = 0;
+
+  const engine = new AgentEngine();
+  engine.generatePlan = async () => { engine.planSteps = [{ id: 1, text: 'p', status: 'in_progress' }]; };
+  engine.runLoop = async () => {};
+  await engine.restorePromise;
+
+  await engine.startTask('find the cheapest iPhone', 101);
+  engine.history.push({ type: 'finish', answer: 'It is 933 EUR in white.' });
+
+  await engine.startTask('now add it to the cart', 101);
+
+  const goals = engine.history.filter(h => h.type === 'user_goal').map(h => h.prompt);
+  assert.deepEqual(goals, ['find the cheapest iPhone', 'now add it to the cart'],
+    'both turns must survive \u2014 otherwise "it" has no referent');
+  assert.equal(engine.turnIndex, 2);
+  assert.equal(engine.stepCount, 0, 'step count resets per turn');
+
+  // The follow-up must actually be told what happened earlier.
+  const messages = engine.formatMessagesForLLM('current page state');
+  const recap = messages.find(m => /Earlier in this session/.test(m.content));
+  assert.ok(recap, 'the prompt must carry a recap of completed turns');
+  assert.match(recap.content, /cheapest iPhone/);
+  assert.match(recap.content, /933 EUR/);
+});
+
+test('currentTurnHistory isolates the active turn from earlier ones', async () => {
+  resetStorage();
+  storageReadDelayMs = 0;
+
+  const engine = new AgentEngine();
+  await engine.restorePromise;
+
+  engine.history = [
+    { type: 'user_goal', turn: 1, prompt: 'first' },
+    { step: 1, type: 'agent_response', action: { action: 'click' }, rawResponse: 'a' },
+    { type: 'finish', answer: 'done one' },
+    { type: 'user_goal', turn: 2, prompt: 'second' },
+    { step: 1, type: 'agent_response', action: { action: 'scroll' }, rawResponse: 'b' }
+  ];
+
+  const cur = engine.currentTurnHistory();
+  assert.equal(cur.length, 2);
+  assert.equal(cur[0].prompt, 'second');
+  assert.equal(engine.previousTurnsSummary().length, 1, 'only the completed turn is recapped');
+});
+
+test('New Session clears every turn', async () => {
+  resetStorage();
+  storageReadDelayMs = 0;
+
+  const engine = new AgentEngine();
+  engine.generatePlan = async () => {};
+  engine.runLoop = async () => {};
+  await engine.restorePromise;
+
+  await engine.startTask('one', 101);
+  await engine.startTask('two', 101);
+  engine.clearHistory();
+
+  assert.deepEqual(engine.history, []);
+  assert.equal(engine.turnIndex, 0);
+  assert.equal(engine.previousTurnsSummary().length, 0);
 });
 
 test('a clean cold boot with no persisted session leaves the engine empty', async () => {

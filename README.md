@@ -15,11 +15,13 @@
 * 📡 **Backend Telemetry Console**: Filter step-by-step DOM snapshots, raw LLM outputs, parser results, and network latency (`(842ms)`).
 * ⚡ **Persistent Storage Model Caching**: Instant 0ms model dropdown loading on panel open.
 * 🦙 **Universal Multi-Provider LLM Support**:
-  * **Google Gemini API** (`gemini-1.5-flash`, `gemini-1.5-pro`, `gemini-2.0-flash-exp`)
+  * **Google Gemini API** (`gemini-2.0-flash`, `gemini-1.5-flash`, `gemini-1.5-pro`)
   * **Ollama (Local Host)** (`qwen2.5:14b`, `llama3.1:8b`, `gemma2:9b`)
-  * **Groq Cloud / OpenAI-Compatible** (`llama-3.1-70b-versatile`)
+  * **Groq Cloud / OpenAI-Compatible** (`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`)
   * **OpenAI Official** (`gpt-4o-mini`, `gpt-4o`)
   * **Anthropic Claude** (`claude-3-5-sonnet-20241022`)
+  * **OpenRouter** (`anthropic/claude-3.5-sonnet`, `deepseek/deepseek-r1`, and any other model OpenRouter hosts)
+  * **AgentRouter** (`claude-3-5-sonnet`, `gpt-4o`, `deepseek-r1`)
 * 🐍 **Standalone Python Playwright Agent**: Run terminal-based Playwright browser automation without registering a Web Store developer account!
 
 ---
@@ -41,6 +43,41 @@
    - Open any web page (e.g. `https://google.com` or `https://news.ycombinator.com`).
    - Click the 🦊 ScoutFox icon in your toolbar to open the Side Panel.
    - Select your LLM Provider (e.g. Google Gemini or Ollama Local) and click **Run Task**!
+
+---
+
+## 🧭 How to Use the Extension
+
+### Give it a task
+1. Click the 🦊 icon to open the Side Panel - it opens on the **Agent** tab.
+2. Type your goal in the box at the bottom (e.g. *"Find the price of product X and click Add to Cart"*) and hit the **send** button (▶).
+3. Every time you click the icon on an idle panel, it opens fresh - no stale history or leftover tokens from a previous task get fed into the new one.
+
+### Watch it work
+- ScoutFox automates the tab you're actually looking at, or opens a new one right beside it - never a tab hidden somewhere else in your window.
+- Every tab it touches gets grouped into an orange **ScoutFox** tab group, so you always know which tabs are sandboxed for automation. A tab you open yourself next to that group stays independent and is never pulled in.
+- The status pill in the header (Idle / Running / Paused) and the progress bar under the input box show what step it's on and out of how many.
+- Each action it takes (click, type, scroll, navigate, ...) appears as its own line in the timeline, with its reasoning available if you click the row.
+
+### Stay in control
+- **Pause** freezes the run mid-step; **Resume** (the same button) picks it back up from exactly where it left off.
+- **Stop Task** ends the run for good.
+- If a single LLM call to your provider fails, ScoutFox retries it automatically before giving up - and if it does give up, the task pauses (not dies), so **Resume** continues from the exact step that failed instead of you having to start over.
+- If the agent needs to ask you something mid-task, a question box appears right in the timeline - type your answer and hit **Send**, and it continues with that answer.
+
+### Read the result honestly
+- A green **"✓ Done"** card means the agent actually finished and is confident in the answer.
+- An amber **"⚠ Unconfirmed answer"** card means the model replied in plain text instead of a structured action - the run still ended, but the answer wasn't explicitly confirmed as final.
+- A turn marked **"did not finish"** (no green card at all) means it ran out of its step budget or hit an error before completing - it's never silently shown as done.
+
+### Configure it (Settings tab)
+- **LLM Provider / Model**: pick from OpenRouter, AgentRouter, Gemini, Ollama, OpenAI, Anthropic, or Groq, and search/select the exact model.
+- **Max Steps**, **Delay (ms)**, and **LLM Timeout (ms)**: tune how long a task can run, how long it pauses between actions, and how long it waits for a single LLM reply before retrying.
+- **Show Floating Element Badges**: toggle the numbered `[1]`, `[2]` overlays ScoutFox draws on page elements it can see.
+
+### Everything else
+- **History (top-right)**: browse, reopen, or delete past runs.
+- **Logs tab**: filterable, real-time backend telemetry (DOM snapshots, raw LLM output, parser results, timings) - the first place to look if a run misbehaves.
 
 ---
 

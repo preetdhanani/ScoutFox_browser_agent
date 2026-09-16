@@ -1,11 +1,19 @@
 /**
  * Background Service Worker for ScoutFox AI Agent
- * Routes extension messages, maintains agent engine instance, manages port connections,
- * dynamically tracks active tab switching when links or automation open new tabs, and
- * defends against the MV3 service-worker lifecycle silently dropping in-flight tasks.
+ * Routes extension messages, maintains one AgentEngine session PER BROWSER WINDOW, manages
+ * port connections, dynamically tracks active tab switching when links or automation open new
+ * tabs, and defends against the MV3 service-worker lifecycle silently dropping in-flight tasks.
+ *
+ * Session model: opening the extension in a window starts (or resumes) that window's OWN,
+ * fully independent session - its own ScoutFox tab group, its own history, its own running
+ * task, its own Stop/Pause. Two windows can automate different tabs at the same time without
+ * ever seeing or touching each other's tabs. Every AgentEngine method already operates on
+ * "this" instance's own state (history, status, tab group, etc.), so the only thing this file
+ * adds is: which engine instance a given event or message belongs to, resolved from whichever
+ * window it actually came from - never assumed to be a single global one.
  */
 
-import { AgentEngine } from './agentEngine.js';
+import { AgentEngine, describeRestrictedUrl, lastRuntimeError } from './agentEngine.js';
 import { ApiClients } from './apiClients.js';
 import { Logger } from '../utils/logger.js';
 
@@ -17,15 +25,99 @@ self.addEventListener('unhandledrejection', (event) => {
   Logger.error('Background', '[UNHANDLED_REJECTION] Unhandled promise rejection in service worker', event.reason);
 });
 
-const agentEngine = new AgentEngine();
+/**
+ * windowId -> { engine: AgentEngine, ports: Set<Port> }
+ *
+ * One entry is created the first time a window's panel connects or its toolbar icon is
+ * clicked, and removed when that window closes (see chrome.windows.onRemoved below). A window
+ * that never opened ScoutFox has no entry at all - tab/window events for it are no-ops.
+ */
+const sessions = new Map();
 
-// Clean network request buffers when tab is closed
-if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onRemoved) {
-  chrome.tabs.onRemoved.addListener((tabId) => {
-    if (agentEngine.networkBuffers.has(tabId)) {
-      agentEngine.networkBuffers.delete(tabId);
-    }
+function getOrCreateSession(windowId) {
+  let session = sessions.get(windowId);
+  if (session) return session;
+
+  const engine = new AgentEngine(windowId);
+  session = { engine, ports: new Set(), lastBroadcastHadNoListeners: false };
+  sessions.set(windowId, session);
+
+  // Each window's engine broadcasts ONLY to that window's own connected panels - never to a
+  // different window's, which is exactly the isolation this whole session model exists for.
+  engine.setStateChangeCallback((state) => {
+    broadcastToSession(session, 'STATE_UPDATE', state);
+    syncKeepaliveAlarm();
   });
+
+  // When this engine opens a brand-new window (AgentEngine.openNewWindow, the "open_window"
+  // action), register that new window against this SAME session object - not a new one -
+  // before anything else touches it. Without this, a panel opened in the new window would hit
+  // getOrCreateSession(newWindowId), find nothing there yet, and start a second, disconnected
+  // session with its own blank history, defeating the entire point of opening the window as
+  // part of this one. sessions is a plain Map<windowId, session>, so multiple keys can (and
+  // here, deliberately do) point at the exact same session object.
+  engine.setWindowOpenedCallback((newWindowId) => {
+    if (sessions.get(newWindowId) === session) return; // already registered, nothing to do
+    sessions.set(newWindowId, session);
+    Logger.info('Background', `[SESSION_EXTENDED] Session for window [${windowId}] now also covers window [${newWindowId}].`);
+  });
+
+  Logger.info('Background', `[SESSION_CREATED] New session for window [${windowId}].`);
+  return session;
+}
+
+// Clean network request buffers when tab is closed & track ScoutFox tab group removal.
+// Both search every session rather than assuming a single global engine owns the tab/group -
+// with one engine per window, ownership has to be looked up, not assumed.
+if (typeof chrome !== 'undefined') {
+  if (chrome.tabs && chrome.tabs.onRemoved) {
+    chrome.tabs.onRemoved.addListener((tabId) => {
+      for (const session of sessions.values()) {
+        if (session.engine.networkBuffers.has(tabId)) {
+          session.engine.networkBuffers.delete(tabId);
+        }
+      }
+    });
+  }
+
+  if (chrome.tabGroups && chrome.tabGroups.onRemoved) {
+    chrome.tabGroups.onRemoved.addListener((group) => {
+      if (!group) return;
+      for (const [windowId, session] of sessions.entries()) {
+        if (session.engine.scoutFoxGroupIds.get(windowId) === group.id) {
+          Logger.info('Background', `[TAB_SANDBOX] ScoutFox tab group [${group.id}] was closed by user (window [${windowId}]).`);
+          session.engine.scoutFoxGroupIds.delete(windowId);
+          session.engine.persistState();
+        }
+      }
+    });
+  }
+
+  // A closed window ends its session outright - there is nothing left to automate, and
+  // keeping its engine/storage around would only leak memory and stale persisted state.
+  if (chrome.windows && chrome.windows.onRemoved) {
+    chrome.windows.onRemoved.addListener((windowId) => {
+      const session = sessions.get(windowId);
+      if (!session) return;
+      sessions.delete(windowId);
+
+      // A session opened into more than one window (openNewWindow) is one session object
+      // reachable from multiple Map keys. Closing ONE of those windows must not end the
+      // session outright while another window still shows it - only forget the engine
+      // (persisted state, its own tab group here) and drop its keepalive contribution once no
+      // window reference to it remains at all.
+      const stillReferenced = Array.from(sessions.values()).some((s) => s === session);
+      if (stillReferenced) {
+        session.engine.scoutFoxGroupIds.delete(windowId);
+        Logger.info('Background', `[WINDOW_CLOSED] Window [${windowId}] closed, but its session continues in another window.`);
+        return;
+      }
+
+      AgentEngine.forgetWindow(session.engine.windowId);
+      Logger.info('Background', `[SESSION_CLOSED] Window [${windowId}] closed. Session and its persisted state removed.`);
+      syncKeepaliveAlarm();
+    });
+  }
 }
 
 // Initialize declarativeNetRequest rules for AgentRouter network-layer header spoofing
@@ -57,94 +149,226 @@ if (typeof chrome !== 'undefined' && chrome.declarativeNetRequest) {
   }
 }
 
-agentEngine.setStateChangeCallback((state) => {
-  broadcastToSidepanel('STATE_UPDATE', state);
-  syncKeepaliveAlarm(state.status);
-});
-
+// Logs stay a single, shared, cross-window stream - a deliberate scope decision, not an
+// oversight. The user's request was about ACTION isolation (session, tab group, history), not
+// about hiding one window's debug telemetry from another; splitting Logger per-window would be
+// a second, separately-scoped rework of the whole persist/clear/restore log system.
 Logger.setBroadcastCallback((logEntry) => {
-  broadcastToSidepanel('LOG_ENTRY', logEntry);
+  broadcastToAllSidepanels('LOG_ENTRY', logEntry);
 });
 
-let activeSidepanelPorts = new Set();
-let lastBroadcastHadNoListeners = false;
+/**
+ * Scope the side panel to one tab at a time, not the whole browser.
+ *
+ * manifest.json declares side_panel.default_path, which registers the panel globally on
+ * EVERY tab as Chrome's fallback. The per-tab enable/disable calls below (onConnect,
+ * onCreated, onActivated) are not enough to override that on their own - this is a
+ * documented Chrome limitation, not a logic bug: setOptions({tabId, enabled:false}) does not
+ * reliably close a panel a global default_path is still offering everywhere else. The fix
+ * Chrome's own team and extension samples describe is to explicitly disable the panel
+ * EVERYWHERE at startup, so nothing is ever enabled except the specific tab(s) this code
+ * turns on. https://github.com/GoogleChrome/chrome-extensions-samples/issues/987
+ */
+if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setOptions) {
+  chrome.sidePanel.setOptions({ enabled: false }, () => {
+    lastRuntimeError();
+  });
+}
+
+// openPanelOnActionClick:true and chrome.action.onClicked are mutually exclusive by Chrome's
+// own design - the former means the panel auto-opens globally on click and onClicked NEVER
+// fires. That auto-open used the global default_path with no tab scoping applied yet, which
+// is exactly the "shows on every tab" symptom. false (Chrome's own default; set explicitly so
+// the intent reads plainly) makes onClicked fire instead, and its handler below enables the
+// panel for ONLY the clicked tab before opening it.
+if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
+}
+
+// Handle explicit extension action icon clicks to group current active tab immediately
+if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
+  chrome.action.onClicked.addListener((tab) => {
+    if (!(tab && tab.id)) return;
+
+    // Enable + open the panel for the clicked tab UNCONDITIONALLY - isValidWebTab exists to
+    // gate whether a tab can be SCRIPTED for automation (content-script injection), not
+    // whether the panel UI can be shown at all. Gating this whole handler on it meant clicking
+    // the icon while sitting on chrome://newtab - an entirely ordinary starting point for a
+    // browser session - silently did nothing: setOptions and open() never even ran.
+    if (chrome.sidePanel && chrome.sidePanel.setOptions) {
+      chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+        lastRuntimeError();
+      });
+    }
+
+    // MUST be called synchronously in this same tick, with nothing awaited above it. Chrome
+    // only honors sidePanel.open() as a genuine response to the click's user gesture for as
+    // long as the call stack stays synchronous; crossing even one await (ensureScoutFoxGroup
+    // below does real async work - tabs.group, storage) loses that gesture and open() then
+    // fails silently, since it's a fire-and-forget .catch(). That silent failure is exactly
+    // what broke "click the icon to open the extension" the moment ensureScoutFoxGroup was
+    // awaited ahead of this line. setOptions() above is fire-and-forget too (callback style,
+    // not awaited), so it does not cross that boundary either.
+    if (chrome.sidePanel && chrome.sidePanel.open) {
+      chrome.sidePanel.open({ tabId: tab.id }).catch((err) => {
+        Logger.warn('Background', '[SIDEPANEL_OPEN_FAILED] chrome.sidePanel.open() was rejected', err);
+      });
+    }
+
+    // Clicking the toolbar icon is a deliberate, explicit "open ScoutFox" gesture - unlike the
+    // internal port reconnects (service worker restarts, a second tab's own panel document
+    // connecting) that must NOT clear an in-progress or just-finished run, and still resume
+    // exactly as before. An idle/finished session, though, should never resurrect a stale
+    // conversation into the next task's LLM prompt (previousTurnsSummary() would recap it)
+    // just because the panel was reopened - so start fresh here instead. Waits for any
+    // in-flight restoreState() first (restorePromise resolves immediately if it already has),
+    // so a just-constructed engine's own restore cannot clobber this clear by loading the old
+    // history right back a moment later; the status re-check inside also protects against a
+    // task that starts between the click and this running.
+    const session = getOrCreateSession(tab.windowId);
+    session.engine.restorePromise.then(() => {
+      if (session.engine.status !== 'running' && session.engine.status !== 'paused') {
+        session.engine.clearHistory();
+      }
+    });
+
+    // Automation sandboxing (tab grouping) only makes sense on a page that can actually be
+    // scripted, so THIS is where isValidWebTab belongs - gating the panel opening at all was
+    // the bug. Grouping has no gesture requirement either way, so it is safe to run after.
+    if (isValidWebTab(tab)) {
+      session.engine.ensureScoutFoxGroup(tab.id).catch((err) => {
+        Logger.warn('Background', '[TAB_SANDBOX_ERROR] ensureScoutFoxGroup failed on icon click', err);
+      });
+    }
+  });
+}
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === 'scoutfox_sidepanel' || port.name === 'strawberry_sidepanel') {
-    activeSidepanelPorts.add(port);
-    lastBroadcastHadNoListeners = false;
-    Logger.info('Background', `[PORT_CONNECT] Sidepanel UI connected. Active ports: ${activeSidepanelPorts.size}`);
+  // The port name's '_fresh'/plain distinction still parses, purely for the PORT_CONNECT log
+  // line below - it no longer decides whether to clear history. Per-window sessions replaced
+  // that need: reopening the panel on a window that already has a session (running or
+  // finished) always reflects it, exactly like reopening a chat app shows the conversation
+  // that was already there, rather than silently starting a new one every time. A window's
+  // session is only ever genuinely empty the first time IT is ever opened - and clearing an
+  // already-empty engine is a harmless no-op, so there is nothing left to special-case here at
+  // all. Starting over on purpose is what CLEAR_HISTORY is for.
+  const match = port.name.match(/^(scoutfox_sidepanel(?:_fresh)?)(?::(-?\d+))?$/);
+  if (!match) return;
 
-    port.onDisconnect.addListener(() => {
-      activeSidepanelPorts.delete(port);
-      Logger.info('Background', `[PORT_DISCONNECT] Sidepanel UI disconnected. Active ports: ${activeSidepanelPorts.size}`);
-    });
+  const windowId = match[2] !== undefined ? Number(match[2]) : 'legacy';
+
+  const session = getOrCreateSession(windowId);
+  session.ports.add(port);
+  session.lastBroadcastHadNoListeners = false;
+  Logger.info('Background', `[PORT_CONNECT] Sidepanel UI connected to window [${windowId}]. Active ports for this window: ${session.ports.size}`);
+
+  port.onDisconnect.addListener(() => {
+    session.ports.delete(port);
+    Logger.info('Background', `[PORT_DISCONNECT] Sidepanel UI disconnected from window [${windowId}]. Active ports for this window: ${session.ports.size}`);
+  });
+
+  // Session creation is lazy - one is built the instant its window's first port ever connects,
+  // rather than a single engine constructed well before any real connection could land. That
+  // removes the incidental time cushion the old single-session design had: restoreState() is
+  // async, so without this await, a session with a genuine persisted run could send its FIRST
+  // STATE_UPDATE from the constructor's still-empty defaults, moments before the real restored
+  // history/status ever lands - the exact same class of race already fixed for
+  // GET_AGENT_STATE/Logger.logsRestored() below, here for the port-connect path.
+  (async () => {
+    try {
+      await session.engine.restorePromise;
+    } catch (err) {
+      Logger.warn('Background', '[PORT_CONNECT] Session restore failed; proceeding with a clean state', err);
+    }
 
     try {
       port.postMessage({
         type: 'STATE_UPDATE',
         payload: {
-          status: agentEngine.status,
-          stepCount: agentEngine.stepCount,
-          task: agentEngine.currentTask,
-          history: agentEngine.history,
-          planSteps: agentEngine.planSteps,
-          currentPhase: agentEngine.currentPhase,
-          // Logs intentionally omitted — the panel pulls them via GET_AGENT_STATE immediately
-          // after connecting, so duplicating the ring here just doubles the payload.
-          stateVersion: agentEngine.stateVersion,
-          bootId: agentEngine.bootId
+          status: session.engine.status,
+          stepCount: session.engine.stepCount,
+          task: session.engine.currentTask,
+          history: session.engine.history,
+          planSteps: session.engine.planSteps,
+          currentPhase: session.engine.currentPhase,
+          stateVersion: session.engine.stateVersion,
+          bootId: session.engine.bootId,
+          // THIS window's own group - not necessarily the session's primary window's, if this
+          // panel belongs to a window the session was later extended into (openNewWindow).
+          scoutFoxGroupId: typeof windowId === 'number' ? session.engine.groupIdForWindow(windowId) : session.engine.scoutFoxGroupId
         }
       });
     } catch (err) {
       Logger.warn('Background', 'Failed sending initial state update on port connect', err);
     }
+  })();
+
+  // Auto-label opening tab into 'ScoutFox' tab group immediately on sidepanel open, scoped to
+  // THIS window only - never the globally-focused window, which could be a different one.
+  if (typeof windowId === 'number') {
+    chrome.tabs.query({ active: true, windowId }, (tabs) => {
+      const activeTab = tabs && tabs[0];
+      if (activeTab && isValidWebTab(activeTab)) {
+        session.engine.ensureScoutFoxGroup(activeTab.id).then((groupId) => {
+          if (groupId && typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setOptions) {
+            chrome.sidePanel.setOptions({ tabId: activeTab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+              lastRuntimeError();
+            });
+          }
+        }).catch(() => {});
+      }
+    });
   }
 });
 
 /**
- * Fan a message out to every connected sidepanel.
+ * Fan a message out to every panel connected to ONE window's session - state updates must
+ * never cross into a different window's panel.
  *
- * Re-entrancy is the hazard here: Logger broadcasts each new entry through this very function,
- * so ANY log call made from inside it calls it again. Two rules keep that finite:
- *   - remove a failing port from the set BEFORE logging about it, or the recursive call
- *     retries the same dead port and recurses without bound;
+ * Re-entrancy is the hazard here: Logger broadcasts each new entry through broadcastToAllSidepanels,
+ * so ANY log call made from inside these functions calls one of them again. Two rules keep
+ * that finite:
+ *   - remove a failing port from its session's set BEFORE logging about it, or the recursive
+ *     call retries the same dead port and recurses without bound;
  *   - use Logger.warnSilent for diagnostics about the broadcast channel itself, so the entry
- *     is still recorded and persisted but is not pushed back through this function.
- * The isBroadcasting flag is a final backstop.
+ *     is still recorded and persisted but is not pushed back through the broadcast path.
  */
-let isBroadcasting = false;
-
-function broadcastToSidepanel(type, payload) {
-  if (isBroadcasting) return;
-
-  if (activeSidepanelPorts.size === 0) {
-    if (!lastBroadcastHadNoListeners) {
-      lastBroadcastHadNoListeners = true; // set BEFORE logging
-      Logger.warnSilent('Background', `[BROADCAST_DROPPED] No sidepanel connected — "${type}" updates are being generated but nothing can receive them until the panel reconnects.`);
+function broadcastToSession(session, type, payload) {
+  if (session.ports.size === 0) {
+    if (!session.lastBroadcastHadNoListeners) {
+      session.lastBroadcastHadNoListeners = true; // set BEFORE logging
+      Logger.warnSilent('Background', `[BROADCAST_DROPPED] No sidepanel connected for window [${session.engine.windowId}] - "${type}" updates are being generated but nothing can receive them until that window's panel reconnects.`);
     }
     return;
   }
+  session.lastBroadcastHadNoListeners = false;
+  for (const port of Array.from(session.ports)) {
+    try {
+      port.postMessage({ type, payload });
+    } catch (err) {
+      session.ports.delete(port); // remove FIRST, then report
+      Logger.warnSilent('Background', `[BROADCAST_ERROR] Dropped a dead sidepanel port for window [${session.engine.windowId}] while sending "${type}": ${err.message}. Active ports for this window: ${session.ports.size}`);
+    }
+  }
+}
 
-  lastBroadcastHadNoListeners = false;
-  isBroadcasting = true;
+let isBroadcastingToAll = false;
+
+/** Fan a message out to EVERY connected panel across every window's session. Logs only. */
+function broadcastToAllSidepanels(type, payload) {
+  if (isBroadcastingToAll) return;
+  isBroadcastingToAll = true;
   try {
-    // Snapshot the set: the loop below mutates it on failure.
-    for (const port of Array.from(activeSidepanelPorts)) {
-      try {
-        port.postMessage({ type, payload });
-      } catch (err) {
-        activeSidepanelPorts.delete(port); // remove FIRST, then report
-        Logger.warnSilent('Background', `[BROADCAST_ERROR] Dropped a dead sidepanel port while sending "${type}": ${err.message}. Active ports: ${activeSidepanelPorts.size}`);
-      }
+    for (const session of sessions.values()) {
+      broadcastToSession(session, type, payload);
     }
   } finally {
-    isBroadcasting = false;
+    isBroadcastingToAll = false;
   }
 }
 
 /**
- * Keeping the MV3 service worker alive while a task is running.
+ * Keeping the MV3 service worker alive while ANY window has a task running.
  *
  * Chrome terminates an extension service worker after ~30s of inactivity. An in-flight
  * `await` on an LLM call does NOT count as activity, so a slow model response is enough to
@@ -156,14 +380,23 @@ function broadcastToSidepanel(type, payload) {
  *      killed anyway (memory pressure, or Chrome's hard cap on keepalive), the alarm
  *      re-wakes it and the restart becomes visible in the log instead of silent.
  *
- * Both are scoped strictly to an active task — nothing runs while the agent is idle.
+ * Both are scoped strictly to "some session has an active task" - nothing runs while every
+ * window is idle, but ANY one running/paused window is enough to hold the worker awake for
+ * all of them, since they share the one process.
  */
 const KEEPALIVE_ALARM_NAME = 'scoutfox_keepalive';
 const KEEPALIVE_INTERVAL_MS = 20000;
 let keepaliveIntervalId = null;
 
-function syncKeepaliveAlarm(agentStatus) {
-  const shouldRun = agentStatus === 'running' || agentStatus === 'paused';
+function anySessionActive() {
+  for (const session of sessions.values()) {
+    if (session.engine.status === 'running' || session.engine.status === 'paused') return true;
+  }
+  return false;
+}
+
+function syncKeepaliveAlarm() {
+  const shouldRun = anySessionActive();
 
   if (shouldRun && keepaliveIntervalId === null) {
     keepaliveIntervalId = setInterval(() => {
@@ -174,11 +407,11 @@ function syncKeepaliveAlarm(agentStatus) {
         Logger.warn('Background', '[KEEPALIVE] Idle-timer ping failed', err);
       }
     }, KEEPALIVE_INTERVAL_MS);
-    Logger.info('Background', '[KEEPALIVE_ON] Task active — holding the service worker awake.');
+    Logger.info('Background', '[KEEPALIVE_ON] A task is active somewhere - holding the service worker awake.');
   } else if (!shouldRun && keepaliveIntervalId !== null) {
     clearInterval(keepaliveIntervalId);
     keepaliveIntervalId = null;
-    Logger.info('Background', '[KEEPALIVE_OFF] No task active — releasing the service worker.');
+    Logger.info('Background', '[KEEPALIVE_OFF] No task active in any window - releasing the service worker.');
   }
 
   if (typeof chrome === 'undefined' || !chrome.alarms) return;
@@ -202,11 +435,11 @@ function syncKeepaliveAlarm(agentStatus) {
 if (typeof chrome !== 'undefined' && chrome.alarms) {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === KEEPALIVE_ALARM_NAME) {
-      Logger.info('Background', `[KEEPALIVE] Heartbeat — status=${agentEngine.status}, step ${agentEngine.stepCount}.`);
+      Logger.info('Background', `[KEEPALIVE] Heartbeat - ${sessions.size} session(s) tracked.`);
       // If the alarm fires while a task is supposedly running but the interval ping is gone,
       // the worker was terminated and restarted. Re-arm so the task is not left unprotected.
-      if (agentEngine.status === 'running' && keepaliveIntervalId === null) {
-        syncKeepaliveAlarm(agentEngine.status);
+      if (anySessionActive() && keepaliveIntervalId === null) {
+        syncKeepaliveAlarm();
       }
     }
   });
@@ -214,22 +447,124 @@ if (typeof chrome !== 'undefined' && chrome.alarms) {
 
 // Every service-worker boot is logged, so an unexplained mid-task restart is visible
 // in the log pane instead of appearing as the UI mysteriously going quiet.
-Logger.info('Background', `[WORKER_BOOT] Service worker started (boot ${agentEngine.bootId.slice(0, 8)}). MV3 restarts the worker frequently — this line marks a fresh incarnation.`);
+Logger.info('Background', `[WORKER_BOOT] Service worker started. MV3 restarts the worker frequently - this line marks a fresh incarnation.`);
 
-// Track active tab switching when links open new tabs
+// Track active tab switching when links open new tabs & auto-group into ScoutFox Sandbox.
+// Every listener below resolves which window's session (if any) an event belongs to from the
+// event's own windowId - never assumes a single global session - and no-ops for a window that
+// has not opened ScoutFox at all.
 if (typeof chrome !== 'undefined' && chrome.tabs) {
   chrome.tabs.onCreated.addListener((tab) => {
-    if (agentEngine.status === 'running') {
+    const session = sessions.get(tab.windowId);
+    if (!session) return; // this window has no ScoutFox session - nothing to auto-group into
+
+    // THIS tab's own window's group - grouping into a DIFFERENT window's group (e.g. the
+    // session's primary window, if this tab was created in a secondary one opened via
+    // openNewWindow) fails outright, since a Chrome tab group cannot span windows.
+    const groupIdForThisWindow = session.engine.groupIdForWindow(tab.windowId);
+
+    // Only adopt tabs THIS session's own automation actually caused.
+    //
+    // Chrome sets openerTabId on a tab opened BY another tab - a target="_blank" link the
+    // agent clicked, or window.open from a page it is driving - so a tab whose opener is the
+    // very tab the agent is working in is one of ours. A tab the USER opened is not: Cmd+T
+    // carries no opener at all, and a link they clicked in some other tab carries that tab.
+    //
+    // This listener used to adopt EVERY new tab in the window, which the user reported from
+    // both ends: a tab they opened next to the group silently became part of the automation
+    // sandbox, and - worse, below - a tab they opened mid-run stole the running agent's
+    // target 500ms later, pointing it at a page they had opened for themselves. Their own
+    // tabs stay their own; the agent only ever follows tabs it opened itself.
+    const openedByThisSession = tab.openerTabId !== undefined
+      && tab.openerTabId === session.engine.activeTabId;
+    if (!openedByThisSession) {
+      if (groupIdForThisWindow) {
+        Logger.info('Background', `[TAB_LEFT_ALONE] Tab [${tab.id}] was opened by the user, not by automation - leaving it outside the 'ScoutFox' group (window [${tab.windowId}]).`);
+      }
+      return;
+    }
+
+    if (groupIdForThisWindow && typeof chrome.tabs.group === 'function') {
+      chrome.tabs.group({ tabIds: tab.id, groupId: groupIdForThisWindow }, () => {
+        lastRuntimeError();
+        Logger.info('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'ScoutFox' tab group [${groupIdForThisWindow}] (window [${tab.windowId}])`);
+        if (typeof chrome.sidePanel !== 'undefined' && chrome.sidePanel.setOptions) {
+          chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+            lastRuntimeError();
+          });
+        }
+      });
+    }
+
+    if (session.engine.status === 'running') {
       setTimeout(() => {
         chrome.tabs.get(tab.id, (createdTab) => {
           if (createdTab && isValidWebTab(createdTab)) {
-            Logger.info('Background', `[NEW_TAB_DETECTED] Automation switching to newly opened Tab ID [${createdTab.id}]`);
-            agentEngine.activeTabId = createdTab.id;
+            Logger.info('Background', `[NEW_TAB_DETECTED] Automation switching to newly opened Tab ID [${createdTab.id}] (window [${tab.windowId}])`);
+            session.engine.activeTabId = createdTab.id;
           }
         });
       }, 500);
     }
   });
+
+  // Scope side panel visibility: hide side panel when user switches to a tab outside the
+  // ScoutFox tab group belonging to THAT SAME tab's window's own session.
+  if (chrome.tabs.onActivated) {
+    chrome.tabs.onActivated.addListener(async (activeInfo) => {
+      const session = sessions.get(activeInfo.windowId);
+      // THIS window's own group - a session extended into more than one window (openNewWindow)
+      // tracks a separate group per window, and a tab switch always happens WITHIN one window.
+      const groupIdForThisWindow = session ? session.engine.groupIdForWindow(activeInfo.windowId) : null;
+      if (!session || !groupIdForThisWindow || typeof chrome.sidePanel === 'undefined' || !chrome.sidePanel.setOptions) return;
+      const tabId = activeInfo.tabId;
+
+      try {
+        const tab = await new Promise((resolve) => {
+          chrome.tabs.get(tabId, (t) => {
+            lastRuntimeError();
+            resolve(t);
+          });
+        });
+
+        if (tab) {
+          const isInScoutFoxGroup = tab.groupId === groupIdForThisWindow;
+          if (isInScoutFoxGroup) {
+            chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+              lastRuntimeError();
+            });
+          } else {
+            chrome.sidePanel.setOptions({ tabId, enabled: false }, () => {
+              lastRuntimeError();
+            });
+          }
+        }
+      } catch (_) {}
+    });
+  }
+
+  // Handle dynamic group changes (e.g. user dragging tab into/out of ScoutFox group)
+  if (chrome.tabs.onUpdated) {
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+      const windowId = tab ? tab.windowId : undefined;
+      const session = windowId !== undefined ? sessions.get(windowId) : undefined;
+      // THIS tab's own window's group - see the same note in onCreated/onActivated above.
+      const groupIdForThisWindow = session ? session.engine.groupIdForWindow(windowId) : null;
+      if (!session || !groupIdForThisWindow || typeof chrome.sidePanel === 'undefined' || !chrome.sidePanel.setOptions) return;
+      if (changeInfo.groupId !== undefined) {
+        const isInScoutFoxGroup = changeInfo.groupId === groupIdForThisWindow;
+        if (isInScoutFoxGroup) {
+          chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+            lastRuntimeError();
+          });
+        } else {
+          chrome.sidePanel.setOptions({ tabId, enabled: false }, () => {
+            lastRuntimeError();
+          });
+        }
+      }
+    });
+  }
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -248,8 +583,20 @@ function routeMessage(request, sender, sendResponse) {
   const { action, payload } = request;
 
   if (action === 'NET_REQUEST_RECORDED') {
-    const tabId = sender.tab ? sender.tab.id : agentEngine.activeTabId;
-    agentEngine.recordNetworkRequest(tabId, payload);
+    // Content scripts always carry a real sender.tab, including its windowId - no ambiguity
+    // here the way there can be for a side-panel-originated message.
+    let session = null;
+    let tabId = sender.tab ? sender.tab.id : null;
+    if (sender.tab) {
+      session = sessions.get(sender.tab.windowId);
+    } else {
+      // Fall back to searching for whichever session currently has an active tab, for the
+      // rare case a sender lacks tab info entirely.
+      for (const s of sessions.values()) {
+        if (s.engine.activeTabId) { session = s; tabId = s.engine.activeTabId; break; }
+      }
+    }
+    if (session) session.engine.recordNetworkRequest(tabId, payload);
     sendResponse({ success: true });
     return true;
   }
@@ -268,25 +615,58 @@ function routeMessage(request, sender, sendResponse) {
     return true;
   }
 
+  if (action === 'CLEAR_LOGS') {
+    // Handled here, BEFORE any session is resolved - Logger keeps its own in-memory
+    // logsHistory independent of any window's engine, shared across every session by design
+    // (see the comment above Logger.setBroadcastCallback). Resolving/creating a session this
+    // action does not need would construct a brand-new AgentEngine as a side effect, whose own
+    // async restoreState() logs a STATE_RESTORE entry moments later - landing in Logger's
+    // history at an unpredictable time relative to the very clear this handler just performed.
+    Logger.clearLogs();
+    sendResponse({ success: true });
+    return true;
+  }
+
+  // Every action below this point belongs to one window's session.
+  const session = getOrCreateSession(request.windowId !== undefined ? request.windowId : 'legacy');
+  const agentEngine = session.engine;
+
   if (action === 'GET_AGENT_STATE') {
-    sendResponse({
-      status: agentEngine.status,
-      stepCount: agentEngine.stepCount,
-      task: agentEngine.currentTask,
-      history: agentEngine.history,
-      planSteps: agentEngine.planSteps,
-      currentPhase: agentEngine.currentPhase,
-      logs: Logger.getLogsHistory(),
-      stateVersion: agentEngine.stateVersion,
-      bootId: agentEngine.bootId
+    // Logger's own cold-boot restore is itself async. Answering with getLogsHistory()
+    // immediately used to race it: a resync landing before the restore finished got back an
+    // empty array, which the panel trusted and used to overwrite logs it had already shown.
+    // Waiting here makes the answer always complete, so nothing downstream has to guess.
+    Logger.logsRestored().then(() => {
+      sendResponse({
+        status: agentEngine.status,
+        stepCount: agentEngine.stepCount,
+        task: agentEngine.currentTask,
+        history: agentEngine.history,
+        planSteps: agentEngine.planSteps,
+        currentPhase: agentEngine.currentPhase,
+        logs: Logger.getLogsHistory(),
+        stateVersion: agentEngine.stateVersion,
+        bootId: agentEngine.bootId,
+        scoutFoxGroupId: agentEngine.scoutFoxGroupId
+      });
     });
     return true;
   }
 
   if (action === 'START_TASK') {
-    getActiveTab()
+    // Claim synchronously, before any await, so a double-clicked send button cannot open two
+    // concurrent runs. onMessage handlers are serialized, so this is the one point where the
+    // second request is guaranteed to see the first.
+    const claim = agentEngine.claimForTask();
+    if (!claim.success) {
+      sendResponse(claim);
+      return true;
+    }
+
+    getActiveTab(request.windowId)
       .then((tab) => {
         if (!tab) {
+          agentEngine.releaseTaskClaim();
           throw new Error('No automatable tab found. ScoutFox cannot script Chrome\'s internal pages (chrome://…) — open a normal website such as https://google.com and try again.');
         }
         agentEngine.startTask(payload.prompt, tab.id).catch((err) => {
@@ -295,6 +675,7 @@ function routeMessage(request, sender, sendResponse) {
         sendResponse({ success: true, tabId: tab.id, tabUrl: tab.url, tabTitle: tab.title });
       })
       .catch((err) => {
+        agentEngine.releaseTaskClaim();
         Logger.error('Background', 'Failed to start task', err);
         sendResponse({ success: false, error: err.message });
       });
@@ -318,6 +699,11 @@ function routeMessage(request, sender, sendResponse) {
     return true;
   }
 
+  if (action === 'ANSWER_QUESTION') {
+    sendResponse(agentEngine.answerQuestion(payload && payload.answer));
+    return true;
+  }
+
   if (action === 'CLEAR_HISTORY') {
     agentEngine.clearHistory();
     sendResponse({ success: true });
@@ -332,48 +718,124 @@ function routeMessage(request, sender, sendResponse) {
   return true;
 }
 
-/**
- * Pick the tab to automate.
- *
- * The focused tab wins when it is automatable. When it is not — most often because the user
- * is sitting on chrome://extensions — we fall back to another tab in the window, but that
- * substitution is announced loudly. Silently driving a page the user is not looking at is
- * confusing enough that it reads as a bug.
- */
-async function getActiveTab() {
-  const focused = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0] || null;
-  if (focused && isValidWebTab(focused)) return focused;
-
-  if (focused) {
-    Logger.warn('Background', `[TAB_NOT_AUTOMATABLE] The focused tab (${focused.url || 'unknown URL'}) cannot be automated — browsers block extensions from scripting internal pages. Looking for another tab.`);
-  }
-
-  const validTab =
-    (await chrome.tabs.query({ active: true })).find(isValidWebTab) ||
-    (await chrome.tabs.query({ currentWindow: true })).find(isValidWebTab) ||
-    null;
-
-  if (validTab) {
-    Logger.warn('Background', `[TAB_SUBSTITUTED] Running against tab [${validTab.id}] (${validTab.url}) instead, because the focused tab cannot be scripted. Switch to the page you want automated if this is not it.`);
-  }
-  return validTab;
+/** Bring a tab to the front of its window, so automation is never invisible to the user. */
+function activateTab(tabId) {
+  return new Promise((resolve) => {
+    if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.update) return resolve();
+    chrome.tabs.update(tabId, { active: true }, () => {
+      lastRuntimeError();
+      resolve();
+    });
+  });
 }
 
-function isValidWebTab(tab) {
-  if (!tab || !tab.url) return false;
-  const url = tab.url.toLowerCase();
+/**
+ * Pick the tab to automate, WITHIN the requesting panel's own window.
+ *
+ * Whatever this returns is the tab the user will watch the agent work in, so it must be a tab
+ * they can actually SEE: either the one already in front of them, or one opened right next to
+ * it. It deliberately never reaches for some other tab they happen to have open - see the
+ * comment on the final fallback below.
+ */
+async function getActiveTab(windowId) {
+  const session = windowId !== undefined ? sessions.get(windowId) : undefined;
+  // THIS requested window's own group - the session may cover more than one window
+  // (openNewWindow), and each has its own separate tab group.
+  const scoutFoxGroupId = session && typeof windowId === 'number' ? session.engine.groupIdForWindow(windowId) : null;
 
-  if (url.includes('chromewebstore.google.com') || url.includes('chrome.google.com/webstore')) {
-    return false;
+  // 1. ALWAYS prioritize the currently focused active tab WITHIN THIS WINDOW - never whichever
+  // window happens to be globally OS-focused, which could belong to a different session.
+  const focused = typeof windowId === 'number'
+    ? (await chrome.tabs.query({ active: true, windowId }))[0] || null
+    : (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0] || null;
+
+  if (focused && isValidWebTab(focused)) {
+    return focused;
   }
 
-  return !url.startsWith('chrome://') && 
-         !url.startsWith('chrome-extension://') && 
-         !url.startsWith('chrome-search://') && 
-         !url.startsWith('chrome-untrusted://') && 
-         !url.startsWith('edge://') && 
-         !url.startsWith('about:') && 
-         !url.startsWith('view-source:') && 
-         !url.startsWith('devtools:') && 
-         !url.startsWith('data:');
+  // 2. A tab already inside THIS session's own ScoutFox group is fair game - that group IS this
+  // session's sandbox, so a tab in it is one the agent itself put there. Bring it to the front
+  // first: it is not the tab the user is looking at right now, and silently driving a
+  // background tab is exactly what made a finished run look like nothing had happened.
+  if (scoutFoxGroupId && typeof chrome.tabs.query === 'function') {
+    try {
+      const groupTabs = await chrome.tabs.query({ groupId: scoutFoxGroupId });
+      const validInGroup = groupTabs.find(isValidWebTab);
+      if (validInGroup) {
+        Logger.info('Background', `[TAB_REFOCUSED] Bringing this session's own tab [${validInGroup.id}] (${validInGroup.url}) to the front to run the task where it can be seen.`);
+        await activateTab(validInGroup.id);
+        return validInGroup;
+      }
+    } catch (_) {}
+  }
+
+  if (focused) {
+    Logger.warn('Background', `[TAB_NOT_AUTOMATABLE] The focused tab (${focused.url || 'unknown URL'}) cannot be automated — browsers block extensions from scripting internal pages. Opening a fresh tab next to it instead.`);
+  }
+
+  // 3. Open a fresh tab immediately to the RIGHT of the tab the user is on, and run there.
+  //
+  // This deliberately replaces the old [TAB_SUBSTITUTED] behaviour, which searched the window
+  // for any scriptable tab and ran against the first one it found, in tab-strip order, without
+  // ever activating it. Two problems, both reported by the user: the run was invisible (they
+  // sat on chrome://newtab watching nothing while the agent drove a tab several positions
+  // away), and the tab it picked was whatever they happened to have open - their mail, a
+  // half-filled form - which the agent would then start clicking around in. A tab the user
+  // opened for their own purposes is theirs; the agent gets its own, right where they can see it.
+  Logger.info('Background', '[AUTO_CREATE_TAB] Opening a fresh tab to https://www.google.com for this task.');
+  const newTab = await new Promise((resolve) => {
+    if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.create) {
+      const createOpts = { url: 'https://www.google.com', active: true };
+      if (typeof windowId === 'number') createOpts.windowId = windowId;
+      // Right beside the tab it was launched from, rather than appended to the far end of the
+      // strip where the user has to go hunting for it.
+      if (focused && typeof focused.index === 'number') createOpts.index = focused.index + 1;
+      chrome.tabs.create(createOpts, (t) => {
+        lastRuntimeError();
+        resolve(t);
+      });
+    } else {
+      resolve({ id: 999, url: 'https://www.google.com' });
+    }
+  });
+
+  // Group it and show the panel on it BEFORE handing it back, in that order. A brand-new tab
+  // has the panel disabled (boot disables it everywhere - see the setOptions comment at the top
+  // of this file), and onActivated disables it again for any tab outside the group, so without
+  // this the panel would vanish the moment this tab came to the front. ensureScoutFoxGroup is
+  // idempotent, so startTask calling it again immediately after is a no-op.
+  if (session && session.engine.ensureScoutFoxGroup) {
+    try {
+      await session.engine.ensureScoutFoxGroup(newTab.id);
+    } catch (err) {
+      Logger.warn('Background', '[TAB_SANDBOX_ERROR] Could not group the freshly opened tab', err);
+    }
+    if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setOptions) {
+      chrome.sidePanel.setOptions({ tabId: newTab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
+        lastRuntimeError();
+      });
+    }
+  }
+
+  if (session && session.engine.waitForTabComplete) {
+    await session.engine.waitForTabComplete(newTab.id, 4000);
+  }
+
+  return newTab;
+}
+
+/**
+ * Is this tab one the agent can actually script?
+ *
+ * Delegates to describeRestrictedUrl() (agentEngine.js), which already covers the Chrome Web
+ * Store and file:/view-source:/devtools:/data: pages that this check used to miss - it only
+ * ever recognised chrome://, chrome-extension://, edge:// and about:. A tab sitting on the Web
+ * Store or a file:// page slipped through as "valid", and the script injection that followed
+ * failed immediately anyway; this just makes the earlier check agree with the one that
+ * actually has to inject into the page. Two separate lists for "can this tab be scripted" were
+ * always going to drift apart - this makes describeRestrictedUrl the single source of truth.
+ */
+function isValidWebTab(tab) {
+  if (!tab || !tab.url) return false;
+  return describeRestrictedUrl(tab.url) === null;
 }

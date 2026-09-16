@@ -41,6 +41,23 @@ function extractTextFromLLMResponse(data) {
   // 3. Direct text fields: data.response, data.text, data.message, data.output
   if (typeof data.response === 'string') return data.response;
   if (typeof data.text === 'string') return data.text;
+  // 3b. Ollama /api/chat format: data.message = { role, content, thinking }
+  // This must be tested BEFORE the `typeof data.message === 'string'` check below, which
+  // never matches because Ollama sends an object. Without this branch every single Ollama
+  // response fell through all the way to `return ''`, so the model generated a perfectly
+  // good answer for 30 seconds and the agent saw an empty string and burned a step.
+  // Thinking models (qwen3, gemma3, deepseek-r1) split their output: reasoning goes to
+  // `thinking` and the real answer to `content`. If generation is cut short by num_predict
+  // the model can still be mid-reasoning, leaving `content` empty — fall back to `thinking`
+  // so the JSON the model was building is still recoverable by the parser.
+  if (data.message && typeof data.message === 'object') {
+    if (typeof data.message.content === 'string' && data.message.content.trim()) {
+      return data.message.content;
+    }
+    if (typeof data.message.thinking === 'string' && data.message.thinking.trim()) {
+      return data.message.thinking;
+    }
+  }
   if (typeof data.message === 'string') return data.message;
   if (typeof data.output === 'string') return data.output;
 
@@ -50,6 +67,44 @@ function extractTextFromLLMResponse(data) {
   }
 
   return '';
+}
+
+// Models that rejected the `think` field once. Cached so the fallback retry is paid at most
+// once per model per service-worker lifetime.
+const OLLAMA_THINK_UNSUPPORTED = new Set();
+
+/** settings.apiKey wins if set, else the provider's own saved key. */
+function getApiKey(settings, provider) {
+  return (settings.apiKey || settings.providerConfigs?.[provider]?.apiKey || '').trim();
+}
+
+/** Strip a trailing slash and guarantee the base URL ends with /v1. */
+function withV1(baseUrl) {
+  const trimmed = baseUrl.replace(/\/$/, '');
+  return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`;
+}
+
+/** OpenAI-shaped chat messages: an explicit system message plus the turns as-is. */
+function toOpenAIMessages(messages, systemPrompt) {
+  return [{ role: 'system', content: systemPrompt }, ...messages.map(m => ({ role: m.role, content: m.content }))];
+}
+
+/** Claude-shaped chat messages: no system message, every non-assistant role folds to 'user'. */
+function toClaudeMessages(messages) {
+  return messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+}
+
+/** Wire-image headers AgentRouter expects on every request (Content-Type added by POST callers). */
+function agentRouterHeaders(apiKey) {
+  return {
+    'Authorization': `Bearer ${apiKey}`,
+    'x-api-key': apiKey,
+    'User-Agent': 'claude-cli/2.1.158 (external, sdk-cli)',
+    'x-app': 'cli',
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
+    'anthropic-dangerous-direct-browser-access': 'true'
+  };
 }
 
 export const ApiClients = {
@@ -67,18 +122,18 @@ export const ApiClients = {
     const dispatch = () => {
       switch (provider) {
         case 'openrouter':
-          return this.callOpenRouter(settings, messages, systemPrompt);
+          return this.callOpenRouter(settings, messages, systemPrompt, options);
         case 'agent_router':
-          return this.callAgentRouter(settings, messages, systemPrompt);
+          return this.callAgentRouter(settings, messages, systemPrompt, options);
         case 'ollama':
-          return this.callOllama(settings, messages, systemPrompt);
+          return this.callOllama(settings, messages, systemPrompt, options);
         case 'openai_compatible':
         case 'openai':
-          return this.callOpenAI(settings, messages, systemPrompt);
+          return this.callOpenAI(settings, messages, systemPrompt, options);
         case 'anthropic':
-          return this.callAnthropic(settings, messages, systemPrompt);
+          return this.callAnthropic(settings, messages, systemPrompt, options);
         case 'gemini':
-          return this.callGemini(settings, messages, systemPrompt);
+          return this.callGemini(settings, messages, systemPrompt, options);
         default:
           throw new Error(`Unsupported LLM provider: ${provider}`);
       }
@@ -124,7 +179,7 @@ export const ApiClients = {
    */
   async fetchAvailableModels(settings, forceRefresh = false) {
     const provider = settings.provider || 'gemini';
-    const apiKey = (settings.apiKey || settings.providerConfigs?.[provider]?.apiKey || '').trim();
+    const apiKey = getApiKey(settings, provider);
     const apiKeyTag = apiKey ? apiKey.slice(-6) : 'none';
     const cacheKey = `${provider}_${settings.baseUrl || 'default'}_${apiKeyTag}`;
 
@@ -169,19 +224,9 @@ export const ApiClients = {
         if (models.length === 0) models = this.getFallbackModels('ollama');
         Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from Ollama`);
       } else if (provider === 'agent_router') {
-        const rawBaseUrl = (settings.baseUrl || 'https://agentrouter.org/v1').replace(/\/$/, '');
-        const baseUrl = rawBaseUrl.endsWith('/v1') ? rawBaseUrl : `${rawBaseUrl}/v1`;
+        const baseUrl = withV1(settings.baseUrl || 'https://agentrouter.org/v1');
         const url = `${baseUrl}/models`;
-
-        const headers = {
-          'Authorization': `Bearer ${apiKey}`,
-          'x-api-key': apiKey,
-          'User-Agent': 'claude-cli/2.1.158 (external, sdk-cli)',
-          'x-app': 'cli',
-          'anthropic-version': '2023-06-01',
-          'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
-          'anthropic-dangerous-direct-browser-access': 'true'
-        };
+        const headers = agentRouterHeaders(apiKey);
 
         const res = await fetch(url, { headers });
         const elapsed = Date.now() - startTime;
@@ -195,8 +240,7 @@ export const ApiClients = {
         }
         Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from AgentRouter`);
       } else if (provider === 'openai' || provider === 'openai_compatible') {
-        const baseUrl = (settings.baseUrl || 'https://api.openai.com').replace(/\/$/, '');
-        const url = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+        const url = `${withV1(settings.baseUrl || 'https://api.openai.com')}/models`;
         const headers = {};
         if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
@@ -277,7 +321,7 @@ export const ApiClients = {
         return ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'];
       case 'openai':
       case 'openai_compatible':
-        return ['gpt-4o', 'gpt-4o-mini', 'llama-3.1-70b-versatile'];
+        return ['gpt-4o', 'gpt-4o-mini', 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
       default:
         return ['gemini-2.0-flash', 'gemini-1.5-flash', 'qwen2.5:14b', 'gpt-4o-mini'];
     }
@@ -287,45 +331,31 @@ export const ApiClients = {
    * Dedicated AgentRouter Client (https://agentrouter.org)
    * Emulates Claude CLI wire image headers and extracts response text using universal payload extractor.
    */
-  async callAgentRouter(settings, messages, systemPrompt) {
-    const rawBaseUrl = (settings.baseUrl || 'https://agentrouter.org/v1').replace(/\/$/, '');
-    const baseUrl = rawBaseUrl.endsWith('/v1') ? rawBaseUrl : `${rawBaseUrl}/v1`;
-    const apiKey = (settings.apiKey || settings.providerConfigs?.agent_router?.apiKey || '').trim();
+  async callAgentRouter(settings, messages, systemPrompt, options = {}) {
+    const baseUrl = withV1(settings.baseUrl || 'https://agentrouter.org/v1');
+    const apiKey = getApiKey(settings, 'agent_router');
     const startTime = Date.now();
 
     if (!apiKey) {
       throw new Error('AgentRouter API Key is missing. Please enter your AgentRouter API Key in Settings and click Save Settings.');
     }
 
-    const formattedMessages = messages.map(m => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.content
-    }));
-
+    const formattedMessages = toClaudeMessages(messages);
     const model = settings.model || 'claude-3-5-sonnet';
-
-    const headers = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-      'x-api-key': apiKey,
-      'User-Agent': 'claude-cli/2.1.158 (external, sdk-cli)',
-      'x-app': 'cli',
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    };
+    const headers = { 'Content-Type': 'application/json', ...agentRouterHeaders(apiKey) };
 
     try {
       // Attempt 1: Anthropic Messages endpoint
       const messagesUrl = `${baseUrl}/messages`;
       const response = await fetch(messagesUrl, {
         method: 'POST',
+        signal: options.signal || null,
         headers,
         body: JSON.stringify({
           model,
           system: systemPrompt,
           messages: formattedMessages,
-          max_tokens: 1024,
+          max_tokens: Number(settings.maxTokens) > 0 ? Number(settings.maxTokens) : 8192,
           temperature: settings.temperature ?? 0.1
         })
       });
@@ -356,6 +386,7 @@ export const ApiClients = {
 
       const resp2 = await fetch(completionsUrl, {
         method: 'POST',
+        signal: options.signal || null,
         headers,
         body: JSON.stringify({
           model,
@@ -386,19 +417,16 @@ export const ApiClients = {
   /**
    * OpenRouter API Client
    */
-  async callOpenRouter(settings, messages, systemPrompt) {
+  async callOpenRouter(settings, messages, systemPrompt, options = {}) {
     const url = 'https://openrouter.ai/api/v1/chat/completions';
-    const apiKey = (settings.apiKey || settings.providerConfigs?.openrouter?.apiKey || '').trim();
+    const apiKey = getApiKey(settings, 'openrouter');
     const startTime = Date.now();
 
     if (!apiKey) {
       throw new Error('OpenRouter API Key is missing. Please enter your OpenRouter API Key in Settings and click Save Settings.');
     }
 
-    const formattedMessages = [
-      { role: 'system', content: systemPrompt },
-      ...messages.map(m => ({ role: m.role, content: m.content }))
-    ];
+    const formattedMessages = toOpenAIMessages(messages, systemPrompt);
 
     const headers = {
       'Content-Type': 'application/json',
@@ -416,6 +444,7 @@ export const ApiClients = {
     try {
       const response = await fetch(url, {
         method: 'POST',
+        signal: options.signal || null,
         headers,
         body: JSON.stringify(body)
       });
@@ -442,48 +471,114 @@ export const ApiClients = {
 
   /**
    * Ollama API Client
+   *
+   * Local models need considerably more scaffolding than hosted ones. Three settings here
+   * are the difference between a 9B model driving the browser and it doing nothing at all:
+   *
+   *   think:false  — every current local agent model (qwen3.x, gemma3/4, deepseek-r1) ships
+   *                  with reasoning ON. Ollama routes that reasoning into `message.thinking`
+   *                  and leaves `message.content` empty until it finishes. A 9B model can
+   *                  spend 30s+ deliberating over a 120-element page and still be mid-thought
+   *                  when num_predict runs out, yielding an empty answer. We do our own
+   *                  reasoning in the prompt, so native thinking buys nothing and costs the
+   *                  entire step. Not every model accepts the flag, so a rejection is cached
+   *                  and the call retried once without it.
+   *   num_ctx      — Ollama defaults to a 4096-token context REGARDLESS of what the model
+   *                  supports (qwen3.5:9b advertises 262144). A page snapshot plus history
+   *                  overflows that easily, and llama.cpp truncates from the FRONT — which
+   *                  silently deletes the system prompt and the goal, so the model no longer
+   *                  knows it is a browser agent or what it was asked to do. Nothing is
+   *                  logged when this happens; the output just turns to garbage.
+   *   format:json  — constrains decoding to valid JSON at the sampler. This is far more
+   *                  reliable than asking a small model to emit JSON and then repairing the
+   *                  result, and it removes the prose-before-JSON failure mode entirely.
    */
-  async callOllama(settings, messages, systemPrompt) {
+  async callOllama(settings, messages, systemPrompt, options = {}) {
     const baseUrl = (settings.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
     const url = `${baseUrl}/api/chat`;
+    const model = settings.model || 'qwen2.5:14b';
     const startTime = Date.now();
 
-    const formattedMessages = [
-      { role: 'system', content: systemPrompt },
-      ...messages.map(m => ({ role: m.role, content: m.content }))
-    ];
+    const formattedMessages = toOpenAIMessages(messages, systemPrompt);
 
-    const body = {
-      model: settings.model || 'qwen2.5:14b',
-      messages: formattedMessages,
-      stream: false,
-      options: { temperature: settings.temperature ?? 0.1 }
+    const numCtx = Number(settings.ollamaNumCtx) > 0 ? Number(settings.ollamaNumCtx) : 8192;
+    const numPredict = settings.ollamaNumPredict !== undefined && settings.ollamaNumPredict !== null
+      ? (Number(settings.ollamaNumPredict) > 0 ? Number(settings.ollamaNumPredict) : undefined)
+      : undefined;
+
+    const buildBody = (withThink) => {
+      const optionsObj = {
+        temperature: settings.temperature ?? 0.1,
+        num_ctx: numCtx
+      };
+      if (numPredict !== undefined) {
+        optionsObj.num_predict = numPredict;
+      }
+      const body = {
+        model,
+        messages: formattedMessages,
+        stream: false,
+        options: optionsObj
+      };
+      if (withThink) body.think = false;
+      if (options.json) body.format = 'json';
+      return body;
     };
 
+    const post = async (withThink) => fetch(url, {
+      method: 'POST',
+      signal: options.signal || null,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildBody(withThink))
+    });
+
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
+      let sendThink = !OLLAMA_THINK_UNSUPPORTED.has(model);
+      let response = await post(sendThink);
+
+      // Older builds, and models with no reasoning mode, reject the `think` field outright.
+      // Remember that for the rest of the session so only the first call pays for the retry.
+      if (!response.ok && sendThink && (response.status === 400 || response.status === 422)) {
+        const probe = await response.clone().text().catch(() => '');
+        if (/think/i.test(probe)) {
+          OLLAMA_THINK_UNSUPPORTED.add(model);
+          Logger.info('ApiClients', `[OLLAMA_THINK] Model [${model}] does not accept "think" — retrying without it and skipping the flag from now on.`);
+          sendThink = false;
+          response = await post(false);
+        }
+      }
 
       const elapsed = Date.now() - startTime;
 
       if (!response.ok) {
         const errText = await response.text();
         if (response.status === 404) {
-          throw new Error(`Model "${settings.model}" not found in Ollama. Please run "ollama pull ${settings.model}" in terminal.`);
+          throw new Error(`Model "${model}" not found in Ollama. Please run "ollama pull ${model}" in terminal.`);
         }
         throw new Error(`Ollama API error (${response.status}): ${errText}`);
       }
 
       const data = await response.json();
       const content = extractTextFromLLMResponse(data);
+
+      // Truncation is the most common silent failure on a local model, and Ollama reports it
+      // plainly in done_reason. Surfacing it turns "the agent behaved oddly" into a one-line
+      // instruction to raise num_predict.
+      if (data && data.done_reason === 'length') {
+        Logger.warn('ApiClients', `[OLLAMA_TRUNCATED] Model [${model}] hit the ${numPredict}-token generation cap mid-answer. The reply is incomplete; raise ollamaNumPredict if this repeats.`);
+      }
+      if (data && data.prompt_eval_count > numCtx * 0.9) {
+        Logger.warn('ApiClients', `[OLLAMA_CTX_PRESSURE] Prompt used ${data.prompt_eval_count} of ${numCtx} context tokens. Ollama truncates from the front, which drops the system prompt first — raise ollamaNumCtx.`);
+      }
+      if (!content && data && data.message && typeof data.message === 'object') {
+        Logger.warn('ApiClients', `[OLLAMA_EMPTY] Model [${model}] returned no usable text (done_reason=${data.done_reason || 'unknown'}). Keys present on message: ${Object.keys(data.message).join(', ') || 'none'}.`);
+      }
+
       Logger.info('ApiClients', `[NETWORK] 200 OK (${elapsed}ms) - Output length: ${content.length} chars`);
       return content;
     } catch (err) {
       Logger.error('OllamaClient', `[NETWORK] Failed connection to Ollama at ${url}`, err.message);
-      if (err.message.includes('not found in Ollama')) throw err;
+      if (err.message.includes('not found in Ollama') || err.message.startsWith('Ollama API error')) throw err;
       throw new Error(`Cannot connect to Ollama at ${url}. Ensure Ollama is running ('OLLAMA_ORIGINS="*" ollama serve'). Details: ${err.message}`);
     }
   },
@@ -491,9 +586,9 @@ export const ApiClients = {
   /**
    * Google Gemini API Client
    */
-  async callGemini(settings, messages, systemPrompt) {
+  async callGemini(settings, messages, systemPrompt, options = {}) {
     const model = settings.model || 'gemini-1.5-flash';
-    const apiKey = (settings.apiKey || settings.providerConfigs?.gemini?.apiKey || '').trim();
+    const apiKey = getApiKey(settings, 'gemini');
     const startTime = Date.now();
 
     if (!apiKey) {
@@ -516,6 +611,7 @@ export const ApiClients = {
     try {
       const response = await fetch(url, {
         method: 'POST',
+        signal: options.signal || null,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
@@ -543,20 +639,17 @@ export const ApiClients = {
   /**
    * OpenAI & OpenAI-compatible Client
    */
-  async callOpenAI(settings, messages, systemPrompt) {
+  async callOpenAI(settings, messages, systemPrompt, options = {}) {
     const provider = settings.provider || 'openai';
     let defaultBase = 'https://api.openai.com';
     if (provider === 'openai_compatible') defaultBase = 'https://api.groq.com/openai/v1';
 
-    const baseUrl = (settings.baseUrl || defaultBase).replace(/\/$/, '');
-    const apiKey = (settings.apiKey || settings.providerConfigs?.[provider]?.apiKey || '').trim();
-    const url = baseUrl.endsWith('/v1') ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
+    const baseUrl = withV1(settings.baseUrl || defaultBase);
+    const apiKey = getApiKey(settings, provider);
+    const url = `${baseUrl}/chat/completions`;
     const startTime = Date.now();
 
-    const formattedMessages = [
-      { role: 'system', content: systemPrompt },
-      ...messages.map(m => ({ role: m.role, content: m.content }))
-    ];
+    const formattedMessages = toOpenAIMessages(messages, systemPrompt);
 
     const headers = { 'Content-Type': 'application/json' };
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
@@ -570,6 +663,7 @@ export const ApiClients = {
     try {
       const response = await fetch(url, {
         method: 'POST',
+        signal: options.signal || null,
         headers,
         body: JSON.stringify(body)
       });
@@ -594,34 +688,35 @@ export const ApiClients = {
   /**
    * Anthropic Claude API Client
    */
-  async callAnthropic(settings, messages, systemPrompt) {
+  async callAnthropic(settings, messages, systemPrompt, options = {}) {
     const url = 'https://api.anthropic.com/v1/messages';
-    const apiKey = (settings.apiKey || settings.providerConfigs?.anthropic?.apiKey || '').trim();
+    const apiKey = getApiKey(settings, 'anthropic');
     const startTime = Date.now();
 
     if (!apiKey) {
       throw new Error('Anthropic Claude API Key is missing. Please enter your API Key in Settings.');
     }
 
-    const formattedMessages = messages.map(m => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.content
-    }));
+    const formattedMessages = toClaudeMessages(messages);
 
     try {
       const response = await fetch(url, {
         method: 'POST',
+        signal: options.signal || null,
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': apiKey,
           'anthropic-version': '2023-06-01',
-          'dangerously-allow-browser': 'true'
+          // The real header. `dangerously-allow-browser` is the JS SDK's client OPTION name,
+          // not a header, and sending it made every request fail CORS preflight because it
+          // is not in Anthropic's Access-Control-Allow-Headers.
+          'anthropic-dangerous-direct-browser-access': 'true'
         },
         body: JSON.stringify({
           model: settings.model || 'claude-3-5-sonnet-20241022',
           system: systemPrompt,
           messages: formattedMessages,
-          max_tokens: 1024,
+          max_tokens: Number(settings.maxTokens) > 0 ? Number(settings.maxTokens) : 8192,
           temperature: settings.temperature ?? 0.1
         })
       });

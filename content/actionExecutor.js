@@ -5,6 +5,8 @@
  */
 
 (function() {
+  const ACCENT_COLOR = '#a85f34'; // Studio Mono copper accent
+
   class ActionExecutor {
     constructor() {
       this.badgeContainer = null;
@@ -39,7 +41,7 @@
         badge.style.position = 'absolute';
         badge.style.top = `${rect.top + window.scrollY}px`;
         badge.style.left = `${rect.left + window.scrollX}px`;
-        badge.style.backgroundColor = '#a85f34'; // Studio Mono copper accent
+        badge.style.backgroundColor = ACCENT_COLOR;
         badge.style.color = '#ffffff';
         badge.style.fontFamily = 'monospace, sans-serif';
         badge.style.fontSize = '11px';
@@ -70,7 +72,7 @@
      * Re-resolve element using Stable Locator descriptors to prevent stale index execution
      */
     resolveElement(elementId) {
-      const compressor = window.domCompressor || window.domCompressorInstance;
+      const compressor = window.domCompressor;
       const liveNode = compressor ? compressor.getElement(elementId) : null;
 
       // 1. Live Node Reference (if still attached to DOM)
@@ -152,8 +154,7 @@
           return { success: true, message: 'Going forward' };
         case 'read_page_text':
         case 'extract_page_text': {
-          const compressor = window.domCompressor || window.domCompressorInstance || (window.DOMCompressor ? new window.DOMCompressor() : null);
-          const pageText = compressor ? compressor.extractPageText() : (document.body ? document.body.innerText : '');
+          const pageText = window.domCompressor ? window.domCompressor.extractPageText() : (document.body ? document.body.innerText : '');
           return { success: true, message: `Extracted text snippet (${pageText.length} chars):\n"""\n${pageText.slice(0, 1500)}\n"""` };
         }
         case 'browser_batch':
@@ -230,14 +231,26 @@
         await this.waitForDomQuiet(300, 1500);
       }
 
-      const ok = completed > 0 && (abortedAt === null);
+      // `completed > 0 && abortedAt === null` misreported a batch as a total failure whenever
+      // stopOnError:false was set and ANY step failed - abortedAt is set on the first failure
+      // and never cleared, so a batch where steps 2-5 all succeeded after step 1 failed still
+      // came back success:false. What actually matters is whether every step that was
+      // ATTEMPTED succeeded - which is also true for the stopOnError:true/break-early case,
+      // since only ok:true results exist before the break.
+      const ok = results.length > 0 && results.every((r) => r.ok);
+      const summary = `${completed}/${steps.length} step(s) completed${terminatedBy ? ` (stopped by ${terminatedBy})` : ''}`;
       return {
         success: ok,
         completed,
         total: steps.length,
         results,
         abortedAt,
-        terminatedBy
+        terminatedBy,
+        // Also fixes a second bug: doBrowserBatch previously returned no top-level message/
+        // error at all, so formatMessagesForLLM's "Action Executed Successfully: ${message}" /
+        // "Action Failed: ${error}" showed the model literally the word "undefined".
+        message: ok ? summary : undefined,
+        error: ok ? undefined : `${summary}. First failure: ${(results.find((r) => !r.ok) || {}).error || 'unknown'}`
       };
     }
 
@@ -279,6 +292,26 @@
     }
 
     /**
+     * Short human-readable name for an element, for the action list in the side panel.
+     * "Clicked [7]" tells the user nothing; "Clicked Add to cart" tells them everything.
+     */
+    describeElement(el) {
+      if (!el) return '';
+      const pick = (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, ' ') : '');
+      const candidates = [
+        pick(el.getAttribute && el.getAttribute('aria-label')),
+        pick(el.getAttribute && el.getAttribute('alt')),
+        pick(el.getAttribute && el.getAttribute('title')),
+        pick(el.getAttribute && el.getAttribute('placeholder')),
+        pick(el.innerText || el.textContent),
+        pick(el.getAttribute && el.getAttribute('name')),
+        pick(el.value)
+      ];
+      const label = candidates.find(c => c && c.length > 0) || '';
+      return label.length > 48 ? label.slice(0, 47) + '\u2026' : label;
+    }
+
+    /**
      * Simulate realistic click on element with stable locator re-resolution
      */
     doClick(elementId) {
@@ -290,7 +323,13 @@
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       this.highlightElement(el);
 
-      // Dispatch pre-click pointer & mouse events
+      // Dispatch the realistic hover/press sequence a real pointer produces before the click
+      // itself - some listeners (tooltips, CSS :hover-driven state, press effects) key off
+      // these specifically. 'click' is deliberately NOT in this list: el.click() below already
+      // fires a proper click event on its own (and handles native defaults like toggling a
+      // checkbox or submitting a form), so dispatching a synthetic 'click' here too fired TWO
+      // click events per action - visibly flipping a checkbox on and back off, or double-
+      // submitting a form, in immediate succession.
       ['mouseenter', 'mouseover', 'mousedown', 'mouseup'].forEach(eventType => {
         const event = new MouseEvent(eventType, {
           view: window,
@@ -303,15 +342,11 @@
       if (typeof el.click === 'function') {
         el.click();
       } else {
-        const clickEvent = new MouseEvent('click', {
-          view: window,
-          bubbles: true,
-          cancelable: true
-        });
-        el.dispatchEvent(clickEvent);
+        el.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true }));
       }
 
-      return { success: true, message: `Clicked element [${elementId}]` };
+      const clickLabel = this.describeElement(el);
+      return { success: true, label: clickLabel, message: `Clicked element [${elementId}]${clickLabel ? ` ("${clickLabel}")` : ''}` };
     }
 
     /**
@@ -327,22 +362,91 @@
       this.highlightElement(el);
 
       el.focus();
-      el.value = text;
 
-      // Dispatch input and change events so modern frameworks register changes
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      const applied = this.setFieldValue(el, text);
+      if (!applied.success) {
+        // Report the failure instead of answering success, so the model can pick a different
+        // element or strategy rather than being told a no-op worked and moving on.
+        return { success: false, error: applied.error };
+      }
 
       if (submit) {
         const form = el.closest('form');
         if (form) {
-          form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+          // A dispatched 'submit' Event runs listeners but does NOT submit a native form.
+          // requestSubmit() fires the event AND submits, and honours validation.
+          if (typeof form.requestSubmit === 'function') {
+            form.requestSubmit();
+          } else {
+            form.submit();
+          }
         } else {
-          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+          const enter = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+          el.dispatchEvent(new KeyboardEvent('keydown', enter));
+          el.dispatchEvent(new KeyboardEvent('keypress', enter));
+          el.dispatchEvent(new KeyboardEvent('keyup', enter));
         }
       }
 
-      return { success: true, message: `Typed "${text}" into element [${elementId}]` };
+      const typeLabel = this.describeElement(el);
+      return { success: true, label: typeLabel, submitted: !!submit, message: `Typed "${text}" into element [${elementId}]${typeLabel ? ` ("${typeLabel}")` : ''}` };
+    }
+
+    /**
+     * Put `text` into whatever kind of field `el` actually is.
+     *
+     * Assigning el.value directly is the problem this exists to solve. React installs a value
+     * tracker on every controlled input; on an 'input' event it compares the node's value
+     * against its own tracked value, and a direct assignment updates BOTH, so React concludes
+     * nothing changed and drops the event. The text is visible on screen but never reaches
+     * component state, which is why searches stayed empty and submit buttons stayed disabled.
+     * Going through the prototype's native setter leaves the tracker stale, so the event lands.
+     *
+     * <select> and contenteditable have no meaningful .value semantics here at all and need
+     * their own handling; previously both silently no-opped and reported success.
+     */
+    setFieldValue(el, text) {
+      const tag = (el.tagName || '').toUpperCase();
+      const str = text == null ? '' : String(text);
+
+      if (tag === 'SELECT') {
+        const options = Array.from(el.options || []);
+        const match =
+          options.find(o => o.value === str) ||
+          options.find(o => (o.textContent || '').trim() === str.trim()) ||
+          options.find(o => (o.textContent || '').trim().toLowerCase() === str.trim().toLowerCase());
+        if (!match) {
+          const available = options.map(o => (o.textContent || o.value || '').trim()).filter(Boolean).slice(0, 12);
+          return { success: false, error: `No option matching "${str}" in this dropdown. Available: ${available.join(' | ') || '(none)'}` };
+        }
+        el.value = match.value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true };
+      }
+
+      const isTextField = tag === 'INPUT' || tag === 'TEXTAREA';
+      if (isTextField) {
+        const proto = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (setter && setter.set) {
+          setter.set.call(el, str);
+        } else {
+          el.value = str;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true };
+      }
+
+      if (el.isContentEditable || el.getAttribute('role') === 'textbox') {
+        el.textContent = str;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: str, inputType: 'insertText' }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true };
+      }
+
+      return { success: false, error: `Element <${tag.toLowerCase()}> is not a text field, dropdown or editable region, so it cannot be typed into.` };
     }
 
     /**
@@ -372,7 +476,7 @@
       const origTransition = el.style.transition;
 
       el.style.transition = 'outline 0.2s ease';
-      el.style.outline = '3px solid #a85f34';
+      el.style.outline = `3px solid ${ACCENT_COLOR}`;
 
       setTimeout(() => {
         el.style.outline = origOutline;

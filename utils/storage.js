@@ -9,7 +9,7 @@ export const DEFAULT_PROVIDER_CONFIGS = {
   gemini: { baseUrl: '', apiKey: '', model: 'gemini-1.5-flash' },
   ollama: { baseUrl: 'http://localhost:11434', apiKey: '', model: 'qwen2.5:14b' },
   openai: { baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o-mini' },
-  openai_compatible: { baseUrl: 'https://api.groq.com/openai/v1', apiKey: '', model: 'llama-3.1-70b-versatile' },
+  openai_compatible: { baseUrl: 'https://api.groq.com/openai/v1', apiKey: '', model: 'llama-3.3-70b-versatile' },
   anthropic: { baseUrl: 'https://api.anthropic.com', apiKey: '', model: 'claude-3-5-sonnet-20241022' }
 };
 
@@ -25,6 +25,14 @@ export const DEFAULT_SETTINGS = {
   // answers would otherwise park the agent loop indefinitely, with the keepalive actively
   // preventing Chrome from reclaiming the worker.
   llmTimeoutMs: 120000,
+  // Ollama-only. Ollama caps context at 4096 tokens by default no matter how large a window
+  // the model actually supports, and truncates overflow from the FRONT — silently discarding
+  // the system prompt and the user's goal. 8192 comfortably fits a page snapshot plus history.
+  ollamaNumCtx: 8192,
+  // Ceiling on a single local generation, so a model that starts rambling cannot stall a step.
+  // Exposed in Settings; 8192 is generous enough that a real answer is unlikely to hit it,
+  // while still bounding a model that never stops.
+  ollamaNumPredict: 8192,
   actionDelayMs: 1000,
   showElementBadges: true,
   autoScroll: true,
@@ -38,64 +46,36 @@ export const Storage = {
    */
   async getSettings() {
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(['agent_settings'], (result) => {
-          const loaded = result.agent_settings || {};
-          const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
-          const provider = loaded.provider || DEFAULT_SETTINGS.provider;
-          const activeCfg = mergedConfigs[provider] || {};
-
-          const apiKey = (loaded.apiKey !== undefined && loaded.apiKey !== '') 
-            ? loaded.apiKey 
-            : (activeCfg.apiKey || '');
-          const baseUrl = (loaded.baseUrl !== undefined && loaded.baseUrl !== '') 
-            ? loaded.baseUrl 
-            : (activeCfg.baseUrl || '');
-          const model = (loaded.model !== undefined && loaded.model !== '') 
-            ? loaded.model 
-            : (activeCfg.model || DEFAULT_SETTINGS.model);
-
-          resolve({
-            ...DEFAULT_SETTINGS,
-            ...loaded,
-            provider,
-            apiKey,
-            baseUrl,
-            model,
-            providerConfigs: mergedConfigs
-          });
-        });
-      } else {
-        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('agent_settings') : null;
-        if (saved) {
-          const loaded = JSON.parse(saved);
-          const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
-          const provider = loaded.provider || DEFAULT_SETTINGS.provider;
-          const activeCfg = mergedConfigs[provider] || {};
-
-          const apiKey = (loaded.apiKey !== undefined && loaded.apiKey !== '') 
-            ? loaded.apiKey 
-            : (activeCfg.apiKey || '');
-          const baseUrl = (loaded.baseUrl !== undefined && loaded.baseUrl !== '') 
-            ? loaded.baseUrl 
-            : (activeCfg.baseUrl || '');
-          const model = (loaded.model !== undefined && loaded.model !== '') 
-            ? loaded.model 
-            : (activeCfg.model || DEFAULT_SETTINGS.model);
-
-          resolve({
-            ...DEFAULT_SETTINGS,
-            ...loaded,
-            provider,
-            apiKey,
-            baseUrl,
-            model,
-            providerConfigs: mergedConfigs
-          });
-        } else {
-          resolve(DEFAULT_SETTINGS);
-        }
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+        resolve({ ...DEFAULT_SETTINGS });
+        return;
       }
+      chrome.storage.local.get(['agent_settings'], (result) => {
+        const loaded = result.agent_settings || {};
+        const mergedConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
+        const provider = loaded.provider || DEFAULT_SETTINGS.provider;
+        const activeCfg = mergedConfigs[provider] || {};
+
+        const apiKey = (loaded.apiKey !== undefined && loaded.apiKey !== '')
+          ? loaded.apiKey
+          : (activeCfg.apiKey || '');
+        const baseUrl = (loaded.baseUrl !== undefined && loaded.baseUrl !== '')
+          ? loaded.baseUrl
+          : (activeCfg.baseUrl || '');
+        const model = (loaded.model !== undefined && loaded.model !== '')
+          ? loaded.model
+          : (activeCfg.model || DEFAULT_SETTINGS.model);
+
+        resolve({
+          ...DEFAULT_SETTINGS,
+          ...loaded,
+          provider,
+          apiKey,
+          baseUrl,
+          model,
+          providerConfigs: mergedConfigs
+        });
+      });
     });
   },
 
@@ -135,16 +115,13 @@ export const Storage = {
       model,
       providerConfigs: updatedProviderConfigs
     };
-    
+
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ agent_settings: updated }, () => resolve(updated));
-      } else {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('agent_settings', JSON.stringify(updated));
-        }
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
         resolve(updated);
+        return;
       }
+      chrome.storage.local.set({ agent_settings: updated }, () => resolve(updated));
     });
   },
 
@@ -194,14 +171,13 @@ export const Storage = {
    */
   async getSessions() {
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(['saved_sessions'], (res) => {
-          resolve(res.saved_sessions || []);
-        });
-      } else {
-        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('saved_sessions') : null;
-        resolve(saved ? JSON.parse(saved) : []);
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+        resolve([]);
+        return;
       }
+      chrome.storage.local.get(['saved_sessions'], (res) => {
+        resolve(res.saved_sessions || []);
+      });
     });
   },
 
@@ -221,14 +197,11 @@ export const Storage = {
     const trimmed = sessions.slice(0, 50);
 
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ saved_sessions: trimmed }, () => resolve(trimmed));
-      } else {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('saved_sessions', JSON.stringify(trimmed));
-        }
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
         resolve(trimmed);
+        return;
       }
+      chrome.storage.local.set({ saved_sessions: trimmed }, () => resolve(trimmed));
     });
   },
 
@@ -240,14 +213,11 @@ export const Storage = {
     const updated = sessions.filter(s => s.id !== sessionId);
 
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ saved_sessions: updated }, () => resolve(updated));
-      } else {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('saved_sessions', JSON.stringify(updated));
-        }
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
         resolve(updated);
+        return;
       }
+      chrome.storage.local.set({ saved_sessions: updated }, () => resolve(updated));
     });
   }
 };

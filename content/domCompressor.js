@@ -42,6 +42,13 @@
       const pageHeight = Math.round(document.documentElement.scrollHeight);
       const viewportHeight = window.innerHeight;
 
+      // actionExecutor.js's resolveElement() falls back to this cache (by #id, cssPath, or
+      // tag+text) when an element's live reference has gone stale - but this snapshot object
+      // was only ever returned, never stored on the instance, so that fallback chain has always
+      // read `compressor.elements` as undefined and returned null immediately. Stable-locator
+      // re-resolution has never actually run; only the live-reference tier ever worked.
+      this.elements = formattedElements;
+
       return {
         title,
         url,
@@ -60,7 +67,18 @@
     extractPageText() {
       try {
         // 1. Raw Markdown / Plain Text Pages (e.g. raw.githubusercontent.com)
-        if (window.location.hostname.includes('raw.githubusercontent.com') || (document.contentType && document.contentType.startsWith('text/'))) {
+        //
+        // document.contentType for an ORDINARY rendered HTML page is "text/html" - which also
+        // starts with "text/". A bare .startsWith('text/') check therefore matched every
+        // normal web page, not just genuinely raw text/markdown files, and returned early with
+        // unstructured innerText before ever reaching the targeted-container selection,
+        // heading-aware formatting, or the scroll-viewport-aware extraction below - all of
+        // which never actually ran on a real page as a result. Excluding the structured
+        // document types (html, xml) that also happen to start with "text/" is what makes this
+        // check match only what its own name says: raw markdown/plain text, not rendered HTML.
+        const rawContentType = document.contentType && document.contentType.startsWith('text/')
+          && document.contentType !== 'text/html' && document.contentType !== 'text/xml';
+        if (window.location.hostname.includes('raw.githubusercontent.com') || rawContentType) {
           const rawText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
           return rawText.trim().slice(0, 4500);
         }
@@ -83,7 +101,19 @@
             return rect.bottom >= -200 && rect.top <= vHeight + 1500;
           });
           if (textNodes.length < 10) {
-            textNodes = allTextNodes.slice(0, 90); // Fallback to main content
+            // A sparse match (a handful of huge <p> tags, or a page that leans on <div>s
+            // instead of the semantic tags this selector looks for) can leave fewer than 10
+            // nodes in the whole generous +-window above, even with plenty of on-screen text.
+            // allTextNodes.slice(-50) picked the last 50 nodes in DOCUMENT order regardless of
+            // where the user has scrolled to - on a long docs page that is the footer, not
+            // whatever is actually visible. Sort every node by its distance from the viewport
+            // instead, so the fallback always centers on where the user is looking, not on
+            // wherever the document happens to end.
+            textNodes = allTextNodes
+              .map(node => ({ node, dist: Math.abs(node.getBoundingClientRect().top) }))
+              .sort((a, b) => a.dist - b.dist)
+              .slice(0, 50)
+              .map(entry => entry.node);
           }
         } else {
           textNodes = allTextNodes.slice(0, 90);
@@ -177,20 +207,37 @@
     }
 
     /**
-     * Check if element is visible on screen
+     * Check if element is visible on screen.
+     *
+     * checkVisibility() (Chrome 105+, well below the 111+ this extension's MAIN-world
+     * injection already requires) also walks ANCESTOR opacity/visibility, which a
+     * getComputedStyle(el) read on the element itself cannot see at all.
      */
     isVisible(el) {
       if (!el) return false;
-      
-      const style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-        return false;
+      if (typeof el.checkVisibility === 'function') {
+        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
       }
 
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return false;
 
       return true;
+    }
+
+    /**
+     * A best-effort implicit ARIA role, for elements with no explicit [role] attribute. Not a
+     * full HTML-AAM implementation - just enough for the model to tell a link from a button
+     * from a form field, which the raw tag name alone (e.g. every clickable thing is just
+     * "div" or "span" with [onclick]) does not convey.
+     */
+    computeRole(el, tagName, type) {
+      const explicit = el.getAttribute('role');
+      if (explicit) return explicit;
+      if (tagName === 'input') {
+        return { checkbox: 'checkbox', radio: 'radio', submit: 'button', reset: 'button', button: 'button', range: 'slider', search: 'searchbox' }[type] || 'textbox';
+      }
+      return { a: 'link', button: 'button', select: 'combobox', textarea: 'textbox', option: 'option' }[tagName] || tagName;
     }
 
     /**
@@ -203,11 +250,42 @@
       const ariaLabel = el.getAttribute('aria-label') || '';
       const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
 
-      let desc = `<${tagName}`;
-      if (type) desc += ` type="${type}"`;
-      if (placeholder) desc += ` placeholder="${placeholder}"`;
-      if (ariaLabel) desc += ` label="${ariaLabel}"`;
-      desc += '>';
+      const role = this.computeRole(el, tagName, type);
+      const disabled = !!(el.disabled || el.getAttribute('aria-disabled') === 'true');
+      const checked = (tagName === 'input' && (type === 'checkbox' || type === 'radio'))
+        ? !!el.checked
+        : (el.getAttribute('aria-checked') === 'true');
+      const expandedAttr = el.getAttribute('aria-expanded');
+      const expanded = expandedAttr === null ? undefined : expandedAttr === 'true';
+      // Never surface a password field's actual value - this is a snapshot the model reads and
+      // that later becomes part of the LLM prompt, not a private in-browser value.
+      const isPasswordLike = tagName === 'input' && type === 'password';
+      const valuePreview = (!isPasswordLike && (tagName === 'input' || tagName === 'textarea') && typeof el.value === 'string' && el.value)
+        ? el.value.slice(0, 40)
+        : '';
+
+      let inViewport = true;
+      try {
+        const rect = el.getBoundingClientRect();
+        const vw = (typeof window !== 'undefined' && window.innerWidth) || 0;
+        const vh = (typeof window !== 'undefined' && window.innerHeight) || 0;
+        inViewport = rect.bottom > 0 && rect.right > 0 && rect.top < vh && rect.left < vw;
+      } catch (_) {
+        // A measurement failure must never hide an element the model could otherwise act on.
+        inViewport = true;
+      }
+
+      // tagName/type are already in `formatted`'s own prefix below - only placeholder/aria-label
+      // are worth repeating here, since labelText can drop one of them (e.g. real innerText
+      // wins over an aria-label that says something different, like an icon button).
+      let extraAttrs = '';
+      if (placeholder) extraAttrs += ` placeholder="${placeholder}"`;
+      if (ariaLabel) extraAttrs += ` label="${ariaLabel}"`;
+      if (disabled) extraAttrs += ' disabled';
+      if (checked) extraAttrs += ' checked';
+      if (expanded === true) extraAttrs += ' expanded';
+      else if (expanded === false) extraAttrs += ' collapsed';
+      if (valuePreview) extraAttrs += ` value="${valuePreview}"`;
 
       let labelText = text || ariaLabel || placeholder || 'element';
 
@@ -215,7 +293,7 @@
         index: id,
         tag: tagName,
         text: labelText,
-        role: el.getAttribute('role') || tagName,
+        role,
         cssPath: this.getCssPath(el),
         attrs: {
           id: el.id || '',
@@ -228,9 +306,14 @@
         id,
         tagName,
         type,
+        role,
+        disabled,
+        checked,
+        expanded,
+        inViewport,
         text: labelText,
         locator,
-        formatted: `[${id}] ${tagName}${type ? `[${type}]` : ''} "${labelText}" (${desc})`
+        formatted: `[${id}] ${tagName}${type ? `[${type}]` : ''} "${labelText}"${extraAttrs ? ` (${extraAttrs.trim()})` : ''}${inViewport ? '' : ' [off-screen]'}`
       };
     }
   }
