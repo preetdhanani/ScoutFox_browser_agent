@@ -21,10 +21,8 @@ Thank you for your interest in contributing to **ScoutFox AI Browser Agent**!
 
 ## Development Setup
 
-1. Open Chrome and go to `chrome://extensions`.
-2. Enable **Developer Mode** (top-right toggle).
-3. Click **Load unpacked** and select this directory.
-4. Open any webpage (e.g. `https://google.com`), open the ScoutFox Side Panel, and test your changes!
+See **Quick Setup** in [README.md](README.md) to load the unpacked extension. Once it's loaded,
+open any webpage, open the ScoutFox Side Panel, and test your changes there before opening a PR.
 
 ## Code Guidelines
 * Keep DOM distillation light (<2,500 tokens).

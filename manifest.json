@@ -5,10 +5,10 @@
   "description": "Autonomous AI Browser Agent for Local & Cloud LLMs (Ollama, Gemini, OpenAI, Claude, Groq, OpenRouter, AgentRouter).",
   "permissions": [
     "sidePanel",
-    "activeTab",
     "scripting",
     "storage",
     "tabs",
+    "tabGroups",
     "alarms",
     "declarativeNetRequest"
   ],

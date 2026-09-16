@@ -1,5 +1,5 @@
 # Product Requirement Document (PRD)
-## Strawberry AI Agentic Browser (Chrome Extension MVP)
+## ScoutFox AI Browser Agent (Chrome Extension MVP)
 
 > **Version**: 1.0.0  
 > **Status**: Approved / Draft  
@@ -16,9 +16,9 @@ Existing browser automation agents (like MultiON, Browser-Use, Stagehand) are pr
 3. **Privacy & Cost Concerns**: Users want local, offline web automation without sending sensitive session cookies or DOM content to remote cloud servers.
 
 ### 1.2 The Value Proposition
-**Strawberry Agentic Browser** is a lightweight, privacy-first Manifest V3 Chrome Extension engineered specifically to run reliably on **local small models (8B–32B)** as well as low-cost cloud endpoints. 
+**ScoutFox AI Browser Agent** is a lightweight, privacy-first Manifest V3 Chrome Extension engineered specifically to run reliably on **local small models (8B–32B)** as well as low-cost cloud endpoints. 
 
-By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action Badges**, and a **Fault-Tolerant Action Loop**, Strawberry enables small local models to browse, search, extract data, click, fill forms, and automate complex web tasks directly within Chrome.
+By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action Badges**, and a **Fault-Tolerant Action Loop**, ScoutFox enables small local models to browse, search, extract data, click, fill forms, and automate complex web tasks directly within Chrome.
 
 ---
 

@@ -8,13 +8,48 @@ import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../utils/st
 
 let backgroundPort = null;
 let currentSettings = { ...DEFAULT_SETTINGS };
+
+// This panel's own browser window. One AgentEngine session exists per window (background.js
+// keeps a Map keyed by windowId), so every message this panel sends must say which window it
+// belongs to - resolved once at startup via chrome.windows.getCurrent(), which always reflects
+// whichever window this document is actually rendered in, unlike any Chrome API sender-tab
+// nuance for a side-panel document that would need guessing at.
+let myWindowId = null;
+
+/**
+ * Send a message to the background worker, always tagged with this panel's own windowId so it
+ * can be routed to the correct per-window session rather than whichever one happens to exist.
+ */
+function sendBgMessage(msg, cb) {
+  chrome.runtime.sendMessage({ ...msg, windowId: myWindowId }, cb);
+}
 let currentSessionId = null;
 let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
 let apiKeyFetchDebounce = null;
 let allFetchedModels = [];
+
+// The authoritative selected model.
+//
+// This used to be read back out of the hidden <select id="modelSelect">, but that element
+// only holds options from the last renderModelOptions() call. Assigning a value with no
+// matching <option> silently leaves select.value === '', so switching to a provider whose
+// default was not already in the list persisted model: '' and then fell back to whatever
+// happened to be first in the hardcoded list. Keep the truth here instead of in the DOM.
+let selectedModel = null;
+// Guards the window between clicking send and the background confirming the task started.
+let isSubmittingTask = false;
+// Mirrors the engine status the panel last rendered, so the submit guard knows whether
+// renderState() has taken ownership of the send button.
+let isTaskActive = false;
 let portReconnectAttempts = 0;
 let portReconnectTimer = null;
+// False only for this panel instance's very first connect. Distinguishes opening the panel
+// from reconnecting after Chrome reclaimed the service worker.
+let hasConnectedBefore = false;
+// Terminal state is broadcast more than once for the same run; this keeps the write to one
+// per (session, history length) rather than one per broadcast.
+const savedSessionIds = new Set();
 
 // Out-of-order render guard. The live port and the GET_AGENT_STATE resync are two independent
 // async channels with no ordering guarantee, so a slow resync reply can arrive after a newer
@@ -24,6 +59,13 @@ let portReconnectTimer = null;
 // every update from the fresh worker forever (which would freeze the panel permanently).
 let lastRenderedStateVersion = -1;
 let lastBootId = null;
+
+// Expand/collapse state for the batched action groups. renderState() rewrites the whole
+// timeline on every state broadcast (~7x per step), so this must live OUTSIDE the DOM or a
+// group would snap shut the instant the agent did anything.
+const turnExpandOverride = new Map(); // turn number -> explicit user choice
+const expandedRows = new Set();       // "turn:index" of rows whose reasoning is showing
+
 
 /**
  * Inline icon set — thin-line SVGs matching the Studio Mono system.
@@ -41,6 +83,18 @@ const ICONS = {
   search: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
   star: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l2.6 5.4 5.9.8-4.3 4.2 1 5.9L12 16.3 6.8 19.3l1-5.9-4.3-4.2 5.9-.8z"/></svg>',
   doc: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1.5"/><line x1="7" y1="9" x2="17" y2="9"/><line x1="7" y1="13" x2="17" y2="13"/><line x1="7" y1="17" x2="13" y2="17"/></svg>',
+  globe: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.5 3.8 5.6 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.6-3.8-9s1.3-6.5 3.8-9z"/></svg>',
+  eye: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></svg>',
+  pointer: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M5 3l6.5 17 2.4-6.6 6.6-2.4z"/></svg>',
+  keyboard: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8" stroke-linecap="round"/></svg>',
+  enter: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 5v6a3 3 0 0 1-3 3H5"/><polyline points="9 10 5 14 9 18"/></svg>',
+  scrollIco: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 4 12 8 16 4"/><polyline points="8 20 12 16 16 20"/></svg>',
+  back: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="10 5 4 11 10 17"/><path d="M4 11h10a6 6 0 0 1 6 6v2"/></svg>',
+  code: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 7 4 12 9 17"/><polyline points="15 7 20 12 15 17"/></svg>',
+  network: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10l-3-3M14 8l-3 3"/><path d="M20 16H10l3-3M10 16l3 3"/></svg>',
+  layers: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><polygon points="12 3 21 8 12 13 3 8"/><polyline points="3 13 12 18 21 13"/></svg>',
+  ask: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.2a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.9.7-.9 1.3v.4"/><circle cx="12" cy="16.6" r="0.6" fill="currentColor" stroke="none"/></svg>',
+  chevron: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>',
   aim: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>'
 };
 
@@ -67,6 +121,23 @@ const THEME_ICON = {
 };
 const THEME_LABEL = { system: 'Auto (matches system)', light: 'Light', dark: 'Dark' };
 
+/**
+ * Simple toast notification system
+ */
+function showToast(message, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+
+  container.appendChild(toast);
+  setTimeout(() => {
+    if (toast.parentElement) toast.remove();
+  }, 3000);
+}
+
 function applyTheme(mode) {
   const root = document.documentElement;
   if (mode === 'light' || mode === 'dark') {
@@ -82,14 +153,37 @@ function applyTheme(mode) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  // Resolve which window this panel belongs to BEFORE connecting - the port name and every
+  // message sent from here need it to reach the right per-window session.
+  try {
+    if (typeof chrome !== 'undefined' && chrome.windows && chrome.windows.getCurrent) {
+      const win = await new Promise((resolve) => chrome.windows.getCurrent((w) => resolve(w)));
+      myWindowId = win ? win.id : null;
+    }
+  } catch (err) {
+    reportClientError('sidepanel:resolve-window', err);
+  }
+
+  // Logs are restored via initPortConnection() -> resyncAgentState() -> GET_AGENT_STATE below,
+  // not read directly from storage here. That used to be a second, racing path: the background
+  // worker's own restore of persisted logs is async, so a resync landing before it finished got
+  // back an empty array and this direct read's result was overwritten with it. The background
+  // now awaits its own restore before answering GET_AGENT_STATE (see logger.js/background.js),
+  // so it is the single, complete, authoritative source and this duplicate is no longer needed.
   await loadSettings();
   initTabs();
+  initTimelineInteraction();
   initPortConnection();
   initEventListeners();
   initCombobox();
   await loadSessionHistory();
   await fetchDynamicModels(false);
 });
+
+// Ensure tabs are initialized even if DOMContentLoaded already fired (common in some preview/extension environments)
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+  initTabs();
+}
 
 /**
  * Load settings into form controls with per-provider memory restoration
@@ -104,9 +198,17 @@ async function loadSettings() {
   document.getElementById('providerSelect').value = activeProvider;
   document.getElementById('baseUrlInput').value = providerCfg.baseUrl || currentSettings.baseUrl || '';
   document.getElementById('apiKeyInput').value = providerCfg.apiKey || currentSettings.apiKey || '';
-  document.getElementById('maxStepsInput').value = currentSettings.maxSteps || 25;
-  document.getElementById('delayInput').value = currentSettings.actionDelayMs || 1000;
+  document.getElementById('maxStepsInput').value = currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
+  document.getElementById('delayInput').value = currentSettings.actionDelayMs || DEFAULT_SETTINGS.actionDelayMs;
+  document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || DEFAULT_SETTINGS.ollamaNumPredict;
+  document.getElementById('llmTimeoutInput').value = currentSettings.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
+
+  // Visibility: Hide Ollama settings if not using Ollama
+  const ollamaGroup = document.getElementById('ollamaNumPredictGroup');
+  if (ollamaGroup) {
+    ollamaGroup.style.display = activeProvider === 'ollama' ? 'flex' : 'none';
+  }
 
   updateSelectedModel(providerCfg.model || currentSettings.model);
 }
@@ -119,8 +221,20 @@ function updateSelectedModel(modelName) {
   const selectEl = document.getElementById('modelSelect');
   const customInput = document.getElementById('modelCustomInput');
 
+  selectedModel = modelName || null;
+
   if (labelEl) labelEl.textContent = modelName || 'Select a model...';
-  if (selectEl) selectEl.value = modelName;
+  if (selectEl) {
+    // Keep the backing <select> in step for anything that still reads it, adding the option
+    // when it is absent so the assignment cannot silently no-op.
+    if (modelName && !Array.from(selectEl.options).some(o => o.value === modelName)) {
+      const opt = document.createElement('option');
+      opt.value = modelName;
+      opt.textContent = modelName;
+      selectEl.appendChild(opt);
+    }
+    selectEl.value = modelName || '';
+  }
   updateModelBadge(modelName);
 
   if (modelName === '__custom__') {
@@ -138,9 +252,18 @@ function renderModelOptions(modelsList) {
   const optionsContainer = document.getElementById('modelComboboxOptions');
   if (!optionsContainer) return;
 
+  const activeProvider = document.getElementById('providerSelect')?.value || currentSettings.provider;
+  const savedModel = currentSettings.providerConfigs?.[activeProvider]?.model || currentSettings.model;
+  const currentSelected = (selectEl && selectEl.value) ? selectEl.value : savedModel;
+
+  const combinedList = [...modelsList];
+  if (savedModel && savedModel !== '__custom__' && !combinedList.includes(savedModel)) {
+    combinedList.unshift(savedModel);
+  }
+
   if (selectEl) {
     selectEl.innerHTML = '';
-    modelsList.forEach(m => {
+    combinedList.forEach(m => {
       const opt = document.createElement('option');
       opt.value = m;
       opt.textContent = m;
@@ -152,20 +275,19 @@ function renderModelOptions(modelsList) {
     selectEl.appendChild(customOpt);
   }
 
-  const activeProvider = document.getElementById('providerSelect').value;
-  const currentSelected = selectEl?.value || currentSettings.providerConfigs?.[activeProvider]?.model || currentSettings.model;
-
-  if (modelsList.length === 0) {
+  if (combinedList.length === 0 && savedModel !== '__custom__') {
     optionsContainer.innerHTML = `<div class="subtext-hint" style="padding: 10px; text-align: center;">No matching models found.</div>`;
     return;
   }
 
-  let html = modelsList.map(modelName => {
-    const isSelected = modelName === currentSelected;
+  const activeModel = currentSelected || savedModel || combinedList[0];
+
+  let html = combinedList.map(modelName => {
+    const isSelected = modelName === activeModel;
     return `<div class="combobox-option-item ${isSelected ? 'selected' : ''}" data-value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</div>`;
   }).join('');
 
-  html += `<div class="combobox-option-item custom-option" data-value="__custom__">✏️ Enter custom model name...</div>`;
+  html += `<div class="combobox-option-item custom-option ${activeModel === '__custom__' ? 'selected' : ''}" data-value="__custom__">✏️ Enter custom model name...</div>`;
 
   optionsContainer.innerHTML = html;
 
@@ -178,11 +300,7 @@ function renderModelOptions(modelsList) {
     });
   });
 
-  if (modelsList.length > 0 && !modelsList.includes(currentSelected) && currentSelected !== '__custom__') {
-    updateSelectedModel(modelsList[0]);
-  } else {
-    updateSelectedModel(currentSelected);
-  }
+  updateSelectedModel(activeModel);
 }
 
 function initCombobox() {
@@ -275,25 +393,31 @@ function closeComboboxMenu() {
  */
 async function autoSaveCurrentForm() {
   const provider = document.getElementById('providerSelect').value;
-  const selectVal = document.getElementById('modelSelect').value;
   const customVal = document.getElementById('modelCustomInput').value.trim();
-  const finalModel = (selectVal === '__custom__' && customVal) ? customVal : selectVal;
+  const finalModel = (selectedModel === '__custom__' && customVal) ? customVal : (selectedModel || '');
 
   const apiKey = document.getElementById('apiKeyInput').value.trim();
   const baseUrl = document.getElementById('baseUrlInput').value.trim();
+
+  const previousModel = (currentSettings.providerConfigs && currentSettings.providerConfigs[provider]
+    && currentSettings.providerConfigs[provider].model) || '';
 
   const newSettings = {
     provider,
     baseUrl,
     apiKey,
-    model: finalModel,
-    maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || 25,
-    actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || 1000,
+    // Guard against writing an empty model over a good one. Even with selectedModel as the
+    // source of truth, an empty value here would silently clear the provider's saved choice.
+    model: finalModel || previousModel,
+    maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || DEFAULT_SETTINGS.maxSteps,
+    actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || DEFAULT_SETTINGS.actionDelayMs,
+    ollamaNumPredict: parseInt(document.getElementById('ollamaNumPredictInput').value, 10) || DEFAULT_SETTINGS.ollamaNumPredict,
+    llmTimeoutMs: parseInt(document.getElementById('llmTimeoutInput').value, 10) || DEFAULT_SETTINGS.llmTimeoutMs,
     showElementBadges: document.getElementById('badgesToggle').checked
   };
 
   currentSettings = await Storage.saveSettings(newSettings);
-  updateModelBadge(finalModel);
+  updateModelBadge(newSettings.model);
 }
 
 /**
@@ -316,7 +440,7 @@ async function fetchDynamicModels(forceRefresh = false) {
   };
 
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'FETCH_MODELS', payload: tempSettings }, (res) => {
+    sendBgMessage({ action: 'FETCH_MODELS', payload: tempSettings }, (res) => {
       if (btnFetch) btnFetch.disabled = false;
 
       if (res && res.success && res.models && res.models.length > 0) {
@@ -343,6 +467,8 @@ function updateModelBadge(modelName) {
   const badge = document.getElementById('currentModelBadge');
   if (badge) {
     badge.textContent = modelName || 'Model';
+    // The badge truncates to one line, so the full id has to stay reachable on hover.
+    badge.title = modelName || '';
   }
 }
 
@@ -350,15 +476,26 @@ function initTabs() {
   const navBtns = document.querySelectorAll('.nav-btn');
   const panels = document.querySelectorAll('.tab-panel');
 
+  if (navBtns.length === 0 || panels.length === 0) {
+    console.warn('[Sidepanel] initTabs: Navigation buttons or tab panels not found in DOM.');
+    return;
+  }
+
   navBtns.forEach(btn => {
     btn.addEventListener('click', () => {
       const targetTab = btn.getAttribute('data-tab');
+      if (!targetTab) return;
 
       navBtns.forEach(b => b.classList.remove('active'));
       panels.forEach(p => p.classList.remove('active'));
 
       btn.classList.add('active');
-      document.getElementById(`tab-${targetTab}`).classList.add('active');
+      const targetPanel = document.getElementById(`tab-${targetTab}`);
+      if (targetPanel) {
+        targetPanel.classList.add('active');
+      } else {
+        console.error(`[Sidepanel] Tab panel #${targetTab} not found.`);
+      }
     });
   });
 }
@@ -380,7 +517,17 @@ function connectPort() {
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
   try {
-    backgroundPort = chrome.runtime.connect({ name: 'scoutfox_sidepanel' });
+    // The '_fresh'/plain distinction is kept only for the background worker's own connect log
+    // line - one session exists per window now, and reopening the panel on a window that
+    // already has one (running or finished) always reflects it rather than clearing on a
+    // "genuine open". Deliberately starting over is CLEAR_HISTORY's job, not a side effect of
+    // reconnecting. What actually matters here is windowId, so this panel is routed to ITS OWN
+    // window's session rather than a shared global one - riding in the port name itself is
+    // simple, synchronous, and available the instant the port is created.
+    const base = hasConnectedBefore ? 'scoutfox_sidepanel' : 'scoutfox_sidepanel_fresh';
+    hasConnectedBefore = true;
+    const portName = myWindowId !== null ? `${base}:${myWindowId}` : base;
+    backgroundPort = chrome.runtime.connect({ name: portName });
   } catch (err) {
     reportClientError('sidepanel:port-connect', err);
     setConnectionBanner(true);
@@ -440,7 +587,7 @@ function scheduleReconnect() {
 function resyncAgentState() {
   if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
 
-  chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE' }, (res) => {
+  sendBgMessage({ action: 'GET_AGENT_STATE' }, (res) => {
     if (chrome.runtime.lastError) {
       appendLocalLog('WARN', 'Sidepanel', `[RESYNC_FAILED] Background worker did not answer GET_AGENT_STATE (${chrome.runtime.lastError.message}). Will retry.`);
       setConnectionBanner(true);
@@ -472,7 +619,7 @@ function resyncAgentState() {
 function sendControlMessage(action, done) {
   if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
 
-  chrome.runtime.sendMessage({ action }, (res) => {
+  sendBgMessage({ action }, (res) => {
     if (chrome.runtime.lastError) {
       const msg = chrome.runtime.lastError.message;
       appendLocalLog('ERROR', 'Sidepanel', `[CONTROL_FAILED] ${action} did not reach the background worker (${msg}).`);
@@ -525,7 +672,7 @@ function reportClientError(source, err) {
   const message = (err && err.message) || String(err);
   appendLocalLog('ERROR', 'Sidepanel', `[${source}] ${message}`);
   try {
-    chrome.runtime.sendMessage({
+    sendBgMessage({
       action: 'CLIENT_ERROR',
       payload: { source, message, stack: (err && err.stack) || null }
     }, () => { void chrome.runtime.lastError; });
@@ -546,6 +693,26 @@ function initEventListeners() {
     await Storage.saveSettings({ theme: next });
   });
 
+  const historyToggle = document.getElementById('btnToggleHistory');
+  const historyDrawer = document.getElementById('historyDrawer');
+  const historyClose = document.getElementById('btnCloseHistory');
+
+  if (historyToggle && historyDrawer) {
+    historyToggle.addEventListener('click', async () => {
+      const willOpen = historyDrawer.style.display === 'none';
+      historyDrawer.style.display = willOpen ? 'flex' : 'none';
+      historyToggle.setAttribute('aria-expanded', String(willOpen));
+      if (willOpen) await loadSessionHistory();
+    });
+  }
+
+  if (historyClose && historyDrawer) {
+    historyClose.addEventListener('click', () => {
+      historyDrawer.style.display = 'none';
+      if (historyToggle) historyToggle.setAttribute('aria-expanded', 'false');
+    });
+  }
+
   document.getElementById('btnStartTask').addEventListener('click', startTask);
   document.getElementById('taskInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -564,31 +731,27 @@ function initEventListeners() {
     sendControlMessage('STOP_TASK');
   });
 
-  document.getElementById('btnNewSession').addEventListener('click', () => {
-    sendControlMessage('CLEAR_HISTORY', (ok) => {
-      // Only clear the UI if the background actually cleared its state. Wiping the timeline
-      // regardless used to leave the panel looking empty while the engine still held the
-      // old session — which then reappeared on the next state broadcast.
-      if (!ok) return;
-      currentSessionId = null;
-      const planContainer = document.getElementById('planContainer');
-      if (planContainer) planContainer.style.display = 'none';
-      renderEmptyState();
+
+
+  // API Key visibility toggle
+  const btnToggleKey = document.getElementById('btnToggleKey');
+  if (btnToggleKey) {
+    btnToggleKey.addEventListener('click', () => {
+      const input = document.getElementById('apiKeyInput');
+      if (input) {
+        const isPassword = input.type === 'password';
+        input.type = isPassword ? 'text' : 'password';
+        btnToggleKey.title = isPassword ? 'Hide API Key' : 'Show API Key';
+      }
     });
-  });
+  }
 
-  document.getElementById('btnToggleHistory').addEventListener('click', async () => {
-    const drawer = document.getElementById('historyDrawer');
-    if (drawer.style.display === 'none' || !drawer.style.display) {
-      await loadSessionHistory();
-      drawer.style.display = 'flex';
-    } else {
-      drawer.style.display = 'none';
+  // Auto-save for all number inputs and toggles
+  ['maxStepsInput', 'delayInput', 'ollamaNumPredictInput', 'llmTimeoutInput', 'badgesToggle'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('change', autoSaveCurrentForm);
     }
-  });
-
-  document.getElementById('btnCloseHistory').addEventListener('click', () => {
-    document.getElementById('historyDrawer').style.display = 'none';
   });
 
   document.querySelectorAll('.log-filter-chip').forEach(chip => {
@@ -598,6 +761,17 @@ function initEventListeners() {
       currentActiveLogFilter = chip.getAttribute('data-filter');
       renderFilteredLogs();
     });
+  });
+
+  document.getElementById('btnDownloadLogs').addEventListener('click', () => {
+    const text = rawLogsCache.map(log => `[${log.timestamp}] [${log.level}] [${log.module}] ${log.message}${log.data ? `\nPayload: ${log.data}` : ''}`).join('\n\n');
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `scoutfox-logs-${new Date().toISOString().slice(0,10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   });
 
   document.getElementById('btnCopyLogs').addEventListener('click', () => {
@@ -612,6 +786,20 @@ function initEventListeners() {
   document.getElementById('btnClearLogs').addEventListener('click', () => {
     rawLogsCache = [];
     document.getElementById('logOutput').textContent = '// Logs cleared.';
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.remove(['agent_logs_history'], () => {
+        if (chrome.runtime && chrome.runtime.lastError) void chrome.runtime.lastError;
+      });
+    }
+
+    // The background worker keeps its own in-memory copy of every log entry and rewrites
+    // agent_logs_history from it on the very next log call, regardless of the storage.remove
+    // above. Without telling the worker too, cleared logs silently came back.
+    sendControlMessage('CLEAR_LOGS', (ok) => {
+      if (!ok) {
+        appendLocalLog('WARN', 'Sidepanel', '[CLEAR_LOGS_INCOMPLETE] The background worker did not confirm the clear - it may still hold these logs in memory and rewrite them on its next log event.');
+      }
+    });
   });
 
   document.getElementById('btnFetchModels').addEventListener('click', () => {
@@ -650,11 +838,14 @@ function initEventListeners() {
     document.getElementById('baseUrlInput').value = savedCfg.baseUrl || '';
     document.getElementById('apiKeyInput').value = savedCfg.apiKey || '';
 
+    const modelToSet = savedCfg.model || (DEFAULT_PROVIDER_CONFIGS[provider] ? DEFAULT_PROVIDER_CONFIGS[provider].model : currentSettings.model);
+    updateSelectedModel(modelToSet);
+
     // Update settings object
     currentSettings.provider = provider;
     currentSettings.baseUrl = savedCfg.baseUrl || '';
     currentSettings.apiKey = savedCfg.apiKey || '';
-    if (savedCfg.model) currentSettings.model = savedCfg.model;
+    currentSettings.model = modelToSet;
 
     await autoSaveCurrentForm();
 
@@ -664,7 +855,7 @@ function initEventListeners() {
 
   document.getElementById('btnSaveSettings').addEventListener('click', async () => {
     await autoSaveCurrentForm();
-    alert(`Settings saved! Provider [${currentSettings.provider}] configured with model [${currentSettings.model}].`);
+    showToast(`Settings saved! Provider [${currentSettings.provider}] configured.`);
   });
 
   document.querySelectorAll('.sample-chip').forEach(chip => {
@@ -677,9 +868,29 @@ function initEventListeners() {
 }
 
 async function startTask() {
+  const btn = document.getElementById('btnStartTask');
   const prompt = document.getElementById('taskInput').value.trim();
   if (!prompt) return;
 
+  // Claim synchronously, before the first await. renderState() does disable this button, but
+  // only once a running STATE_UPDATE has made the round trip, and both the click handler and
+  // the Enter key land here directly. The engine guards this too; this half is what stops the
+  // duplicate message being sent at all, and gives immediate visual feedback.
+  if (isSubmittingTask) return;
+  isSubmittingTask = true;
+  if (btn) btn.disabled = true;
+
+  try {
+    await startTaskInner(prompt);
+  } finally {
+    isSubmittingTask = false;
+    // renderState() owns the button from here: it re-disables while the task runs, and
+    // re-enables when it ends. Only release it if the task never got that far.
+    if (btn && !isTaskActive) btn.disabled = false;
+  }
+}
+
+async function startTaskInner(prompt) {
   // Auto-sync form state into Storage before launching task
   await autoSaveCurrentForm();
 
@@ -687,7 +898,7 @@ async function startTask() {
 
   appendLocalLog('INFO', 'Sidepanel', `[TASK_SUBMIT] Sending task to background worker: "${prompt}"`);
 
-  chrome.runtime.sendMessage({ action: 'START_TASK', payload: { prompt } }, (res) => {
+  sendBgMessage({ action: 'START_TASK', payload: { prompt } }, (res) => {
     // Without this check a failed wake-up leaves res undefined and the whole submission
     // vanishes with no alert, no log and no UI change — the task simply never starts.
     if (chrome.runtime.lastError) {
@@ -730,7 +941,12 @@ function showTaskError(message) {
 async function loadSessionHistory() {
   const sessions = await Storage.getSessions();
   const historyBtn = document.getElementById('btnToggleHistory');
-  if (historyBtn) historyBtn.innerHTML = `${ICONS.clock} History (${sessions.length})`;
+  // The word is wrapped so it can be dropped at narrow panel widths, leaving the clock and
+  // the count. Without that the button pushes the status pill past the header edge at 320px.
+  if (historyBtn) {
+    historyBtn.innerHTML = `${ICONS.clock}<span class="history-toggle-label">History</span> (${sessions.length})`;
+    historyBtn.title = `Saved sessions (${sessions.length})`;
+  }
 
   const listContainer = document.getElementById('historySessionsList');
   if (!listContainer) return;
@@ -743,7 +959,7 @@ async function loadSessionHistory() {
   listContainer.innerHTML = sessions.map(session => {
     const isSelected = session.id === currentSessionId;
     return `
-      <div class="history-session-item ${isSelected ? 'active' : ''}" data-id="${session.id}">
+      <div class="history-session-item ${isSelected ? 'active' : ''}" data-id="${session.id}" tabindex="0" role="button">
         <div class="history-item-info">
           <span class="history-item-title">${escapeHtml(session.task || 'Untitled Session')}</span>
           <span class="history-item-meta">${session.timestamp || ''} • ${session.model || ''}</span>
@@ -754,10 +970,13 @@ async function loadSessionHistory() {
   }).join('');
 
   listContainer.querySelectorAll('.history-session-item').forEach(item => {
-    item.addEventListener('click', (e) => {
-      if (e.target.classList.contains('btn-delete-session')) return;
-      const sessionId = item.getAttribute('data-id');
-      loadSelectedSession(sessionId);
+    const open = (e) => {
+      if (e.target.closest('.btn-delete-session')) return;
+      loadSelectedSession(item.getAttribute('data-id'));
+    };
+    item.addEventListener('click', open);
+    item.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); }
     });
   });
 
@@ -771,27 +990,39 @@ async function loadSessionHistory() {
   });
 }
 
+/**
+ * Persist a run once it reaches a terminal state.
+ *
+ * Only terminal states are saved, so a run is written once rather than on every one of the
+ * ~7 state broadcasts per step. The panel still OPENS on a clean timeline (the worker clears
+ * history on a fresh connect); this is what makes that previous run recoverable afterwards
+ * instead of simply lost.
+ */
 async function autoSaveActiveSession(state) {
-  if (!state || !state.task || !state.history || state.history.length === 0) return;
+  if (!state) return;
 
-  if (!currentSessionId) {
-    currentSessionId = `session_${Date.now()}`;
+  const TERMINAL = ['idle', 'stopped', 'complete', 'completed', 'error'];
+  if (!TERMINAL.includes(state.status)) return;
+  if (!state.task) return;
+  if (!Array.isArray(state.history) || state.history.length === 0) return;
+  if (!currentSessionId) return;
+  if (savedSessionIds.has(currentSessionId + ':' + state.history.length)) return;
+
+  savedSessionIds.add(currentSessionId + ':' + state.history.length);
+
+  try {
+    await Storage.saveSession({
+      id: currentSessionId,
+      task: state.task,
+      timestamp: new Date().toLocaleString(),
+      model: currentSettings.model || '',
+      history: state.history,
+      planSteps: state.planSteps || []
+    });
+    await loadSessionHistory();
+  } catch (err) {
+    reportClientError('sidepanel:session-save', err);
   }
-
-  const sessionObj = {
-    id: currentSessionId,
-    task: state.task,
-    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    date: new Date().toLocaleDateString(),
-    history: state.history,
-    planSteps: state.planSteps || [],
-    model: currentSettings.model || 'Model'
-  };
-
-  await Storage.saveSession(sessionObj);
-  const sessions = await Storage.getSessions();
-  const historyBtn = document.getElementById('btnToggleHistory');
-  if (historyBtn) historyBtn.innerHTML = `${ICONS.clock} History (${sessions.length})`;
 }
 
 async function loadSelectedSession(sessionId) {
@@ -800,7 +1031,10 @@ async function loadSelectedSession(sessionId) {
   if (!target) return;
 
   currentSessionId = target.id;
-  document.getElementById('historyDrawer').style.display = 'none';
+  const drawer = document.getElementById('historyDrawer');
+  if (drawer) drawer.style.display = 'none';
+  const toggle = document.getElementById('btnToggleHistory');
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
 
   renderState({
     status: 'idle',
@@ -856,7 +1090,7 @@ function renderState(state) {
     lastRenderedStateVersion = state.stateVersion;
   }
 
-  const { status, stepCount, history, planSteps, currentPhase } = state;
+  const { status, stepCount, history, planSteps, currentPhase, pendingQuestion } = state;
   const isDisconnected = backgroundPort === null;
 
   const statusPill = document.getElementById('statusPill');
@@ -876,16 +1110,24 @@ function renderState(state) {
       : status.charAt(0).toUpperCase() + status.slice(1);
   }
 
-  renderPlanChecklist(planSteps);
+  const sandboxBadge = document.getElementById('sandboxBadge');
+  if (sandboxBadge) {
+    if (state.scoutFoxGroupId) {
+      sandboxBadge.classList.remove('hidden');
+    } else {
+      sandboxBadge.classList.add('hidden');
+    }
+  }
 
   if (status === 'running' || status === 'paused') {
     if (processingBanner) processingBanner.style.display = 'flex';
     if (processingPhaseText) processingPhaseText.textContent = currentPhase || `Processing step ${stepCount}...`;
     
-    const maxSteps = currentSettings.maxSteps || 25;
+    const maxSteps = currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
     const pct = Math.min(100, Math.round(((stepCount || 1) / maxSteps) * 100));
     if (progressBarFill) progressBarFill.style.width = `${pct}%`;
 
+    isTaskActive = true;
     if (controlBar) controlBar.style.display = 'flex';
     if (taskInput) taskInput.disabled = true;
     if (btnStartTask) btnStartTask.disabled = true;
@@ -898,6 +1140,7 @@ function renderState(state) {
       }
     }
   } else {
+    isTaskActive = false;
     if (processingBanner) processingBanner.style.display = 'none';
     if (controlBar) controlBar.style.display = 'none';
     if (taskInput) taskInput.disabled = false;
@@ -911,87 +1154,273 @@ function renderState(state) {
       return;
     }
 
-    let html = '';
-    history.forEach(item => {
-      if (item.type === 'user_goal') {
-        html += `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(item.prompt)}</div>`;
-      } else if (item.type === 'step_start') {
-        html += `
-          <div class="timeline-card">
-            <div class="timeline-header">
-              <span class="step-badge">Step ${item.step}</span>
-              <span>${escapeHtml(item.pageTitle || item.url || '')}</span>
-            </div>
-        `;
-      } else if (item.type === 'agent_response') {
-        if (item.thought) {
-          html += `<div class="thought-text">${escapeHtml(item.thought)}</div>`;
-        }
-        if (item.action) {
-          const actionStr = formatActionPill(item.action);
-          html += `<div class="action-pill">${actionStr}</div>`;
-        }
-      } else if (item.type === 'execution_result') {
-        const cls = item.success ? 'success' : 'error';
-        html += `
-            <div class="result-badge ${cls}">${item.success ? ICONS.check : ICONS.cross} ${escapeHtml(item.message || item.error || '')}</div>
-          </div>
-        `;
-      } else if (item.type === 'error') {
-        html += `
-          <div class="result-badge error" style="margin-top: 8px; padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.5; align-items: flex-start;">
-            ${ICONS.warning}<span><strong>Error Diagnostic:</strong><br>${escapeHtml(item.content)}</span>
-          </div>
-        `;
-      } else if (item.type === 'finish') {
-        html += `
-          <div class="finish-card">
-            <div class="finish-title">${ICONS.complete} Task Complete</div>
-            <div class="finish-body">${formatMarkdownText(item.answer)}</div>
-          </div>
-        `;
-      }
-    });
-
-    timeline.innerHTML = html;
-    timeline.scrollTop = timeline.scrollHeight;
+    // Keep the scroll pinned to the bottom only if the user was already there, so
+    // expanding a row mid-run does not yank the view away from them.
+    const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
+    timeline.innerHTML = renderTurns(history, status, planSteps, currentPhase, pendingQuestion);
+    if (nearBottom) timeline.scrollTop = timeline.scrollHeight;
   }
 }
 
-function renderPlanChecklist(planSteps) {
-  const planContainer = document.getElementById('planContainer');
-  const planItemsList = document.getElementById('planItemsList');
-  const planProgressPill = document.getElementById('planProgressPill');
+/**
+ * Batched action rendering.
+ *
+ * A session is a sequence of turns. Each turn is: the goal you typed, a collapsible group of
+ * one-line action rows showing what the agent actually did, then the answer. While a turn runs
+ * its group is open so you can watch; once it finishes the group collapses to a single summary
+ * line so a long session stays readable. Reasoning hides behind each row until you click it.
+ */
 
-  if (!planContainer || !planItemsList) return;
+/** Split flat history into turns. A turn starts at each user_goal entry. */
+function buildTurns(history) {
+  const turns = [];
+  let cur = null;
+  (history || []).forEach((item, idx) => {
+    if (item.type === 'user_goal') {
+      cur = {
+        turn: item.turn || turns.length + 1,
+        goal: item.prompt,
+        entries: [],
+        answer: null,
+        failed: false,
+        timestamp: item.timestamp || null,
+        isNewRun: !!item.isNewRun
+      };
+      turns.push(cur);
+      return;
+    }
+    if (!cur) {
+      cur = { turn: turns.length + 1, goal: null, entries: [], answer: null, failed: false, timestamp: null, isNewRun: false };
+      turns.push(cur);
+    }
+    if (item.type === 'agent_response' && item.action) {
+      cur.entries.push({ kind: 'action', idx, action: item.action, thought: item.thought || '', outcome: null });
+    } else if (item.type === 'execution_result') {
+      // Attach the outcome to the action row it belongs to.
+      for (let i = cur.entries.length - 1; i >= 0; i--) {
+        if (cur.entries[i].kind === 'action' && !cur.entries[i].outcome) {
+          cur.entries[i].outcome = item;
+          break;
+        }
+      }
+      if (item.success === false) cur.failed = true;
+    } else if (item.type === 'error') {
+      cur.entries.push({ kind: 'fault', idx, content: item.content });
+      cur.failed = true;
+    } else if (item.type === 'user_answer') {
+      cur.entries.push({ kind: 'answer', idx, content: item.content });
+    } else if (item.type === 'finish') {
+      cur.answer = item.answer;
+      cur.answerUnconfirmed = !!item.unconfirmed;
+    }
+  });
+  return turns;
+}
 
-  if (!planSteps || planSteps.length === 0) {
-    planContainer.style.display = 'none';
-    return;
+/** One-line human description of an action: icon, verb, and the thing it acted on. */
+function describeAction(action, outcome) {
+  const label = (outcome && outcome.label) || '';
+  const quote = (t) => `<em>${escapeHtml(String(t).length > 44 ? String(t).slice(0, 43) + '…' : String(t))}</em>`;
+  const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (_) { return u; } };
+
+  switch (action.action) {
+    case 'navigate':      return { icon: ICONS.globe, text: `Opened ${quote(host(action.url || ''))}` };
+    case 'read_page_text':return { icon: ICONS.eye, text: 'Read page text' };
+    case 'click':         return { icon: ICONS.pointer, text: label ? `Clicked ${quote(label)}` : `Clicked element ${escapeHtml(String(action.element_id))}` };
+    case 'type':          return { icon: ICONS.keyboard, text: `Typed ${quote(action.text || '')}${label ? ` into ${quote(label)}` : ''}` };
+    case 'scroll':        return { icon: ICONS.scrollIco, text: `Scrolled ${escapeHtml(action.direction || 'down')}` };
+    case 'go_back':       return { icon: ICONS.back, text: 'Went back' };
+    case 'go_forward':    return { icon: ICONS.back, text: 'Went forward' };
+    case 'execute_js':    return { icon: ICONS.code, text: 'Ran JavaScript' };
+    case 'read_network_requests': return { icon: ICONS.network, text: 'Checked network activity' };
+    case 'browser_batch': return { icon: ICONS.layers, text: `Ran ${(action.steps || []).length} actions in one batch` };
+    case 'open_window':   return { icon: ICONS.globe, text: `Opened a new window at ${quote(host(action.url || ''))}` };
+    case 'ask_user':      return { icon: ICONS.ask, text: `Asked ${quote(action.question || 'a question')}` };
+    case 'press_key':     return { icon: ICONS.keyboard, text: `Pressed ${quote(action.key || 'a key')}` };
+    case 'wait':          return { icon: ICONS.clock, text: `Waited ${escapeHtml(String(action.amount || 1))}s` };
+    default:              return { icon: ICONS.dot, text: escapeHtml(action.action || 'Acted') };
   }
+}
 
-  planContainer.style.display = 'flex';
-  const completedCount = planSteps.filter(s => s.status === 'completed').length;
-  if (planProgressPill) planProgressPill.textContent = `${completedCount}/${planSteps.length} Done`;
+/**
+ * Should this turn's group be open? Explicit user choice always wins. Otherwise: open while
+ * the turn is live so you can watch it, and open if it ended without producing an answer so
+ * the reason is visible. A turn that finished successfully collapses, even if some individual
+ * action failed along the way — recovering from a failed click is normal, not a bad outcome.
+ */
+function isTurnExpanded(turn, isLive, incomplete) {
+  if (turnExpandOverride.has(turn.turn)) return turnExpandOverride.get(turn.turn);
+  return isLive || incomplete;
+}
 
-  planItemsList.innerHTML = planSteps.map((step) => {
-    let icon = ICONS.circle;
-    let cls = 'pending';
-    if (step.status === 'completed') {
-      icon = ICONS.check;
-      cls = 'completed';
-    } else if (step.status === 'in_progress') {
-      icon = ICONS.dot;
-      cls = 'in_progress';
+function renderTurns(history, status, planSteps, currentPhase, pendingQuestion) {
+  const turns = buildTurns(history);
+  const busy = status === 'running' || status === 'paused';
+
+  return turns.map((turn, ti) => {
+    const isLast = ti === turns.length - 1;
+    const isLive = busy && isLast;
+    const count = turn.entries.filter(e => e.kind === 'action').length;
+    // "Did not finish" means no answer was produced — not merely that one action failed.
+    const incomplete = !isLive && !turn.answer && turn.entries.length > 0;
+    const open = isTurnExpanded(turn, isLive, incomplete);
+
+    // Header doubles as the progress indicator, which is why the separate plan card is gone.
+    let headline;
+    if (isLive) {
+      const done = (planSteps || []).filter(s => s.status === 'completed').length;
+      const total = (planSteps || []).length;
+      headline = total
+        ? `Working · step ${Math.min(done + 1, total)} of ${total} · ${count} action${count === 1 ? '' : 's'}`
+        : `Working · ${count} action${count === 1 ? '' : 's'}`;
+    } else {
+      headline = `${count} action${count === 1 ? '' : 's'}${incomplete ? ' · did not finish' : ''}`;
     }
 
-    return `
-      <div class="plan-item ${cls}">
-        <span class="plan-icon">${icon}</span>
-        <span>${escapeHtml(step.text)}</span>
-      </div>
-    `;
+    const rows = turn.entries.map((e) => {
+      if (e.kind === 'fault') {
+        return `<div class="act-row fault"><span class="act-ico">${ICONS.warning}</span><span class="act-text">${escapeHtml(e.content)}</span></div>`;
+      }
+      if (e.kind === 'answer') {
+        return `<div class="act-row answer"><span class="act-ico">${ICONS.keyboard}</span><span class="act-text">You answered: <em>${escapeHtml(e.content)}</em></span></div>`;
+      }
+      const d = describeAction(e.action, e.outcome);
+      const key = `${turn.turn}:${e.idx}`;
+      const shown = expandedRows.has(key);
+      const bad = e.outcome && e.outcome.success === false;
+      const pending = !e.outcome;
+      const why = e.thought
+        ? `<div class="act-why" ${shown ? '' : 'hidden'}>${escapeHtml(e.thought)}</div>`
+        : '';
+      const state = bad ? `<span class="act-state bad">${ICONS.cross}</span>`
+                  : pending ? '<span class="act-state live"></span>'
+                  : '';
+      return `<div class="act-item">
+          <div class="act-row${bad ? ' bad' : ''}${e.thought ? ' has-why' : ''}" data-row="${key}" ${e.thought ? 'role="button" tabindex="0"' : ''}>
+            <span class="act-ico">${d.icon}</span>
+            <span class="act-text">${d.text}</span>
+            ${state}
+          </div>${why}
+        </div>`;
+    }).join('');
+
+    const planDetail = (isLive && planSteps && planSteps.length)
+      ? `<div class="act-plan">${planSteps.map(st => {
+          const ic = st.status === 'completed' ? ICONS.check : st.status === 'in_progress' ? ICONS.dot : ICONS.circle;
+          return `<div class="act-plan-row ${st.status}"><span>${ic}</span><span>${escapeHtml(st.text)}</span></div>`;
+        }).join('')}</div>`
+      : '';
+
+    const phase = (isLive && currentPhase)
+      ? `<div class="act-phase">${escapeHtml(currentPhase)}</div>`
+      : '';
+
+    // The agent called ask_user and is waiting - give the user an actual way to answer, right
+    // where the question was asked, instead of leaving them stuck at a generic Resume button
+    // with no way to say anything back.
+    const answerPrompt = (isLive && status === 'paused' && pendingQuestion)
+      ? `<div class="ask-user-prompt">
+          <div class="ask-user-question">${ICONS.ask} ${escapeHtml(pendingQuestion)}</div>
+          <div class="ask-user-input-row">
+            <input type="text" class="ask-user-input form-input" placeholder="Type your answer..." />
+            <button class="ask-user-send btn btn-primary btn-xs" type="button">Send</button>
+          </div>
+        </div>`
+      : '';
+
+    const sessionDivider = (turn.turn > 1 || turn.isNewRun)
+      ? `<div class="session-divider">
+          <span class="session-tag">⚡ Run #${turn.turn}</span>
+          ${turn.timestamp ? `<span class="session-time">${escapeHtml(turn.timestamp)}</span>` : ''}
+        </div>`
+      : '';
+
+    return `<div class="turn">
+      ${sessionDivider}
+      ${turn.goal ? `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(turn.goal)}</div>` : ''}
+      ${count || turn.entries.length ? `<div class="act-group${open ? ' open' : ''}">
+        <button class="act-head" data-turn="${turn.turn}" aria-expanded="${open}">
+          <span class="act-chev">${ICONS.chevron}</span>
+          <span class="act-head-text">${headline}</span>
+        </button>
+        <div class="act-body" ${open ? '' : 'hidden'}>${planDetail}${rows}${phase}${answerPrompt}</div>
+      </div>` : ''}
+      ${turn.answer ? (turn.answerUnconfirmed
+        ? `<div class="finish-card unconfirmed"><div class="finish-title">${ICONS.warning} Unconfirmed answer</div><div class="finish-body">${formatMarkdownText(turn.answer)}</div></div>`
+        : `<div class="finish-card"><div class="finish-title">${ICONS.complete} Done</div><div class="finish-body">${formatMarkdownText(turn.answer)}</div></div>`) : ''}
+    </div>`;
   }).join('');
+}
+
+/**
+ * One delegated listener for the whole timeline. Bound once at startup, so it survives the
+ * innerHTML rewrites that renderState performs on every state broadcast.
+ */
+function initTimelineInteraction() {
+  const timeline = document.getElementById('timeline');
+  if (!timeline) return;
+
+  const toggle = (target) => {
+    const head = target.closest('.act-head');
+    if (head) {
+      const turn = Number(head.getAttribute('data-turn'));
+      const group = head.parentElement;
+      const nowOpen = !group.classList.contains('open');
+      turnExpandOverride.set(turn, nowOpen);
+      group.classList.toggle('open', nowOpen);
+      head.setAttribute('aria-expanded', String(nowOpen));
+      const body = group.querySelector('.act-body');
+      if (body) body.hidden = !nowOpen;
+      return true;
+    }
+    const row = target.closest('.act-row.has-why');
+    if (row) {
+      const key = row.getAttribute('data-row');
+      const why = row.parentElement.querySelector('.act-why');
+      if (!why) return true;
+      const show = why.hidden;
+      why.hidden = !show;
+      if (show) expandedRows.add(key); else expandedRows.delete(key);
+      return true;
+    }
+    return false;
+  };
+
+  const sendAnswer = (promptEl) => {
+    const input = promptEl.querySelector('.ask-user-input');
+    const btn = promptEl.querySelector('.ask-user-send');
+    const answer = (input && input.value || '').trim();
+    if (!answer) { if (input) input.focus(); return; }
+    if (input) input.disabled = true;
+    if (btn) btn.disabled = true;
+    sendBgMessage({ action: 'ANSWER_QUESTION', payload: { answer } }, (res) => {
+      if (chrome.runtime.lastError || (res && res.success === false)) {
+        const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : res.error;
+        appendLocalLog('ERROR', 'Sidepanel', `[ANSWER_FAILED] ${errMsg}`);
+        showTaskError(errMsg || 'Could not send your answer to the agent.');
+        if (input) input.disabled = false;
+        if (btn) btn.disabled = false;
+      }
+      // On success the next STATE_UPDATE broadcast replaces this prompt with the recorded
+      // answer row - nothing further to do here.
+    });
+  };
+
+  timeline.addEventListener('click', (e) => {
+    const sendBtn = e.target.closest('.ask-user-send');
+    if (sendBtn) { sendAnswer(sendBtn.closest('.ask-user-prompt')); return; }
+    toggle(e.target);
+  });
+  timeline.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.classList.contains('ask-user-input')) {
+      e.preventDefault();
+      sendAnswer(e.target.closest('.ask-user-prompt'));
+      return;
+    }
+    if (e.key === 'Enter' || e.key === ' ') {
+      if (toggle(e.target)) e.preventDefault();
+    }
+  });
 }
 
 function renderFilteredLogs() {
@@ -999,7 +1428,7 @@ function renderFilteredLogs() {
   if (!logOutput) return;
 
   if (!rawLogsCache || rawLogsCache.length === 0) {
-    logOutput.textContent = '// Waiting for backend system logs...';
+    logOutput.innerHTML = '<div class="subtext-hint" style="text-align: center; padding: 20px;">// Waiting for backend system logs...</div>';
     return;
   }
 
@@ -1007,48 +1436,40 @@ function renderFilteredLogs() {
     if (currentActiveLogFilter === 'all') return true;
     const keywords = LOG_FILTER_KEYWORDS[currentActiveLogFilter];
     if (!keywords) return true;
-    // Coalesce BOTH fields — an entry with an undefined module used to throw inside
-    // .filter(), which killed the whole render and froze the log pane permanently.
     const haystack = `${log.message || ''} ${log.module || ''}`.toUpperCase();
     return keywords.some(k => haystack.includes(k));
   });
 
   if (filtered.length === 0) {
-    logOutput.textContent = `// No logs match category filter: [${currentActiveLogFilter}]`;
+    logOutput.innerHTML = `<div class="subtext-hint" style="text-align: center; padding: 20px;">// No logs match category filter: [${currentActiveLogFilter}]</div>`;
     return;
   }
 
-  const formattedLines = filtered.map(log => {
+  logOutput.innerHTML = filtered.map(log => {
     const time = log.timestamp || '';
     const level = log.level || 'INFO';
     const mod = log.module || 'System';
     const msg = log.message || '';
-    const dataStr = log.data ? `\n   Payload: ${log.data}` : '';
-    return `[${time}] [${level}] [${mod}] ${msg}${dataStr}`;
-  }).join('\n\n');
+    const payload = log.data ? `<div class="log-payload">${escapeHtml(JSON.stringify(log.data, null, 2))}</div>` : '';
 
-  logOutput.textContent = formattedLines;
+    if (msg.includes('[NEW_SESSION_RUN]')) {
+      return `<div class="log-entry" style="border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); padding: 10px 0; margin: 10px 0; font-weight: 600;">${msg}</div>`;
+    }
+
+    return `
+      <div class="log-entry">
+        <div class="log-meta">
+          <span class="log-time">${time}</span>
+          <span class="log-level-${level}">${level}</span>
+          <span>${mod}</span>
+        </div>
+        <div class="log-msg">${escapeHtml(msg)}</div>
+        ${payload}
+      </div>
+    `;
+  }).join('');
+
   logOutput.scrollTop = logOutput.scrollHeight;
-}
-
-function formatActionPill(actionObj) {
-  const { action, element_id, text, url, direction, answer, question } = actionObj;
-  switch (action) {
-    case 'click':
-      return `click → [${element_id}]`;
-    case 'type':
-      return `type → [${element_id}] "${escapeHtml(text || '')}"`;
-    case 'scroll':
-      return `scroll → ${direction || 'down'}`;
-    case 'navigate':
-      return `navigate → ${escapeHtml(url || '')}`;
-    case 'finish':
-      return `finish → ${escapeHtml(answer || '')}`;
-    case 'ask_user':
-      return `ask → "${escapeHtml(question || '')}"`;
-    default:
-      return `${action} ${element_id ? `[${element_id}]` : ''}`;
-  }
 }
 
 function formatMarkdownText(text) {

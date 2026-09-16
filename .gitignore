@@ -12,5 +12,12 @@ __pycache__/
 .env
 .env.local
 
-# Agent Customizations & Local Skills
+# Agent Customizations & Skills
 .agents/
+agents/
+.agent/
+_agents/
+_agent/
+.claude/
+.claude
+docs/

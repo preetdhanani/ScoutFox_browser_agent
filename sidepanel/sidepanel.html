@@ -14,15 +14,17 @@
     <!-- Header -->
     <header class="app-header">
       <div class="brand">
-        <div class="logo-icon">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3 8L8 2L9.5 9.5H3z"/><path d="M21 8L16 2L14.5 9.5H21z"/><path d="M9.5 9.5H14.5L18 14L12 22L6 14z"/></svg>
+        <div class="logo-icon" title="ScoutFox AI Agent">
+          🦊
         </div>
         <div class="brand-text">
           <h1>ScoutFox</h1>
           <span class="badge-tag" id="currentModelBadge">Gemini 1.5 Flash</span>
+          <span class="sandbox-badge hidden" id="sandboxBadge" title="This tab is inside the ScoutFox tab group. The agent is scoped to it.">Sandboxed</span>
         </div>
       </div>
       <div class="header-actions">
+        <button class="btn-history-toggle" id="btnToggleHistory" title="Saved sessions" aria-expanded="false" aria-controls="historyDrawer">History (0)</button>
         <button class="theme-toggle" id="btnThemeToggle" title="Theme: Auto"></button>
         <div class="status-indicator" id="statusPill">
           <span class="status-dot"></span>
@@ -47,44 +49,21 @@
       </button>
     </nav>
 
+    <!-- SESSION HISTORY DRAWER -->
+    <div class="history-drawer" id="historyDrawer" style="display: none;">
+      <div class="history-drawer-header">
+        <span>Saved sessions</span>
+        <button class="btn btn-secondary btn-xs" id="btnCloseHistory">Close</button>
+      </div>
+      <div class="history-sessions-list" id="historySessionsList"></div>
+    </div>
+
     <!-- Tab Contents -->
     <main class="tab-content">
 
       <!-- TAB 1: AGENT CHAT & TIMELINE -->
       <section id="tab-chat" class="tab-panel active">
-        <!-- Chat Controls Bar -->
-        <div class="chat-header-bar">
-          <button class="btn btn-secondary btn-xs" id="btnNewSession">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            New Session
-          </button>
-          <button class="btn btn-secondary btn-xs" id="btnToggleHistory">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
-            History (0)
-          </button>
-        </div>
 
-        <!-- SESSION HISTORY DRAWER -->
-        <div class="history-drawer" id="historyDrawer" style="display: none;">
-          <div class="history-drawer-header">
-            <span>Saved Session History</span>
-            <button class="btn btn-secondary btn-xs" id="btnCloseHistory">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><line x1="5" y1="5" x2="19" y2="19"/><line x1="19" y1="5" x2="5" y2="19"/></svg>
-            </button>
-          </div>
-          <div class="history-sessions-list" id="historySessionsList">
-            <div class="subtext-hint" style="padding: 10px; text-align: center;">No saved sessions yet.</div>
-          </div>
-        </div>
-
-        <!-- PLANNER CHECKLIST CARD -->
-        <div class="plan-card" id="planContainer" style="display: none;">
-          <div class="plan-card-header">
-            <span class="plan-card-title">Execution Plan</span>
-            <span class="plan-progress-pill" id="planProgressPill">0/0 Done</span>
-          </div>
-          <div class="plan-items-list" id="planItemsList"></div>
-        </div>
 
         <div class="timeline-container" id="timeline">
           <div class="empty-state" id="emptyState">
@@ -170,8 +149,14 @@
           <!-- API Key -->
           <div class="form-group">
             <label class="form-label" for="apiKeyInput">API Key (Required for OpenRouter / Gemini / OpenAI / Claude)</label>
-            <input type="password" id="apiKeyInput" class="form-input" placeholder="sk-or-v1-... or AIzaSy...">
+            <div class="input-with-toggle">
+              <input type="password" id="apiKeyInput" class="form-input" placeholder="sk-or-v1-... or AIzaSy...">
+              <button class="btn-toggle-visibility" id="btnToggleKey" title="Show/Hide API Key">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
           </div>
+
 
           <!-- DYNAMIC MODEL SEARCHABLE COMBOBOX -->
           <div class="form-group">
@@ -216,6 +201,24 @@
             </div>
           </div>
 
+          <!-- Ollama-only: local models have no vendor-side output cap, so this is the only
+               ceiling on a single generation. Always shown rather than hidden per-provider,
+               matching how the API Key label above names its providers instead of hiding. -->
+          <div class="form-group" id="ollamaNumPredictGroup">
+            <label class="form-label" for="ollamaNumPredictInput">Ollama Max Output Tokens (num_predict)</label>
+            <input type="number" id="ollamaNumPredictInput" class="form-input" value="8192" min="1" step="256">
+            <span class="subtext-hint">Ollama only. Raise this if replies get cut off mid-answer (check Logs for OLLAMA_TRUNCATED).</span>
+          </div>
+
+          <!-- The failed-step error message tells the user to "raise llmTimeoutMs in settings" -
+               this is that setting. A slow provider or a large local model can genuinely need
+               longer than the 120s default before the agent gives up and retries. -->
+          <div class="form-group" id="llmTimeoutGroup">
+            <label class="form-label" for="llmTimeoutInput">LLM Timeout (ms)</label>
+            <input type="number" id="llmTimeoutInput" class="form-input" value="120000" min="5000" step="5000">
+            <span class="subtext-hint">How long to wait for a single reply before retrying. Raise this if you see "did not respond within Ns" errors on a slow provider or local model.</span>
+          </div>
+
           <!-- Feature Toggles -->
           <div class="form-group toggle-group">
             <label class="toggle-label" for="badgesToggle">
@@ -238,6 +241,10 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="1.5"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
                 Copy
               </button>
+              <button class="btn btn-secondary btn-xs" id="btnDownloadLogs">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Download
+              </button>
               <button class="btn btn-secondary btn-xs" id="btnClearLogs">Clear</button>
             </div>
           </div>
@@ -250,12 +257,16 @@
             <span class="log-filter-chip" data-filter="NETWORK">Network</span>
           </div>
 
-          <pre class="log-output" id="logOutput">// Waiting for backend system logs...</pre>
+          <div class="log-output" id="logOutput">// Waiting for backend system logs...</div>
         </div>
       </section>
 
     </main>
+
+    <!-- TOAST NOTIFICATIONS -->
+    <div class="toast-container" id="toastContainer"></div>
   </div>
+
 
   <script type="module" src="sidepanel.js"></script>
 </body>

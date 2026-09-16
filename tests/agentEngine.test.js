@@ -10,6 +10,7 @@ global.chrome = {
     }
   },
   tabs: {
+    get: (id, cb) => cb({ id, groupId: -1, url: 'https://example.com' }),
     query: async () => [{ id: 101, url: 'https://example.com' }],
     sendMessage: (tabId, msg, cb) => cb({ success: true })
   }
@@ -45,7 +46,7 @@ test('AgentEngine - Plain text intent extraction for smaller LLMs', () => {
   assert.equal(result.action.element_id, 5);
 });
 
-test('AgentEngine - Element ID Clamping Guardrail', () => {
+test('AgentEngine - a hallucinated out-of-range element_id is rejected, not clamped onto a different element', () => {
   const engine = new AgentEngine();
   const output = `\`\`\`json
 {
@@ -56,7 +57,33 @@ test('AgentEngine - Element ID Clamping Guardrail', () => {
 \`\`\``;
 
   const result = engine.parseResponse(output, 12);
-  assert.equal(result.action.element_id, 12); // Clamped to max elements (12)
+  // Clamping element_id 99 to 12 used to make the agent silently click whatever REAL element
+  // happened to be #12 - not what the model asked for, and with no visible failure. It must
+  // instead come back as a correctable parse error.
+  assert.equal(result.action, undefined);
+  assert.match(result.error, /element_id/i);
+  assert.match(result.error, /99/);
+});
+
+test('AgentEngine - a hallucinated action verb is rejected as a correctable parse error, not dispatched', () => {
+  const engine = new AgentEngine();
+  const output = JSON.stringify({ action: 'delete_element', element_id: 1, reason: 'made up verb' });
+
+  const result = engine.parseResponse(output, 10);
+  // This used to sail through parsing unchanged, get pushed to history as a real action, and
+  // only fail one layer later at actionExecutor.js's default `throw new Error('Unknown
+  // action')` - after the step was already spent.
+  assert.equal(result.action, undefined);
+  assert.match(result.error, /delete_element/);
+  assert.match(result.error, /unknown action/i);
+});
+
+test('AgentEngine - a known alias for a real action is still accepted, not rejected as unknown', () => {
+  const engine = new AgentEngine();
+  const output = JSON.stringify({ action: 'click_element', element_id: 3 });
+
+  const result = engine.parseResponse(output, 10);
+  assert.equal(result.action.action, 'click', 'alias normalization must run before the allowlist check');
 });
 
 test('AgentEngine - Schema Normalization & Key Aliases', () => {
@@ -99,6 +126,19 @@ test('AgentEngine - Parse execute_js Action', () => {
   const result = engine.parseResponse(output, 10);
   assert.equal(result.action.action, 'execute_js');
   assert.equal(result.action.code, 'return document.title');
+});
+
+test('AgentEngine - Parse Truncated execute_js Action Payload', () => {
+  const engine = new AgentEngine();
+  const truncatedOutput = `\`\`\`json
+{
+  "action": "execute_js",
+  "code": "const reject = document.querySelector('#cookie_action_close_header_reject'); if (reject) reject.click(); const sel = document.querySelector('select'); if (sel) { sel.value = '1'; } const order = [...document.querySelectorAll('button')].find(b => /order now/i.test(b.textContent`;
+
+  const result = engine.parseResponse(truncatedOutput, 10);
+  assert.equal(result.action.action, 'execute_js');
+  assert.ok(result.action.code.includes('cookie_action_close_header_reject'));
+  assert.notEqual(result.action.action, 'finish'); // Proves it did not wrongly fall back to finish action!
 });
 
 test('AgentEngine - Parse read_network_requests Action', () => {
@@ -149,6 +189,10 @@ test('AgentEngine - Redact Sensitive Data in Network Payloads', () => {
   assert.ok(redacted.includes('testuser'));
 });
 
+// ensureScoutFoxGroup coverage (group creation, reuse, adoption, persistence) lives in
+// tests/tabGrouping.test.js against a fuller mock - this file's version only asserted a
+// hardcoded stub id, a strict subset of that coverage. Not duplicated here.
+
 test('AgentEngine - clearHistory resets state', () => {
   const engine = new AgentEngine();
   engine.history = [{ type: 'user_goal', prompt: 'test' }];
@@ -163,12 +207,18 @@ test('AgentEngine - clearHistory resets state', () => {
 });
 
 test('AgentEngine - Zombie Running State Reset on Service Worker Restore', async () => {
+  // Keyed by windowId ('default', since this engine is constructed with none) - restoreState
+  // reads agent_sessions now, not a single global agent_session slot. Seeding the old key here
+  // would make this test pass vacuously (nothing restored, status defaults to idle anyway)
+  // rather than actually exercising the zombie-status reset it is named for.
   global.chrome.storage.local.get = (keys, cb) => cb({
-    agent_session: {
-      history: [],
-      planSteps: [],
-      stepCount: 4,
-      status: 'running'
+    agent_sessions: {
+      default: {
+        history: [],
+        planSteps: [],
+        stepCount: 4,
+        status: 'running'
+      }
     }
   });
 

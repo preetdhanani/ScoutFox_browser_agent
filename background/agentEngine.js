@@ -9,13 +9,32 @@
 import { ApiClients } from './apiClients.js';
 import { Storage } from '../utils/storage.js';
 import { Logger } from '../utils/logger.js';
+import { callWithRetry, LLM_MAX_ATTEMPTS } from './harness/recovery.js';
+import { buildFinishEntry, buildMaxStepsEntry } from './harness/outcome.js';
+
+// Sessions are multi-turn and would otherwise grow without bound, and the whole array is
+// serialised to chrome.storage on every state change.
+const MAX_HISTORY = 400;
+// How many completed-turn recaps previousTurnsSummary() keeps for a follow-up prompt.
+const PREVIOUS_TURNS_LIMIT = 4;
+
+// Every verb the system can actually dispatch (sanitizeActionSchema's aliases already resolve
+// onto these), whether or not the current system prompt happens to declare it. An unrecognised
+// verb used to sail straight through parsing, get pushed to history, and only fail one layer
+// past the page boundary at actionExecutor.js's default `throw new Error('Unknown action')` -
+// a wasted step with a generic failure instead of a correctable parse error naming the problem.
+const KNOWN_ACTIONS = new Set([
+  'click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward',
+  'read_page_text', 'execute_js', 'read_network_requests', 'browser_batch', 'wait',
+  'finish', 'ask_user', 'open_window'
+]);
 
 /**
  * Safely read chrome.runtime.lastError. It MUST be read inside every chrome.* callback or
  * Chrome emits an "unchecked runtime.lastError" warning, but chrome.runtime itself is absent
  * in test and non-extension contexts — so a bare read would throw and swallow the callback.
  */
-function lastRuntimeError() {
+export function lastRuntimeError() {
   try {
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError) {
       return chrome.runtime.lastError;
@@ -25,13 +44,33 @@ function lastRuntimeError() {
 }
 
 /**
+ * Read-modify-write chrome.storage.local's agent_sessions key. It's one key shared across
+ * every window's engine, so a blind overwrite would silently erase every OTHER window's
+ * persisted session on whichever engine happens to write last - mutate() is handed the whole
+ * map and decides what this call changes for just its own window. Return `false` from mutate
+ * to skip the write entirely (nothing changed).
+ */
+function updateAgentSessions(mutate, onError) {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
+  chrome.storage.local.get(['agent_sessions'], (res) => {
+    lastRuntimeError();
+    const all = (res && res.agent_sessions) || {};
+    if (mutate(all) === false) return;
+    chrome.storage.local.set({ agent_sessions: all }, () => {
+      const err = lastRuntimeError();
+      if (err && onError) onError(err);
+    });
+  });
+}
+
+/**
  * Explain why a URL cannot be automated, or return null if it can be.
  *
  * Chrome forbids extensions from injecting scripts into its own internal pages and the Web
  * Store, and no permission unlocks it — it is a hard browser restriction, not a bug and not
  * something a page reload fixes. Saying so plainly is the only useful response.
  */
-function describeRestrictedUrl(url) {
+export function describeRestrictedUrl(url) {
   if (!url) {
     return 'That tab has not finished loading a page yet. Wait for it to load, then start the task again.';
   }
@@ -50,8 +89,95 @@ function describeRestrictedUrl(url) {
   return null;
 }
 
+/**
+ * Robust Truncated & Partial JSON Repair Engine
+ * Salvages unclosed strings, missing braces, or raw unescaped newlines in JSON action payloads.
+ */
+function parsePartialOrTruncatedJson(str) {
+  if (!str || typeof str !== 'string') return null;
+  const trimmed = str.trim();
+
+  // 1. Standard JSON parse
+  try {
+    return JSON.parse(trimmed);
+  } catch (_) {}
+
+  // 2. Fix unescaped control characters & raw newlines inside JSON string values
+  try {
+    const escapedNewlines = trimmed.replace(/[\r\n]+/g, '\\n');
+    return JSON.parse(escapedNewlines);
+  } catch (_) {}
+
+  // 3. Balance unclosed string quotes and closing braces/brackets
+  try {
+    let repaired = trimmed.replace(/[\r\n]+/g, '\\n');
+    const quoteCount = (repaired.match(/(?<!\\)"/g) || []).length;
+    if (quoteCount % 2 !== 0) {
+      repaired += '"';
+    }
+
+    const openBraces = (repaired.match(/\{/g) || []).length;
+    const closeBraces = (repaired.match(/\}/g) || []).length;
+    for (let i = 0; i < openBraces - closeBraces; i++) {
+      repaired += '}';
+    }
+
+    const openBrackets = (repaired.match(/\[/g) || []).length;
+    const closeBrackets = (repaired.match(/\]/g) || []).length;
+    for (let i = 0; i < openBrackets - closeBrackets; i++) {
+      repaired += ']';
+    }
+
+    return JSON.parse(repaired);
+  } catch (_) {}
+
+  // 4. Regex extraction fallback for truncated execute_js / browser_batch payloads
+  try {
+    const actionMatch = trimmed.match(/"action"\s*:\s*"([^"]+)"/i);
+    if (actionMatch) {
+      const actName = actionMatch[1];
+      
+      if (actName === 'execute_js' || actName === 'eval_js') {
+        const codeMatch = trimmed.match(/"code"\s*:\s*"([\s\S]*)/i);
+        if (codeMatch) {
+          let codeStr = codeMatch[1].replace(/"\s*\}?\s*\]?\s*$/, '').trim();
+          codeStr = codeStr.replace(/\\"/g, '"').replace(/\\n/g, '\n');
+          return {
+            action: 'execute_js',
+            code: codeStr,
+            world: 'MAIN',
+            reason: 'Recovered from truncated model output'
+          };
+        }
+      }
+
+      if (actName === 'click' || actName === 'type') {
+        const idMatch = trimmed.match(/"element_id"\s*:\s*(\d+)/i) || trimmed.match(/"click"\s*:\s*(\d+)/i);
+        const textMatch = trimmed.match(/"text"\s*:\s*"([^"]+)"/i);
+        return {
+          action: actName,
+          element_id: idMatch ? parseInt(idMatch[1], 10) : undefined,
+          text: textMatch ? textMatch[1] : undefined,
+          reason: 'Recovered from truncated model output'
+        };
+      }
+    }
+  } catch (_) {}
+
+  return null;
+}
+
 export class AgentEngine {
-  constructor() {
+  /**
+   * @param {number|string} [windowId] Which browser window this engine belongs to. One
+   *   engine exists per window (see background.js's session map) so that each window runs a
+   *   fully independent automation: its own tab group, its own history, its own Stop/Pause,
+   *   never able to see or touch a tab outside its own group. Optional and defaults to
+   *   'default' so every existing test and any non-windowed context (the standalone Python
+   *   runner analog, direct unit tests) keeps working unchanged with a single implicit session.
+   */
+  constructor(windowId) {
+    this.windowId = windowId !== undefined && windowId !== null ? windowId : 'default';
     this.status = 'idle'; // 'idle' | 'running' | 'paused' | 'stopped'
     this.currentTask = null;
     this.history = [];
@@ -60,11 +186,30 @@ export class AgentEngine {
     this.activeTabId = null;
     this.currentPhase = '';
     this.isLoopActive = false;
+    // Set when the agent calls ask_user, cleared the moment it gets an answer (or the user
+    // hits the plain Resume button instead of answering). Broadcast on every state change
+    // (see notifyStateChange) so the panel - even a fresh reconnect - always knows whether a
+    // paused run is waiting on a question, not just paused by the user or by a failed LLM call.
+    this.pendingQuestion = null;
     this.onStateChangeCallback = null;
+    // Fired when this session opens a brand-new browser window (see openNewWindow()), so
+    // background.js can register that window's id against THIS session instead of creating a
+    // second, disconnected one the moment a panel is opened there. AgentEngine has no direct
+    // access to background.js's own window->session registry; this callback is the seam.
+    this.onWindowOpenedCallback = null;
     this.stateVersion = 0;
     this.recentActionSignatures = [];
     this.currentPlanIndex = 0;
     this.networkBuffers = new Map(); // tabId -> Array of Network Requests (capped at 100)
+
+    // Sandboxed Chrome Tab Group ID(s). A Chrome tab group is intrinsically single-window, but
+    // one session can span MORE than one window (an agent-opened new window stays part of the
+    // SAME running session/history rather than starting a second, disconnected one) - so this
+    // is a map of windowId -> groupId, not a single value. scoutFoxGroupId below is a
+    // convenience accessor for THIS engine's own primary window, which is what almost all
+    // existing code (including ensureScoutFoxGroup itself) reads and writes, so that logic did
+    // not need to change to support the map.
+    this.scoutFoxGroupIds = new Map();
 
     // Identifies THIS service-worker incarnation. MV3 terminates the worker aggressively
     // (idle timeout, memory pressure, Chrome's hard cap on port-based keepalive), and every
@@ -87,6 +232,68 @@ export class AgentEngine {
     this.restorePromise = this.restoreState();
   }
 
+  /** This engine's own tab group, in its own (primary) window. */
+  get scoutFoxGroupId() {
+    return this.groupIdForWindow(this.windowId);
+  }
+
+  set scoutFoxGroupId(groupId) {
+    if (groupId === null || groupId === undefined) {
+      this.scoutFoxGroupIds.delete(this.windowId);
+    } else {
+      this.scoutFoxGroupIds.set(this.windowId, groupId);
+    }
+  }
+
+  /**
+   * This session's tab group in a SPECIFIC window - not necessarily its primary one.
+   *
+   * A session extended into more than one window (openNewWindow) tracks one group per window
+   * it touches; scoutFoxGroupId (above) only ever answers for this engine's own primary
+   * window, which is wrong the moment a caller means some OTHER window this same session also
+   * covers - grouping a tab into a group that belongs to a different Chrome window fails
+   * outright, since a tab group cannot span windows.
+   */
+  groupIdForWindow(windowId) {
+    const v = this.scoutFoxGroupIds.get(windowId);
+    return v === undefined ? null : v;
+  }
+
+  /**
+   * The hard access wall: is this tab one the agent is actually allowed to act on?
+   *
+   * A tab is in scope only if it sits in a Chrome tab group THIS session owns - i.e. its
+   * groupId matches the group this engine tracks for that tab's OWN window. This is checked
+   * at the single choke point every step passes through (getTabDOMWithAutoInject) as a safety
+   * net, on top of background.js only ever handing this engine tabIds from its own window(s)
+   * in the first place. Outside the group: no access, no reads, no actions - by design.
+   */
+  async isTabInScope(tabId) {
+    if (!tabId) return false;
+    if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.get) return true; // no tab API to check against (tests, non-extension context)
+
+    // chrome.tabs.get supports both the classic callback form and, when no callback is
+    // meaningfully used, a returned Promise - and some test doubles in this codebase mock it
+    // as promise-only regardless of a callback being passed. Handling both keeps this robust
+    // to either shape instead of hanging forever waiting on a callback that never fires.
+    const tab = await new Promise((resolve, reject) => {
+      const maybePromise = chrome.tabs.get(tabId, (t) => { lastRuntimeError(); resolve(t); });
+      if (maybePromise && typeof maybePromise.then === 'function') {
+        maybePromise.then(resolve, reject);
+      }
+    });
+    if (!tab) return false;
+
+    const ownGroupForThatWindow = this.scoutFoxGroupIds.get(tab.windowId);
+    if (ownGroupForThatWindow === undefined || ownGroupForThatWindow === null) {
+      // This session has not sandboxed anything in that tab's window at all yet - nothing to
+      // be in scope of. (startTask always establishes the group before acting, so in normal
+      // operation this only trips for a tab that genuinely has nothing to do with this session.)
+      return false;
+    }
+    return tab.groupId === ownGroupForThatWindow;
+  }
+
   async restoreState() {
     try {
       if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
@@ -94,15 +301,18 @@ export class AgentEngine {
         return;
       }
 
+      // Keyed by windowId, not a single global slot - one engine exists per window, and each
+      // must restore only ITS OWN session, never another window's.
       const stored = await new Promise((resolve) => {
-        chrome.storage.local.get(['agent_session'], (res) => {
+        chrome.storage.local.get(['agent_sessions'], (res) => {
           const err = lastRuntimeError();
           if (err) {
             Logger.warn('AgentEngine', '[STATE_RESTORE_FAILED] Could not read persisted session', err.message);
             resolve(null);
             return;
           }
-          resolve(res && res.agent_session ? res.agent_session : null);
+          const all = res && res.agent_sessions;
+          resolve(all && all[String(this.windowId)] ? all[String(this.windowId)] : null);
         });
       });
 
@@ -126,24 +336,24 @@ export class AgentEngine {
       this.stepCount = stored.stepCount || 0;
       this.currentPlanIndex = stored.currentPlanIndex || 0;
       this.activeTabId = stored.activeTabId || null;
+      this.scoutFoxGroupId = stored.scoutFoxGroupId || null;
 
       // Keep the version counter monotonic across worker restarts so the sidepanel's
       // out-of-order guard still holds even within a single boot.
       this.stateVersion = (stored.stateVersion || 0) + 1;
 
       if (stored.status === 'running' || stored.status === 'paused') {
-        // The loop that owned this status died with the previous worker. Never silently
-        // pretend it finished — surface it in the timeline AND the logs.
+        // The loop that owned this status died with the previous worker. Surface interruption.
         this.status = 'idle';
         this.currentPhase = '';
         this.history.push({
           type: 'error',
           content: `Previous task was interrupted — Chrome shut down the extension's background worker mid-run (this happens after ~30s idle or when the browser reclaims memory). Progress up to step ${this.stepCount} is preserved above. Re-run the task to continue.`
         });
-        Logger.warn('AgentEngine', `[STATE_RESTORE_INTERRUPTED] Recovered a session that was still marked "${stored.status}" at step ${this.stepCount}. The execution loop did not survive the worker restart; status forced to idle and the interruption surfaced to the user.`);
+        Logger.warn('AgentEngine', `[STATE_RESTORE_INTERRUPTED] Recovered a session that was still marked "${stored.status}" at step ${this.stepCount}.`);
       } else {
         this.status = stored.status || 'idle';
-        Logger.info('AgentEngine', `[STATE_RESTORE] Restored session "${this.currentTask || 'none'}" (status=${this.status}, step=${this.stepCount}, ${this.history.length} history entries, boot ${this.bootId.slice(0, 8)}).`);
+        Logger.info('AgentEngine', `[STATE_RESTORE] Restored session "${this.currentTask || 'none'}" (status=${this.status}, step=${this.stepCount}, boot ${this.bootId.slice(0, 8)}).`);
       }
 
       this.notifyStateChange();
@@ -154,46 +364,103 @@ export class AgentEngine {
 
   async persistState() {
     try {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({
-          agent_session: {
-            history: this.history,
-            planSteps: this.planSteps,
-            task: this.currentTask,
-            stepCount: this.stepCount,
-            status: this.status,
-            currentPlanIndex: this.currentPlanIndex,
-            activeTabId: this.activeTabId,
-            stateVersion: this.stateVersion
-          }
-        }, () => {
-          const err = lastRuntimeError();
-          if (err) {
-            Logger.warn('AgentEngine', '[STATE_PERSIST_FAILED] Could not write session to storage', err.message);
-          }
-        });
-      }
+      updateAgentSessions((all) => {
+        all[String(this.windowId)] = {
+          history: this.history,
+          planSteps: this.planSteps,
+          task: this.currentTask,
+          stepCount: this.stepCount,
+          status: this.status,
+          currentPlanIndex: this.currentPlanIndex,
+          activeTabId: this.activeTabId,
+          stateVersion: this.stateVersion,
+          scoutFoxGroupId: this.scoutFoxGroupId
+        };
+      }, (err) => {
+        Logger.warn('AgentEngine', '[STATE_PERSIST_FAILED] Could not write session to storage', err.message);
+      });
     } catch (e) {
       Logger.warn('AgentEngine', '[STATE_PERSIST_ERROR] Could not persist state', e);
     }
   }
 
+  /** Remove this window's persisted session entirely - called when its window closes. */
+  static forgetWindow(windowId) {
+    try {
+      updateAgentSessions((all) => {
+        if (!(String(windowId) in all)) return false; // nothing to remove, skip the write
+        delete all[String(windowId)];
+      });
+    } catch (e) {
+      Logger.warn('AgentEngine', '[STATE_FORGET_ERROR] Could not remove closed window\'s persisted session', e);
+    }
+  }
+
   clearHistory() {
     this.dirty = true;
+    this.turnIndex = 0;
     this.history = [];
     this.planSteps = [];
     this.stepCount = 0;
     this.currentPlanIndex = 0;
     this.currentTask = null;
     this.notifyStateChange();
-    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history and plan cleared.');
+    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history and plan cleared for fresh session.');
+  }
+
+  /**
+   * Cap total history. Sessions are multi-turn now and would otherwise grow without bound,
+   * and the whole array is serialised to chrome.storage on every state change.
+   */
+  trimHistory() {
+    if (this.history.length > MAX_HISTORY) {
+      this.history.splice(0, this.history.length - MAX_HISTORY);
+    }
+  }
+
+  /** Entries belonging to the current turn: everything from the most recent user_goal on. */
+  currentTurnHistory() {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      if (this.history[i].type === 'user_goal') return this.history.slice(i);
+    }
+    return this.history;
+  }
+
+  /**
+   * Compact recap of earlier COMPLETED turns, so a follow-up has context without replaying
+   * every step of every previous task into the prompt.
+   */
+  previousTurnsSummary() {
+    const lines = [];
+    let goal = null;
+    for (const item of this.history) {
+      if (item.type === 'user_goal') {
+        goal = item.prompt;
+      } else if (item.type === 'finish' && goal) {
+        const answer = String(item.answer || '').replace(/\s+/g, ' ').slice(0, 280);
+        lines.push(`- Asked: "${goal}"\n  Result: ${answer}`);
+        goal = null;
+      }
+    }
+    return lines.slice(-PREVIOUS_TURNS_LIMIT);
   }
 
   setStateChangeCallback(cb) {
     this.onStateChangeCallback = cb;
   }
 
+  setWindowOpenedCallback(cb) {
+    this.onWindowOpenedCallback = cb;
+  }
+
   notifyStateChange(extraData = {}) {
+    // trimHistory() used to be called from only 2 of the history-mutating code paths, so the
+    // array could grow past MAX_HISTORY between them - and worse, whichever entry a splice cut
+    // first was whatever happened to be oldest at that moment, not necessarily safe to lose.
+    // Every single history push in this file is followed by a notifyStateChange() (directly, or
+    // via setPhase()) before the step ends, so trimming here once is both simpler and
+    // strictly more complete than chasing every call site individually.
+    this.trimHistory();
     this.stateVersion++;
     this.persistState();
     if (this.onStateChangeCallback) {
@@ -205,6 +472,7 @@ export class AgentEngine {
           history: this.history,
           planSteps: this.planSteps,
           currentPhase: this.currentPhase,
+          pendingQuestion: this.pendingQuestion,
           // Deliberately NOT sending Logger.getLogsHistory() here. setPhase() calls this
           // ~7 times per loop iteration, and shipping the whole 300-entry ring (which holds
           // full [LLM_RAW_OUTPUT] bodies) meant several hundred KB structure-cloned across
@@ -212,11 +480,181 @@ export class AgentEngine {
           // only needs the bulk array on an explicit GET_AGENT_STATE resync.
           stateVersion: this.stateVersion,
           bootId: this.bootId,
+          scoutFoxGroupId: this.scoutFoxGroupId,
           ...extraData
         });
       } catch (err) {
         console.error('[AgentEngine] notifyStateChange callback threw', err);
       }
+    }
+  }
+
+  /**
+   * Ensures target tab and all agent automation tabs are sandboxed into a 'ScoutFox' Chrome Tab Group
+   */
+  /**
+   * @param {number} tabId
+   * @param {number|string} [windowId] Defaults to this engine's own primary window
+   *   (this.windowId, via the scoutFoxGroupId getter/setter every existing caller and test
+   *   already relies on). Pass the tab's OWN window explicitly when sandboxing a tab in some
+   *   OTHER window this session has been extended into (see openNewWindow()) - a Chrome tab
+   *   group cannot span windows, so a session spanning more than one tracks one group PER
+   *   window it touches, in scoutFoxGroupIds.
+   */
+  async ensureScoutFoxGroup(tabId, windowId = this.windowId) {
+    if (!tabId || typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.group) return null;
+
+    try {
+      const tab = await new Promise((resolve) => {
+        chrome.tabs.get(tabId, (t) => {
+          lastRuntimeError();
+          resolve(t);
+        });
+      });
+
+      if (!tab) return null;
+
+      const TAB_GROUP_ID_NONE = (typeof chrome.tabGroups !== 'undefined' && chrome.tabGroups.TAB_GROUP_ID_NONE !== undefined)
+        ? chrome.tabGroups.TAB_GROUP_ID_NONE
+        : -1;
+
+      let recordedGroupId = this.scoutFoxGroupIds.get(windowId);
+      if (recordedGroupId === undefined) recordedGroupId = null;
+
+      // 1. Check if our recorded group for THIS window is still valid and active in Chrome
+      let activeGroupValid = false;
+      if (recordedGroupId && recordedGroupId !== TAB_GROUP_ID_NONE) {
+        if (chrome.tabGroups && chrome.tabGroups.get) {
+          const activeGrp = await new Promise((resolve) => {
+            chrome.tabGroups.get(recordedGroupId, (g) => {
+              lastRuntimeError();
+              resolve(g);
+            });
+          });
+          if (activeGrp) {
+            activeGroupValid = true;
+          }
+        } else {
+          activeGroupValid = true;
+        }
+      }
+
+      if (!activeGroupValid) {
+        recordedGroupId = null;
+        this.scoutFoxGroupIds.delete(windowId);
+      }
+
+      // 2. If valid ScoutFox group exists and tab is not yet in it -> join tab into existing group
+      if (activeGroupValid && recordedGroupId) {
+        if (tab.groupId !== recordedGroupId) {
+          await new Promise((resolve) => {
+            chrome.tabs.group({ tabIds: tabId, groupId: recordedGroupId }, (gid) => {
+              lastRuntimeError();
+              resolve(gid);
+            });
+          });
+        }
+        Logger.info('AgentEngine', `[TAB_SANDBOX] Tab [${tabId}] joined active 'ScoutFox' tab group (GroupID: ${recordedGroupId}, window [${windowId}])`);
+        return recordedGroupId;
+      }
+
+      // 3. Check if target tab is already in a titled ScoutFox group
+      if (tab.groupId && tab.groupId !== TAB_GROUP_ID_NONE && chrome.tabGroups && chrome.tabGroups.get) {
+        const currentGrp = await new Promise((resolve) => {
+          chrome.tabGroups.get(tab.groupId, (g) => {
+            lastRuntimeError();
+            resolve(g);
+          });
+        });
+        if (currentGrp && currentGrp.title === 'ScoutFox') {
+          this.scoutFoxGroupIds.set(windowId, tab.groupId);
+          this.persistState();
+          return tab.groupId;
+        }
+      }
+
+      // 4. Create fresh 'ScoutFox' tab group
+      const newGroupId = await new Promise((resolve) => {
+        chrome.tabs.group({ tabIds: tabId }, (gid) => {
+          lastRuntimeError();
+          resolve(gid);
+        });
+      });
+
+      if (newGroupId && chrome.tabGroups && chrome.tabGroups.update) {
+        await new Promise((resolve) => {
+          chrome.tabGroups.update(newGroupId, { title: 'ScoutFox', color: 'orange' }, () => {
+            lastRuntimeError();
+            resolve();
+          });
+        });
+      }
+
+      this.scoutFoxGroupIds.set(windowId, newGroupId);
+      this.persistState();
+      Logger.info('AgentEngine', `[TAB_SANDBOX] Created fresh 'ScoutFox' tab group (GroupID: ${newGroupId}) for tab [${tabId}] (window [${windowId}])`);
+      return newGroupId;
+    } catch (err) {
+      Logger.warn('AgentEngine', '[TAB_SANDBOX_WARN] Could not sandbox tab into ScoutFox group', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Open a brand-new browser window and keep it part of THIS SAME session, sharing history -
+   * rather than starting a second, disconnected one the moment its own panel is opened. Most
+   * tasks never need this; it exists for the rare one that genuinely does (comparing two
+   * pages side by side, a flow that opens in a fresh window by design, etc).
+   *
+   * A Chrome tab group cannot span windows, so the new window's tab gets its OWN ScoutFox
+   * group - tracked in scoutFoxGroupIds under the new window's id, alongside this engine's
+   * other window(s) - while history, status, and everything else stay the ONE shared session.
+   * background.js learns about the new window via onWindowOpenedCallback, so a panel opened
+   * there finds this same session instead of creating a second one.
+   */
+  async openNewWindow(url) {
+    if (typeof chrome === 'undefined' || !chrome.windows || !chrome.windows.create) {
+      return { success: false, error: 'chrome.windows is unavailable in this context, so a new window cannot be opened.' };
+    }
+
+    const targetUrl = url && /^https?:\/\//i.test(url) ? url : (url || 'https://www.google.com');
+
+    try {
+      const win = await new Promise((resolve, reject) => {
+        chrome.windows.create({ url: targetUrl, focused: true }, (w) => {
+          const err = lastRuntimeError();
+          if (err) { reject(new Error(err.message)); return; }
+          resolve(w);
+        });
+      });
+
+      const newTab = win && Array.isArray(win.tabs) ? win.tabs[0] : null;
+      if (!win || !newTab) {
+        return { success: false, error: 'The new window was created, but no tab was found in it.' };
+      }
+
+      if (this.onWindowOpenedCallback) {
+        try { this.onWindowOpenedCallback(win.id); } catch (err) {
+          Logger.warn('AgentEngine', '[WINDOW_OPENED_CALLBACK_ERROR] onWindowOpenedCallback threw', err);
+        }
+      }
+
+      await this.ensureScoutFoxGroup(newTab.id, win.id);
+
+      // Drive the new window from here - opening it is presumably in service of the very
+      // next step, not an end in itself.
+      this.activeTabId = newTab.id;
+      this.notifyStateChange();
+
+      Logger.info('AgentEngine', `[WINDOW_OPENED] Opened a new window [${win.id}] at ${targetUrl}, now driving tab [${newTab.id}] there. Still the same session.`);
+      return {
+        success: true,
+        message: `Opened a new window at ${targetUrl} and switched to it.`,
+        windowId: win.id,
+        tabId: newTab.id
+      };
+    } catch (err) {
+      return { success: false, error: `Could not open a new window: ${err.message}` };
     }
   }
 
@@ -335,24 +773,107 @@ export class AgentEngine {
   }
 
   /**
-   * Tool 1: execute_js in MAIN or ISOLATED world with 5s timeout, CSP fallback, and truncation
+   * Verify if the action's expected outcome was actually achieved.
+   * Uses the LLM to compare the prediction against the current DOM state.
    */
-  async executeJs(tabId, code, world = 'MAIN') {
+  async verifyStep(expectedOutcome, snapshot, settings) {
+    if (!expectedOutcome) return { success: true, reason: 'No expected outcome predicted.' };
+
+    const verifyPrompt = `You are a Verification Agent.
+
+    User Goal: "${this.currentTask}"
+    Action Taken: ${this.history[this.history.length - 1]?.type === 'agent_response' ? this.history[this.history.length - 1].action : 'Unknown'}
+    Expected Outcome: "${expectedOutcome}"
+
+    Current Page State:
+    Title: ${snapshot.title}
+    URL: ${snapshot.url}
+    Visible Text:
+    """
+    ${snapshot.pageText || '(No text)'}
+    """
+
+    Did the action achieve the expected outcome? Answer ONLY with a JSON object:
+    {"success": true/false, "reason": "Short explanation of why it succeeded or failed"}
+    `;
+
+    try {
+      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: verifyPrompt }], 'You are a precise verification agent. Your only job is to confirm if a browser state change happened as predicted.', {
+        json: true,
+        signal: this.abortController?.signal
+      });
+
+      const result = parsePartialOrTruncatedJson(resp);
+      if (result && typeof result.success === 'boolean') {
+        return {
+          success: result.success,
+          reason: result.reason || (result.success ? 'Outcome verified.' : 'Outcome not detected.')
+        };
+      }
+    } catch (err) {
+      Logger.warn('AgentEngine', '[VERIFY_ERROR] Verification call failed', err.message);
+    }
+
+    return { success: true, reason: 'Verification skipped due to error (assuming success to avoid loop)' };
+  }
+
+  /**
+   * Tool 1: execute_js in MAIN world with a 5s timeout and truncation.
+   *
+   * MV3 removed raw code-string injection (the old chrome.tabs.executeScript({code})), so the
+   * only way to run an arbitrary string the model hands us is chrome.scripting.executeScript's
+   * func + new Function(src) - which is functionally eval, and is exactly what a page's
+   * Content-Security-Policy (script-src without 'unsafe-eval') exists to block.
+   *
+   * Two things had to be proven with a real, CSP-sending page and a real unpacked load of this
+   * extension before trusting this code (see the executeJs investigation) rather than guessing:
+   *   1. When new Function() is CSP-blocked, chrome.scripting.executeScript's own promise does
+   *      NOT reliably reject - it can resolve cleanly with `result: null`, indistinguishable from
+   *      the model's own code legitimately returning null. That silent collision is why this used
+   *      to burn steps: every failed extraction looked identical to a successful empty one.
+   *   2. ISOLATED world is not a usable fallback for this technique at all: it enforces its own
+   *      eval restriction unconditionally, independent of whatever CSP the target page sends, so
+   *      new Function() fails there even on a page with no CSP whatsoever. There is no world
+   *      where routing arbitrary code through new Function() is guaranteed to work.
+   *
+   * The fix here isn't to smooth that over - it's to stop it from lying. The injected function
+   * wraps its own outcome in a `{__scoutfoxOk, value|error}` marker *from inside the page's own
+   * try/catch*, so a CSP block is caught right where it happens and reported as a real, actionable
+   * failure instead of silently resolving as an empty answer that reads exactly like success.
+   */
+  async executeJs(tabId, code) {
     const timeoutMs = 5000;
     const startTime = Date.now();
 
-    const executeWork = async (targetWorld) => {
+    const executeWork = async () => {
       const [inj] = await chrome.scripting.executeScript({
         target: { tabId },
-        world: targetWorld,
+        world: 'MAIN',
         func: (src) => {
-          // eslint-disable-next-line no-new-func
-          const fn = new Function(`return (async () => { ${src} })()`);
-          return fn();
+          try {
+            // eslint-disable-next-line no-new-func
+            const fn = new Function(`return (async () => { ${src} })()`);
+            return Promise.resolve(fn())
+              .then((value) => ({ __scoutfoxOk: true, value }))
+              .catch((err) => ({ __scoutfoxOk: false, error: `RUNTIME_ERROR: ${err && err.message ? err.message : String(err)}` }));
+          } catch (err) {
+            // new Function() itself threw - almost always the page's CSP refusing 'unsafe-eval'.
+            return { __scoutfoxOk: false, error: `EVAL_BLOCKED: ${err && err.message ? err.message : String(err)}` };
+          }
         },
         args: [code]
       });
-      return inj ? inj.result : undefined;
+      const wrapped = inj ? inj.result : undefined;
+      if (wrapped && typeof wrapped === 'object' && '__scoutfoxOk' in wrapped) {
+        if (wrapped.__scoutfoxOk) return { value: wrapped.value };
+        const blocked = String(wrapped.error || '').startsWith('EVAL_BLOCKED');
+        const message = blocked
+          ? "execute_js is unavailable on this page: its Content-Security-Policy blocks dynamic script execution ('unsafe-eval' not allowed). Use read_page_text, or click/type on individual elements, instead."
+          : `Your code threw: ${String(wrapped.error || '').replace(/^RUNTIME_ERROR: /, '')}`;
+        throw new Error(message);
+      }
+      // The wrapper itself never ran - e.g. the frame was gone before injection completed.
+      throw new Error('execute_js produced no result - the page may have navigated away or blocked script injection entirely.');
     };
 
     const serializeResult = (val) => {
@@ -382,21 +903,21 @@ export class AgentEngine {
     try {
       const resultPromise = (async () => {
         let rawVal;
-        let usedWorld = world;
         try {
-          rawVal = await executeWork(world);
+          const outcome = await executeWork();
+          rawVal = outcome.value;
         } catch (err) {
-          if (world === 'MAIN' && (err.message.includes('EvalError') || err.message.includes('CSP') || err.message.includes('unsafe-eval'))) {
-            usedWorld = 'ISOLATED';
-            rawVal = await executeWork('ISOLATED');
-          } else if (err.message.includes('Frame with ID') && err.message.includes('removed')) {
+          if (err.message.includes('Frame with ID') && err.message.includes('removed')) {
             return { ok: true, result: 'navigation triggered', durationMs: Date.now() - startTime };
-          } else {
-            throw err;
           }
+          throw err;
         }
 
-        let serialized = serializeResult(rawVal);
+        // redactSensitiveData already strips password/token/cookie/apikey/etc.-named fields out
+        // of network request bodies - execute_js can return exactly the same shape of data
+        // (the model can ask it to read a form, a config object, a cookie) but never went
+        // through the same redaction before landing in history and the next LLM prompt.
+        let serialized = this.redactSensitiveData(serializeResult(rawVal));
         let truncated = false;
         if (typeof serialized === 'string' && serialized.length > 2000) {
           const origLen = serialized.length;
@@ -407,18 +928,27 @@ export class AgentEngine {
         return {
           ok: true,
           result: serialized,
-          world: usedWorld,
+          world: 'MAIN',
           truncated,
           durationMs: Date.now() - startTime
         };
       })();
 
+      let timeoutHandle;
       const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('execute_js timed out after 5000ms')), timeoutMs);
+        timeoutHandle = setTimeout(() => reject(new Error('execute_js timed out after 5000ms')), timeoutMs);
       });
 
-      const res = await Promise.race([resultPromise, timeoutPromise]);
-      return { success: res.ok, message: res.ok ? `Result: ${res.result}` : res.error, ...res };
+      // Same shape of bug fixed in harness/recovery.js for the LLM call: a Promise.race with no
+      // cancellation of the losing side leaves this timer pending for the full 5s regardless of
+      // how fast resultPromise actually settled - and execute_js is called potentially every
+      // step, so those pile up. Cleared unconditionally in `finally` below.
+      try {
+        const res = await Promise.race([resultPromise, timeoutPromise]);
+        return { success: res.ok, message: res.ok ? `Result: ${res.result}` : res.error, ...res };
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
     } catch (err) {
       return {
         success: false,
@@ -429,9 +959,31 @@ export class AgentEngine {
     }
   }
 
+  /**
+   * Synchronously reserve the engine for one task, or refuse.
+   *
+   * Must be called from the message handler BEFORE any await. startTask() cannot guard on
+   * this.status alone: it awaits restorePromise first, so a second START_TASK arriving a few
+   * milliseconds later still observes 'idle' and starts a second concurrent loop against the
+   * same tab, interleaving actions and performing every non-idempotent step twice.
+   */
+  claimForTask() {
+    if (this.status === 'running' || this.isLoopActive || this.taskClaimed) {
+      Logger.warn('AgentEngine', `[START_TASK_REJECTED] A task is already active (status=${this.status}, loop=${this.isLoopActive}, claimed=${!!this.taskClaimed}).`);
+      return { success: false, error: 'A task is already running. Stop it before starting another.' };
+    }
+    this.taskClaimed = true;
+    return { success: true };
+  }
+
+  releaseTaskClaim() {
+    this.taskClaimed = false;
+  }
+
   async startTask(userPrompt, tabId) {
     if (!userPrompt || !userPrompt.trim()) {
       Logger.warn('AgentEngine', '[START_TASK_REJECTED] Ignoring empty task prompt.');
+      this.releaseTaskClaim();
       return;
     }
 
@@ -450,19 +1002,35 @@ export class AgentEngine {
     this.dirty = true;
     this.status = 'running';
     this.currentTask = userPrompt.trim();
-    this.history = [];
+
+    // History is NOT cleared here. Each task appends a new turn to the same session, so a
+    // follow-up like "now add it to the cart" still knows what "it" refers to. Only the
+    // New Session button (clearHistory) starts over.
+    this.turnIndex = (this.turnIndex || 0) + 1;
     this.recentActionSignatures = [];
     this.stepCount = 0;
     this.currentPlanIndex = 0;
+    this.planSteps = [];
     this.activeTabId = tabId;
     this.isLoopActive = true;
     this.abortController = new AbortController();
 
+    Logger.info('AgentEngine', `─────────────────────────────────────────────────────────────────────────────`);
+    Logger.info('AgentEngine', `[NEW_SESSION_RUN] 🚀 Run #${this.turnIndex} Started: "${userPrompt.trim()}"`);
+    Logger.info('AgentEngine', `─────────────────────────────────────────────────────────────────────────────`);
+
+    // Sandbox automation inside 'ScoutFox' Chrome Tab Group
+    await this.ensureScoutFoxGroup(tabId);
+
     this.history.push({
       type: 'user_goal',
-      prompt: userPrompt,
-      timestamp: new Date().toLocaleTimeString()
+      turn: this.turnIndex,
+      prompt: userPrompt.trim(),
+      timestamp: new Date().toLocaleTimeString(),
+      isNewRun: true
     });
+    // trimHistory() now runs centrally in notifyStateChange(), which every path out of this
+    // function reaches before returning.
 
     const settings = await Storage.getSettings();
 
@@ -470,7 +1038,11 @@ export class AgentEngine {
     await this.generatePlan(userPrompt, settings);
 
     this.notifyStateChange();
-    await this.runLoop();
+    try {
+      await this.runLoop();
+    } finally {
+      this.releaseTaskClaim();
+    }
   }
 
   async generatePlan(userPrompt, settings) {
@@ -485,8 +1057,14 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
 ["Identify target form or section", "Execute required browser actions", "Verify result and complete task"]`}`;
 
     try {
-      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.');
-      
+      // Previously passed no signal at all, so Pause/Stop pressed during plan generation could
+      // not cancel it - the in-flight request just ran to completion (or the full timeout)
+      // regardless. Same abortController startTask() already created for the main loop.
+      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.', {
+        json: true,
+        signal: this.abortController ? this.abortController.signal : null
+      });
+
       let planArray = [];
       const match = resp.match(/\[[\s\S]*\]/);
       if (match) {
@@ -565,6 +1143,19 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     }
   }
 
+  /**
+   * Did this error come from the user pressing Pause or Stop, rather than the provider?
+   *
+   * Checks three independent signals because not every provider surfaces an abort the same
+   * way: a genuine DOMException AbortError, the controller's own aborted flag, and the
+   * engine status the user's action already set. Any one of them is enough.
+   */
+  isUserAbort(err) {
+    if (err && (err.name === 'AbortError' || /abort/i.test(err.message || ''))) return true;
+    if (this.abortController && this.abortController.signal.aborted) return true;
+    return this.status === 'paused' || this.status === 'stopped';
+  }
+
   pause() {
     this.dirty = true;
     if (this.status !== 'running') {
@@ -588,11 +1179,44 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       return { success: false, error: `Cannot resume: the agent is ${this.status}. The paused task did not survive a background restart — please re-run it.` };
     }
     this.status = 'running';
+    // A plain Resume (not answering) is a legitimate way to unstick an ask_user pause too - the
+    // model just gets no answer and has to proceed without one. Either way, the question is no
+    // longer pending once the loop is moving again.
+    this.pendingQuestion = null;
     this.abortController = new AbortController();
     this.setPhase('Resuming task...');
     Logger.info('AgentEngine', '[RESUMED] Task resumed by user.');
     this.runLoop().catch((err) => {
       Logger.error('AgentEngine', '[RESUME_ERROR] Uncaught exception resuming loop', err);
+    });
+    return { success: true };
+  }
+
+  /**
+   * Answers a pending ask_user question and continues the run - the recourse that did not
+   * exist before: notifyStateChange({question}) had zero consumers anywhere in the repo, so
+   * an agent honest enough to ask for help had no way to actually hear back. Pushes the answer
+   * as a visible history entry (see harness/outcome.js's sibling module, formatMessagesForLLM
+   * below feeds it back to the model) and resumes exactly like the plain Resume button does.
+   */
+  answerQuestion(answerText) {
+    this.dirty = true;
+    if (this.status !== 'paused' || !this.pendingQuestion) {
+      return { success: false, error: 'There is no pending question to answer right now.' };
+    }
+    const answer = (answerText || '').trim();
+    if (!answer) {
+      return { success: false, error: 'The answer cannot be empty.' };
+    }
+
+    Logger.info('AgentEngine', `[ASK_USER_ANSWERED] "${this.pendingQuestion}" -> "${answer}"`);
+    this.pendingQuestion = null;
+    this.history.push({ type: 'user_answer', content: answer });
+    this.status = 'running';
+    this.abortController = new AbortController();
+    this.setPhase('Continuing with your answer...');
+    this.runLoop().catch((err) => {
+      Logger.error('AgentEngine', '[RESUME_ERROR] Uncaught exception resuming loop after answer', err);
     });
     return { success: true };
   }
@@ -634,6 +1258,14 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     const maxSteps = settings.maxSteps || 25;
     this.isLoopActive = true;
 
+    let consecutiveDomErrors = 0;
+    // A model that cannot produce a parseable action will not start producing one because we
+    // asked it fifteen more times. Without this counter an unusable model (wrong endpoint,
+    // truncated context, reasoning-only output) consumed every remaining step at ~30s each
+    // and reported nothing more useful than "reached maximum allowed steps".
+    let consecutiveParseErrors = 0;
+    const MAX_PARSE_ERRORS = 3;
+
     while (this.status === 'running' && this.stepCount < maxSteps) {
       this.stepCount++;
       Logger.info('AgentEngine', `---------------- STEP ${this.stepCount}/${maxSteps} ----------------`);
@@ -644,9 +1276,38 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       let domSnapshot;
       try {
         domSnapshot = await this.getTabDOMWithAutoInject(this.activeTabId, settings.showElementBadges);
+        consecutiveDomErrors = 0; // Reset error count on clean DOM read
         Logger.info('AgentEngine', `[DOM_SNAPSHOT_INPUT] Title: "${domSnapshot.title}" | URL: ${domSnapshot.url} | Elements: ${domSnapshot.elementCount} | PageTextLen: ${domSnapshot.pageText ? domSnapshot.pageText.length : 0}`);
       } catch (err) {
-        Logger.error('AgentEngine', '[DOM_ERROR] Failed to read page state', err);
+        consecutiveDomErrors++;
+        Logger.error('AgentEngine', `[DOM_ERROR] Failed to read page state (attempt ${consecutiveDomErrors}/3)`, err);
+
+        const isErrorPage = err.message.includes('error page') || err.message.includes('Restricted') || err.message.includes('cannot read');
+
+        if (consecutiveDomErrors <= 3 && (isErrorPage || this.recentActionSignatures.some(s => s.startsWith('navigate')))) {
+          const searchQuery = this.currentTask || 'google search';
+          const fallbackUrl = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
+          
+          Logger.warn('AgentEngine', `[DOM_SELF_HEAL] Target page failed to load (${err.message}). Auto-navigating to Google search fallback: ${fallbackUrl}`);
+          
+          this.history.push({
+            step: this.stepCount,
+            type: 'error',
+            content: `Failed to load target page (${err.message}). Self-healing by redirecting to Google search to find valid website path.`
+          });
+
+          try {
+            if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.update) {
+              await new Promise(r => chrome.tabs.update(this.activeTabId, { url: fallbackUrl }, r));
+              await this.waitForTabComplete(this.activeTabId, 4000);
+            }
+          } catch (_) {}
+
+          this.notifyStateChange();
+          await new Promise(r => setTimeout(r, 1500));
+          continue; // Self-heal and continue the loop!
+        }
+
         this.history.push({
           step: this.stepCount,
           type: 'error',
@@ -660,7 +1321,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       }
 
       const systemPrompt = this.buildSystemPrompt(settings.systemInstructions);
-      let userMessage = this.buildStepMessage(domSnapshot);
+      let userMessage = this.buildStepMessage(domSnapshot, maxSteps);
 
       // Universal Guardrail: Anti-Stuck Loop Detection & Auto-Inject Network Errors
       if (this.recentActionSignatures.length >= 2) {
@@ -694,18 +1355,44 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       let responseText = '';
       try {
         const messages = this.formatMessagesForLLM(userMessage);
-        responseText = await ApiClients.generateCompletion(settings, messages, systemPrompt, {
-          signal: this.abortController ? this.abortController.signal : null
-        });
+        responseText = await callWithRetry(
+          () => ApiClients.generateCompletion(settings, messages, systemPrompt, {
+            signal: this.abortController ? this.abortController.signal : null,
+            json: true
+          }),
+          {
+            isAbort: (err) => this.isUserAbort(err),
+            shouldContinue: () => this.status === 'running',
+            onRetry: (attempt, err, delayMs) => {
+              Logger.warn('AgentEngine', `[LLM_RETRY] Attempt ${attempt}/${LLM_MAX_ATTEMPTS} failed (${err.message}). Retrying in ${delayMs}ms.`);
+            }
+          }
+        );
         Logger.info('AgentEngine', `[LLM_RAW_OUTPUT]\n${responseText}`);
       } catch (err) {
-        Logger.error('AgentEngine', '[LLM_API_ERROR] Connection failure', err);
+        // Pause and Stop both abort the in-flight request, so an abort landing here is the
+        // user's own action, not a provider failure. Treating it as one used to overwrite
+        // 'paused'/'stopped' with 'idle' and record a fabricated connection error, which
+        // destroyed the run and made Resume impossible.
+        if (this.isUserAbort(err)) {
+          Logger.info('AgentEngine', `[LLM_ABORTED] In-flight request cancelled by user (status=${this.status}).`);
+          this.isLoopActive = false;
+          this.notifyStateChange();
+          return;
+        }
+
+        // Every retry is spent by the time we get here (or the user paused/stopped mid-retry,
+        // in which case shouldContinue() already threw and isUserAbort() caught it above).
+        // Pausing instead of going idle means the existing Resume button - which already
+        // preserves stepCount/history/planSteps - continues this exact step, instead of the
+        // task just dying with no way back in.
+        Logger.error('AgentEngine', `[LLM_API_ERROR] Connection failure after ${LLM_MAX_ATTEMPTS} attempts`, err);
         this.history.push({
           step: this.stepCount,
           type: 'error',
-          content: `LLM Connection Error (${settings.provider}): ${err.message}`
+          content: `LLM Connection Error (${settings.provider}) after ${LLM_MAX_ATTEMPTS} attempts: ${err.message}. Task paused at step ${this.stepCount} - click Resume to try again, or check your provider settings if this keeps happening.`
         });
-        this.status = 'idle';
+        this.status = 'paused';
         this.isLoopActive = false;
         this.currentPhase = '';
         this.notifyStateChange({ error: err.message });
@@ -725,17 +1412,39 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       });
 
       if (actionResult.error) {
-        Logger.warn('AgentEngine', `[PARSE_ERROR] Step ${this.stepCount} parsing failed`, actionResult.error);
+        consecutiveParseErrors++;
+        Logger.warn('AgentEngine', `[PARSE_ERROR] Step ${this.stepCount} parsing failed (${consecutiveParseErrors}/${MAX_PARSE_ERRORS})`, actionResult.error);
         this.history.push({
           step: this.stepCount,
           type: 'execution_result',
           success: false,
-          error: actionResult.error
+          error: `${actionResult.error} Reply with a single JSON object containing an "action" key and nothing else.`
         });
+
+        if (consecutiveParseErrors >= MAX_PARSE_ERRORS) {
+          const empty = /empty output/i.test(actionResult.error || '');
+          const detail = empty
+            ? `The model [${settings.model}] returned an empty response ${MAX_PARSE_ERRORS} times in a row. For a local model this is almost always one of: the model is a reasoning model whose output never left the thinking phase, the reply was truncated by the generation cap, or the prompt overflowed the context window. Check the [OLLAMA_*] warnings above.`
+            : `The model [${settings.model}] failed to produce a usable action ${MAX_PARSE_ERRORS} times in a row. Last parser error: ${actionResult.error}`;
+
+          this.status = 'idle';
+          this.isLoopActive = false;
+          this.currentPhase = '';
+          Logger.error('AgentEngine', `[PARSE_CIRCUIT_BREAK] Stopping after ${MAX_PARSE_ERRORS} unusable replies. ${detail}`);
+          this.history.push({
+            type: 'error',
+            content: `Stopped early — ${detail}`
+          });
+          this.notifyStateChange();
+          break;
+        }
+
         this.notifyStateChange();
         await new Promise(r => setTimeout(r, 1000));
         continue;
       }
+
+      consecutiveParseErrors = 0;
 
       const actionObj = actionResult.action;
       
@@ -750,20 +1459,21 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         this.isLoopActive = false;
         this.currentPhase = '';
         this.updatePlanProgress(null, true);
-        this.history.push({
-          type: 'finish',
-          answer: actionObj.answer || 'Task completed successfully.'
-        });
-        Logger.info('AgentEngine', '[TASK_FINISHED] Task completed successfully.');
+        const finishEntry = buildFinishEntry(actionObj);
+        this.history.push(finishEntry);
+        Logger.info('AgentEngine', finishEntry.unconfirmed
+          ? '[TASK_FINISHED] Model gave a direct text answer instead of a finish action - accepted, but flagged unconfirmed.'
+          : '[TASK_FINISHED] Task completed successfully.');
         this.notifyStateChange();
         break;
       }
 
       if (actionObj.action === 'ask_user') {
         this.status = 'paused';
-        this.setPhase('Waiting for user input');
-        Logger.info('AgentEngine', '[ASK_USER] Waiting for user input.');
-        this.notifyStateChange({ question: actionObj.question });
+        this.pendingQuestion = actionObj.question || 'The agent needs more information to continue.';
+        this.setPhase('Waiting for your answer...');
+        Logger.info('AgentEngine', `[ASK_USER] Waiting for user input: ${this.pendingQuestion}`);
+        this.notifyStateChange();
         break;
       }
 
@@ -790,20 +1500,42 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         const execResult = await this.executeActionOnTab(this.activeTabId, actionObj);
         Logger.info('AgentEngine', `[ACTION_RESULT] ${execResult.success ? 'Success' : 'Failed'}: ${execResult.message || execResult.error}`);
 
+        // RAV Verification: If the action technically succeeded, verify it achieved the expected outcome
+        let finalSuccess = execResult.success !== false;
+        let finalMessage = execResult.message;
+        let finalError = execResult.error;
+
+        if (finalSuccess && actionResult.expectedOutcome) {
+          this.setPhase(`🔍 Step ${this.stepCount}/${maxSteps}: Verifying expected outcome...`);
+          const postActionDom = await this.getTabDOMWithAutoInject(this.activeTabId, settings.showElementBadges);
+          const verification = await this.verifyStep(actionResult.expectedOutcome, postActionDom, settings);
+
+          if (!verification.success) {
+            Logger.warn('AgentEngine', `[VERIFICATION_FAILED] Expected: "${actionResult.expectedOutcome}" | Actual: ${verification.reason}`);
+            finalSuccess = false;
+            finalError = `Verification Failed: ${verification.reason}`;
+            finalMessage = `Action executed but outcome not achieved: ${verification.reason}`;
+          } else {
+            Logger.info('AgentEngine', `[VERIFICATION_OK] ${verification.reason}`);
+          }
+        }
+
         this.history.push({
           step: this.stepCount,
           type: 'execution_result',
-          success: execResult.success !== false,
-          message: execResult.message,
-          error: execResult.error,
+          success: finalSuccess,
+          message: finalMessage,
+          error: finalError,
+          label: execResult.label || null,
+          submitted: execResult.submitted || false,
           resultData: execResult.result || execResult.results || null
         });
 
-        if (execResult.success !== false) {
+        if (finalSuccess) {
           this.updatePlanProgress(actionObj, false);
         }
 
-        if (actionObj.action === 'click' || actionObj.action === 'navigate' || (actionObj.action === 'type' && actionObj.submit)) {
+        if (actionObj.action === 'click' || actionObj.action === 'navigate' || actionObj.action === 'open_window' || (actionObj.action === 'type' && actionObj.submit)) {
           await this.waitForTabComplete(this.activeTabId, 4000);
         }
 
@@ -826,10 +1558,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       this.status = 'idle';
       this.isLoopActive = false;
       this.currentPhase = '';
-      this.history.push({
-        type: 'finish',
-        answer: `Reached maximum allowed steps (${maxSteps}) without completing task.`
-      });
+      // Pushed as an 'error', never 'finish' - see harness/outcome.js. This run did not
+      // complete, and must never render or be recapped as though it did.
+      this.history.push(buildMaxStepsEntry(maxSteps));
       this.notifyStateChange();
     }
   }
@@ -893,6 +1624,14 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       throw new Error(`The target tab [${tabId}] no longer exists (it was probably closed). Open the page you want automated and start the task again.`);
     }
 
+    // The hard access wall. This session is confined to its own ScoutFox tab group(s); a tab
+    // outside them gets no reads and no actions, full stop - even if some upstream event ever
+    // handed this engine a foreign tabId by mistake, this is the one place every single step
+    // passes through before touching a page, so it is the right place to refuse.
+    if (!(await this.isTabInScope(tabId))) {
+      throw new Error(`Tab [${tabId}] is outside this session's ScoutFox group and cannot be automated from here. Each window's ScoutFox session only acts on tabs within its own group.`);
+    }
+
     const restriction = describeRestrictedUrl(tab.url);
     if (restriction) {
       // Fail with the truth. The old message said "refresh the page and try again", which for
@@ -952,8 +1691,30 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
   }
 
   async executeActionOnTab(tabId, actionPayload) {
+    // describeRestrictedUrl was only ever applied to the CURRENT tab's URL, before a DOM read -
+    // never to a proposed navigate/open_window TARGET. A restricted destination was reached
+    // (window.location.href = url, or chrome.windows.create) and only discovered a step later
+    // when the next DOM read failed. Gate it here instead, at the one chokepoint every
+    // top-level action already passes through, before the tab (or a new window) ever gets there.
+    if ((actionPayload.action === 'navigate' || actionPayload.action === 'open_window') && actionPayload.url) {
+      const restriction = describeRestrictedUrl(actionPayload.url);
+      if (restriction) {
+        return { success: false, error: restriction };
+      }
+    }
+
     if (actionPayload.action === 'execute_js') {
-      return this.executeJs(tabId, actionPayload.code, actionPayload.world || 'MAIN');
+      // `world` is no longer accepted: ISOLATED can never run dynamic code (its own content-
+      // script CSP blocks eval unconditionally), so execute_js always runs in MAIN now - see
+      // executeJs()'s doc comment for why. Any `world` the model still sends is simply ignored.
+      return this.executeJs(tabId, actionPayload.code);
+    }
+
+    if (actionPayload.action === 'open_window') {
+      // A background-only browser API, not a content-script action - dispatched here directly
+      // rather than via chrome.tabs.sendMessage(tabId, ...) below, which targets a page's own
+      // content script and has nothing to do with creating a new window.
+      return this.openNewWindow(actionPayload.url);
     }
 
     if (actionPayload.action === 'read_network_requests') {
@@ -974,12 +1735,21 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
   formatMessagesForLLM(latestUserMsg) {
     const messages = [];
 
+    const priorTurns = this.previousTurnsSummary();
+    if (priorTurns.length > 0) {
+      messages.push({
+        role: 'user',
+        content: `Earlier in this session you already completed these tasks:\n${priorTurns.join('\n')}\n\nThose are finished. Use them for context \u2014 words like "it" or "that" in the new goal usually refer to them. Your current goal follows.`
+      });
+    }
+
     messages.push({
       role: 'user',
       content: `Goal: ${this.currentTask}`
     });
 
-    const recentHistory = this.history.slice(-8);
+    // Only the CURRENT turn's steps. Earlier turns are represented by the recap above.
+    const recentHistory = this.currentTurnHistory().slice(-8);
     recentHistory.forEach(item => {
       if (item.type === 'agent_response') {
         messages.push({ role: 'assistant', content: item.rawResponse });
@@ -990,6 +1760,8 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
             ? `Action Executed Successfully: ${item.message}`
             : `Action Failed: ${item.error}. Choose a different element or action.`
         });
+      } else if (item.type === 'user_answer') {
+        messages.push({ role: 'user', content: `You asked a question and the user answered: "${item.content}". Continue the task using this answer.` });
       }
     });
 
@@ -1018,6 +1790,10 @@ Your objective is to choose the single best action to complete the user's goal i
 3. **Silent Action Failures / Error Debugging**:
    - If an action succeeds but the page state remains unchanged, use "read_network_requests" to inspect API responses or "execute_js" to verify state instead of blindly retrying.
 
+4. **Domain Navigation Safety**:
+   - DO NOT guess top-level domain extensions (e.g. .de, .org, .com) blindly if you do not know the exact working website URL!
+   - If you are not already on the correct website, navigate to Google search (https://www.google.com/search?q=...) to find the official valid page link first instead of guessing non-existent domains.
+
 ### Available Actions:
 1. Click element:
    {"action": "click", "element_id": <number>, "reason": "<explanation>"}
@@ -1033,9 +1809,11 @@ Your objective is to choose the single best action to complete the user's goal i
 
 5. Go back / forward:
    {"action": "go_back", "reason": "<explanation>"}
+   {"action": "go_forward", "reason": "<explanation>"}
 
-6. Execute JavaScript in page context:
-   {"action": "execute_js", "code": "return document.querySelectorAll('.result').length", "world": "MAIN", "reason": "<explanation>"}
+6. Execute JavaScript in page context (fails with a clear error on pages whose Content-Security-
+   Policy blocks script execution - fall back to read_page_text or click/type there instead):
+   {"action": "execute_js", "code": "return document.querySelectorAll('.result').length", "reason": "<explanation>"}
 
 7. Read recent network activity (XHR/fetch status & bodies):
    {"action": "read_network_requests", "filter": {"status": "error"|"all", "since": "last_action"}, "includeBody": true, "limit": 10, "reason": "<explanation>"}
@@ -1051,6 +1829,20 @@ Your objective is to choose the single best action to complete the user's goal i
 
 11. Ask user for input/help:
    {"action": "ask_user", "question": "<question_text>", "reason": "<explanation>"}
+
+12. Open a brand-new browser window (RARE - most tasks never need this; prefer "navigate" for
+    an ordinary new page in the SAME window). Use this only when the task genuinely requires a
+    separate window - comparing two pages side by side, a flow that only works in a fresh
+    window. The new window stays part of this same task and history; you keep driving it
+    afterward exactly as you were driving the tab before:
+   {"action": "open_window", "url": "<https://...>", "reason": "<explanation>"}
+
+13. Press a keyboard key (e.g. Escape to close a modal/dropdown, Enter to submit a focused field):
+   {"action": "press_key", "key": "Escape", "reason": "<explanation>"}
+
+14. Wait a fixed number of seconds (RARE - prefer just reading the page again; use this only for
+    a page that is genuinely still loading/animating with nothing yet to act on):
+   {"action": "wait", "amount": 2, "reason": "<explanation>"}
 
 ### FEW-SHOT OUTPUT EXAMPLES (Always follow these exact output patterns):
 
@@ -1105,7 +1897,6 @@ I need to check the number of virtualized table rows and verify form validity us
 {
   "action": "execute_js",
   "code": "return document.querySelectorAll('.table-row').length",
-  "world": "MAIN",
   "reason": "Count table rows in page"
 }
 \`\`\`
@@ -1142,11 +1933,18 @@ The visible documentation text provides the project title, key features, and arc
 3. Only select element_id numbers that exist in the provided Interactive Elements list.`;
   }
 
-  buildStepMessage(snapshot) {
+  buildStepMessage(snapshot, maxSteps) {
+    // planSteps has always been computed (generatePlan) and shown in the side panel's own
+    // progress bar - but buildStepMessage never included it, so the model choosing the actual
+    // next action never saw the plan it was supposedly following, or how many steps remained.
+    const planText = (this.planSteps && this.planSteps.length)
+      ? `\nPlan (step ${this.stepCount}${maxSteps ? `/${maxSteps}` : ''} overall):\n${this.planSteps.map((s, i) => `${i + 1}. [${s.status === 'completed' ? 'x' : s.status === 'in_progress' ? '>' : ' '}] ${s.text}`).join('\n')}\n`
+      : '';
+
     return `Current Page Title: "${snapshot.title}"
 Current URL: ${snapshot.url}
 Scroll Position: Y=${snapshot.scrollState.scrollY} / ${snapshot.scrollState.pageHeight}px
-
+${planText}
 Webpage Visible Text Content (Use this to read content or summarize):
 """
 ${snapshot.pageText || '(No visible text extracted)'}
@@ -1181,18 +1979,14 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     // 2. Extract JSON from ```json ... ``` or ``` ... ```
     const codeBlockMatch = cleanText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
     if (codeBlockMatch) {
-      try {
-        actionObj = JSON.parse(codeBlockMatch[1].trim());
-      } catch (_) { /* continue to fallback extractors */ }
+      actionObj = parsePartialOrTruncatedJson(codeBlockMatch[1].trim());
     }
 
     // 3. Extract JSON object containing "action" key
     if (!actionObj) {
       const braceMatch = cleanText.match(/\{[\s\S]*?"action"\s*:[\s\S]*?\}/i);
       if (braceMatch) {
-        try {
-          actionObj = JSON.parse(braceMatch[0].trim());
-        } catch (_) { /* continue */ }
+        actionObj = parsePartialOrTruncatedJson(braceMatch[0].trim());
       }
     }
 
@@ -1200,13 +1994,11 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     if (!actionObj) {
       const matches = cleanText.match(/\{[\s\S]*?\}/g) || [];
       for (let i = matches.length - 1; i >= 0; i--) {
-        try {
-          const parsed = JSON.parse(matches[i]);
-          if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.execute_js || parsed.browser_batch || parsed.read_network_requests)) {
-            actionObj = parsed;
-            break;
-          }
-        } catch (_) { /* ignore */ }
+        const parsed = parsePartialOrTruncatedJson(matches[i]);
+        if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.execute_js || parsed.browser_batch || parsed.read_network_requests)) {
+          actionObj = parsed;
+          break;
+        }
       }
     }
 
@@ -1243,24 +2035,50 @@ Choose your next action based on the goal: "${this.currentTask}"`;
       }
     }
 
-    // 6. Freeform Text Auto-Wrapping Guardrail
-    if (!actionObj && cleanText.length > 5) {
+    // 6. Freeform Text Auto-Wrapping Guardrail (PROTECTED AGAINST TRUNCATED JSON PAYLOADS)
+    const looksLikeActionJson = /"action"\s*:|"execute_js"|"browser_batch"|```json/i.test(cleanText);
+
+    if (!actionObj && cleanText.length > 5 && !looksLikeActionJson) {
       Logger.info('AgentEngine', '[UNIVERSAL_GUARDRAIL] Model provided direct text response. Auto-wrapping into finish action.');
       actionObj = {
         action: 'finish',
         answer: cleanText,
-        reason: 'Direct text output from model'
+        reason: 'Direct text output from model',
+        // The model never actually emitted {"action":"finish"} - it just replied in prose and
+        // this guardrail inferred an ending so the run has somewhere to go. buildFinishEntry
+        // (harness/outcome.js) turns this into an `unconfirmed` flag so it is shown as inferred,
+        // not declared. See harness/outcome.js for why that distinction matters.
+        autoWrapped: true
       };
     }
 
     if (!actionObj) {
-      return { thought, error: 'No valid action or response text found in model output.', raw: text };
+      return { thought, error: 'Model output contained a truncated or malformed action JSON. Retrying with simpler prompt.', raw: text };
     }
 
     // 7. Action Schema & Element ID Sanitizer
     actionObj = this.sanitizeActionSchema(actionObj, maxElementCount);
 
-    return { thought, action: actionObj };
+    if (actionObj.invalidAction) {
+      return {
+        thought,
+        error: `Unknown action "${actionObj.invalidAction}". Valid actions are: ${[...KNOWN_ACTIONS].join(', ')}.`
+      };
+    }
+
+    if (actionObj.invalidElementId) {
+      // A hallucinated or out-of-range element_id used to be silently clamped/coerced onto a
+      // DIFFERENT, real element - the agent then confidently acted on the wrong thing instead
+      // of visibly failing. Routing it through the same parse-error/retry path as malformed
+      // JSON (consecutiveParseErrors, corrective feedback, the 3-strike circuit breaker) gives
+      // the model a chance to look at the element list again instead of clicking blind.
+      return {
+        thought,
+        error: `Selected element_id ${actionObj.invalidElementId} does not exist on this page (valid range: 1-${maxElementCount}). Re-check the numbered element list and choose a real one.`
+      };
+    }
+
+    return { thought, action: actionObj, expectedOutcome: actionObj.expected_outcome || actionObj.expectedOutcome || null };
   }
 
   /**
@@ -1279,6 +2097,16 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     if (act.action === 'eval_js' || act.action === 'run_js' || act.action === 'javascript') act.action = 'execute_js';
     if (act.action === 'read_network' || act.action === 'network_requests' || act.action === 'get_network') act.action = 'read_network_requests';
     if (act.action === 'batch' || act.action === 'batch_actions') act.action = 'browser_batch';
+    if (act.action === 'new_window' || act.action === 'open_new_window' || act.action === 'create_window') act.action = 'open_window';
+
+    // After alias normalization, anything still not a real verb is a hallucination the executor
+    // would only catch one layer later (actionExecutor.js's default `throw new Error('Unknown
+    // action')`) after this action had already been pushed to history. invalidAction is read by
+    // parseResponse (the caller), which turns it into a correctable parse error instead.
+    if (!KNOWN_ACTIONS.has(act.action)) {
+      Logger.warn('AgentEngine', `[GUARDRAIL_REJECTED] Model requested an unrecognised action "${act.action}".`);
+      act.invalidAction = act.action;
+    }
 
     if (act.element_id === undefined) {
       if (act.element !== undefined) act.element_id = act.element;
@@ -1286,11 +2114,23 @@ Choose your next action based on the goal: "${this.currentTask}"`;
       else if (act.elementId !== undefined) act.element_id = act.elementId;
     }
 
-    if (act.element_id !== undefined && typeof act.element_id === 'number') {
-      act.element_id = parseInt(act.element_id, 10) || 1;
-      if (maxElementCount > 0 && act.element_id > maxElementCount) {
-        Logger.warn('AgentEngine', `[GUARDRAIL_BOUNDS] Model selected hallucinated element_id [${act.element_id}]. Clamping to valid range [1..${maxElementCount}]`);
-        act.element_id = Math.min(act.element_id, maxElementCount);
+    // Parsed unconditionally, NOT only when the value already happens to be a number. Gating
+    // on `typeof === 'number'` let a string element_id through untouched, and page content is
+    // attacker-controlled input to the model, so a prompt-injected reply could put arbitrary
+    // markup in this field.
+    //
+    // A non-numeric or out-of-range id is REJECTED, not clamped/coerced. Clamping to
+    // maxElementCount or coercing to 1 used to silently redirect the action onto a different,
+    // REAL element the model never chose - a hallucinated click landed somewhere else on the
+    // page with no visible failure. invalidElementId is read by parseResponse (the caller),
+    // which turns it into a correctable parse error instead of returning this action at all.
+    if (act.element_id !== undefined) {
+      const parsed = parseInt(act.element_id, 10);
+      if (!Number.isFinite(parsed) || parsed < 1 || (maxElementCount > 0 && parsed > maxElementCount)) {
+        Logger.warn('AgentEngine', `[GUARDRAIL_REJECTED] Model selected an invalid element_id (${JSON.stringify(act.element_id)}, valid range 1-${maxElementCount}). Rejecting instead of guessing a different element.`);
+        act.invalidElementId = JSON.stringify(act.element_id);
+      } else {
+        act.element_id = parsed;
       }
     }
 
@@ -1307,5 +2147,6 @@ function formatActionSummary(act) {
   if (act.action === 'execute_js') return `Execute JS`;
   if (act.action === 'read_network_requests') return `Read network requests`;
   if (act.action === 'browser_batch') return `Batch (${act.steps ? act.steps.length : 0} steps)`;
+  if (act.action === 'open_window') return `Open new window at ${act.url || ''}`;
   return act.action;
 }
