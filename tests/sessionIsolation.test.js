@@ -1,9 +1,12 @@
 /**
- * Tests for the per-window session model: each browser window gets its own independent
- * ScoutFox session (own tab group, own history, own running task, own Stop/Pause), reopening
- * the panel on a tab already in a window's group reflects that window's current session rather
- * than resetting it, and the agent can only read/act on tabs inside its OWN window's group -
- * zero access outside it.
+ * Tests for the per-TAB session model: each tab gets its own independent ScoutFox session (own
+ * tab group, own history, own running task, own Stop/Pause), reopening the panel on a tab
+ * reflects that tab's current session rather than resetting it, and the agent can only read/act
+ * on tabs inside its OWN group - zero access outside it.
+ *
+ * Per tab, not per window, so two tabs side by side in the SAME window are as independent as two
+ * tabs in different windows. That is the point of the model: start a task in one tab, open
+ * another tab and start something completely unrelated, and neither disturbs the other.
  *
  * Imports the real background.js, not a reimplementation - see the other background*.test.js
  * files in this suite for why that distinction matters here.
@@ -50,7 +53,7 @@ function makeMultiWindowMock() {
         }
       },
       tabs: {
-        onRemoved: listener(),
+        onRemoved: { addListener: (fn) => { listeners.onTabRemoved = fn; } },
         onActivated: listener(),
         onCreated: listener(),
         onUpdated: listener(),
@@ -99,85 +102,107 @@ global.chrome = mock.chrome;
 await import('../background/background.js');
 
 
-test('two windows get fully independent sessions - starting a task in one never touches the other', async () => {
-  const WIN_A = 1, WIN_B = 2;
-  mock.__addTab(101, WIN_A, 'https://example.com/a');
-  mock.__addTab(201, WIN_B, 'https://example.com/b');
+test('two tabs in the SAME window get fully independent sessions', async () => {
+  const WIN = 1;
+  mock.__addTab(101, WIN, 'https://example.com/a');
+  mock.__addTab(102, WIN, 'https://example.com/b');
 
-  const portA = makeFakePort('scoutfox_sidepanel_fresh:1');
+  const portA = makeFakePort('scoutfox_sidepanel_fresh:101');
   mock.__listeners.onConnect(portA);
   await new Promise((r) => setTimeout(r, 20));
 
-  const portB = makeFakePort('scoutfox_sidepanel_fresh:2');
+  const portB = makeFakePort('scoutfox_sidepanel_fresh:102');
   mock.__listeners.onConnect(portB);
   await new Promise((r) => setTimeout(r, 20));
 
-  // Both are genuinely solitary within their OWN window, so both cleared to a blank session -
-  // neither one being "fresh" collided with the other, because they are different windows.
   assert.deepEqual(lastStateUpdate(portA).payload.history, []);
   assert.deepEqual(lastStateUpdate(portB).payload.history, []);
 
-  const startRes = await sendMessage(mock.__listeners, { action: 'START_TASK', windowId: WIN_A, payload: { prompt: 'task for window A only' } });
+  const startRes = await sendMessage(mock.__listeners, { action: 'START_TASK', tabId: 101, payload: { prompt: 'task for tab 101 only' } });
   assert.equal(startRes.success, true);
-  assert.equal(startRes.tabId, 101, 'START_TASK with windowId=1 must resolve a tab INSIDE window 1, never window 2\'s tab');
+  assert.equal(startRes.tabId, 101, 'a task must run in the tab whose panel started it, never a neighbouring tab');
 
   await new Promise((r) => setTimeout(r, 20));
 
-  const stateA = await sendMessage(mock.__listeners, { action: 'GET_AGENT_STATE', windowId: WIN_A });
-  const stateB = await sendMessage(mock.__listeners, { action: 'GET_AGENT_STATE', windowId: WIN_B });
+  const stateA = await sendMessage(mock.__listeners, { action: 'GET_AGENT_STATE', tabId: 101 });
+  const stateB = await sendMessage(mock.__listeners, { action: 'GET_AGENT_STATE', tabId: 102 });
 
-  assert.equal(stateA.task, 'task for window A only', 'window A\'s own session must show the task it started');
-  assert.equal(stateB.task, null, 'window B\'s session must be completely untouched by window A\'s task');
+  assert.equal(stateA.task, 'task for tab 101 only', 'tab 101\'s own session must show the task it started');
+  assert.equal(stateB.task, null,
+    'tab 102\'s session must be completely untouched - same window, but a different session entirely');
   assert.notEqual(stateA.bootId, undefined);
-  assert.notEqual(stateA.scoutFoxGroupId, stateB.scoutFoxGroupId, 'each window must get its OWN tab group, never a shared one');
 
   portA._disconnect();
   portB._disconnect();
 });
 
-test('reopening the panel on a tab already in the window\'s group reflects the current session, not a reset', async () => {
-  const WIN = 3;
-  mock.__addTab(301, WIN, 'https://example.com/c');
+test('two tabs in DIFFERENT windows are independent too, with their own tab groups', async () => {
+  mock.__addTab(201, 2, 'https://example.com/c');
+  mock.__addTab(301, 3, 'https://example.com/d');
 
-  const port1 = makeFakePort('scoutfox_sidepanel_fresh:3');
+  const portA = makeFakePort('scoutfox_sidepanel_fresh:201');
+  mock.__listeners.onConnect(portA);
+  const portB = makeFakePort('scoutfox_sidepanel_fresh:301');
+  mock.__listeners.onConnect(portB);
+  await new Promise((r) => setTimeout(r, 20));
+
+  await sendMessage(mock.__listeners, { action: 'START_TASK', tabId: 201, payload: { prompt: 'window 2 task' } });
+  await sendMessage(mock.__listeners, { action: 'START_TASK', tabId: 301, payload: { prompt: 'window 3 task' } });
+  await new Promise((r) => setTimeout(r, 20));
+
+  const stateA = await sendMessage(mock.__listeners, { action: 'GET_AGENT_STATE', tabId: 201 });
+  const stateB = await sendMessage(mock.__listeners, { action: 'GET_AGENT_STATE', tabId: 301 });
+
+  assert.equal(stateA.task, 'window 2 task');
+  assert.equal(stateB.task, 'window 3 task');
+  assert.notEqual(stateA.scoutFoxGroupId, stateB.scoutFoxGroupId,
+    'each session must get its OWN tab group, never a shared one - and a Chrome group cannot span windows anyway');
+
+  portA._disconnect();
+  portB._disconnect();
+});
+
+test('reopening the panel on a tab reflects that tab\'s current session, not a reset', async () => {
+  mock.__addTab(401, 4, 'https://example.com/e');
+
+  const port1 = makeFakePort('scoutfox_sidepanel_fresh:401');
   mock.__listeners.onConnect(port1);
   await new Promise((r) => setTimeout(r, 20));
 
-  await sendMessage(mock.__listeners, { action: 'START_TASK', windowId: WIN, payload: { prompt: 'a real task' } });
+  await sendMessage(mock.__listeners, { action: 'START_TASK', tabId: 401, payload: { prompt: 'a real task' } });
   await new Promise((r) => setTimeout(r, 20));
 
-  // Panel closes (worker not necessarily killed), then the SAME window's panel reopens later.
+  // Panel closes (worker not necessarily killed), then the SAME tab's panel reopens later.
   // From the reopening document's own point of view this is a genuine, honest fresh connect.
   port1._disconnect();
 
-  const port2 = makeFakePort('scoutfox_sidepanel_fresh:3');
+  const port2 = makeFakePort('scoutfox_sidepanel_fresh:401');
   mock.__listeners.onConnect(port2);
   await new Promise((r) => setTimeout(r, 20));
 
   const reopened = lastStateUpdate(port2);
   assert.equal(reopened.payload.task, 'a real task',
-    'reopening the panel on a tab already in this window\'s group must show the session that is actually there, not silently reset it');
+    'reopening the panel on a tab must show the session that is actually there, not silently reset it');
 
   port2._disconnect();
 });
 
-test('a second, genuinely NEW window opening the extension starts its own blank session unaffected by an existing one', async () => {
-  const WIN_EXISTING = 4, WIN_NEW = 5;
-  mock.__addTab(401, WIN_EXISTING, 'https://example.com/d');
-  mock.__addTab(501, WIN_NEW, 'https://example.com/e');
+test('a brand new tab opening the extension starts its own blank session', async () => {
+  mock.__addTab(501, 5, 'https://example.com/f');
+  mock.__addTab(502, 5, 'https://example.com/g');
 
-  const portExisting = makeFakePort('scoutfox_sidepanel_fresh:4');
+  const portExisting = makeFakePort('scoutfox_sidepanel_fresh:501');
   mock.__listeners.onConnect(portExisting);
   await new Promise((r) => setTimeout(r, 20));
-  await sendMessage(mock.__listeners, { action: 'START_TASK', windowId: WIN_EXISTING, payload: { prompt: 'existing window task' } });
+  await sendMessage(mock.__listeners, { action: 'START_TASK', tabId: 501, payload: { prompt: 'existing tab task' } });
   await new Promise((r) => setTimeout(r, 20));
 
-  const portNew = makeFakePort('scoutfox_sidepanel_fresh:5');
+  const portNew = makeFakePort('scoutfox_sidepanel_fresh:502');
   mock.__listeners.onConnect(portNew);
   await new Promise((r) => setTimeout(r, 20));
 
   assert.deepEqual(lastStateUpdate(portNew).payload.history, [],
-    'a brand new window opening the extension must start blank, not see the other window\'s session');
+    'a brand new tab opening the extension must start blank, not see the neighbouring tab\'s session');
   assert.equal(lastStateUpdate(portNew).payload.task, null);
 
   portExisting._disconnect();
@@ -186,15 +211,16 @@ test('a second, genuinely NEW window opening the extension starts its own blank 
 
 test('the hard access wall: a session cannot read a tab outside its own ScoutFox group', async () => {
   const { AgentEngine } = await import('../background/agentEngine.js');
-  const engineA = new AgentEngine(10);
+  // Session owned by tab 1001, which lives in window 10.
+  const engineA = new AgentEngine(1001, 10);
   await engineA.restorePromise;
   engineA.scoutFoxGroupIds.set(10, 7000); // window 10's own group
 
-  mock.__addTab(1001, 10, 'https://example.com/mine', 7000);   // inside window 10's own group
-  mock.__addTab(1002, 11, 'https://example.com/theirs', 8000); // a DIFFERENT window's group entirely
+  mock.__addTab(1001, 10, 'https://example.com/mine', 7000);   // inside this session's own group
+  mock.__addTab(1002, 11, 'https://example.com/theirs', 8000); // a DIFFERENT group entirely
 
   assert.equal(await engineA.isTabInScope(1001), true, 'a tab inside this session\'s own group must be in scope');
-  assert.equal(await engineA.isTabInScope(1002), false, 'a tab in a DIFFERENT window\'s group must never be in scope');
+  assert.equal(await engineA.isTabInScope(1002), false, 'a tab in a DIFFERENT group must never be in scope');
 
   await assert.rejects(
     () => engineA.getTabDOMWithAutoInject(1002, false),
@@ -203,36 +229,36 @@ test('the hard access wall: a session cannot read a tab outside its own ScoutFox
   );
 });
 
-test('closing a window ends its session and forgets its persisted state', async () => {
-  const WIN = 6;
-  mock.__addTab(601, WIN, 'https://example.com/f');
+test('closing a tab ends its session and forgets its persisted state', async () => {
+  mock.__addTab(601, 6, 'https://example.com/h');
 
-  const port = makeFakePort('scoutfox_sidepanel_fresh:6');
+  const port = makeFakePort('scoutfox_sidepanel_fresh:601');
   mock.__listeners.onConnect(port);
   await new Promise((r) => setTimeout(r, 20));
-  await sendMessage(mock.__listeners, { action: 'START_TASK', windowId: WIN, payload: { prompt: 'about to close' } });
+  await sendMessage(mock.__listeners, { action: 'START_TASK', tabId: 601, payload: { prompt: 'about to close' } });
   await new Promise((r) => setTimeout(r, 20));
 
-  assert.ok(mock.__storage.agent_sessions && mock.__storage.agent_sessions['6'],
-    'the window\'s session must actually be persisted before it closes');
+  assert.ok(mock.__storage.agent_sessions && mock.__storage.agent_sessions['601'],
+    'the tab\'s session must actually be persisted before it closes - that is what survives a worker restart');
 
   port._disconnect();
 
-  assert.equal(typeof mock.__listeners.onWindowRemoved, 'function',
-    'background.js must register a chrome.windows.onRemoved listener to clean up closed sessions');
-  mock.__listeners.onWindowRemoved(WIN);
+  assert.equal(typeof mock.__listeners.onTabRemoved, 'function',
+    'background.js must register a chrome.tabs.onRemoved listener to clean up closed sessions');
+  mock.__listeners.onTabRemoved(601);
   await new Promise((r) => setTimeout(r, 20));
 
-  assert.ok(!mock.__storage.agent_sessions['6'],
-    'a closed window\'s persisted session must be removed, not left behind indefinitely');
+  assert.ok(!mock.__storage.agent_sessions['601'],
+    'a closed tab\'s persisted session must be removed, not left behind indefinitely');
 
-  // A brand new port for that SAME window id, after it closed, must be treated as a totally
-  // fresh session (no leftover in-memory engine either) rather than resurrecting the old one.
-  const reopened = makeFakePort('scoutfox_sidepanel_fresh:6');
-  mock.__listeners.onConnect(reopened);
+  // A brand new port for that SAME tab id, after it closed, must be treated as a totally fresh
+  // session (no leftover in-memory engine either) rather than resurrecting the old one. Chrome
+  // does reuse tab ids, so this is a real scenario, not a hypothetical.
+  const portAfter = makeFakePort('scoutfox_sidepanel_fresh:601');
+  mock.__listeners.onConnect(portAfter);
   await new Promise((r) => setTimeout(r, 20));
-  assert.equal(lastStateUpdate(reopened).payload.task, null,
-    'a new session for a window id that previously closed must not remember the old task');
 
-  reopened._disconnect();
+  assert.equal(lastStateUpdate(portAfter).payload.task, null,
+    'a new tab reusing that id must not inherit the closed session');
+  portAfter._disconnect();
 });
