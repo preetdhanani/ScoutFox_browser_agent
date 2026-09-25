@@ -15,7 +15,7 @@
 
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { sendMessage } from './helpers/fakePort.js';
+import { makeFakePort, sendMessage } from './helpers/fakePort.js';
 
 const { ApiClients } = await import('../background/apiClients.js');
 
@@ -100,8 +100,11 @@ function makeMock() {
           if (opts.active) {
             for (const t of tabs.values()) t.active = t.id === id;
           }
-          if (cb) cb(tab);
-          return Promise.resolve(tab);
+          // Like Chrome: a tab handed back by create has not committed its navigation yet, so it
+          // carries pendingUrl and no url. The stored tab (what tabs.get returns later) has both.
+          const justCreated = { ...tab, url: undefined, pendingUrl: opts.url };
+          if (cb) cb(justCreated);
+          return Promise.resolve(justCreated);
         },
         update: (id, props, cb) => {
           updateCalls.push({ id, props });
@@ -176,7 +179,7 @@ after(() => { ApiClients.generateCompletion = realGenerateCompletion; });
 async function waitUntilIdle(timeoutMs = 3000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const state = await sendMessage(mock.__listeners, { action: 'GET_AGENT_STATE', windowId: 1 });
+    const state = await sendMessage(mock.__listeners, { action: 'GET_AGENT_STATE', tabId: 100 });
     if (state && state.status !== 'running') return state;
     await new Promise((r) => setTimeout(r, 20));
   }
@@ -185,10 +188,24 @@ async function waitUntilIdle(timeoutMs = 3000) {
 
 test('a restricted focused tab gets a fresh tab beside it - never the user\'s unrelated tab', async () => {
   mock.__createCalls.length = 0;
+  mock.__updateCalls.length = 0;
+
+  // The panel the user typed the task into, attached to tab 100. Its messages and the worker's
+  // tab activations share one sequence, so the test can tell which came first.
+  const sequence = [];
+  const panelPort = makeFakePort('scoutfox_sidepanel_fresh:100');
+  panelPort.postMessage = (msg) => { panelPort.received.push(msg); sequence.push(msg.type); };
+  mock.__listeners.onConnect(panelPort);
+  const realUpdate = mock.chrome.tabs.update;
+  mock.chrome.tabs.update = (id, props, cb) => {
+    if (props.active) sequence.push(`activate:${id}`);
+    return realUpdate(id, props, cb);
+  };
 
   const res = await sendMessage(mock.__listeners, {
-    action: 'START_TASK', windowId: 1, payload: { prompt: 'find something' }
+    action: 'START_TASK', tabId: 100, payload: { prompt: 'find something' }
   });
+  mock.chrome.tabs.update = realUpdate;
 
   assert.equal(res.success, true, 'the task must start');
   assert.notEqual(res.tabId, 200,
@@ -197,54 +214,94 @@ test('a restricted focused tab gets a fresh tab beside it - never the user\'s un
 
   assert.equal(mock.__createCalls.length, 1, 'exactly one fresh tab must be opened for the task');
   const created = mock.__createCalls[0];
-  assert.equal(created.active, true, 'the automation tab must come to the front, or the run is invisible');
+
+  // Created in the BACKGROUND, then activated once it is grouped and the side panel is enabled
+  // on it. The enable has to land first: the panel's handoff open() is rejected on a tab with no
+  // panel enabled, and onActivated disables the panel on any tab outside a session.
+  assert.equal(created.active, false,
+    'the automation tab must be created in the background, so it can be grouped and have the panel enabled on it before it comes to the front');
+  const activated = mock.__updateCalls.find((c) => c.id === res.tabId && c.props.active === true);
+  assert.ok(activated,
+    'the automation tab must still be brought to the front afterwards, or the run is invisible - deferring the activation must not mean skipping it');
+
+  // Bringing another tab to the front hides a tab-scoped panel, and only a user gesture can show
+  // one on the new tab. The worker has none, so the panel that submitted the task - which still
+  // holds the Enter/click gesture - is told to reopen itself there. Checked in a real Chromium:
+  // without this, the panel vanished the moment the task started.
+  const handoff = panelPort.received.find((m) => m.type === 'PANEL_HANDOFF');
+  assert.ok(handoff, 'the submitting panel must be asked to follow the run onto the new tab');
+  assert.deepEqual(handoff.payload, { tabId: res.tabId, fromTabId: 100 },
+    'the handoff must name the new tab, and the panel that submitted the task - only that panel holds the gesture');
+  assert.ok(sequence.indexOf(`activate:${res.tabId}`) < sequence.indexOf('PANEL_HANDOFF'),
+    'the handoff must come after the tab is brought to the front, so the reopened panel resolves the new tab as its own');
+
   assert.equal(created.index, 1,
     'the fresh tab must open immediately to the RIGHT of the focused tab (index 0), not appended to the far end of the strip');
   assert.equal(created.windowId, 1, 'it must open in the requesting panel\'s own window');
   assert.equal(mock.__tabs.get(res.tabId).url, 'https://www.google.com', 'the task must run in that fresh tab');
+  assert.equal(res.tabUrl, 'https://www.google.com',
+    'the panel must be told where the run started - a tab fresh out of tabs.create has only pendingUrl, which showed up as "unknown URL"');
 
   await waitUntilIdle();
 });
 
-test('a scriptable focused tab is used as-is, with no new tab opened', async () => {
+test('a session whose own tab is scriptable uses it as-is, with no new tab opened', async () => {
   mock.__createCalls.length = 0;
-  mock.__addTab({ id: 300, url: 'https://example.com/work', index: 2 });
+  // A SECOND, independent session, on a tab of its own. This is the per-tab model: tab 300 has
+  // its own panel and its own engine, and knows nothing about tab 100's session above.
+  mock.__addTab({ id: 300, url: 'https://example.com/work', index: 2, active: true });
+
+  const res = await sendMessage(mock.__listeners, {
+    action: 'START_TASK', tabId: 300, payload: { prompt: 'work on this page' }
+  });
+
+  assert.equal(res.success, true, 'the task must start');
+  assert.equal(res.tabId, 300,
+    'a session runs in ITS OWN tab - the one its panel is attached to and the user is looking at');
+  assert.equal(mock.__createCalls.length, 0, 'no extra tab should be opened when the session\'s own tab already works');
+
+  await waitUntilIdle();
+});
+
+test('a session never reaches into a tab belonging to a different session', async () => {
+  mock.__createCalls.length = 0;
+  // Tab 300 (another session's tab) is scriptable and is the one in front of the user. Tab 100's
+  // session must still not touch it: whose tab it is beats what happens to be focused.
+  //
+  // This is the guarantee that makes two tabs genuinely independent. The old window-keyed
+  // version asked the WINDOW for its active tab, so starting a task in one tab could drive a
+  // completely different tab's page - the user's mail, a half-filled form.
   for (const t of mock.__tabs.values()) t.active = t.id === 300;
 
   const res = await sendMessage(mock.__listeners, {
-    action: 'START_TASK', windowId: 1, payload: { prompt: 'work on this page' }
+    action: 'START_TASK', tabId: 100, payload: { prompt: 'carry on' }
   });
 
   assert.equal(res.success, true, 'the task must start');
-  assert.equal(res.tabId, 300, 'the tab the user is actually looking at must be the one automated');
-  assert.equal(mock.__createCalls.length, 0, 'no extra tab should be opened when the focused tab already works');
+  assert.notEqual(res.tabId, 300, 'another session\'s tab must never be commandeered, focused or not');
+  assert.notEqual(res.tabId, 200, 'and neither must a tab the user opened for themselves');
 
   await waitUntilIdle();
 });
 
-test('this session\'s own group tab is brought to the front rather than driven in the background', async () => {
+test('a follow-up task continues in the tab the run already moved into', async () => {
   mock.__createCalls.length = 0;
   mock.__updateCalls.length = 0;
 
-  // Previous runs have left this session with a group containing scriptable tabs. The user has
-  // since switched back to the restricted tab, so nothing in front of them can be automated.
-  const grouped = Array.from(mock.__tabs.values()).filter((t) => t.groupId > 0);
-  assert.ok(grouped.length > 0, 'sanity check: the runs above put at least one tab in the group');
-  for (const t of mock.__tabs.values()) t.active = t.id === 100;
+  // The first test's run left this session owning an extra tab - the one getActiveTab opened
+  // when tab 100 turned out to be chrome://newtab. That tab is where the user is watching, so a
+  // follow-up must carry on there rather than opening yet another one.
+  const sessionTabs = Array.from(mock.__tabs.values()).filter((t) => t.groupId > 0);
+  assert.ok(sessionTabs.length > 0, 'sanity check: the first run put at least one tab in the group');
 
   const res = await sendMessage(mock.__listeners, {
-    action: 'START_TASK', windowId: 1, payload: { prompt: 'carry on' }
+    action: 'START_TASK', tabId: 100, payload: { prompt: 'and now the next thing' }
   });
 
   assert.equal(res.success, true, 'the task must start');
-  assert.notEqual(res.tabId, 200, 'the user\'s unrelated tab must still never be picked');
   assert.ok(mock.__tabs.get(res.tabId).groupId > 0,
     'the reused tab must be one inside this session\'s own ScoutFox group, not an arbitrary window tab');
   assert.equal(mock.__createCalls.length, 0, 'no new tab is needed when the session already owns a scriptable one');
-
-  const activated = mock.__updateCalls.find((c) => c.id === res.tabId && c.props.active === true);
-  assert.ok(activated,
-    'that tab must be activated so the user can SEE the run - driving a background tab is what made a completed run look like nothing happened');
 
   await waitUntilIdle();
 });

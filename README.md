@@ -51,11 +51,17 @@
 ### Give it a task
 1. Click the 🦊 icon to open the Side Panel - it opens on the **Agent** tab.
 2. Type your goal in the box at the bottom (e.g. *"Find the price of product X and click Add to Cart"*) and hit the **send** button (▶).
-3. Every time you click the icon on an idle panel, it opens fresh - no stale history or leftover tokens from a previous task get fed into the new one.
+3. Clicking the icon opens the panel and nothing else - no tab group, no rearranging your tabs. That happens when you actually give it a task.
+4. Clicking the icon on an idle panel starts fresh, unless it has a finished run on screen - a result you haven't read yet is never wiped just because you reopened the panel.
+
+### One session per tab
+- Each **tab** gets its own independent session: its own history, its own running task, its own Stop button. Two tabs side by side in the same window can run completely different tasks without noticing each other.
+- The panel shows up only on tabs that have a session, so switching to one of your own tabs hides it rather than following you around.
+- A session lives as long as its tab. Closing the tab ends it; a background restart mid-task doesn't.
 
 ### Watch it work
-- ScoutFox automates the tab you're actually looking at, or opens a new one right beside it - never a tab hidden somewhere else in your window.
-- Every tab it touches gets grouped into an orange **ScoutFox** tab group, so you always know which tabs are sandboxed for automation. A tab you open yourself next to that group stays independent and is never pulled in.
+- ScoutFox automates the tab its panel is attached to - the one you're looking at. If that tab is an empty new-tab page it reuses it in place; if it's a page it can't script and shouldn't navigate away from (settings, the Web Store), it opens a new tab right beside it.
+- Once a task starts, the tabs it touches get grouped into an orange **ScoutFox** tab group, so you always know which tabs are sandboxed for automation. A tab you open yourself stays independent and is never pulled in - even when Chrome tries to add it for you.
 - The status pill in the header (Idle / Running / Paused) and the progress bar under the input box show what step it's on and out of how many.
 - Each action it takes (click, type, scroll, navigate, ...) appears as its own line in the timeline, with its reasoning available if you click the row.
 
