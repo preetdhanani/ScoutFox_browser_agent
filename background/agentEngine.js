@@ -169,14 +169,19 @@ function parsePartialOrTruncatedJson(str) {
 
 export class AgentEngine {
   /**
-   * @param {number|string} [windowId] Which browser window this engine belongs to. One
-   *   engine exists per window (see background.js's session map) so that each window runs a
-   *   fully independent automation: its own tab group, its own history, its own Stop/Pause,
-   *   never able to see or touch a tab outside its own group. Optional and defaults to
-   *   'default' so every existing test and any non-windowed context (the standalone Python
-   *   runner analog, direct unit tests) keeps working unchanged with a single implicit session.
+   * @param {number|string} [sessionId] Which TAB this engine belongs to. One engine exists per
+   *   tab (see background.js's session map) so that each tab runs a fully independent
+   *   automation: its own tab group, its own history, its own Stop/Pause, never able to see or
+   *   touch a tab outside its own group. Two tabs side by side in the same window can run
+   *   different tasks at the same time without ever noticing each other. Optional and defaults
+   *   to 'default' so every existing test and any non-tabbed context (direct unit tests) keeps
+   *   working unchanged with a single implicit session.
+   * @param {number|string} [windowId] Which window that tab currently sits in. This is a
+   *   SEPARATE concern from identity: a Chrome tab group cannot span windows, so group
+   *   bookkeeping is keyed by window even though the session itself is keyed by tab.
    */
-  constructor(windowId) {
+  constructor(sessionId, windowId) {
+    this.sessionId = sessionId !== undefined && sessionId !== null ? sessionId : 'default';
     this.windowId = windowId !== undefined && windowId !== null ? windowId : 'default';
     this.status = 'idle'; // 'idle' | 'running' | 'paused' | 'stopped'
     this.currentTask = null;
@@ -192,11 +197,12 @@ export class AgentEngine {
     // paused run is waiting on a question, not just paused by the user or by a failed LLM call.
     this.pendingQuestion = null;
     this.onStateChangeCallback = null;
-    // Fired when this session opens a brand-new browser window (see openNewWindow()), so
-    // background.js can register that window's id against THIS session instead of creating a
-    // second, disconnected one the moment a panel is opened there. AgentEngine has no direct
-    // access to background.js's own window->session registry; this callback is the seam.
-    this.onWindowOpenedCallback = null;
+    // Fired when this session takes on a tab it did not start with - the tab inside a window
+    // it opened (see openNewWindow()), for instance - so background.js can register that TAB
+    // against THIS session instead of creating a second, disconnected one the moment a panel
+    // appears there. AgentEngine has no direct access to background.js's own tab->session
+    // registry; this callback is the seam between them.
+    this.onTabAdoptedCallback = null;
     this.stateVersion = 0;
     this.recentActionSignatures = [];
     this.currentPlanIndex = 0;
@@ -301,8 +307,8 @@ export class AgentEngine {
         return;
       }
 
-      // Keyed by windowId, not a single global slot - one engine exists per window, and each
-      // must restore only ITS OWN session, never another window's.
+      // Keyed by the owning TAB, not a single global slot - one engine exists per tab, and
+      // each must restore only ITS OWN session, never a neighbouring tab's.
       const stored = await new Promise((resolve) => {
         chrome.storage.local.get(['agent_sessions'], (res) => {
           const err = lastRuntimeError();
@@ -312,7 +318,7 @@ export class AgentEngine {
             return;
           }
           const all = res && res.agent_sessions;
-          resolve(all && all[String(this.windowId)] ? all[String(this.windowId)] : null);
+          resolve(all && all[String(this.sessionId)] ? all[String(this.sessionId)] : null);
         });
       });
 
@@ -365,7 +371,7 @@ export class AgentEngine {
   async persistState() {
     try {
       updateAgentSessions((all) => {
-        all[String(this.windowId)] = {
+        all[String(this.sessionId)] = {
           history: this.history,
           planSteps: this.planSteps,
           task: this.currentTask,
@@ -384,15 +390,38 @@ export class AgentEngine {
     }
   }
 
-  /** Remove this window's persisted session entirely - called when its window closes. */
-  static forgetWindow(windowId) {
+  /** Remove this session's persisted state entirely - called when its owning tab closes. */
+  static forgetSession(sessionId) {
     try {
       updateAgentSessions((all) => {
-        if (!(String(windowId) in all)) return false; // nothing to remove, skip the write
-        delete all[String(windowId)];
+        if (!(String(sessionId) in all)) return false; // nothing to remove, skip the write
+        delete all[String(sessionId)];
       });
     } catch (e) {
-      Logger.warn('AgentEngine', '[STATE_FORGET_ERROR] Could not remove closed window\'s persisted session', e);
+      Logger.warn('AgentEngine', '[STATE_FORGET_ERROR] Could not remove closed tab\'s persisted session', e);
+    }
+  }
+
+  /**
+   * Wipe every persisted session. Called from chrome.runtime.onStartup, i.e. once per browser
+   * launch, before any session can be constructed.
+   *
+   * Sessions are keyed by tab id, and Chrome reuses tab ids freely across browser restarts. So
+   * without this, the first tab of a brand-new browser run can be handed a previous run's
+   * history - and, because that history carries a status the engine treats as interrupted, it
+   * greets the user with a task they never started and a "previous task was interrupted"
+   * notice about work from days ago. Within a single browser run, ids are stable and the
+   * per-tab persistence does its real job: surviving the MV3 worker being recycled mid-task.
+   */
+  static forgetAllSessions() {
+    try {
+      updateAgentSessions((all) => {
+        const keys = Object.keys(all);
+        if (keys.length === 0) return false; // nothing stored, skip the write
+        keys.forEach((k) => delete all[k]);
+      });
+    } catch (e) {
+      Logger.warn('AgentEngine', '[STATE_FORGET_ERROR] Could not clear persisted sessions on browser startup', e);
     }
   }
 
@@ -449,8 +478,8 @@ export class AgentEngine {
     this.onStateChangeCallback = cb;
   }
 
-  setWindowOpenedCallback(cb) {
-    this.onWindowOpenedCallback = cb;
+  setTabAdoptedCallback(cb) {
+    this.onTabAdoptedCallback = cb;
   }
 
   notifyStateChange(extraData = {}) {
@@ -501,7 +530,7 @@ export class AgentEngine {
    *   group cannot span windows, so a session spanning more than one tracks one group PER
    *   window it touches, in scoutFoxGroupIds.
    */
-  async ensureScoutFoxGroup(tabId, windowId = this.windowId) {
+  async ensureScoutFoxGroup(tabId, explicitWindowId) {
     if (!tabId || typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.group) return null;
 
     try {
@@ -513,6 +542,19 @@ export class AgentEngine {
       });
 
       if (!tab) return null;
+
+      // Which window's group does this tab belong in? The TAB's own, always - a Chrome tab group
+      // cannot span windows, so grouping a tab into any other window's group simply fails.
+      //
+      // This used to default to this.windowId, the engine's own cached window. That is a
+      // different thing: with one session per tab, the engine's window is only where its owning
+      // tab happened to be when the session was created, and it goes stale the moment a tab is
+      // dragged to another window. isTabInScope has always keyed on tab.windowId, so any
+      // disagreement between the two showed up as the agent refusing to touch the very tab it
+      // had just grouped - "outside this session's ScoutFox group" on its own tab.
+      const windowId = explicitWindowId !== undefined && explicitWindowId !== null
+        ? explicitWindowId
+        : (tab.windowId !== undefined ? tab.windowId : this.windowId);
 
       const TAB_GROUP_ID_NONE = (typeof chrome.tabGroups !== 'undefined' && chrome.tabGroups.TAB_GROUP_ID_NONE !== undefined)
         ? chrome.tabGroups.TAB_GROUP_ID_NONE
@@ -609,7 +651,7 @@ export class AgentEngine {
    * A Chrome tab group cannot span windows, so the new window's tab gets its OWN ScoutFox
    * group - tracked in scoutFoxGroupIds under the new window's id, alongside this engine's
    * other window(s) - while history, status, and everything else stay the ONE shared session.
-   * background.js learns about the new window via onWindowOpenedCallback, so a panel opened
+   * background.js learns about the new window's tab via onTabAdoptedCallback, so a panel opened
    * there finds this same session instead of creating a second one.
    */
   async openNewWindow(url) {
@@ -633,9 +675,9 @@ export class AgentEngine {
         return { success: false, error: 'The new window was created, but no tab was found in it.' };
       }
 
-      if (this.onWindowOpenedCallback) {
-        try { this.onWindowOpenedCallback(win.id); } catch (err) {
-          Logger.warn('AgentEngine', '[WINDOW_OPENED_CALLBACK_ERROR] onWindowOpenedCallback threw', err);
+      if (this.onTabAdoptedCallback) {
+        try { this.onTabAdoptedCallback(newTab.id, win.id); } catch (err) {
+          Logger.warn('AgentEngine', '[TAB_ADOPTED_CALLBACK_ERROR] onTabAdoptedCallback threw', err);
         }
       }
 

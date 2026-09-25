@@ -9,19 +9,21 @@ import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../utils/st
 let backgroundPort = null;
 let currentSettings = { ...DEFAULT_SETTINGS };
 
-// This panel's own browser window. One AgentEngine session exists per window (background.js
-// keeps a Map keyed by windowId), so every message this panel sends must say which window it
-// belongs to - resolved once at startup via chrome.windows.getCurrent(), which always reflects
-// whichever window this document is actually rendered in, unlike any Chrome API sender-tab
-// nuance for a side-panel document that would need guessing at.
-let myWindowId = null;
+// The TAB this panel is attached to. One AgentEngine session exists per tab (background.js
+// keeps a Map keyed by tabId), so every message this panel sends must say which tab it belongs
+// to. The panel has to work this out for itself: a side-panel port reaches the background
+// worker with no sender.tab at all, so the worker cannot tell which tab a panel came from.
+//
+// Chrome only shows a tab-scoped side panel for the ACTIVE tab, so the active tab of this
+// panel's own window is, by construction, the tab this document is attached to.
+let myTabId = null;
 
 /**
- * Send a message to the background worker, always tagged with this panel's own windowId so it
- * can be routed to the correct per-window session rather than whichever one happens to exist.
+ * Send a message to the background worker, always tagged with this panel's own tabId so it
+ * can be routed to the correct per-tab session rather than whichever one happens to exist.
  */
 function sendBgMessage(msg, cb) {
-  chrome.runtime.sendMessage({ ...msg, windowId: myWindowId }, cb);
+  chrome.runtime.sendMessage({ ...msg, tabId: myTabId }, cb);
 }
 let currentSessionId = null;
 let currentActiveLogFilter = 'all';
@@ -153,15 +155,15 @@ function applyTheme(mode) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // Resolve which window this panel belongs to BEFORE connecting - the port name and every
-  // message sent from here need it to reach the right per-window session.
+  // Resolve which TAB this panel belongs to BEFORE connecting - the port name and every
+  // message sent from here need it to reach the right per-tab session.
   try {
-    if (typeof chrome !== 'undefined' && chrome.windows && chrome.windows.getCurrent) {
-      const win = await new Promise((resolve) => chrome.windows.getCurrent((w) => resolve(w)));
-      myWindowId = win ? win.id : null;
+    if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
+      const tabs = await new Promise((resolve) => chrome.tabs.query({ active: true, currentWindow: true }, (t) => resolve(t || [])));
+      myTabId = tabs && tabs[0] ? tabs[0].id : null;
     }
   } catch (err) {
-    reportClientError('sidepanel:resolve-window', err);
+    reportClientError('sidepanel:resolve-tab', err);
   }
 
   // Logs are restored via initPortConnection() -> resyncAgentState() -> GET_AGENT_STATE below,
@@ -177,8 +179,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   initEventListeners();
   initCombobox();
   await loadSessionHistory();
+  followSavedSessionChanges();
   await fetchDynamicModels(false);
 });
+
+/**
+ * Keep the History button and list current when ANOTHER panel saves a session.
+ *
+ * Only the panel that submitted a task saves it, and that is often not the one on screen: when
+ * a run moves to a new tab, the submitting panel stays behind, hidden on the old tab, and the
+ * panel the user is looking at is a second document that loaded before the save. Reading the
+ * list once at startup left it showing "(0)" next to the run it had just finished.
+ */
+function followSavedSessionChanges() {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.onChanged) return;
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.saved_sessions) return;
+    loadSessionHistory().catch((err) => reportClientError('sidepanel:session-history-sync', err));
+  });
+}
 
 // Ensure tabs are initialized even if DOMContentLoaded already fired (common in some preview/extension environments)
 if (document.readyState === 'complete' || document.readyState === 'interactive') {
@@ -518,15 +537,15 @@ function connectPort() {
 
   try {
     // The '_fresh'/plain distinction is kept only for the background worker's own connect log
-    // line - one session exists per window now, and reopening the panel on a window that
-    // already has one (running or finished) always reflects it rather than clearing on a
-    // "genuine open". Deliberately starting over is CLEAR_HISTORY's job, not a side effect of
-    // reconnecting. What actually matters here is windowId, so this panel is routed to ITS OWN
-    // window's session rather than a shared global one - riding in the port name itself is
-    // simple, synchronous, and available the instant the port is created.
+    // line - one session exists per tab now, and reopening the panel on a tab that already has
+    // one (running or finished) always reflects it rather than clearing on a "genuine open".
+    // Deliberately starting over is CLEAR_HISTORY's job, not a side effect of reconnecting.
+    // What actually matters here is tabId, so this panel is routed to ITS OWN tab's session
+    // rather than a shared one - riding in the port name itself is simple, synchronous, and
+    // available the instant the port is created.
     const base = hasConnectedBefore ? 'scoutfox_sidepanel' : 'scoutfox_sidepanel_fresh';
     hasConnectedBefore = true;
-    const portName = myWindowId !== null ? `${base}:${myWindowId}` : base;
+    const portName = myTabId !== null ? `${base}:${myTabId}` : base;
     backgroundPort = chrome.runtime.connect({ name: portName });
   } catch (err) {
     reportClientError('sidepanel:port-connect', err);
@@ -544,6 +563,8 @@ function connectPort() {
         rawLogsCache.push(msg.payload);
         if (rawLogsCache.length > 300) rawLogsCache.shift();
         renderFilteredLogs();
+      } else if (msg.type === 'PANEL_HANDOFF') {
+        followRunToTab(msg.payload);
       }
     } catch (err) {
       reportClientError('sidepanel:port-message', err);
@@ -565,6 +586,26 @@ function connectPort() {
   }
   setConnectionBanner(false);
   resyncAgentState();
+}
+
+/**
+ * Reopen the panel on the tab a task just moved into.
+ *
+ * Chrome shows a tab-scoped panel only on the tab it was opened for, so the moment the
+ * background worker brings a new tab to the front, this panel is hidden and none is showing on
+ * the new tab. Only sidePanel.open() can show one there, and only with a user gesture - which
+ * this document still has from the Enter/click that submitted the task, for about five seconds.
+ * The worker has no gesture at all, which is why it asks here instead of opening it itself.
+ *
+ * A session can have several panels connected (the one hidden on the tab the run left, for a
+ * start), but only the one that submitted the task holds the gesture, so only it acts.
+ */
+function followRunToTab(payload) {
+  if (!payload || typeof payload.tabId !== 'number' || payload.fromTabId !== myTabId) return;
+  if (!chrome.sidePanel || !chrome.sidePanel.open) return;
+  chrome.sidePanel.open({ tabId: payload.tabId }).catch((err) => {
+    appendLocalLog('WARN', 'Sidepanel', `[PANEL_HANDOFF_FAILED] The task moved to tab [${payload.tabId}], but the panel could not follow it there (${err.message}). Click the ScoutFox icon on that tab to see the run.`);
+  });
 }
 
 function scheduleReconnect() {
