@@ -94,38 +94,44 @@ test('clicking the toolbar icon enables the panel for ONLY that tab', async () =
 
   const enableCall = mock.__setOptionsCalls.find((c) => c.tabId === 100 && c.enabled === true);
   assert.ok(enableCall, 'the clicked tab must be explicitly enabled');
-  assert.equal(mock.__tabs.get(100).groupId >= 5000, true, 'the clicked tab must join the ScoutFox group');
+  assert.equal(mock.__tabs.get(100).groupId, -1,
+    'but it must NOT be grouped - opening the panel is not asking for work, and the group is a sandbox marker for a running task');
 
   const tab200EverEnabled = mock.__setOptionsCalls.some((c) => c.tabId === 200 && c.enabled === true);
   assert.equal(tab200EverEnabled, false,
     'an unrelated tab must never be enabled just because a different tab\'s icon was clicked');
 });
 
-test('switching to a tab outside the group hides the panel there', async () => {
+// Panel visibility is keyed on "does this tab have a session", not on tab-group membership.
+// That key is true from the instant the icon is clicked, whereas a group only ever appears once
+// a task starts - which is why the group-based version left the panel unprotected for exactly
+// the first task of a session, and it vanished.
+test('switching to a tab with no session hides the panel there', async () => {
   mock.__setOptionsCalls.length = 0;
   await mock.__listeners.onActivated({ tabId: 200, windowId: 1 });
   await new Promise((r) => setTimeout(r, 20));
 
   assert.deepEqual(mock.__setOptionsCalls, [{ tabId: 200, enabled: false }],
-    'the reactive per-tab scoping (added before this fix) must still disable the panel when switching away from the grouped tab');
+    'tab 200 has no session of its own, so the panel must not follow the user there - this is what keeps two tabs independent');
 });
 
-test('switching back to the grouped tab re-enables the panel there', async () => {
+test('switching back to the tab that HAS the session re-enables the panel there', async () => {
   mock.__setOptionsCalls.length = 0;
   await mock.__listeners.onActivated({ tabId: 100, windowId: 1 });
   await new Promise((r) => setTimeout(r, 20));
 
   const enableCall = mock.__setOptionsCalls.find((c) => c.tabId === 100 && c.enabled === true);
-  assert.ok(enableCall, 'switching back to the originally-opened tab must re-enable the panel there');
+  assert.ok(enableCall, 'the tab the user opened ScoutFox on must always get its panel back');
 });
 
-test('onActivated is a no-op for a window that never opened ScoutFox at all', async () => {
+test('a tab that never opened ScoutFox is hidden, not left to the manifest default', async () => {
   mock.__setOptionsCalls.length = 0;
-  // windowId 999 never had its session created (no icon click, no port connect) - the real
-  // handler must resolve "no session for this window" and return before touching the panel.
-  await mock.__listeners.onActivated({ tabId: 100, windowId: 999 });
+  // Tab 999 has no session: no icon click, no port connect. The manifest's side_panel
+  // default_path otherwise offers the panel on every tab in the browser, so "do nothing" is not
+  // an option here - the handler has to actively disable it.
+  await mock.__listeners.onActivated({ tabId: 999, windowId: 1 });
   await new Promise((r) => setTimeout(r, 20));
 
-  assert.deepEqual(mock.__setOptionsCalls, [],
-    'a window with no session (and so no group) must produce zero setOptions calls');
+  assert.deepEqual(mock.__setOptionsCalls, [{ tabId: 999, enabled: false }],
+    'a tab with no session must have the panel explicitly disabled, or the manifest default shows it everywhere');
 });
