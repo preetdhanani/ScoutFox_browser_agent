@@ -14,9 +14,8 @@
  *
  * Per tab rather than per window because Chrome's side panel is itself per tab. Keying sessions
  * the same way means "which tabs should show the panel" has a direct answer - the ones with a
- * session - instead of needing a proxy. An earlier revision used the ScoutFox tab group as that
- * proxy, which forced a group to exist before any work had been asked for, and left the panel
- * unprotected on any tab that did not have one yet.
+ * session - instead of needing a proxy such as the ScoutFox tab group, which would have to exist
+ * before any work had been asked for.
  *
  * Two things stay window-shaped, because Chrome makes them so: a tab group cannot span windows,
  * so AgentEngine tracks its groups in a Map keyed by window; and a session can cover several
@@ -132,20 +131,6 @@ function endSessionForClosedTab(tabId) {
   syncKeepaliveAlarm();
 }
 
-// Clear a brand-new browser run's slate before anything can read it.
-//
-// Sessions persist across a service-worker restart on purpose - MV3 recycles the worker
-// aggressively and a long task must survive that. They must NOT persist across a browser
-// restart: they are keyed by tab id, and Chrome hands out the same low tab ids again on every
-// launch, so yesterday's session would be adopted by whatever tab happens to open first today.
-// onStartup runs once per browser launch, before any tab can connect.
-if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onStartup) {
-  chrome.runtime.onStartup.addListener(() => {
-    AgentEngine.forgetAllSessions();
-    Logger.info('Background', '[BROWSER_STARTUP] New browser run - cleared persisted sessions so no tab inherits a previous run\'s history.');
-  });
-}
-
 // Clean network request buffers when tab is closed & track ScoutFox tab group removal.
 // Both search every session rather than assuming a single global engine owns the tab/group -
 // with one engine per tab, ownership has to be looked up, not assumed.
@@ -169,10 +154,7 @@ if (typeof chrome !== 'undefined') {
       // The group map is keyed by WINDOW even though sessions are keyed by tab - a Chrome tab
       // group cannot span windows, so that part stays window-shaped. Several tab ids can point
       // at the same session object, so this deduplicates before touching any engine.
-      const seen = new Set();
-      for (const session of sessions.values()) {
-        if (seen.has(session)) continue;
-        seen.add(session);
+      for (const session of new Set(sessions.values())) {
         for (const [windowId, groupId] of Array.from(session.engine.scoutFoxGroupIds.entries())) {
           if (groupId !== group.id) continue;
           Logger.info('Background', `[TAB_SANDBOX] ScoutFox tab group [${group.id}] was closed by user (window [${windowId}]).`);
@@ -290,12 +272,9 @@ if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
     // history right back a moment later; the status re-check inside also protects against a
     // task that starts between the click and this running.
     //
-    // The !dirty condition is what stops this from eating a run the user is still reading.
-    // "Stale" was always meant to mean a conversation restored from storage that the user has
-    // already moved on from - not one that finished thirty seconds ago. Those two were
-    // indistinguishable while the only test was on status, and both read as 'idle'. So clicking
-    // the icon to get the panel back after a finished run destroyed that run's result, which is
-    // precisely the recovery gesture the panel-vanishing bug above forced people into.
+    // The dirty check stops this from eating a run the user is still reading. "Stale" means a
+    // conversation restored from storage that the user already moved on from - not one that
+    // finished thirty seconds ago - and both read as 'idle' on status alone.
     //
     // dirty separates them exactly: the constructor sets it false, restoreState never sets it,
     // and every method that mutates this worker's own engine (startTask, clearHistory, pause,
@@ -319,13 +298,8 @@ if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
     // user's tab strip - moving the tab, painting it orange, boxing it - just for looking at
     // the extension, before it had been asked to do anything at all. The group is a sandbox
     // marker for automation, so it belongs to a task: startTask() and getActiveTab() create it
-    // when a run actually begins.
-    //
-    // An earlier revision DID group here, because side-panel visibility used to be keyed off
-    // the group: no group meant onActivated could not tell which tabs should show the panel,
-    // so the panel died on the first tab switch. Sessions being per-tab removes that need
-    // entirely - "does this tab have a session" is a direct answer to the same question, and a
-    // better one, since it does not depend on a group the user can drag tabs into and out of.
+    // when a run actually begins. Panel visibility does not need a group either: it is keyed
+    // on "does this tab have a session" (see onActivated).
   });
 }
 
@@ -347,7 +321,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
   const tabId = match[2] !== undefined ? Number(match[2]) : 'legacy';
 
-  const session = getOrCreateSession(tabId, undefined);
+  const session = getOrCreateSession(tabId);
   session.ports.add(port);
   session.lastBroadcastHadNoListeners = false;
   Logger.info('Background', `[PORT_CONNECT] Sidepanel UI connected to tab [${tabId}]. Active ports for this tab: ${session.ports.size}`);
@@ -650,16 +624,11 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
     }
   });
 
-  // Scope side panel visibility to the tabs that actually have a session.
-  //
-  // This used to ask "is this tab in the ScoutFox group", which needed the group to exist
-  // before the panel could be kept alive - and on a brand-new tab it does not, so the panel
-  // died on the first switch of every session. "Does this tab have a session" answers the same
-  // question directly, is true from the instant the icon is clicked, and does not depend on a
-  // tab group the user can drag tabs into and out of.
+  // Scope side panel visibility to the tabs that actually have a session. That is true from the
+  // instant the icon is clicked, and does not depend on a tab group the user can drag tabs into
+  // and out of.
   if (chrome.tabs.onActivated) {
     chrome.tabs.onActivated.addListener((activeInfo) => {
-      if (typeof chrome.sidePanel === 'undefined' || !chrome.sidePanel.setOptions) return;
       setPanelVisibility(activeInfo.tabId, sessions.has(activeInfo.tabId));
     });
   }
@@ -745,7 +714,7 @@ function routeMessage(request, sender, sendResponse) {
   }
 
   // Every action below this point belongs to one window's session.
-  const session = getOrCreateSession(request.tabId !== undefined ? request.tabId : 'legacy', undefined);
+  const session = getOrCreateSession(request.tabId !== undefined ? request.tabId : 'legacy');
   const agentEngine = session.engine;
 
   if (action === 'GET_AGENT_STATE') {
@@ -863,11 +832,9 @@ function sessionTabIds(session) {
 /**
  * Pick the tab to automate for THIS session.
  *
- * With one session per tab this stopped being a search. The session owns a tab, the panel is
- * attached to that tab, and that is the tab the user is watching - so the only real questions
- * left are whether it can be scripted and, if not, what to do about it. The old version queried
- * the window for whatever happened to be focused, which is how a task could end up running
- * against a tab belonging to someone else's session entirely.
+ * This is not a search. The session owns a tab, the panel is attached to that tab, and that is
+ * the tab the user is watching - so the only questions are whether it can be scripted and, if
+ * not, what to do about it. Never the window's focused tab: that may belong to another session.
  *
  * requestingTabId is the tab whose panel sent START_TASK. It only matters if this has to open a
  * new tab: that panel is the one holding the user's Enter/click gesture, so it is the one asked
@@ -907,13 +874,8 @@ async function getActiveTab(session, requestingTabId) {
 
   // The session's tab cannot be scripted, but if it is a THROWAWAY page - a new-tab page, a
   // blank tab - then it holds nothing the user would miss, and the right move is to navigate it
-  // where it stands rather than open a second tab beside it.
-  //
-  // This is the fix for the bug as the user actually experienced it: a brand-new window opens on
-  // chrome://newtab, which isValidWebTab rejects, so every single first task in a new window
-  // fell through and spawned a tab. From the user's seat that reads as "I asked it to do
-  // something and it wandered off into a new tab", when they were sitting on an empty page that
-  // was theirs to reuse.
+  // where it stands rather than open a second tab beside it. Every new window starts on
+  // chrome://newtab, so this is the common first-task path, not an edge case.
   //
   // Reusing it also protects the side panel. The panel is scoped per tab id, so creating and
   // activating a different tab moves the active tab out from under the open panel and Chrome
@@ -1039,10 +1001,9 @@ function isValidWebTab(tab) {
  * freshly scripted or restored tab can be about:blank, and Edge uses its own edge:// prefix.
  */
 function isDisposableTab(tab) {
-  // TODO(human): decide which URLs count as "empty enough to reuse" and return true for those.
-  //
-  // `tab.url` may also be undefined or '' on a tab that has not committed a navigation yet.
-  // Decide deliberately whether that counts as disposable - it is the most ambiguous case here,
-  // and it is reachable in practice on a slow cold start.
-  return false;
+  // A tab that has not committed yet has no url, only pendingUrl - where it is about to go. That
+  // is only disposable if it is itself a new-tab page; with neither, leave the tab alone.
+  const url = tab && (tab.url || tab.pendingUrl);
+  if (!url) return false;
+  return url === 'about:blank' || /^(chrome|edge|brave):\/\/(newtab|new-tab-page)\/?$/i.test(url);
 }
