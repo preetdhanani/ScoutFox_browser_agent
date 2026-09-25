@@ -44,19 +44,23 @@ export function lastRuntimeError() {
 }
 
 /**
- * Read-modify-write chrome.storage.local's agent_sessions key. It's one key shared across
- * every window's engine, so a blind overwrite would silently erase every OTHER window's
- * persisted session on whichever engine happens to write last - mutate() is handed the whole
- * map and decides what this call changes for just its own window. Return `false` from mutate
- * to skip the write entirely (nothing changed).
+ * Read-modify-write the agent_sessions key in chrome.storage.session. It's one key shared across
+ * every tab's engine, so a blind overwrite would silently erase every OTHER tab's persisted
+ * session on whichever engine happens to write last - mutate() is handed the whole map and
+ * decides what this call changes for just its own tab. Return `false` from mutate to skip the
+ * write entirely (nothing changed).
+ *
+ * storage.session, not storage.local: it survives the MV3 worker being recycled mid-task, and
+ * Chrome clears it on browser restart. Sessions are keyed by tab id and Chrome reuses tab ids
+ * across restarts, so anything longer-lived would hand yesterday's run to today's first tab.
  */
 function updateAgentSessions(mutate, onError) {
-  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
-  chrome.storage.local.get(['agent_sessions'], (res) => {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.session) return;
+  chrome.storage.session.get(['agent_sessions'], (res) => {
     lastRuntimeError();
     const all = (res && res.agent_sessions) || {};
     if (mutate(all) === false) return;
-    chrome.storage.local.set({ agent_sessions: all }, () => {
+    chrome.storage.session.set({ agent_sessions: all }, () => {
       const err = lastRuntimeError();
       if (err && onError) onError(err);
     });
@@ -302,7 +306,7 @@ export class AgentEngine {
 
   async restoreState() {
     try {
-      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.session) {
         Logger.info('AgentEngine', '[STATE_RESTORE] chrome.storage unavailable — starting from a clean engine state.');
         return;
       }
@@ -310,7 +314,7 @@ export class AgentEngine {
       // Keyed by the owning TAB, not a single global slot - one engine exists per tab, and
       // each must restore only ITS OWN session, never a neighbouring tab's.
       const stored = await new Promise((resolve) => {
-        chrome.storage.local.get(['agent_sessions'], (res) => {
+        chrome.storage.session.get(['agent_sessions'], (res) => {
           const err = lastRuntimeError();
           if (err) {
             Logger.warn('AgentEngine', '[STATE_RESTORE_FAILED] Could not read persisted session', err.message);
@@ -399,29 +403,6 @@ export class AgentEngine {
       });
     } catch (e) {
       Logger.warn('AgentEngine', '[STATE_FORGET_ERROR] Could not remove closed tab\'s persisted session', e);
-    }
-  }
-
-  /**
-   * Wipe every persisted session. Called from chrome.runtime.onStartup, i.e. once per browser
-   * launch, before any session can be constructed.
-   *
-   * Sessions are keyed by tab id, and Chrome reuses tab ids freely across browser restarts. So
-   * without this, the first tab of a brand-new browser run can be handed a previous run's
-   * history - and, because that history carries a status the engine treats as interrupted, it
-   * greets the user with a task they never started and a "previous task was interrupted"
-   * notice about work from days ago. Within a single browser run, ids are stable and the
-   * per-tab persistence does its real job: surviving the MV3 worker being recycled mid-task.
-   */
-  static forgetAllSessions() {
-    try {
-      updateAgentSessions((all) => {
-        const keys = Object.keys(all);
-        if (keys.length === 0) return false; // nothing stored, skip the write
-        keys.forEach((k) => delete all[k]);
-      });
-    } catch (e) {
-      Logger.warn('AgentEngine', '[STATE_FORGET_ERROR] Could not clear persisted sessions on browser startup', e);
     }
   }
 
@@ -544,14 +525,9 @@ export class AgentEngine {
       if (!tab) return null;
 
       // Which window's group does this tab belong in? The TAB's own, always - a Chrome tab group
-      // cannot span windows, so grouping a tab into any other window's group simply fails.
-      //
-      // This used to default to this.windowId, the engine's own cached window. That is a
-      // different thing: with one session per tab, the engine's window is only where its owning
-      // tab happened to be when the session was created, and it goes stale the moment a tab is
-      // dragged to another window. isTabInScope has always keyed on tab.windowId, so any
-      // disagreement between the two showed up as the agent refusing to touch the very tab it
-      // had just grouped - "outside this session's ScoutFox group" on its own tab.
+      // cannot span windows, so grouping a tab into any other window's group simply fails. Not
+      // this.windowId: that is only where the owner tab was when the session was created, and
+      // it goes stale once a tab is dragged to another window. isTabInScope keys on tab.windowId.
       const windowId = explicitWindowId !== undefined && explicitWindowId !== null
         ? explicitWindowId
         : (tab.windowId !== undefined ? tab.windowId : this.windowId);
@@ -615,9 +591,11 @@ export class AgentEngine {
         }
       }
 
-      // 4. Create fresh 'ScoutFox' tab group
+      // 4. Create fresh 'ScoutFox' tab group, in the tab's OWN window. Without createProperties
+      // Chrome creates the group in the last-focused window and MOVES the tab there - so a user
+      // who clicked into another window while a task was starting lost the agent's tab to it.
       const newGroupId = await new Promise((resolve) => {
-        chrome.tabs.group({ tabIds: tabId }, (gid) => {
+        chrome.tabs.group({ tabIds: tabId, createProperties: { windowId: tab.windowId } }, (gid) => {
           lastRuntimeError();
           resolve(gid);
         });

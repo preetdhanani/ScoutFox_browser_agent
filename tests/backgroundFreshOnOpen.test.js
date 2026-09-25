@@ -63,6 +63,7 @@ function makeMock() {
         onMessage: { addListener: (fn) => { listeners.onMessage = fn; } }
       },
       storage: {
+        get session() { return this.local; }, // agent_sessions lives in storage.session; one backing store keeps seeds simple
         local: {
           get: (keys, cb) => {
             const result = {};
