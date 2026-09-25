@@ -8,9 +8,9 @@
  * tab the user happened to have open - their mail, a half-filled form - and drove it invisibly,
  * several positions away in the strip.
  *
- * Now: the focused tab if it can be scripted; else this session's OWN group tab, brought to
- * the front; else a fresh tab opened immediately to the right of the focused one. An unrelated
- * tab the user opened for their own purposes is never commandeered.
+ * Now: the session's own tab if it can be scripted; else, if it is an empty new-tab page, that
+ * same tab navigated in place; else a fresh tab opened immediately to the right of it. An
+ * unrelated tab the user opened for their own purposes is never commandeered.
  */
 
 import test, { after } from 'node:test';
@@ -26,7 +26,7 @@ function makeMock() {
   const onUpdatedListeners = [];
   let tabCounter = 500;
   let groupCounter = 9000;
-  let lastCreatedTabId = null;
+  let lastNavigatedTabId = null;
   const noop = () => {};
   const listeners = {};
   const storage = {};
@@ -72,7 +72,7 @@ function makeMock() {
             onUpdatedListeners.push(fn);
             // waitForTabComplete() waits for a 'complete' update on the tab it was handed, or
             // times out after 4s - fire immediately so these tests don't sit through that.
-            setTimeout(() => fn(lastCreatedTabId, { status: 'complete' }), 0);
+            setTimeout(() => fn(lastNavigatedTabId, { status: 'complete' }), 0);
           },
           removeListener: (fn) => {
             const i = onUpdatedListeners.indexOf(fn);
@@ -94,7 +94,7 @@ function makeMock() {
         create: (opts, cb) => {
           createCalls.push({ ...opts });
           const id = ++tabCounter;
-          lastCreatedTabId = id;
+          lastNavigatedTabId = id;
           const tab = { id, url: opts.url, groupId: -1, windowId: opts.windowId ?? 1, active: !!opts.active, index: opts.index ?? tabs.size };
           tabs.set(id, tab);
           if (opts.active) {
@@ -112,7 +112,7 @@ function makeMock() {
           if (tab && props.active) {
             for (const t of tabs.values()) t.active = t.id === id;
           }
-          if (tab && props.url) tab.url = props.url;
+          if (tab && props.url) { tab.url = props.url; lastNavigatedTabId = id; }
           if (cb) cb(tab);
           return Promise.resolve(tab);
         },
@@ -154,9 +154,9 @@ global.self = { addEventListener: () => {} };
 const mock = makeMock();
 global.chrome = mock.chrome;
 
-// The user's own tab, sitting in the same window. Index 1, deliberately scriptable - this is
-// exactly what the old fallback would have commandeered.
-mock.__addTab({ id: 100, url: 'chrome://newtab/', index: 0, active: true });
+// Tab 100 is a page that cannot be scripted and is not ours to navigate away from. Tab 200 is
+// the user's own tab, deliberately scriptable - exactly what the old fallback commandeered.
+mock.__addTab({ id: 100, url: 'chrome://settings/', index: 0, active: true });
 mock.__addTab({ id: 200, url: 'https://mail.example.com/inbox', index: 1 });
 
 await import('../background/background.js');
@@ -289,7 +289,7 @@ test('a follow-up task continues in the tab the run already moved into', async (
   mock.__updateCalls.length = 0;
 
   // The first test's run left this session owning an extra tab - the one getActiveTab opened
-  // when tab 100 turned out to be chrome://newtab. That tab is where the user is watching, so a
+  // when tab 100 turned out to be chrome://settings. That tab is where the user is watching, so a
   // follow-up must carry on there rather than opening yet another one.
   const sessionTabs = Array.from(mock.__tabs.values()).filter((t) => t.groupId > 0);
   assert.ok(sessionTabs.length > 0, 'sanity check: the first run put at least one tab in the group');
@@ -302,6 +302,26 @@ test('a follow-up task continues in the tab the run already moved into', async (
   assert.ok(mock.__tabs.get(res.tabId).groupId > 0,
     'the reused tab must be one inside this session\'s own ScoutFox group, not an arbitrary window tab');
   assert.equal(mock.__createCalls.length, 0, 'no new tab is needed when the session already owns a scriptable one');
+
+  await waitUntilIdle();
+});
+
+test('an empty new-tab page is reused in place - no second tab, so the side panel stays open', async () => {
+  mock.__createCalls.length = 0;
+  mock.__updateCalls.length = 0;
+  // A brand-new window's first tab. Opening a tab beside it moves the active tab out from under
+  // the tab-scoped panel and Chrome closes the panel - reproduced in a real Chromium.
+  mock.__addTab({ id: 400, url: 'chrome://newtab/', index: 3, windowId: 2, active: true });
+
+  const res = await sendMessage(mock.__listeners, {
+    action: 'START_TASK', tabId: 400, payload: { prompt: 'find something' }
+  });
+
+  assert.equal(res.success, true, 'the task must start');
+  assert.equal(res.tabId, 400, 'the task must run in the new-tab page the panel is attached to');
+  assert.equal(mock.__createCalls.length, 0, 'no second tab may be opened for an empty page');
+  assert.equal(mock.__tabs.get(400).url, 'https://www.google.com', 'the empty tab must be navigated in place');
+  assert.ok(mock.__tabs.get(400).groupId > 0, 'the reused tab must join this session\'s ScoutFox group');
 
   await waitUntilIdle();
 });
