@@ -122,6 +122,37 @@ python agent.py --goal "Find top 3 trending python repositories on GitHub and su
 
 ---
 
+## 🗺️ Roadmap
+
+### Next version (planned, decided 2026-09-28)
+
+The next version is a rework of the agent on [LangGraph.js](https://github.com/langchain-ai/langgraphjs).
+This is planned and not built yet.
+Everything above in this README describes the extension as it works today.
+
+What will change for you:
+
+* **Approve the plan first**: the agent shows its plan and the sites it will visit.
+  You approve it once, and then it runs.
+* **Real clicks**: while a task runs, the agent clicks through Chrome's debugger, like a real mouse.
+  Chrome shows a yellow "is debugging this browser" bar during the task.
+  If the debugger cannot attach (for example when DevTools is open), it falls back to today's clicks.
+* **Better long tasks**: a notebook where the agent saves what it finds, a longer memory of past steps, and an honest checklist.
+  A checklist step is marked done only when its goal is really met.
+* **Blocked sites are skipped**: if a site shows a challenge or error page again and again, the agent marks it blocked and moves on.
+  The result shows what it found and which sources were blocked, instead of retrying forever.
+* **Live graph view**: the side panel gets a new view that shows which step of the graph the agent is in right now.
+* **Python runner too**: `python_runner/agent.py` also moves to LangGraph (Python).
+* **LangSmith tracing**: opt-in in Settings, off by default.
+* **Local models keep working**: small local Ollama models stay supported.
+* **New setup step**: the project moves to TypeScript + Vite, so it gets a build step.
+  After the rework, you run a build and load the built output folder in Chrome, not the repository folder.
+  Until then, the Quick Setup above (load the repository folder) is still correct.
+
+See [PRD.md](PRD.md) for the details.
+
+---
+
 ## 📜 Community & Governance
 
 * **[License](LICENSE)**: MIT License
