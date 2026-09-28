@@ -28,3 +28,15 @@ open any webpage, open the ScoutFox Side Panel, and test your changes there befo
 * Keep DOM distillation light (<2,500 tokens).
 * Run `node --check` across JS files before submitting PRs.
 * Follow standard ES6 module imports.
+* Run `npm test` before submitting a PR (226 tests across 45 test files currently).
+* For bug-fix PRs specifically, it is recommended practice (not a hard requirement for every PR - a new feature test does not need this) to write a regression test, then briefly `git stash` the fix and confirm the new test actually fails, before finalizing.
+
+## Next version (planned, decided 2026-09-28)
+
+A LangGraph + TypeScript + Vite rework of the agent is planned.
+It is decided, but not built yet.
+Today the extension is still plain JavaScript ES modules with no build step.
+During the rework, put new agent logic into graph nodes.
+Do not grow `background/agentEngine.js` with new logic.
+The "Follow standard ES6 module imports" and `node --check` guidelines above will change once TypeScript lands.
+See section 3 of [PRD.md](PRD.md) (planned next version, decided 2026-09-28, not built yet) for the full plan.
