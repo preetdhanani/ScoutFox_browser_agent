@@ -35,10 +35,14 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
    *Planned (decided 2026-09-28, not built yet):* real clicks through `chrome.debugger` (CDP input events) while a task runs.
    If the debugger cannot attach, it falls back to today's synthetic DOM events.
 3. **Multi-Provider API Client (`background/apiClients.js`)**: Universal REST client supporting Ollama (`http://localhost:11434`), OpenAI-compatible endpoints (Groq, LM Studio, vLLM, Llama API), OpenAI, Anthropic Claude, and Google Gemini.
+   For Ollama, the main action call now sends a JSON schema in `format` with `think:false` (constrained decoding), so the model can only answer with a real action.
+   A server older than 0.5 that rejects a schema falls back to `format:"json"`, and the other providers are unchanged.
    *Planned (decided 2026-09-28, not built yet):* replaced by LangChain chat model packages.
 4. **Fault-Tolerant Action Loop (`background/agentEngine.js`, `background/harness/`)**: Self-correcting execution loop with a JSON fallback parser and error recovery for 8B-32B small models.
    Hallucinated element IDs and unrecognized action verbs are now rejected as correctable parse errors instead of being silently "corrected" or failing a layer later.
    Restricted-page navigation (chrome://, the Chrome Web Store, etc.) is now blocked before it happens rather than discovered a step later, and the agent is now shown its own step-by-step plan and remaining step budget when choosing its next action.
+   For Ollama, the system prompt is now a compact one (one line per action, no few-shot examples), and a reply that is one bare JSON object is parsed whole.
+   The prompt for every other provider is unchanged.
    *Planned (decided 2026-09-28, not built yet):* replaced by a LangGraph.js graph (see section 3).
 
    **Reliability & honesty harness** (`background/harness/recovery.js`, `background/harness/outcome.js`):
@@ -50,10 +54,11 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
 
 ---
 
-## 3. Next version (planned, decided 2026-09-28): LangGraph rework
+## 3. Next version (planned, decided 2026-09-28, revised 2026-09-29): LangGraph rework
 
-> **Status**: Decided by Prit on 2026-09-28, not built yet.
-> Nothing in this section is implemented.
+> **Status**: Decided by Prit on 2026-09-28, and revised on 2026-09-29 after his design review.
+> Only phase P0a is built: constrained decoding for Ollama in today's engine (see 3.3, item 17).
+> Nothing else in this section is implemented.
 > Everything in section 2 still describes the current code.
 > The target audience and the local-first, small-model niche from section 1 stay the same.
 
@@ -109,8 +114,11 @@ Rebuild the whole agent on LangGraph.js.
    Chrome shows a yellow "is debugging this browser" bar; this is accepted.
    If the debugger cannot attach (for example, DevTools is open), it falls back to today's synthetic DOM events.
    This needs the `debugger` permission in the manifest.
+   The debugger detaches after 30 minutes of pause.
 8. **Approve plan first**: the agent shows its plan and the sites it will visit.
    The user approves once, then it runs (LangGraph `interrupt`).
+   The plan card also shows the effort level and an estimate of the steps.
+   A new task is refused while another one is paused.
 9. **Build**: TypeScript + Vite (needed anyway to bundle LangGraph for MV3).
    CI must then zip the built output instead of the raw folders.
 10. **Side panel**: the UI stays vanilla JS with the same messages, plus a new live graph view that shows the node the agent is in right now.
@@ -122,6 +130,25 @@ Rebuild the whole agent on LangGraph.js.
 14. **Storage**: graph state and checkpoints are saved in `chrome.storage.session` (cleared on browser restart, same as today).
 15. **Tests**: rewrite the existing suite for the graph, and keep what each test guards.
 16. **LangSmith tracing**: off by default, opt-in in Settings (privacy and local-first promise).
+17. **Constrained decoding for Ollama** (built in phase P0a, 2026-09-29): the action JSON schema goes to Ollama's `format`, with a compact prompt and no few-shot examples.
+    Measured on qwen3.5:9b and gemma4:12b: 52 to 65% fewer prompt tokens, faster answers and no broken JSON.
+    The rest of the small-model strategy is planned: the model only picks the next action, code does the rest (memory, checklist, budgets, checks), and each step offers only a small list of actions.
+18. **One isolated worker per site**: every site runs as its own LangGraph subgraph with private context, its own success criteria and a step budget that code computes.
+    The orchestrator only sees a short summary of each finished site.
+    A site is done only when code sees its criteria met.
+19. **Checks after every action**: a code step compares the page before and after (URL and page structure) and finds actions that changed nothing.
+    A stuck detector stops loops: it bans the repeated action, then switches strategy, then marks the site partial or blocked.
+    Failed attempts are kept in a per-site failure memory that the model sees.
+20. **Replan**: after a site ends, a `reflect` step can continue, replan or stop early.
+    Finished sites never change, and a new domain needs the user's approval again.
+21. **Risk gate**: submitting a form, logging in, buying, and leaving the approved sites wait for the user's OK.
+    The agent never types passwords, card numbers or one-time codes.
+22. **Provenance**: every value in the final table carries its URL, the time and a page snippet that code found, never one written by the model.
+23. **Effort levels**: Low, Medium and High first, and XHigh and Max later, after real-run data.
+    A level sets the step budget per site, the retries, how strictly actions are verified, how hard the agent tries to get past blocked pages, when it reflects, and the evidence checks.
+    The default is Medium.
+24. **Step limit**: `settings.maxSteps` becomes a hard safety cap with a default of 250, and the effort level and the site budgets limit each task.
+25. **Optional later phases**: parallel sites, and a rerun of only the partial sites at a higher level.
 
 ### 3.4 Out of scope for now (maybe later)
 - Native tool calling.
@@ -134,29 +161,35 @@ Rebuild the whole agent on LangGraph.js.
 - On-page overlay with a Stop button.
 - Stronger redaction (credit card numbers, one-time codes).
 
-### 3.5 Early checks before the big rebuild
-- A small "hello graph" Vite build runs inside the MV3 service worker without `eval` or `new Function` (the MV3 content security policy blocks `eval`).
-- AgentRouter works through LangChain's `ChatOpenAI` connector.
+### 3.5 Early checks (done 2026-09-28)
+- LangGraph runs inside a real MV3 service worker, built with Vite and without `eval`.
+  Browsers have no `AsyncLocalStorage`, so `interrupt` needs a small helper, and a paused task resumed correctly after the worker was stopped by force.
+- LangChain chat models work from the worker, including AgentRouter (`ChatAnthropic` first, with a hand-written fallback to the OpenAI format).
+- Constrained decoding works on real local models, and it is built (phase P0a).
+- Real clicks through `chrome.debugger` work, including React inputs, iframes and zoom.
+  On a hidden tab they need focus emulation.
+- Still to test: graph checkpoints of a subgraph with the custom saver (spike S5, the first task of phase P4).
 
 ### 3.6 Next step
-Draw the new graph (nodes, edges, state fields) and get Prit's approval before building anything.
+The design is written and waits for Prit's review, and phase P0a is built.
+Next comes phase P0, a build step with Vite and TypeScript, then the phases up to P3, and the graph itself from P4 on.
+Every phase keeps the tests green, and the graph stays behind an engine switch until it works on real sites.
 
 ### 3.7 How today's harness concepts map to the planned graph
-This is a suggested mapping, not a final design.
-The final graph still needs Prit's approval (see 3.6).
-- **Planner** -> `plan` node (one step per source) + approve-plan interrupt.
-- **Reasoner** -> `think` node (LLM call) + `parse` node.
-  The parser never auto-finishes on tool-call formats, and unclear output goes back to `think`.
-- **Executor** -> `act` node (CDP real clicks, stable element IDs) + the existing optional verify step.
-- **Memory** -> the shared graph state (findings ledger, visited and blocked URLs, step history) + `summarize` node.
-- **Perception** -> `observe` node (the `content/domCompressor.js` snapshot).
-- **Safety** -> approve-plan interrupt + the existing restricted-URL gate + the existing redaction.
+This is a summary of the design, which still waits for Prit's approval.
+- **Planner** -> `plan` node (one step per site, with success criteria) + approve-plan interrupt + `reflect` and replan.
+- **Reasoner** -> `policy` node (the LLM, with a small action list per mode) + the parser.
+  The parser never auto-finishes on tool-call formats, and unclear output is a parse error.
+- **Executor** -> `risk` gate, `execute` (real clicks, stable element IDs) and `verify` (code checks after each action).
+- **Memory** -> the shared graph state (findings with provenance, visited and blocked URLs, short site summaries) + the private context of each site worker.
+- **Perception** -> `perceive` node (the `content/domCompressor.js` snapshot, page type and page signature).
+- **Safety** -> approve-plan interrupt + risk gate + the existing restricted-URL gate + the existing redaction.
   Prompt-injection hardening is out of scope for now.
-- **Recovery** -> router edges (LLM retry, blocked source after N tries, pause via checkpoint and resume).
+- **Recovery** -> the blocked-site ladder by effort level, `recover` (failure memory, retries, bans), stuck detection, and checkpoints with resume.
 
-### 3.8 Current facts (checked 2026-09-28)
+### 3.8 Current facts (checked 2026-09-29)
 - `npm test`: 258 tests across 48 test files, all passing.
-- `npm run check` runs `node --check` on 9 source files (see `package.json`).
+- `npm run check` runs `node --check` on 10 source files (see `package.json`).
 - Today the extension has no build step: plain JS ES modules, loaded unpacked from the repo folder.
 - CI (`.github/workflows/ci.yml`) zips the raw source folders; after the rework it must zip the built output.
 - `manifest.json` does not have the `debugger` permission yet.
