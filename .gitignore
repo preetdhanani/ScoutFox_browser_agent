@@ -21,3 +21,7 @@ _agent/
 .claude/
 .claude
 docs/
+
+# Build output
+dist/
+scoutfox-chrome-extension.zip

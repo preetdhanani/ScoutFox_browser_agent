@@ -2,10 +2,11 @@
   "name": "scoutfox-e2e",
   "version": "1.0.0",
   "private": true,
-  "description": "Opt-in end-to-end smoke run of the unpacked extension in Chromium against a local Ollama. Not part of npm test.",
+  "description": "Opt-in end-to-end smoke run of the built extension (dist/) in Chromium, against an offline mock model (--mock) or a local Ollama. Not part of npm test.",
   "type": "module",
   "scripts": {
     "smoke": "node smoke.mjs",
+    "smoke:mock": "node smoke.mjs --mock",
     "snapshots": "node smoke.mjs --dump-snapshots"
   },
   "dependencies": {
