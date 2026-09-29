@@ -141,6 +141,14 @@ What will change for you:
   A checklist step is marked done only when its goal is really met.
 * **Blocked sites are skipped**: if a site shows a challenge or error page again and again, the agent marks it blocked and moves on.
   The result shows what it found and which sources were blocked, instead of retrying forever.
+* **Effort levels**: you pick Low, Medium or High before a task (Medium is the default).
+  A higher level gives each site more steps, more retries and stricter checks, and it takes longer.
+* **One worker per site**: every website is handled on its own, with its own step budget.
+  The result says which sites are done, partial or blocked.
+* **Checks after every action**: the agent checks whether an action changed the page, and it stops loops instead of repeating the same click.
+* **Asks before risky actions**: buying, logging in, submitting a form, or leaving the sites you approved.
+  The agent never types passwords, card numbers or one-time codes.
+* **Sources for every number**: each value in the result table links to its page, with the time and a snippet of the text.
 * **Live graph view**: the side panel gets a new view that shows which step of the graph the agent is in right now.
 * **Python runner too**: `python_runner/agent.py` also moves to LangGraph (Python).
 * **LangSmith tracing**: opt-in in Settings, off by default.
