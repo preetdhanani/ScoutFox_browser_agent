@@ -36,7 +36,7 @@ Run the full suite with:
 ```bash
 npm test
 ```
-This runs `node --test tests/*.test.js` - 226 tests across 45 files as of this writing.
+This runs `node --test tests/*.test.js` - 258 tests across 48 files as of this writing.
 None of it needs a real browser.
 
 ### Syntax Check

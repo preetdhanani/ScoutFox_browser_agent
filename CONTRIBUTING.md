@@ -28,7 +28,7 @@ open any webpage, open the ScoutFox Side Panel, and test your changes there befo
 * Keep DOM distillation light (<2,500 tokens).
 * Run `node --check` across JS files before submitting PRs.
 * Follow standard ES6 module imports.
-* Run `npm test` before submitting a PR (226 tests across 45 test files currently).
+* Run `npm test` before submitting a PR (258 tests across 48 test files currently).
 * For bug-fix PRs specifically, it is recommended practice (not a hard requirement for every PR - a new feature test does not need this) to write a regression test, then briefly `git stash` the fix and confirm the new test actually fails, before finalizing.
 
 ## Next version (planned, decided 2026-09-28)

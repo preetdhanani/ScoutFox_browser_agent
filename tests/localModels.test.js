@@ -36,6 +36,7 @@ global.chrome = {
 
 const { ApiClients } = await import('../background/apiClients.js');
 const { AgentEngine } = await import('../background/agentEngine.js');
+const { buildActionSchema } = await import('../background/actionSchema.js');
 
 const OLLAMA_SETTINGS = {
   provider: 'ollama',
@@ -79,14 +80,60 @@ test('Ollama - falls back to message.thinking when content is empty', async () =
   assert.match(out, /"action":"click"/);
 });
 
-test('Ollama - request disables native thinking and pins the context window', async () => {
+test('Ollama - request disables native thinking, pins the context window and sends the action schema', async () => {
+  // The options the engine passes for its main action call (see runLoopBody).
+  const schema = buildActionSchema();
   const calls = stubFetch({ json: { message: { role: 'assistant', content: 'ok' } } });
-  await ApiClients.callOllama(OLLAMA_SETTINGS, [{ role: 'user', content: 'go' }], 'sys', { json: true });
+  await ApiClients.callOllama(OLLAMA_SETTINGS, [{ role: 'user', content: 'go' }], 'sys', { json: true, schema });
 
   assert.equal(calls[0].body.think, false, 'think must be false — local reasoning models leave content empty until they finish');
   assert.equal(calls[0].body.options.num_ctx, 8192, 'num_ctx must be explicit; Ollama defaults to 4096 and truncates from the front');
   assert.equal(calls[0].body.options.num_predict, 1024);
-  assert.equal(calls[0].body.format, 'json', 'JSON mode constrains decoding so a small model cannot emit prose around the action');
+  // Changed on purpose from format:'json'. The schema constrains decoding further: the model
+  // can only produce a known action with its required fields, not just any JSON object.
+  assert.deepEqual(calls[0].body.format, schema, 'the action schema, not "json", constrains the main action call');
+});
+
+test('Ollama - JSON mode without a schema still sends format "json"', async () => {
+  // verifyStep and other side calls ask for plain JSON and must keep getting exactly that.
+  const calls = stubFetch({ json: { message: { role: 'assistant', content: '{"success":true}' } } });
+  await ApiClients.callOllama(OLLAMA_SETTINGS, [{ role: 'user', content: 'go' }], 'sys', { json: true });
+  assert.equal(calls[0].body.format, 'json');
+  assert.equal(calls[0].body.think, false);
+});
+
+test('Ollama - a server that rejects a schema format gets format "json" instead, and remembers it', async () => {
+  // Ollama before 0.5 only knows format:"json" and answers a schema with this 400.
+  const oldServer = { ...OLLAMA_SETTINGS, baseUrl: 'http://old-ollama.test:11434' };
+  const schema = buildActionSchema();
+  const calls = stubFetch([
+    { ok: false, status: 400, text: '{"error":"json: cannot unmarshal object into Go struct field ChatRequest.format of type string"}' },
+    { json: { message: { role: 'assistant', content: '{"action":"scroll","direction":"down"}' } } }
+  ]);
+  const out = await ApiClients.callOllama(oldServer, [{ role: 'user', content: 'go' }], 'sys', { json: true, schema });
+  assert.equal(out, '{"action":"scroll","direction":"down"}');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].body.format, schema);
+  assert.equal(calls[1].body.format, 'json', 'the retry falls back to plain JSON mode');
+  assert.equal(calls[1].body.think, false, 'the retry keeps think:false');
+
+  const later = stubFetch({ json: { message: { role: 'assistant', content: 'ok' } } });
+  await ApiClients.callOllama(oldServer, [{ role: 'user', content: 'go' }], 'sys', { json: true, schema });
+  assert.equal(later.length, 1, 'the next call does not pay for the retry again');
+  assert.equal(later[0].body.format, 'json');
+});
+
+test('Ollama - the think retry keeps the schema', async () => {
+  const schema = buildActionSchema();
+  const calls = stubFetch([
+    { ok: false, status: 400, text: 'model does not support think' },
+    { json: { message: { role: 'assistant', content: '{"action":"go_back"}' } } }
+  ]);
+  const out = await ApiClients.callOllama({ ...OLLAMA_SETTINGS, model: 'no-think-schema-model' }, [{ role: 'user', content: 'go' }], 'sys', { json: true, schema });
+  assert.equal(out, '{"action":"go_back"}');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].body.think, undefined);
+  assert.deepEqual(calls[1].body.format, schema, 'dropping think must not drop the schema');
 });
 
 test('Ollama - omits format when JSON mode is not requested', async () => {

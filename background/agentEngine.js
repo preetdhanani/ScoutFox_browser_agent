@@ -11,6 +11,7 @@ import { Storage } from '../utils/storage.js';
 import { Logger } from '../utils/logger.js';
 import { callWithRetry, LLM_MAX_ATTEMPTS } from './harness/recovery.js';
 import { buildFinishEntry, buildMaxStepsEntry } from './harness/outcome.js';
+import { buildActionSchema, buildActionPromptLines, buildPlanSchema, PLAN_MAX_STEPS } from './actionSchema.js';
 
 // Sessions are multi-turn and would otherwise grow without bound, and the whole array is
 // serialised to chrome.storage on every state change.
@@ -23,7 +24,11 @@ const PREVIOUS_TURNS_LIMIT = 4;
 // verb used to sail straight through parsing, get pushed to history, and only fail one layer
 // past the page boundary at actionExecutor.js's default `throw new Error('Unknown action')` -
 // a wasted step with a generic failure instead of a correctable parse error naming the problem.
-const KNOWN_ACTIONS = new Set([
+//
+// Exported so a test can keep it equal to the verbs of the schema registry (actionSchema.js):
+// a verb the engine dispatches but Ollama's grammar cannot produce, or the other way round,
+// would fail silently.
+export const KNOWN_ACTIONS = new Set([
   'click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward',
   'read_page_text', 'execute_js', 'read_network_requests', 'browser_batch', 'wait',
   'finish', 'ask_user', 'open_window'
@@ -169,6 +174,50 @@ function parsePartialOrTruncatedJson(str) {
   } catch (_) {}
 
   return null;
+}
+
+/**
+ * The reply is exactly one JSON object with a string "action" - what Ollama returns when the
+ * action schema is sent as `format`. Parsed whole, so nested objects (browser_batch steps, a
+ * read_network_requests filter) survive; the older stages below cut a bare reply at its first
+ * closing brace. Anything else returns null and goes through the older stages unchanged.
+ */
+function parseBareActionJson(text) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+  try {
+    const obj = JSON.parse(trimmed);
+    return obj && typeof obj === 'object' && !Array.isArray(obj) && typeof obj.action === 'string' ? obj : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Plan checklist texts from the Ollama plan reply, {steps: [{source, goal}]}.
+ *
+ * The grammar should already cap the array, but a server that fell back to format:"json"
+ * does not, so the cap is applied here too. Plain string steps are accepted for the same
+ * reason. Returns [] when nothing usable is there, and the caller falls back.
+ */
+function planTextsFromStepsObject(resp) {
+  const parsed = parsePartialOrTruncatedJson(resp);
+  const steps = parsed && !Array.isArray(parsed) && Array.isArray(parsed.steps) ? parsed.steps : [];
+  return steps
+    .map((step) => {
+      if (typeof step === 'string') return step.trim();
+      if (!step || typeof step !== 'object') return '';
+      const goal = String(step.goal || '').trim();
+      const source = String(step.source || '').trim();
+      // The source is shown only when it adds something: "idealo.de: Find the price" helps,
+      // "current page: Read the price" or a goal that already names the site does not.
+      if (!goal || !source || /^(the )?(current|this) (page|tab|site)$/i.test(source) || goal.toLowerCase().includes(source.toLowerCase())) {
+        return goal;
+      }
+      return `${source}: ${goal}`;
+    })
+    .filter(Boolean)
+    .slice(0, PLAN_MAX_STEPS);
 }
 
 export class AgentEngine {
@@ -1068,7 +1117,18 @@ export class AgentEngine {
   async generatePlan(userPrompt, settings) {
     const isSummarizeTask = /summarize|summary|readme|overview|describe|explain|read/i.test(userPrompt);
 
-    const planPrompt = `Task: "${userPrompt}"
+    // Ollama gets an object schema in `format`. The old request asked for a bare JSON array,
+    // which format:"json" cannot produce (it always yields an object), so the plan only
+    // worked when the model happened to wrap an array of strings in an object and the regex
+    // below fished it out. Cloud providers keep the array request unchanged.
+    const useSchema = !!settings && settings.provider === 'ollama';
+
+    const planPrompt = useSchema ? `Task: "${userPrompt}"
+Make a short plan for this web browsing task, in the order the steps must happen.
+Reply with ONE JSON object: {"steps": [{"source": "...", "goal": "..."}]} with 1 to ${PLAN_MAX_STEPS} steps.
+- source: the website for this step as a domain like "idealo.de", or "current page".
+- goal: one short sentence that says what to do or find there.
+Give every website the user names its own step.${isSummarizeTask ? '\nFor reading or summarizing tasks, use 1 or 2 steps.' : ''}` : `Task: "${userPrompt}"
 Generate a concise, efficient execution plan tailored specifically for this web browsing task.
 Output ONLY a raw JSON array of short sub-goal action strings.
 
@@ -1080,15 +1140,21 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       // Previously passed no signal at all, so Pause/Stop pressed during plan generation could
       // not cancel it - the in-flight request just ran to completion (or the full timeout)
       // regardless. Same abortController startTask() already created for the main loop.
-      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.', {
+      const options = {
         json: true,
         signal: this.abortController ? this.abortController.signal : null
-      });
+      };
+      if (useSchema) options.schema = buildPlanSchema();
+      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.', options);
 
       let planArray = [];
-      const match = resp.match(/\[[\s\S]*\]/);
-      if (match) {
-        planArray = JSON.parse(match[0]);
+      if (useSchema) {
+        planArray = planTextsFromStepsObject(resp);
+      } else {
+        const match = resp.match(/\[[\s\S]*\]/);
+        if (match) {
+          planArray = JSON.parse(match[0]);
+        }
       }
 
       if (Array.isArray(planArray) && planArray.length > 0) {
@@ -1286,6 +1352,11 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     let consecutiveParseErrors = 0;
     const MAX_PARSE_ERRORS = 3;
 
+    // Constrained decoding for Ollama: its sampler can only produce one well-formed action
+    // (see actionSchema.js). Only this main action call gets it - verifyStep and other JSON
+    // side calls keep plain format:"json" - and cloud providers get nothing new on the wire.
+    const actionSchema = settings.provider === 'ollama' ? buildActionSchema() : null;
+
     while (this.status === 'running' && this.stepCount < maxSteps) {
       this.stepCount++;
       Logger.info('AgentEngine', `---------------- STEP ${this.stepCount}/${maxSteps} ----------------`);
@@ -1340,7 +1411,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         break;
       }
 
-      const systemPrompt = this.buildSystemPrompt(settings.systemInstructions);
+      const systemPrompt = this.buildSystemPrompt(settings.systemInstructions, settings.provider);
       let userMessage = this.buildStepMessage(domSnapshot, maxSteps);
 
       // Universal Guardrail: Anti-Stuck Loop Detection & Auto-Inject Network Errors
@@ -1376,10 +1447,15 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       try {
         const messages = this.formatMessagesForLLM(userMessage);
         responseText = await callWithRetry(
-          () => ApiClients.generateCompletion(settings, messages, systemPrompt, {
-            signal: this.abortController ? this.abortController.signal : null,
-            json: true
-          }),
+          () => {
+            // Built per attempt, so each retry reads the abort controller that is current then.
+            const llmOptions = {
+              signal: this.abortController ? this.abortController.signal : null,
+              json: true
+            };
+            if (actionSchema) llmOptions.schema = actionSchema;
+            return ApiClients.generateCompletion(settings, messages, systemPrompt, llmOptions);
+          },
           {
             isAbort: (err) => this.isUserAbort(err),
             shouldContinue: () => this.status === 'running',
@@ -1790,7 +1866,17 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     return messages;
   }
 
-  buildSystemPrompt(customInstructions) {
+  /**
+   * The system prompt for the main action call, chosen by PROVIDER (never by model name).
+   *
+   * Ollama gets the compact prompt, because its reply is shaped by the action schema in
+   * `format`. Every other provider gets the legacy prompt below, byte for byte as before: their
+   * replies are free text, and the few-shot examples and output rules are what keep them in
+   * shape.
+   */
+  buildSystemPrompt(customInstructions, provider) {
+    if (provider === 'ollama') return this.buildCompactSystemPrompt(customInstructions);
+
     return `${customInstructions || 'You are ScoutFox, an autonomous web browsing AI agent.'}
 
 You are provided with a user goal, visible webpage text content, and a compressed list of interactive web page elements labeled with numerical IDs like [1], [2], [3].
@@ -1953,6 +2039,35 @@ The visible documentation text provides the project title, key features, and arc
 3. Only select element_id numbers that exist in the provided Interactive Elements list.`;
   }
 
+  /**
+   * The system prompt for Ollama: one line per action from the schema registry and a few
+   * rules, and nothing else.
+   *
+   * The legacy prompt asked for <thought> tags and a fenced block while the request forced
+   * JSON, so the model got two conflicting output formats; the reply shape now comes from the
+   * schema alone. There are no few-shot examples: with the schema the models were just as
+   * accurate without them, and they cost well over a thousand prompt tokens on every step.
+   * The schema itself is never shown to the model (Ollama does not inject it), so the action
+   * list stays.
+   *
+   * Rule 3 names the exact reply on purpose. With only "never click" (in several wordings),
+   * qwen3.5:9b still clicked "Verify you are human" in every eval run; naming the action to use
+   * instead made both models wait.
+   */
+  buildCompactSystemPrompt(customInstructions) {
+    return `${customInstructions || 'You are ScoutFox, an autonomous web browsing AI agent.'}
+You control one browser tab. Each turn you get the user's goal, the current page (its text and a numbered list of interactive elements) and the results of your earlier actions.
+Reply with ONE JSON object: the single next action.
+Actions:
+${buildActionPromptLines().join('\n')}
+Rules:
+1. If the page already shows what the goal asks for, finish now with the full answer.
+2. Use only element_id numbers from the current element list.
+3. Never click CAPTCHA or "verify you are human" boxes. On such a bot-check page reply {"action":"wait","amount":3}; if the check is still there after that, finish and say that the site blocked you.
+4. Do not guess web addresses. If you do not know the exact URL, search with https://www.google.com/search?q=...
+5. If an action did not change the page, try a different one.`;
+  }
+
   buildStepMessage(snapshot, maxSteps) {
     // planSteps has always been computed (generatePlan) and shown in the side panel's own
     // progress bar - but buildStepMessage never included it, so the model choosing the actual
@@ -1985,91 +2100,95 @@ Choose your next action based on the goal: "${this.currentTask}"`;
     }
 
     let thought = '';
-    
-    // 1. Extract <think> or <thought> or <reasoning>
-    const thinkMatch = text.match(/<(?:think|thought|reasoning)>([\s\S]*?)<\/(?:think|thought|reasoning)>/i);
-    if (thinkMatch) {
-      thought = thinkMatch[1].trim();
-    }
 
-    let cleanText = text.replace(/<(?:think|thought|reasoning)>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
+    // 0. The whole reply is one JSON object with an "action" key - the shape Ollama's schema
+    // forces. Stages 1-6 are skipped for it, and run exactly as before for everything else.
+    let actionObj = parseBareActionJson(text);
 
-    let actionObj = null;
-
-    // 2. Extract JSON from ```json ... ``` or ``` ... ```
-    const codeBlockMatch = cleanText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (codeBlockMatch) {
-      actionObj = parsePartialOrTruncatedJson(codeBlockMatch[1].trim());
-    }
-
-    // 3. Extract JSON object containing "action" key
     if (!actionObj) {
-      const braceMatch = cleanText.match(/\{[\s\S]*?"action"\s*:[\s\S]*?\}/i);
-      if (braceMatch) {
-        actionObj = parsePartialOrTruncatedJson(braceMatch[0].trim());
-      }
-    }
-
-    // 4. Reverse SCAN all { ... } blocks in text for valid action JSON
-    if (!actionObj) {
-      const matches = cleanText.match(/\{[\s\S]*?\}/g) || [];
-      for (let i = matches.length - 1; i >= 0; i--) {
-        const parsed = parsePartialOrTruncatedJson(matches[i]);
-        if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.execute_js || parsed.browser_batch || parsed.read_network_requests)) {
-          actionObj = parsed;
-          break;
-        }
-      }
-    }
-
-    // 5. REGEX Intent Extractor for Dumber / Smaller LLMs outputting plain text
-    if (!actionObj) {
-      const clickMatch = cleanText.match(/(?:action:?\s*)?(?:click|press|tap)\s+(?:on\s+)?(?:element\s+)?\[?(\d+)\]?/i);
-      if (clickMatch) {
-        actionObj = { action: 'click', element_id: parseInt(clickMatch[1], 10), reason: 'Extracted via text intent' };
+      // 1. Extract <think> or <thought> or <reasoning>
+      const thinkMatch = text.match(/<(?:think|thought|reasoning)>([\s\S]*?)<\/(?:think|thought|reasoning)>/i);
+      if (thinkMatch) {
+        thought = thinkMatch[1].trim();
       }
 
+      let cleanText = text.replace(/<(?:think|thought|reasoning)>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
+
+      // 2. Extract JSON from ```json ... ``` or ``` ... ```
+      const codeBlockMatch = cleanText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+      if (codeBlockMatch) {
+        actionObj = parsePartialOrTruncatedJson(codeBlockMatch[1].trim());
+      }
+
+      // 3. Extract JSON object containing "action" key
       if (!actionObj) {
-        const typeMatch = cleanText.match(/(?:action:?\s*)?(?:type|enter|write|input)\s+["']([^"']+)["']\s+(?:in|into|on)\s+(?:element\s+)?\[?(\d+)\]?/i);
-        if (typeMatch) {
-          actionObj = { action: 'type', text: typeMatch[1], element_id: parseInt(typeMatch[2], 10), submit: true, reason: 'Extracted via text intent' };
+        const braceMatch = cleanText.match(/\{[\s\S]*?"action"\s*:[\s\S]*?\}/i);
+        if (braceMatch) {
+          actionObj = parsePartialOrTruncatedJson(braceMatch[0].trim());
         }
       }
 
+      // 4. Reverse SCAN all { ... } blocks in text for valid action JSON
       if (!actionObj) {
-        const navMatch = cleanText.match(/(?:action:?\s*)?(?:navigate|go\s+to|open)\s+(https?:\/\/[^\s]+)/i);
-        if (navMatch) {
-          actionObj = { action: 'navigate', url: navMatch[1], reason: 'Extracted via text intent' };
+        const matches = cleanText.match(/\{[\s\S]*?\}/g) || [];
+        for (let i = matches.length - 1; i >= 0; i--) {
+          const parsed = parsePartialOrTruncatedJson(matches[i]);
+          if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.execute_js || parsed.browser_batch || parsed.read_network_requests)) {
+            actionObj = parsed;
+            break;
+          }
         }
       }
 
+      // 5. REGEX Intent Extractor for Dumber / Smaller LLMs outputting plain text
       if (!actionObj) {
-        const scrollMatch = cleanText.match(/(?:action:?\s*)?(?:scroll)\s+(down|up)/i);
-        if (scrollMatch) {
-          actionObj = { action: 'scroll', direction: scrollMatch[1].toLowerCase(), amount: 500, reason: 'Extracted via text intent' };
+        const clickMatch = cleanText.match(/(?:action:?\s*)?(?:click|press|tap)\s+(?:on\s+)?(?:element\s+)?\[?(\d+)\]?/i);
+        if (clickMatch) {
+          actionObj = { action: 'click', element_id: parseInt(clickMatch[1], 10), reason: 'Extracted via text intent' };
+        }
+
+        if (!actionObj) {
+          const typeMatch = cleanText.match(/(?:action:?\s*)?(?:type|enter|write|input)\s+["']([^"']+)["']\s+(?:in|into|on)\s+(?:element\s+)?\[?(\d+)\]?/i);
+          if (typeMatch) {
+            actionObj = { action: 'type', text: typeMatch[1], element_id: parseInt(typeMatch[2], 10), submit: true, reason: 'Extracted via text intent' };
+          }
+        }
+
+        if (!actionObj) {
+          const navMatch = cleanText.match(/(?:action:?\s*)?(?:navigate|go\s+to|open)\s+(https?:\/\/[^\s]+)/i);
+          if (navMatch) {
+            actionObj = { action: 'navigate', url: navMatch[1], reason: 'Extracted via text intent' };
+          }
+        }
+
+        if (!actionObj) {
+          const scrollMatch = cleanText.match(/(?:action:?\s*)?(?:scroll)\s+(down|up)/i);
+          if (scrollMatch) {
+            actionObj = { action: 'scroll', direction: scrollMatch[1].toLowerCase(), amount: 500, reason: 'Extracted via text intent' };
+          }
+        }
+
+        if (!actionObj && /read.*page.*text|extract.*text|get.*page.*content/i.test(cleanText)) {
+          actionObj = { action: 'read_page_text', reason: 'Extracted via text intent' };
         }
       }
 
-      if (!actionObj && /read.*page.*text|extract.*text|get.*page.*content/i.test(cleanText)) {
-        actionObj = { action: 'read_page_text', reason: 'Extracted via text intent' };
+      // 6. Freeform Text Auto-Wrapping Guardrail (PROTECTED AGAINST TRUNCATED JSON PAYLOADS)
+      const looksLikeActionJson = /"action"\s*:|"execute_js"|"browser_batch"|```json/i.test(cleanText);
+
+      if (!actionObj && cleanText.length > 5 && !looksLikeActionJson) {
+        Logger.info('AgentEngine', '[UNIVERSAL_GUARDRAIL] Model provided direct text response. Auto-wrapping into finish action.');
+        actionObj = {
+          action: 'finish',
+          answer: cleanText,
+          reason: 'Direct text output from model',
+          // The model never actually emitted {"action":"finish"} - it just replied in prose and
+          // this guardrail inferred an ending so the run has somewhere to go. buildFinishEntry
+          // (harness/outcome.js) turns this into an `unconfirmed` flag so it is shown as inferred,
+          // not declared. See harness/outcome.js for why that distinction matters.
+          autoWrapped: true
+        };
       }
-    }
-
-    // 6. Freeform Text Auto-Wrapping Guardrail (PROTECTED AGAINST TRUNCATED JSON PAYLOADS)
-    const looksLikeActionJson = /"action"\s*:|"execute_js"|"browser_batch"|```json/i.test(cleanText);
-
-    if (!actionObj && cleanText.length > 5 && !looksLikeActionJson) {
-      Logger.info('AgentEngine', '[UNIVERSAL_GUARDRAIL] Model provided direct text response. Auto-wrapping into finish action.');
-      actionObj = {
-        action: 'finish',
-        answer: cleanText,
-        reason: 'Direct text output from model',
-        // The model never actually emitted {"action":"finish"} - it just replied in prose and
-        // this guardrail inferred an ending so the run has somewhere to go. buildFinishEntry
-        // (harness/outcome.js) turns this into an `unconfirmed` flag so it is shown as inferred,
-        // not declared. See harness/outcome.js for why that distinction matters.
-        autoWrapped: true
-      };
     }
 
     if (!actionObj) {
