@@ -73,6 +73,11 @@ function extractTextFromLLMResponse(data) {
 // once per model per service-worker lifetime.
 const OLLAMA_THINK_UNSUPPORTED = new Set();
 
+// Ollama servers (by base URL) that rejected a JSON schema in `format`. Servers older than
+// 0.5 only know format:"json"; they get that instead, so an old install keeps working exactly
+// as it did before schemas were sent. Cached like the think fallback above.
+const OLLAMA_SCHEMA_UNSUPPORTED = new Set();
+
 /** settings.apiKey wins if set, else the provider's own saved key. */
 function getApiKey(settings, provider) {
   return (settings.apiKey || settings.providerConfigs?.[provider]?.apiKey || '').trim();
@@ -489,9 +494,13 @@ export const ApiClients = {
    *                  silently deletes the system prompt and the goal, so the model no longer
    *                  knows it is a browser agent or what it was asked to do. Nothing is
    *                  logged when this happens; the output just turns to garbage.
-   *   format:json  — constrains decoding to valid JSON at the sampler. This is far more
-   *                  reliable than asking a small model to emit JSON and then repairing the
-   *                  result, and it removes the prose-before-JSON failure mode entirely.
+   *   format       - constrains decoding at the sampler. This is far more reliable than
+   *                  asking a small model to emit JSON and then repairing the result, and it
+   *                  removes the prose-before-JSON failure mode entirely. options.schema (the
+   *                  action or plan schema from actionSchema.js) goes further than
+   *                  options.json's format:"json": the model can only produce a known action
+   *                  with its required fields. If the server rejects the schema, the call is
+   *                  retried once with format:"json".
    */
   async callOllama(settings, messages, systemPrompt, options = {}) {
     const baseUrl = (settings.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
@@ -506,7 +515,7 @@ export const ApiClients = {
       ? (Number(settings.ollamaNumPredict) > 0 ? Number(settings.ollamaNumPredict) : undefined)
       : undefined;
 
-    const buildBody = (withThink) => {
+    const buildBody = (withThink, format) => {
       const optionsObj = {
         temperature: settings.temperature ?? 0.1,
         num_ctx: numCtx
@@ -521,31 +530,43 @@ export const ApiClients = {
         options: optionsObj
       };
       if (withThink) body.think = false;
-      if (options.json) body.format = 'json';
+      if (format !== undefined) body.format = format;
       return body;
     };
 
-    const post = async (withThink) => fetch(url, {
+    const post = async (withThink, format) => fetch(url, {
       method: 'POST',
       signal: options.signal || null,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildBody(withThink))
+      body: JSON.stringify(buildBody(withThink, format))
     });
 
     try {
       let sendThink = !OLLAMA_THINK_UNSUPPORTED.has(model);
-      let response = await post(sendThink);
+      let format;
+      if (options.schema && !OLLAMA_SCHEMA_UNSUPPORTED.has(baseUrl)) format = options.schema;
+      else if (options.json || options.schema) format = 'json';
 
-      // Older builds, and models with no reasoning mode, reject the `think` field outright.
-      // Remember that for the rest of the session so only the first call pays for the retry.
-      if (!response.ok && sendThink && (response.status === 400 || response.status === 422)) {
+      let response = await post(sendThink, format);
+
+      // A 400/422 can name a request field this server or model does not accept. Each known
+      // case is dropped once and remembered, so only the first call pays for the retry:
+      //   - older builds, and models with no reasoning mode, reject the `think` field;
+      //   - servers older than 0.5 reject a JSON schema in `format` and only know "json".
+      for (let retries = 0; retries < 2 && !response.ok && (response.status === 400 || response.status === 422); retries++) {
         const probe = await response.clone().text().catch(() => '');
-        if (/think/i.test(probe)) {
+        if (sendThink && /think/i.test(probe)) {
           OLLAMA_THINK_UNSUPPORTED.add(model);
           Logger.info('ApiClients', `[OLLAMA_THINK] Model [${model}] does not accept "think" — retrying without it and skipping the flag from now on.`);
           sendThink = false;
-          response = await post(false);
+        } else if (format && typeof format === 'object' && /format|schema|grammar/i.test(probe)) {
+          OLLAMA_SCHEMA_UNSUPPORTED.add(baseUrl);
+          Logger.warn('ApiClients', `[OLLAMA_SCHEMA] Ollama at ${baseUrl} rejected a JSON schema in "format" (${probe.slice(0, 160)}). Retrying with format:"json" and using that from now on; update Ollama to get schema-constrained actions.`);
+          format = 'json';
+        } else {
+          break;
         }
+        response = await post(sendThink, format);
       }
 
       const elapsed = Date.now() - startTime;

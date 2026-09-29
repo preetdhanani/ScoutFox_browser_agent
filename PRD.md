@@ -155,7 +155,7 @@ The final graph still needs Prit's approval (see 3.6).
 - **Recovery** -> router edges (LLM retry, blocked source after N tries, pause via checkpoint and resume).
 
 ### 3.8 Current facts (checked 2026-09-28)
-- `npm test`: 226 tests across 45 test files, all passing.
+- `npm test`: 258 tests across 48 test files, all passing.
 - `npm run check` runs `node --check` on 9 source files (see `package.json`).
 - Today the extension has no build step: plain JS ES modules, loaded unpacked from the repo folder.
 - CI (`.github/workflows/ci.yml`) zips the raw source folders; after the rework it must zip the built output.
