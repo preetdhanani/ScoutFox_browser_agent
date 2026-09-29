@@ -21,21 +21,23 @@ Thank you for your interest in contributing to **ScoutFox AI Browser Agent**!
 
 ## Development Setup
 
-See **Quick Setup** in [README.md](README.md) to load the unpacked extension. Once it's loaded,
-open any webpage, open the ScoutFox Side Panel, and test your changes there before opening a PR.
+See **Quick Setup** in [README.md](README.md) to load the unpacked extension.
+Run `npm run build` after each code change, and load the `dist/` folder in Chrome, not the repository folder.
+Once it's loaded, open any webpage, open the ScoutFox Side Panel, and test your changes there before opening a PR.
 
 ## Code Guidelines
 * Keep DOM distillation light (<2,500 tokens).
 * Run `node --check` across JS files before submitting PRs.
 * Follow standard ES6 module imports.
-* Run `npm test` before submitting a PR (258 tests across 48 test files currently).
+* Run `npm test` before submitting a PR (429 tests across 51 test files currently).
 * For bug-fix PRs specifically, it is recommended practice (not a hard requirement for every PR - a new feature test does not need this) to write a regression test, then briefly `git stash` the fix and confirm the new test actually fails, before finalizing.
 
 ## Next version (planned, decided 2026-09-28)
 
 A LangGraph + TypeScript + Vite rework of the agent is planned.
-It is decided, but not built yet.
-Today the extension is still plain JavaScript ES modules with no build step.
+It is decided.
+The Vite build (phase P0) is built, and the graph itself is not built yet.
+Today the extension is still plain JavaScript ES modules, built with Vite (`npm run build`).
 During the rework, put new agent logic into graph nodes.
 Do not grow `background/agentEngine.js` with new logic.
 The "Follow standard ES6 module imports" and `node --check` guidelines above will change once TypeScript lands.

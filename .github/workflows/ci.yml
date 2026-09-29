@@ -1,19 +1,31 @@
 name: ScoutFox AI Browser Agent CI
 
+# Runs on every push and pull request to main and dev.
+# The browser smoke test is not part of this workflow, see e2e.yml.
+# No test retries anywhere: a flaky test is fixed, never retried.
+
 on:
   push:
     branches: [ main, dev ]
   pull_request:
     branches: [ main, dev ]
 
+permissions:
+  contents: read
+
 jobs:
   test-and-build:
     name: Run Syntax Checks & Test Suites
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     strategy:
+      # Let both Node versions finish, so a failure that only one of them has is visible.
+      fail-fast: false
       matrix:
-        node-version: [20.x, 22.x]
+        # package.json "engines" is node >=22.18, so nothing older is tested: the test helpers
+        # (.ts files) run through Node's type stripping, which is on by default only from 22.18.
+        node-version: [22.x, 24.x]
 
     steps:
       - name: Checkout repository
@@ -23,6 +35,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
 
       - name: Validate JavaScript Syntax across Extension Files
         run: npm run check
@@ -30,15 +46,19 @@ jobs:
       - name: Execute Automated QA Test Suite
         run: npm test
 
-      - name: Package Chrome Extension Zip Artifact
-        if: matrix.node-version == '22.x' && github.event_name == 'push'
-        run: |
-          mkdir -p dist
-          zip -r dist/scoutfox-chrome-extension.zip manifest.json background content sidepanel icons utils README.md LICENSE
+      - name: Build Extension into dist/
+        run: npm run build
+
+      - name: Scan dist/ for eval and new Function
+        run: npm run evalscan
+
+      - name: Zip dist/ for the Chrome Web Store
+        run: npm run zip
 
       - name: Upload Extension Build Artifact
         if: matrix.node-version == '22.x' && github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: scoutfox-chrome-extension
-          path: dist/scoutfox-chrome-extension.zip
+          path: scoutfox-chrome-extension.zip
+          if-no-files-found: error

@@ -3,7 +3,7 @@
 **ScoutFox** is an open-source, production-ready Chrome Extension (Manifest V3) and Python automation runner that empowers local models (Ollama 8B/14B/27B) and cloud APIs (Google Gemini, OpenAI, Claude, Groq) to autonomously control your web browser.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Manifest V3](https://img.shields.io/badge/Chrome-Manifest--V3-brightgreen.svg)](manifest.json)
+[![Manifest V3](https://img.shields.io/badge/Chrome-Manifest--V3-brightgreen.svg)](public/manifest.json)
 
 ---
 
@@ -28,21 +28,34 @@
 
 ## 🚀 Quick Setup (Chrome Extension)
 
-1. Clone the repository:
+You need:
+- Node.js 22.18 or newer, to build the extension and run the tests.
+- Google Chrome.
+
+1. Clone the repository and build the extension:
    ```bash
    git clone https://github.com/preetdhanani/ScoutFox_browser_agent.git
    cd ScoutFox_browser_agent
+   npm ci
+   npm run build
    ```
+   The build writes the extension into the `dist/` folder.
 
 2. Load unpacked extension in Chrome:
    - Open **`chrome://extensions/`** in Google Chrome.
    - Enable **Developer Mode** (toggle in top-right corner).
-   - Click **Load unpacked** and select the repository directory.
+   - Click **Load unpacked** and select the **`dist/`** folder, not the repository folder.
+   - Chrome ties saved data (settings, API keys, sessions) to the extension's ID, and an unpacked extension's ID comes from its folder.
+   - So an extension loaded from `dist/` is a new extension for Chrome, and you enter your settings once again.
 
 3. Start Automating:
    - Open any web page (e.g. `https://google.com` or `https://news.ycombinator.com`).
    - Click the 🦊 ScoutFox icon in your toolbar to open the Side Panel.
    - Select your LLM Provider (e.g. Google Gemini or Ollama Local) and click **Run Task**!
+
+After you change the code:
+- Run `npm run build` again.
+- Press **Reload** on the ScoutFox card in `chrome://extensions/`.
 
 ---
 
@@ -127,7 +140,7 @@ python agent.py --goal "Find top 3 trending python repositories on GitHub and su
 ### Next version (planned, decided 2026-09-28)
 
 The next version is a rework of the agent on [LangGraph.js](https://github.com/langchain-ai/langgraphjs).
-This is planned and not built yet.
+This is planned and not built yet, except the new build step (the last item below).
 Everything above in this README describes the extension as it works today.
 
 What will change for you:
@@ -153,9 +166,9 @@ What will change for you:
 * **Python runner too**: `python_runner/agent.py` also moves to LangGraph (Python).
 * **LangSmith tracing**: opt-in in Settings, off by default.
 * **Local models keep working**: small local Ollama models stay supported.
-* **New setup step**: the project moves to TypeScript + Vite, so it gets a build step.
-  After the rework, you run a build and load the built output folder in Chrome, not the repository folder.
-  Until then, the Quick Setup above (load the repository folder) is still correct.
+* **New setup step (already built)**: the project now has a Vite build step.
+  You run `npm run build` and load the `dist/` folder in Chrome, as in the Quick Setup above.
+  The code is still plain JavaScript today, and TypeScript comes in a later phase.
 
 See [PRD.md](PRD.md) for the details.
 

@@ -57,7 +57,7 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
 ## 3. Next version (planned, decided 2026-09-28, revised 2026-09-29): LangGraph rework
 
 > **Status**: Decided by Prit on 2026-09-28, and revised on 2026-09-29 after his design review.
-> Only phase P0a is built: constrained decoding for Ollama in today's engine (see 3.3, item 17).
+> Only two phases are built: P0a (constrained decoding for Ollama in today's engine, see 3.3, item 17) and P0 (the Vite build foundation, see 3.3, item 9, and 3.6).
 > Nothing else in this section is implemented.
 > Everything in section 2 still describes the current code.
 > The target audience and the local-first, small-model niche from section 1 stay the same.
@@ -119,8 +119,9 @@ Rebuild the whole agent on LangGraph.js.
    The user approves once, then it runs (LangGraph `interrupt`).
    The plan card also shows the effort level and an estimate of the steps.
    A new task is refused while another one is paused.
-9. **Build**: TypeScript + Vite (needed anyway to bundle LangGraph for MV3).
-   CI must then zip the built output instead of the raw folders.
+9. **Build** (the Vite part is built in phase P0, 2026-09-29): TypeScript + Vite (needed anyway to bundle LangGraph for MV3).
+   `npm run build` writes `dist/`, and CI zips the built `dist/` instead of the raw folders.
+   TypeScript is planned for phase P1.
 10. **Side panel**: the UI stays vanilla JS with the same messages, plus a new live graph view that shows the node the agent is in right now.
 11. **Python runner**: `python_runner/agent.py` also moves to LangGraph (Python) in this iteration.
 12. **LLM calls**: switch to LangChain chat model packages, replacing `background/apiClients.js`.
@@ -171,8 +172,12 @@ Rebuild the whole agent on LangGraph.js.
 - Still to test: graph checkpoints of a subgraph with the custom saver (spike S5, the first task of phase P4).
 
 ### 3.6 Next step
-The design is written and waits for Prit's review, and phase P0a is built.
-Next comes phase P0, a build step with Vite and TypeScript, then the phases up to P3, and the graph itself from P4 on.
+The design is written and waits for Prit's review, and phases P0a and P0 are built.
+- P0a: constrained decoding for Ollama (see 3.3, item 17).
+- P0 (build foundation, no behaviour change): Vite builds today's JS into `dist/` (`npm run build`), you load `dist/` in Chrome, and CI runs on Node 22.x and 24.x and zips the built `dist/`.
+  It also added an opt-in browser smoke test (`npm run test:e2e`) and two test helpers (`fakeChrome` and `fakeStorageSession`).
+
+Next comes phase P1 (TypeScript core), then the phases up to P3, and the graph itself from P4 on.
 Every phase keeps the tests green, and the graph stays behind an engine switch until it works on real sites.
 
 ### 3.7 How today's harness concepts map to the planned graph
@@ -188,8 +193,9 @@ This is a summary of the design, which still waits for Prit's approval.
 - **Recovery** -> the blocked-site ladder by effort level, `recover` (failure memory, retries, bans), stuck detection, and checkpoints with resume.
 
 ### 3.8 Current facts (checked 2026-09-29)
-- `npm test`: 258 tests across 48 test files, all passing.
+- `npm test`: 429 tests across 51 test files, all passing.
 - `npm run check` runs `node --check` on 10 source files (see `package.json`).
-- Today the extension has no build step: plain JS ES modules, loaded unpacked from the repo folder.
-- CI (`.github/workflows/ci.yml`) zips the raw source folders; after the rework it must zip the built output.
-- `manifest.json` does not have the `debugger` permission yet.
+- Today the extension is built with Vite (phase P0): `npm run build` writes `dist/`, and you load `dist/` unpacked in Chrome, not the repo folder.
+  The sources are still plain JS ES modules, with no TypeScript yet.
+- CI (`.github/workflows/ci.yml`) runs on Node 22.x and 24.x: `npm ci`, check, test, build, evalscan and a zip of the built `dist/`.
+- `public/manifest.json` does not have the `debugger` permission yet.

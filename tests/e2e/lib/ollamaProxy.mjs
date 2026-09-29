@@ -8,22 +8,16 @@
  *
  * It also records every /api/chat call (request size, format, think flag, and Ollama's own
  * prompt_eval_count and eval_count), which is how the smoke run counts model calls and tokens.
+ * The record has the same shape as the one the offline mock keeps (see callRecord.mjs).
  */
 import http from 'node:http';
+import { buildCallRecord } from './callRecord.mjs';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization'
 };
-
-function describeFormat(format) {
-  if (format === undefined) return 'none';
-  if (typeof format === 'string') return format;
-  if (Array.isArray(format.oneOf)) return `schema(oneOf x${format.oneOf.length})`;
-  if (format.type === 'object') return `schema(object: ${Object.keys(format.properties || {}).join(',')})`;
-  return 'schema(other)';
-}
 
 export function startOllamaProxy({ host = '127.0.0.1', port = 11435, target = 'http://127.0.0.1:11434', onCall = () => {} } = {}) {
   const calls = [];
@@ -63,24 +57,15 @@ export function startOllamaProxy({ host = '127.0.0.1', port = 11435, target = 'h
       let got = {};
       try { sent = JSON.parse(reqBody.toString('utf8')); } catch { /* not JSON */ }
       try { got = JSON.parse(respBody.toString('utf8')); } catch { /* not JSON */ }
-      const system = (sent.messages || []).find((m) => m.role === 'system');
-      const call = {
+      const call = buildCallRecord({
         n: calls.length + 1,
         status: upstream.status,
         ms: Date.now() - startedAt,
         requestBytes: reqBody.length,
         responseBytes: respBody.length,
-        model: sent.model,
-        format: describeFormat(sent.format),
-        think: sent.think,
-        messages: (sent.messages || []).length,
-        systemChars: system ? system.content.length : 0,
-        systemHead: system ? system.content.slice(0, 60) : '',
-        promptEvalCount: got.prompt_eval_count ?? null,
-        evalCount: got.eval_count ?? null,
-        doneReason: got.done_reason ?? null,
-        content: typeof got.message?.content === 'string' ? got.message.content : (got.error || '')
-      };
+        sent,
+        got
+      });
       calls.push(call);
       onCall(call);
     }
