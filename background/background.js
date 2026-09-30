@@ -22,15 +22,24 @@
  * tabs (the ones a run opens for itself), so several tab ids may point at one session object.
  */
 
+// Must stay the first import: it sets zod's jitless flag before any module that bundles zod runs (see the file).
+import '../src/background/boot/zodJitless.ts';
+import { isGeminiStreamCut } from '../src/background/boot/rejections.ts';
 import { AgentEngine, describeRestrictedUrl, lastRuntimeError } from './agentEngine.js';
 import { ApiClients } from './apiClients.js';
-import { Logger } from '../utils/logger.js';
+import { Logger } from '../src/shared/logger.ts';
 
 // Catch anything that would otherwise die silently in the service worker's global scope.
 self.addEventListener('error', (event) => {
   Logger.error('Background', '[UNCAUGHT_ERROR] Uncaught exception in service worker', event.error || event.message);
 });
 self.addEventListener('unhandledrejection', (event) => {
+  if (isGeminiStreamCut(event.reason)) {
+    // The Google SDK's second report of a cut stream (see the file). The call itself failed and was logged already.
+    event.preventDefault();
+    Logger.info('Background', '[GEMINI_STREAM_CUT] Ignored the Google SDK\'s unhandled rejection of a cut stream: the call itself already failed and was logged.');
+    return;
+  }
   Logger.error('Background', '[UNHANDLED_REJECTION] Unhandled promise rejection in service worker', event.reason);
 });
 

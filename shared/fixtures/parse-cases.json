@@ -1,0 +1,2163 @@
+{
+  "version": 1,
+  "notes": [
+    "Raw model output -> the action or the parse error the model would see, for src/background/agent/parse.ts (parseModelReply), and later for the Python runner.",
+    "input is the reply as one string, or an array of lines that are joined with a newline.",
+    "scope says which verbs the reply may use: \"all\" is every verb of shared/actions.json (what the old engine passes), or {mode, tier} is verbsFor(mode, tier) of that file. The default is \"all\".",
+    "refs says which element ids are on the page: a number N means 1..N, an array is the exact list, null means the list is not known. The default is 10.",
+    "expect.action is the exact action object (key order does not matter). expect.error is the exact error text, expect.kind is the rule that rejected the reply, and expect.thought is the text of the think tag.",
+    "neverFinish means that whatever the result is, it must not be a finish action. It is set on the tool-call cases, because a reply in tool-call markup must never end the run by accident."
+  ],
+  "cases": [
+    {
+      "name": "empty string is empty output",
+      "input": "",
+      "expect": {
+        "kind": "empty",
+        "error": "Empty output from model."
+      }
+    },
+    {
+      "name": "whitespace only is not \"empty output\" (as before)",
+      "input": [
+        "  ",
+        "  "
+      ],
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "bare click keeps its fields",
+      "input": "{\"action\":\"click\",\"element_id\":4,\"reason\":\"the search result\"}",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 4,
+          "reason": "the search result"
+        },
+        "thought": ""
+      }
+    },
+    {
+      "name": "bare pretty-printed type",
+      "input": [
+        "{",
+        "  \"action\": \"type\",",
+        "  \"element_id\": 2,",
+        "  \"text\": \"framework laptop 16\",",
+        "  \"submit\": true",
+        "}"
+      ],
+      "expect": {
+        "action": {
+          "action": "type",
+          "element_id": 2,
+          "text": "framework laptop 16",
+          "submit": true
+        }
+      }
+    },
+    {
+      "name": "bare browser_batch keeps every step",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"type\",\"element_id\":2,\"text\":\"a@b.com\",\"submit\":false},{\"action\":\"type\",\"element_id\":3,\"text\":\"hunter2\",\"submit\":false},{\"action\":\"click\",\"element_id\":5}],\"stopOnError\":true}",
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "type",
+              "element_id": 2,
+              "text": "a@b.com",
+              "submit": false
+            },
+            {
+              "action": "type",
+              "element_id": 3,
+              "text": "hunter2",
+              "submit": false
+            },
+            {
+              "action": "click",
+              "element_id": 5
+            }
+          ],
+          "stopOnError": true
+        }
+      }
+    },
+    {
+      "name": "bare read_network_requests keeps its nested filter",
+      "input": "{\"action\":\"read_network_requests\",\"filter\":{\"status\":\"error\",\"since\":\"last_action\"},\"includeBody\":false,\"limit\":5}",
+      "expect": {
+        "action": {
+          "action": "read_network_requests",
+          "filter": {
+            "status": "error",
+            "since": "last_action"
+          },
+          "includeBody": false,
+          "limit": 5
+        }
+      }
+    },
+    {
+      "name": "a verb alias and an elementId string are normalised",
+      "input": "{\"action\":\"click_element\",\"elementId\":\"7\"}",
+      "expect": {
+        "action": {
+          "action": "click",
+          "elementId": "7",
+          "element_id": 7
+        }
+      }
+    },
+    {
+      "name": "the {\"click\": N} shape becomes a click",
+      "input": "{\"click\": 3}",
+      "expect": {
+        "action": {
+          "click": 3,
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "an unknown verb is rejected and the valid ones are listed",
+      "input": "{\"action\":\"fly\"}",
+      "expect": {
+        "kind": "unknown_action",
+        "error": "Unknown action \"fly\". Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, execute_js, read_network_requests, browser_batch, wait, finish, ask_user, open_window."
+      }
+    },
+    {
+      "name": "an action that is an object is rejected",
+      "input": "{\"action\": {\"type\": \"click\"}}",
+      "expect": {
+        "kind": "unknown_action"
+      }
+    },
+    {
+      "name": "an id past the end of the list is rejected, never clamped",
+      "refs": 12,
+      "input": "{\"action\":\"click\",\"element_id\":99}",
+      "expect": {
+        "kind": "bad_element_id",
+        "error": "Element [99] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "element id 0 is rejected",
+      "input": "{\"action\":\"click\",\"element_id\":0}",
+      "expect": {
+        "kind": "bad_element_id",
+        "error": "Element [0] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "an element id that is markup is rejected",
+      "input": "{\"action\":\"click\",\"element_id\":\"<img src=x onerror=alert(1)>\"}",
+      "expect": {
+        "kind": "bad_element_id"
+      }
+    },
+    {
+      "name": "a numeric string id is turned into the number",
+      "input": "{\"action\":\"click\",\"element_id\":\"4\"}",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 4
+        }
+      }
+    },
+    {
+      "name": "a fraction is not an id, it is not rounded down onto another element",
+      "input": "{\"action\":\"click\",\"element_id\":3.9}",
+      "expect": {
+        "kind": "bad_element_id",
+        "error": "Element [3.9] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "digits followed by letters are not an id",
+      "input": "{\"action\":\"click\",\"element_id\":\"12abc\"}",
+      "expect": {
+        "kind": "bad_element_id",
+        "error": "Element [\"12abc\"] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "an exponent is not an id (1e3 is not 1)",
+      "input": "{\"action\":\"click\",\"element_id\":\"1e3\"}",
+      "expect": {
+        "kind": "bad_element_id",
+        "error": "Element [\"1e3\"] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "ref is read as the element id, and is checked like one",
+      "input": "{\"action\":\"click\",\"ref\":3}",
+      "expect": {
+        "action": {
+          "action": "click",
+          "ref": 3,
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "a ref that is not on the page is rejected",
+      "input": "{\"action\":\"click\",\"ref\":99}",
+      "expect": {
+        "kind": "bad_element_id",
+        "error": "Element [99] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "an object with an alias key but no action is a parse error, not an action",
+      "input": "{\"finish\": \"done\"}",
+      "expect": {
+        "kind": "not_an_action",
+        "error": "The reply has no \"action\". Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, execute_js, read_network_requests, browser_batch, wait, finish, ask_user, open_window."
+      }
+    },
+    {
+      "name": "<think> then a fenced click gives the thought and the action",
+      "input": [
+        "<think>",
+        "I need to click the search button on element [3].",
+        "</think>",
+        "```json",
+        "{",
+        "  \"action\": \"click\",",
+        "  \"element_id\": 3,",
+        "  \"reason\": \"Click search button\"",
+        "}",
+        "```"
+      ],
+      "expect": {
+        "thought": "I need to click the search button on element [3].",
+        "action": {
+          "action": "click",
+          "element_id": 3,
+          "reason": "Click search button"
+        }
+      }
+    },
+    {
+      "name": "<thought> before a sentence and an object",
+      "input": "<thought>Batch it.</thought>Sure. {\"action\":\"scroll\",\"direction\":\"down\"}",
+      "expect": {
+        "thought": "Batch it.",
+        "action": {
+          "action": "scroll",
+          "direction": "down"
+        }
+      }
+    },
+    {
+      "name": "<reasoning> before a bare object",
+      "input": [
+        "<reasoning>a</reasoning>",
+        "{\"action\":\"scroll\",\"direction\":\"up\"}"
+      ],
+      "expect": {
+        "thought": "a",
+        "action": {
+          "action": "scroll",
+          "direction": "up"
+        }
+      }
+    },
+    {
+      "name": "tool-call words inside the thought are not markup",
+      "input": "<think>Do not use <tool_call> or \"tool_calls\": here.</think>{\"action\":\"click\",\"element_id\":2}",
+      "expect": {
+        "thought": "Do not use <tool_call> or \"tool_calls\": here.",
+        "action": {
+          "action": "click",
+          "element_id": 2
+        }
+      }
+    },
+    {
+      "name": "a fenced finish whose answer explains tool calls is an action, not markup",
+      "input": [
+        "```json",
+        "{\"action\":\"finish\",\"answer\":\"The docs say: wrap each call in <tool_call> tags.\"}",
+        "```"
+      ],
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "The docs say: wrap each call in <tool_call> tags."
+        }
+      }
+    },
+    {
+      "name": "text typed that looks like markup is an action, after prose",
+      "input": [
+        "Typing the query.",
+        "{\"action\":\"type\",\"element_id\":3,\"text\":\"<invoke name=\",\"submit\":true}"
+      ],
+      "expect": {
+        "action": {
+          "action": "type",
+          "element_id": 3,
+          "text": "<invoke name=",
+          "submit": true
+        }
+      }
+    },
+    {
+      "name": "a DSML tag in the answer of a browser_batch step is content",
+      "input": "Doing both: {\"action\":\"browser_batch\",\"steps\":[{\"action\":\"type\",\"element_id\":1,\"text\":\"<｜DSML｜invoke name=\\\"x\\\">\"},{\"action\":\"click\",\"element_id\":2}]}",
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "type",
+              "element_id": 1,
+              "text": "<｜DSML｜invoke name=\"x\">"
+            },
+            {
+              "action": "click",
+              "element_id": 2
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a closing think tag with no opening one ends reasoning that mentions markup",
+      "input": [
+        "I could use a <tool_call> but this agent wants JSON.</think>",
+        "{\"action\":\"click\",\"element_id\":3}"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        },
+        "thought": "I could use a <tool_call> but this agent wants JSON."
+      }
+    },
+    {
+      "name": "a closing think tag inside the answer of an action is part of the answer",
+      "input": [
+        "```json",
+        "{\"action\":\"finish\",\"answer\":\"Close the block with </think> and go on.\"}",
+        "```"
+      ],
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "Close the block with </think> and go on."
+        },
+        "thought": ""
+      }
+    },
+    {
+      "name": "markup next to a valid action is still markup (the action is not used)",
+      "neverFinish": true,
+      "input": [
+        "<tool_call>",
+        "{\"name\": \"web_search\", \"arguments\": {\"q\": \"x\"}}",
+        "</tool_call>",
+        "{\"action\":\"finish\",\"answer\":\"guess\"}"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "a DSML call cut off inside an unclosed <think> is markup, never prose",
+      "neverFinish": true,
+      "input": "<think>maybe <｜DSML｜invoke name=\"click\">",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "fenced json block",
+      "input": [
+        "```json",
+        "{\"action\":\"navigate\",\"url\":\"https://www.idealo.de/x.html\"}",
+        "```"
+      ],
+      "expect": {
+        "action": {
+          "action": "navigate",
+          "url": "https://www.idealo.de/x.html"
+        }
+      }
+    },
+    {
+      "name": "fenced block without a label",
+      "input": [
+        "Here:",
+        "```",
+        "{\"action\":\"go_back\"}",
+        "```"
+      ],
+      "expect": {
+        "action": {
+          "action": "go_back"
+        }
+      }
+    },
+    {
+      "name": "fenced pretty browser_batch keeps its nested steps",
+      "input": [
+        "```json",
+        "{",
+        "  \"action\": \"browser_batch\",",
+        "  \"steps\": [",
+        "    {",
+        "      \"action\": \"type\",",
+        "      \"element_id\": 1,",
+        "      \"text\": \"a\"",
+        "    },",
+        "    {",
+        "      \"action\": \"click\",",
+        "      \"element_id\": 2",
+        "    }",
+        "  ]",
+        "}",
+        "```"
+      ],
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "type",
+              "element_id": 1,
+              "text": "a"
+            },
+            {
+              "action": "click",
+              "element_id": 2
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a closed fence around cut-off JSON is repaired",
+      "input": [
+        "```json",
+        "{\"action\":\"click\",\"element_id\":3",
+        "```"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "raw newline inside a JSON string is repaired",
+      "input": [
+        "```json",
+        "{\"action\":\"type\",\"element_id\":2,\"text\":\"a",
+        "b\",\"submit\":false}",
+        "```"
+      ],
+      "expect": {
+        "action": {
+          "action": "type",
+          "element_id": 2,
+          "text": "a\nb",
+          "submit": false
+        }
+      }
+    },
+    {
+      "name": "nested browser_batch in prose is not cut at its first closing brace",
+      "input": "Plan: {\"action\":\"browser_batch\",\"steps\":[{\"action\":\"type\",\"element_id\":1,\"text\":\"a@b.com\"},{\"action\":\"click\",\"element_id\":2}],\"stopOnError\":true} - go",
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "type",
+              "element_id": 1,
+              "text": "a@b.com"
+            },
+            {
+              "action": "click",
+              "element_id": 2
+            }
+          ],
+          "stopOnError": true
+        }
+      }
+    },
+    {
+      "name": "read_network_requests filter with nested objects in prose",
+      "input": "Checking: {\"action\":\"read_network_requests\",\"filter\":{\"status\":\"error\",\"since\":\"last_action\",\"match\":{\"url\":{\"contains\":\"api\"}}},\"limit\":3} ok?",
+      "expect": {
+        "action": {
+          "action": "read_network_requests",
+          "filter": {
+            "status": "error",
+            "since": "last_action",
+            "match": {
+              "url": {
+                "contains": "api"
+              }
+            }
+          },
+          "limit": 3
+        }
+      }
+    },
+    {
+      "name": "braces, quotes and a backslash inside a string",
+      "input": "Result: {\"action\":\"finish\",\"answer\":\"Price {ab} is \\\"1.399,00\\\" EUR; path C:\\\\x }{\"}",
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "Price {ab} is \"1.399,00\" EUR; path C:\\x }{"
+        }
+      }
+    },
+    {
+      "name": "a string ending in an escaped backslash",
+      "input": "Result: {\"action\":\"finish\",\"answer\":\"ends with \\\\\"} end",
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "ends with \\"
+        }
+      }
+    },
+    {
+      "name": "two objects: the first action wins",
+      "input": "{\"action\":\"click\",\"element_id\":1} and then {\"action\":\"click\",\"element_id\":2}",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 1
+        }
+      }
+    },
+    {
+      "name": "braces in prose before the action",
+      "input": "Use {curly} braces. {\"action\":\"scroll\",\"direction\":\"down\"}",
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "down"
+        }
+      }
+    },
+    {
+      "name": "an array of actions: the first object wins",
+      "input": "[{\"action\":\"click\",\"element_id\":1},{\"action\":\"click\",\"element_id\":2}]",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 1
+        }
+      }
+    },
+    {
+      "name": "an object with a type key after the action is not the action",
+      "input": "I will click the search button {\"action\":\"click\",\"element_id\":3}. The button has attributes {\"type\": \"submit\"}.",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "an example finish after the action is not the action",
+      "input": "My action: {\"action\":\"click\",\"element_id\":3}. (Once done I would send {\"action\": \"finish\", \"answer\": \"...\"}.)",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "a plan of several actions runs the first one now",
+      "input": [
+        "{\"action\":\"click\",\"element_id\":2}",
+        "{\"action\":\"type\",\"element_id\":4,\"text\":\"abc\",\"submit\":false}",
+        "{\"action\":\"finish\",\"answer\":\"done\"}"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 2
+        }
+      }
+    },
+    {
+      "name": "an object with a type key is still the action when nothing has an action key",
+      "input": "Typing now {\"type\": \"hello\", \"element_id\": 2}",
+      "expect": {
+        "action": {
+          "type": "hello",
+          "element_id": 2,
+          "action": "type"
+        }
+      }
+    },
+    {
+      "name": "several alias-key objects and no action key: the last one wins",
+      "input": "{\"click\": 1} then {\"click\": 2}",
+      "expect": {
+        "action": {
+          "click": 2,
+          "action": "click",
+          "element_id": 2
+        }
+      }
+    },
+    {
+      "name": "an alias-key object in prose",
+      "input": "Do this: {\"click\": 5}",
+      "expect": {
+        "action": {
+          "click": 5,
+          "action": "click",
+          "element_id": 5
+        }
+      }
+    },
+    {
+      "name": "a quote in the prose before the object does not confuse the scan",
+      "input": "He said \"go {now}\" and then {\"action\":\"scroll\",\"direction\":\"up\"}",
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "up"
+        }
+      }
+    },
+    {
+      "name": "a quoted open brace in the prose before the action does not hide it",
+      "input": [
+        "I see the text \"{\" on the page.",
+        "{\"action\":\"click\",\"element_id\":3}"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "an open brace that never closes in the prose before the action does not hide it",
+      "input": [
+        "Selector would be div.price { color... Anyway:",
+        "{\"action\":\"click\",\"element_id\":3}"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "a stray open brace before an alias shape and an action: the action wins, no text intent is used",
+      "input": [
+        "{go to https://a.de/x```json",
+        "{\"click\": 4}{\"action\":\"scroll\",\"direction\":\"down\"}"
+      ],
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "down"
+        }
+      }
+    },
+    {
+      "name": "a stray open brace before a nested browser_batch keeps every step",
+      "input": [
+        "Plan { first the login form:",
+        "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"type\",\"element_id\":1,\"text\":\"a@b.com\"},{\"action\":\"click\",\"element_id\":2}]}"
+      ],
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "type",
+              "element_id": 1,
+              "text": "a@b.com"
+            },
+            {
+              "action": "click",
+              "element_id": 2
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a stray open brace before a cut-off click is still not repaired into a click",
+      "input": [
+        "I see a { on the page.",
+        "{\"action\":\"click\",\"element_id\":1"
+      ],
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "an object that never closes is not repaired into an action",
+      "input": "{\"action\":\"click\",\"element_id\":3",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "a URL cut in the middle is not opened",
+      "input": "{\"action\":\"navigate\",\"url\":\"https://www.idea",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "a browser_batch cut off after its first step is not run as that step",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":2}",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "a truncated execute_js is rescued under the alias eval_js",
+      "input": "Running: {\"action\":\"eval_js\",\"code\":\"return document.title",
+      "expect": {
+        "action": {
+          "action": "execute_js",
+          "code": "return document.title",
+          "world": "MAIN",
+          "reason": "Recovered from truncated model output"
+        }
+      }
+    },
+    {
+      "name": "a truncated execute_js is rescued under the alias run_js",
+      "input": "Running: {\"action\":\"run_js\",\"code\":\"return document.title",
+      "expect": {
+        "action": {
+          "action": "execute_js",
+          "code": "return document.title",
+          "world": "MAIN",
+          "reason": "Recovered from truncated model output"
+        }
+      }
+    },
+    {
+      "name": "a truncated execute_js is rescued under the alias javascript",
+      "input": "Running: {\"action\":\"javascript\",\"code\":\"return document.title",
+      "expect": {
+        "action": {
+          "action": "execute_js",
+          "code": "return document.title",
+          "world": "MAIN",
+          "reason": "Recovered from truncated model output"
+        }
+      }
+    },
+    {
+      "name": "a truncated execute_js is recovered, and it never finishes",
+      "neverFinish": true,
+      "input": [
+        "```json",
+        "{",
+        "  \"action\": \"execute_js\",",
+        "  \"code\": \"const reject = document.querySelector('#cookie'); if (reject) reject.click(); const sel = document.querySelector('select'); if (sel) { sel.value = '1'; } const order = [...document.querySelectorAll('button')].find(b => /order now/i.test(b.textContent"
+      ],
+      "expect": {
+        "action": {
+          "action": "execute_js",
+          "code": "const reject = document.querySelector('#cookie'); if (reject) reject.click(); const sel = document.querySelector('select'); if (sel) { sel.value = '1'; } const order = [...document.querySelectorAll('button')].find(b => /order now/i.test(b.textContent",
+          "world": "MAIN",
+          "reason": "Recovered from truncated model output"
+        }
+      }
+    },
+    {
+      "name": "execute_js cut off right after the opening quote is not an action",
+      "input": "{\"action\":\"execute_js\",\"code\":\"",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "a wrapper object without an action key is not an action",
+      "input": "{\"response\": {\"action\":\"click\",\"element_id\":3}}",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "a fenced object with no action key is not an action",
+      "input": [
+        "```json",
+        "{\"foo\":1}",
+        "```"
+      ],
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "text intent: click",
+      "input": "I will click on element [5] to continue.",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 5,
+          "reason": "Extracted via text intent"
+        }
+      }
+    },
+    {
+      "name": "text intent: type",
+      "input": "Action: type \"hello world\" into element 7",
+      "expect": {
+        "action": {
+          "action": "type",
+          "text": "hello world",
+          "element_id": 7,
+          "submit": true,
+          "reason": "Extracted via text intent"
+        }
+      }
+    },
+    {
+      "name": "text intent: navigate",
+      "input": "go to https://example.com/page now",
+      "expect": {
+        "action": {
+          "action": "navigate",
+          "url": "https://example.com/page",
+          "reason": "Extracted via text intent"
+        }
+      }
+    },
+    {
+      "name": "text intent: scroll",
+      "input": "scroll down please",
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "down",
+          "amount": 500,
+          "reason": "Extracted via text intent"
+        }
+      }
+    },
+    {
+      "name": "text intent: read the page text",
+      "input": "Please read the page text first",
+      "expect": {
+        "action": {
+          "action": "read_page_text",
+          "reason": "Extracted via text intent"
+        }
+      }
+    },
+    {
+      "name": "a text intent for a verb the mode does not offer is skipped (answer mode has no click)",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "input": "I will click on element [5] to continue.",
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "I will click on element [5] to continue.",
+          "reason": "Direct text output from model",
+          "autoWrapped": true
+        }
+      }
+    },
+    {
+      "name": "plain prose becomes an unconfirmed finish",
+      "input": "The price is 1.399,00 EUR with free shipping.",
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "The price is 1.399,00 EUR with free shipping.",
+          "reason": "Direct text output from model",
+          "autoWrapped": true
+        }
+      }
+    },
+    {
+      "name": "prose in a mode that has no finish is a parse error",
+      "scope": {
+        "mode": "browse",
+        "tier": "large"
+      },
+      "input": "The price is 1.399,00 EUR with free shipping.",
+      "expect": {
+        "kind": "not_an_action",
+        "error": "Your reply was not an action. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "a very short reply is not wrapped",
+      "input": "ok",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "prose that mentions an \"action\" key is not wrapped",
+      "input": "Here is the plan: \"action\": click the button",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "only a thought and nothing after it is not wrapped",
+      "input": "<think>only thinking</think>",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "DSML: a well-formed click call is converted",
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"click\">",
+        "<｜DSML｜parameter name=\"element_id\" string=\"false\">5</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 5
+        }
+      }
+    },
+    {
+      "name": "DSML with plain | bars",
+      "input": [
+        "<|DSML|function_calls>",
+        "<|DSML|invoke name=\"click\">",
+        "<|DSML|parameter name=\"element_id\" string=\"false\">5</|DSML|parameter>",
+        "</|DSML|invoke>",
+        "</|DSML|function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 5
+        }
+      }
+    },
+    {
+      "name": "DSML: string=\"true\" keeps \"123\" as text, string=\"false\" is JSON",
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"type\">",
+        "<｜DSML｜parameter name=\"element_id\" string=\"false\">2</｜DSML｜parameter>",
+        "<｜DSML｜parameter name=\"text\" string=\"true\">123</｜DSML｜parameter>",
+        "<｜DSML｜parameter name=\"submit\" string=\"false\">false</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "type",
+          "element_id": 2,
+          "text": "123",
+          "submit": false
+        }
+      }
+    },
+    {
+      "name": "DSML: browser_batch steps come as a JSON array",
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"browser_batch\">",
+        "<｜DSML｜parameter name=\"steps\" string=\"false\">[{\"action\":\"click\",\"element_id\":2},{\"action\":\"click\",\"element_id\":3}]</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "click",
+              "element_id": 2
+            },
+            {
+              "action": "click",
+              "element_id": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "DSML: a tool name that is a verb alias is resolved",
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"click_element\">",
+        "<｜DSML｜parameter name=\"element_id\" string=\"false\">5</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 5
+        }
+      }
+    },
+    {
+      "name": "DSML: a call with an id that is not on the page is rejected like any action",
+      "neverFinish": true,
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"click\">",
+        "<｜DSML｜parameter name=\"element_id\" string=\"false\">99</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "kind": "bad_element_id"
+      }
+    },
+    {
+      "name": "DSML: a batch step with an id that is not on the page is rejected",
+      "neverFinish": true,
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"browser_batch\">",
+        "<｜DSML｜parameter name=\"steps\" string=\"false\">[{\"action\":\"click\",\"element_id\":2},{\"action\":\"click\",\"element_id\":99}]</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "kind": "bad_step_element_id",
+        "error": "Element [99] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "DSML: two calls, the first one is used",
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"scroll\">",
+        "<｜DSML｜parameter name=\"direction\" string=\"true\">down</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "<｜DSML｜invoke name=\"click\">",
+        "<｜DSML｜parameter name=\"element_id\" string=\"false\">5</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "down"
+        }
+      }
+    },
+    {
+      "name": "DSML: text before the call is fine",
+      "input": [
+        "I will click the button.",
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"click\">",
+        "<｜DSML｜parameter name=\"element_id\" string=\"false\">2</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 2
+        }
+      }
+    },
+    {
+      "name": "DSML: a parameter cut off in the middle is malformed markup (answer mode), never a finish",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"finish\">",
+        "<｜DSML｜parameter name=\"answer\" string=\"true\">The price is 1.399,00 EUR</｜DSML｜param"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "DSML: cut off right after the opening tag",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"click\">",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "DSML: a call with no closing invoke tag is malformed",
+      "neverFinish": true,
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"click\">",
+        "<｜DSML｜parameter name=\"element_id\" string=\"false\">5</｜DSML｜parameter>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "DSML: a parameter that is never closed is malformed",
+      "neverFinish": true,
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"click\">",
+        "<｜DSML｜parameter name=\"element_id\" string=\"false\">5",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "DSML: a tool name that is not a verb gives the tool-call error",
+      "neverFinish": true,
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"web_search\">",
+        "<｜DSML｜parameter name=\"query\" string=\"true\">framework laptop</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "DSML: a verb the mode does not offer gives the tool-call error (click in answer mode)",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"click\">",
+        "<｜DSML｜parameter name=\"element_id\" string=\"false\">2</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "DSML: an explicit finish is allowed in answer mode",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"finish\">",
+        "<｜DSML｜parameter name=\"answer\" string=\"true\">The price is 1.399,00 EUR</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "The price is 1.399,00 EUR"
+        }
+      }
+    },
+    {
+      "name": "DSML: finish is not a verb of the browse mode, so it gives the tool-call error",
+      "scope": {
+        "mode": "browse",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"finish\">",
+        "<｜DSML｜parameter name=\"answer\" string=\"true\">done</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "DSML: the verb comes from the tool name, an action parameter cannot replace it",
+      "neverFinish": true,
+      "input": [
+        "<｜DSML｜function_calls>",
+        "<｜DSML｜invoke name=\"scroll\">",
+        "<｜DSML｜parameter name=\"direction\" string=\"true\">down</｜DSML｜parameter>",
+        "<｜DSML｜parameter name=\"action\" string=\"true\">finish</｜DSML｜parameter>",
+        "</｜DSML｜invoke>",
+        "</｜DSML｜function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "down"
+        }
+      }
+    },
+    {
+      "name": "DeepSeek tool-calls-begin tokens are detected and give the tool-call error",
+      "neverFinish": true,
+      "input": [
+        "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>click",
+        "```json",
+        "{\"element_id\": 5}",
+        "```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "cut off inside the first DSML tag is a tool-call error, not prose",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": "<｜DSML",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "cut off inside a <tool_call> tag after some prose is a tool-call error, not prose",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": "I will act now. <tool_ca",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "a tool_calls message cut off inside its key is a tool-call error",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": "{\"role\":\"assistant\",\"content\":null,\"tool_ca",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "a tool_calls message cut off before its key is a truncated object, not prose",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": "{\"role\":\"assistant\",\"content\":null,",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "a JSON reply cut off inside the \"action\" key is not prose",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": "{\"acti",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "a valid action followed by a cut-off tag is still the action",
+      "input": "{\"action\":\"scroll\",\"direction\":\"down\"} <t",
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "down"
+        }
+      }
+    },
+    {
+      "name": "function_calls: scroll with an enum parameter",
+      "input": [
+        "<function_calls>",
+        "<invoke name=\"scroll\">",
+        "<parameter name=\"direction\">down</parameter>",
+        "</invoke>",
+        "</function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "down"
+        }
+      }
+    },
+    {
+      "name": "function_calls: the registry types the parameters (element_id is a number, \"2024\" stays text)",
+      "input": [
+        "<function_calls>",
+        "<invoke name=\"type\">",
+        "<parameter name=\"element_id\">2</parameter>",
+        "<parameter name=\"text\">2024</parameter>",
+        "<parameter name=\"submit\">true</parameter>",
+        "</invoke>",
+        "</function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "type",
+          "element_id": 2,
+          "text": "2024",
+          "submit": true
+        }
+      }
+    },
+    {
+      "name": "function_calls: finish with an answer",
+      "input": [
+        "<function_calls>",
+        "<invoke name=\"finish\">",
+        "<parameter name=\"answer\">Done</parameter>",
+        "</invoke>",
+        "</function_calls>"
+      ],
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "Done"
+        }
+      }
+    },
+    {
+      "name": "function_calls: an invoke without its closing tag is malformed",
+      "neverFinish": true,
+      "input": [
+        "<function_calls>",
+        "<invoke name=\"scroll\">",
+        "<parameter name=\"direction\">down</parameter>",
+        "</function_calls>"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "a lone opening <invoke name= tag is tool-call markup",
+      "neverFinish": true,
+      "input": "<invoke name=\"click\"",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "tool_call: a well-formed Qwen call",
+      "input": [
+        "<tool_call>",
+        "{\"name\":\"click\",\"arguments\":{\"element_id\":5}}",
+        "</tool_call>"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 5
+        }
+      }
+    },
+    {
+      "name": "tool_call: arguments as a JSON string",
+      "input": [
+        "<tool_call>",
+        "{\"name\":\"type\",\"arguments\":\"{\\\"element_id\\\":2,\\\"text\\\":\\\"abc\\\",\\\"submit\\\":false}\"}",
+        "</tool_call>"
+      ],
+      "expect": {
+        "action": {
+          "action": "type",
+          "element_id": 2,
+          "text": "abc",
+          "submit": false
+        }
+      }
+    },
+    {
+      "name": "tool_call: text before the call and an alias name",
+      "input": [
+        "I will click that.",
+        "<tool_call>",
+        "{\"name\":\"click_element\",\"arguments\":{\"element_id\":4}}",
+        "</tool_call>"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 4
+        }
+      }
+    },
+    {
+      "name": "tool_call: an explicit finish call (all verbs)",
+      "input": [
+        "<tool_call>",
+        "{\"name\":\"finish\",\"arguments\":{\"answer\":\"Done\"}}",
+        "</tool_call>"
+      ],
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "Done"
+        }
+      }
+    },
+    {
+      "name": "tool_call: a truncated call is a parse error and never a finish (answer mode)",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": [
+        "<tool_call>",
+        "{\"name\": \"finish\", \"arguments\": {\"answer\": \"The price is 1.399,00"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "tool_call: cut off before the arguments",
+      "neverFinish": true,
+      "input": [
+        "<tool_call>",
+        "{\"name\": \"click\", \"arguments\": {\"element_id\":"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "tool_call: complete JSON but no closing tag is still a parse error",
+      "neverFinish": true,
+      "input": [
+        "<tool_call>",
+        "{\"name\": \"click\", \"arguments\": {\"element_id\": 5}}"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "tool_call: an action object inside the tag is not read as an action",
+      "neverFinish": true,
+      "input": [
+        "<tool_call>",
+        "{\"action\": \"finish\", \"answer\": \"All done\"}",
+        "</tool_call>"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "tool_call: an empty tag",
+      "neverFinish": true,
+      "input": "<tool_call></tool_call>",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "tool_call: a closing tag alone",
+      "neverFinish": true,
+      "input": "The answer is 5.</tool_call>",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "tool_calls: a whole assistant message",
+      "input": [
+        "{",
+        "  \"role\": \"assistant\",",
+        "  \"content\": null,",
+        "  \"tool_calls\": [",
+        "    {",
+        "      \"id\": \"call_1\",",
+        "      \"type\": \"function\",",
+        "      \"function\": {",
+        "        \"name\": \"click\",",
+        "        \"arguments\": \"{\\\"element_id\\\":5}\"",
+        "      }",
+        "    }",
+        "  ]",
+        "}"
+      ],
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 5
+        }
+      }
+    },
+    {
+      "name": "tool_calls: a message in a fenced block with prose around it",
+      "input": [
+        "Calling:",
+        "```json",
+        "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"scroll\",\"arguments\":\"{\\\"direction\\\":\\\"up\\\"}\"}}]}",
+        "```"
+      ],
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "up"
+        }
+      }
+    },
+    {
+      "name": "tool_calls: a bare key and array",
+      "input": "\"tool_calls\": [{\"function\": {\"name\": \"go_back\", \"arguments\": \"{}\"}}]",
+      "expect": {
+        "action": {
+          "action": "go_back"
+        }
+      }
+    },
+    {
+      "name": "tool_calls: a truncated message is a parse error and never a finish",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"functio",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "tool_calls: an unknown tool name",
+      "neverFinish": true,
+      "input": "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"web_search\",\"arguments\":\"{\\\"query\\\":\\\"x\\\"}\"}}]}",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "a bare valid JSON finish is taken whole even when its answer mentions tool-call tags",
+      "input": "{\"action\":\"finish\",\"answer\":\"The page showed a <tool_call> tag.\"}",
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "The page showed a <tool_call> tag."
+        }
+      }
+    },
+    {
+      "name": "batch: every step id on the page is accepted",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"type\",\"element_id\":1,\"text\":\"a\"},{\"action\":\"click\",\"element_id\":9}]}",
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "type",
+              "element_id": 1,
+              "text": "a"
+            },
+            {
+              "action": "click",
+              "element_id": 9
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "batch: a step id past the end is rejected with the design text",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":2},{\"action\":\"click\",\"element_id\":99}]}",
+      "expect": {
+        "kind": "bad_step_element_id",
+        "error": "Element [99] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "batch: the first bad id is the one reported",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":77},{\"action\":\"click\",\"element_id\":99}]}",
+      "expect": {
+        "kind": "bad_step_element_id",
+        "error": "Element [77] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "batch: a step id that is not a number is rejected",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":\"abc\"}]}",
+      "expect": {
+        "kind": "bad_step_element_id",
+        "error": "Element [\"abc\"] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "batch: a step id 0 is rejected",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":0}]}",
+      "expect": {
+        "kind": "bad_step_element_id",
+        "error": "Element [0] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "batch: the {\"click\": N} step shape is checked too",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"click\":99}]}",
+      "expect": {
+        "kind": "bad_step_element_id",
+        "error": "Element [99] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "batch: the key names the content script reads (index, elementId, element) are checked",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"index\":40}]}",
+      "expect": {
+        "kind": "bad_step_element_id"
+      }
+    },
+    {
+      "name": "batch: a numeric string step id is turned into the number",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":\"5\"}]}",
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "click",
+              "element_id": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "batch: a step id with letters after the digits is rejected, not read as 3",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":\"3abc\"}]}",
+      "expect": {
+        "kind": "bad_step_element_id",
+        "error": "Element [\"3abc\"] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "batch: steps that need no element (scroll, wait) are left alone",
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"scroll\",\"direction\":\"down\"},{\"action\":\"wait\",\"amount\":2}]}",
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "scroll",
+              "direction": "down"
+            },
+            {
+              "action": "wait",
+              "amount": 2
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "batch: the alias name of the verb still gets its steps checked",
+      "input": "{\"action\":\"batch\",\"steps\":[{\"action\":\"click\",\"element_id\":99}]}",
+      "expect": {
+        "kind": "bad_step_element_id"
+      }
+    },
+    {
+      "name": "batch: ids are members of the list, not a range (page ids 3, 7 and 12)",
+      "refs": [
+        3,
+        7,
+        12
+      ],
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":3},{\"action\":\"click\",\"element_id\":12}]}",
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "click",
+              "element_id": 3
+            },
+            {
+              "action": "click",
+              "element_id": 12
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "batch: an id inside the range but not on the page is rejected",
+      "refs": [
+        3,
+        7,
+        12
+      ],
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":3},{\"action\":\"click\",\"element_id\":5}]}",
+      "expect": {
+        "kind": "bad_step_element_id",
+        "error": "Element [5] is not in the current element list (it may be from an older view of the page). Use an id from the list."
+      }
+    },
+    {
+      "name": "batch: a single click id must be on the page too (page ids 3, 7 and 12)",
+      "refs": [
+        3,
+        7,
+        12
+      ],
+      "input": "{\"action\":\"click\",\"element_id\":5}",
+      "expect": {
+        "kind": "bad_element_id"
+      }
+    },
+    {
+      "name": "batch: with no list known an id only has to be 1 or more",
+      "refs": null,
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":5000}]}",
+      "expect": {
+        "action": {
+          "action": "browser_batch",
+          "steps": [
+            {
+              "action": "click",
+              "element_id": 5000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "small tier: execute_js is not available here",
+      "scope": {
+        "mode": "browse",
+        "tier": "small"
+      },
+      "input": "{\"action\":\"execute_js\",\"code\":\"return 1\"}",
+      "expect": {
+        "kind": "unavailable_action",
+        "error": "Action \"execute_js\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, wait, ask_user."
+      }
+    },
+    {
+      "name": "small tier: read_network_requests is not available here",
+      "scope": {
+        "mode": "browse",
+        "tier": "small"
+      },
+      "input": "{\"action\":\"read_network_requests\",\"limit\":5}",
+      "expect": {
+        "kind": "unavailable_action",
+        "error": "Action \"read_network_requests\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, wait, ask_user."
+      }
+    },
+    {
+      "name": "small tier: browser_batch is not available here",
+      "scope": {
+        "mode": "browse",
+        "tier": "small"
+      },
+      "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":1}]}",
+      "expect": {
+        "kind": "unavailable_action",
+        "error": "Action \"browser_batch\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, wait, ask_user."
+      }
+    },
+    {
+      "name": "small tier: open_window is not available here",
+      "scope": {
+        "mode": "browse",
+        "tier": "small"
+      },
+      "input": "{\"action\":\"open_window\",\"url\":\"https://example.com\"}",
+      "expect": {
+        "kind": "unavailable_action",
+        "error": "Action \"open_window\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, wait, ask_user."
+      }
+    },
+    {
+      "name": "small tier: an alias of a large-tier verb is not available either",
+      "scope": {
+        "mode": "browse",
+        "tier": "small"
+      },
+      "input": "{\"action\":\"run_js\",\"code\":\"return 1\"}",
+      "expect": {
+        "kind": "unavailable_action",
+        "error": "Action \"execute_js\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, wait, ask_user."
+      }
+    },
+    {
+      "name": "small tier: ask_user stays available",
+      "scope": {
+        "mode": "browse",
+        "tier": "small"
+      },
+      "input": "{\"action\":\"ask_user\",\"question\":\"Which color?\"}",
+      "expect": {
+        "action": {
+          "action": "ask_user",
+          "question": "Which color?"
+        }
+      }
+    },
+    {
+      "name": "answer mode: a click is not available",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "input": "{\"action\":\"click\",\"element_id\":2}",
+      "expect": {
+        "kind": "unavailable_action"
+      }
+    },
+    {
+      "name": "answer mode: an unknown verb is still \"Unknown action\"",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "input": "{\"action\":\"fly\"}",
+      "expect": {
+        "kind": "unknown_action",
+        "error": "Unknown action \"fly\". Valid actions are: scroll, read_page_text, finish, ask_user."
+      }
+    },
+    {
+      "name": "unicode in a JSON string is kept",
+      "input": "{\"action\":\"type\",\"element_id\":2,\"text\":\"zubehör 🛒 日本語 ‮\",\"submit\":false}",
+      "expect": {
+        "action": {
+          "action": "type",
+          "element_id": 2,
+          "text": "zubehör 🛒 日本語 ‮",
+          "submit": false
+        }
+      }
+    },
+    {
+      "name": "unicode prose becomes an unconfirmed finish with the text unchanged",
+      "input": "Der Preis ist 1.399,00 € – 🛒 ​‍ Versand frei.",
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "Der Preis ist 1.399,00 € – 🛒 ​‍ Versand frei.",
+          "reason": "Direct text output from model",
+          "autoWrapped": true
+        }
+      }
+    },
+    {
+      "name": "a line separator character inside a JSON string is kept",
+      "input": "{\"action\":\"finish\",\"answer\":\"a b c\"}",
+      "expect": {
+        "action": {
+          "action": "finish",
+          "answer": "a b c"
+        }
+      }
+    },
+    {
+      "name": "braces that open and never close are a cut-off object, not prose",
+      "input": "{{{}{ {{ }",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "unbalanced closing braces before the action",
+      "input": "} } {\"action\":\"scroll\",\"direction\":\"down\"}",
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "down"
+        }
+      }
+    },
+    {
+      "name": "a string that never closes swallows the rest of the text",
+      "input": "{\"action\": \"click\", \"reason\": \"oops, \"element_id\": 3}",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "Llama <|python_tag|> call with parameters is converted",
+      "input": "<|python_tag|>{\"name\": \"click\", \"parameters\": {\"element_id\": 3}}",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "Llama <function=name> call with a JSON body is converted",
+      "input": "<function=click>{\"element_id\": 3}</function>",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "Qwen3-Coder <function=name> call with parameter children is converted, typed by the registry",
+      "input": [
+        "<tool_call>",
+        "<function=type>",
+        "<parameter=element_id>",
+        "2",
+        "</parameter>",
+        "<parameter=text>",
+        "2024",
+        "</parameter>",
+        "<parameter=submit>",
+        "false",
+        "</parameter>",
+        "</function>",
+        "</tool_call>"
+      ],
+      "expect": {
+        "action": {
+          "action": "type",
+          "element_id": 2,
+          "text": "2024",
+          "submit": false
+        }
+      }
+    },
+    {
+      "name": "a <function=name> call that is never closed is a tool-call error",
+      "neverFinish": true,
+      "input": "<function=click>{\"element_id\": 3}",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "Mistral [TOOL_CALLS] list is converted",
+      "input": "[TOOL_CALLS] [{\"name\": \"click\", \"arguments\": {\"element_id\": 3}}]",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "Mistral [TOOL_CALLS] list cut off is a tool-call error",
+      "neverFinish": true,
+      "input": "[TOOL_CALLS] [{\"name\": \"click\", \"arguments\": {\"element_id\": ",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "Granite <|tool_call|> list is converted",
+      "input": "<|tool_call|>[{\"name\": \"scroll\", \"arguments\": {\"direction\": \"down\"}}]",
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "down"
+        }
+      }
+    },
+    {
+      "name": "the old OpenAI function_call is converted",
+      "input": "{\"function_call\": {\"name\": \"click\", \"arguments\": \"{\\\"element_id\\\": 3}\"}}",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "a Gemma tool_code fence is a tool-call error (the call is python)",
+      "neverFinish": true,
+      "input": [
+        "```tool_code",
+        "click(element_id=3)",
+        "```"
+      ],
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "a bare {name, arguments} object is a call and is converted",
+      "input": "{\"name\": \"click\", \"arguments\": {\"element_id\": 3}}",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    },
+    {
+      "name": "a bare {name, arguments} object in prose is a call and is converted",
+      "input": [
+        "I will call it now:",
+        "{\"name\": \"scroll\", \"arguments\": {\"direction\": \"up\"}}"
+      ],
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "up"
+        }
+      }
+    },
+    {
+      "name": "a bare call to a tool that is not a verb is a tool-call error",
+      "neverFinish": true,
+      "input": "{\"name\": \"web_search\", \"arguments\": {\"query\": \"x\"}}",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "a bare call in a mode that does not offer the verb is a tool-call error",
+      "scope": {
+        "mode": "answer",
+        "tier": "large"
+      },
+      "neverFinish": true,
+      "input": "{\"name\": \"click\", \"arguments\": {\"element_id\": 3}}",
+      "expect": {
+        "kind": "tool_call_markup",
+        "error": "Your reply used tool-call markup. This agent does not use tool calls. Reply with a single JSON object {\"action\": ...}."
+      }
+    },
+    {
+      "name": "a bare call cut off inside its object is malformed, never prose",
+      "neverFinish": true,
+      "input": "{\"name\": \"click\", \"arguments\": {\"element_id\": 3}",
+      "expect": {
+        "kind": "malformed",
+        "error": "Model output contained a truncated or malformed action JSON. Retrying with simpler prompt."
+      }
+    },
+    {
+      "name": "an OpenAI tool-call entry with no tool_calls key is a call, not the {\"type\": ...} shape",
+      "input": "{\"id\":\"7\",\"type\":\"function\",\"function\":{\"name\":\"click\",\"arguments\":\"{\\\"element_id\\\": 4}\"}}",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 4
+        }
+      }
+    },
+    {
+      "name": "a list of OpenAI tool-call entries is converted from its first call",
+      "input": "[{\"type\":\"function\",\"function\":{\"name\":\"scroll\",\"arguments\":\"{\\\"direction\\\":\\\"down\\\"}\"}}]",
+      "expect": {
+        "action": {
+          "action": "scroll",
+          "direction": "down"
+        }
+      }
+    },
+    {
+      "name": "an Anthropic tool_use block is a call (input holds the arguments)",
+      "input": "{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"click\",\"input\":{\"element_id\":3}}",
+      "expect": {
+        "action": {
+          "action": "click",
+          "element_id": 3
+        }
+      }
+    }
+  ]
+}

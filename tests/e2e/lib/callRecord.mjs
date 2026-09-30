@@ -3,6 +3,27 @@
  * offline mock (--mock), so a report looks the same in both modes and the two cannot drift.
  */
 
+/**
+ * A /api/chat answer as one object, whichever way it came: a single JSON object (stream:false, or an error), or
+ * NDJSON, which is what ChatOllama asks for. For NDJSON the result is the last line (done:true, the counts, done_reason)
+ * with the pieces of every line's message.content joined into its message. An {"error": ...} line wins, because
+ * that is what the extension reported. Anything that is not JSON gives {}.
+ */
+export function collapseChatResponse(text) {
+  const objects = [];
+  for (const line of String(text).split('\n')) {
+    if (!line.trim()) continue;
+    try { objects.push(JSON.parse(line)); } catch { return {}; }
+  }
+  if (objects.length === 0) return {};
+  const failed = objects.find((object) => object && object.error);
+  if (failed) return failed;
+  if (objects.length === 1) return objects[0];
+  const join = (key) => objects.map((object) => (object.message && typeof object.message[key] === 'string' ? object.message[key] : '')).join('');
+  const last = objects[objects.length - 1];
+  return { ...last, message: { ...last.message, content: join('content'), ...(join('thinking') ? { thinking: join('thinking') } : {}) } };
+}
+
 export function describeFormat(format) {
   if (format === undefined) return 'none';
   if (typeof format === 'string') return format;

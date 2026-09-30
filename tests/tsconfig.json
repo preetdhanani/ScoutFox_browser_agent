@@ -1,0 +1,12 @@
+{
+  // The tests, the test helpers and the Node scripts. They run in Node, so this adds the node types to
+  // the rules of ../tsconfig.json. It also type-checks the src/ files the tests import, with those
+  // types, which is why src/ is checked by both projects and only the root one is strict about it.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["chrome", "node"]
+  },
+  // zod ships .test.ts files under tests/e2e/node_modules, which are not ours.
+  "include": ["../src", "./**/*.ts", "../scripts/**/*.ts"],
+  "exclude": ["**/node_modules", "../dist"]
+}

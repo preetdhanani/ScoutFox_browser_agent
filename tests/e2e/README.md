@@ -70,12 +70,16 @@ A run fails when any of these is true.
 - The bot-check task clicks or types into element 1.
 - The service worker or the driver page logs a console error or throws.
   This includes an error at the very start of the worker.
+- The service worker has a CSP violation (the extension CSP forbids `eval` and `new Function`).
+  Chromium reports it in a worker only as a `ContentSecurityPolicyIssue` of the CDP Audits domain, never as a console message, so the harness enables Audits (and it replays the issues from before it attached).
+  zod's `new Function('')` probe, which `zodJitless` prevents, is the case this exists for.
 - A fixture page a task runs on (the start page and the page the task ended on) shows a console error or a page error.
   The listeners are attached before the page loads, so an error at `document_start` counts too.
   The only line ignored is the browser's own 404 for `/favicon.ico`, which the fixture site does not have.
 - On such a page, the MAIN-world net recorder did not run (`window.__scoutfox_net_recorder_active` is not `true`), or the isolated-world content script does not answer a `GET_DOM_SNAPSHOT` message.
 - The side panel, opened as a page, shows a console error, a page error or a CSP violation.
   Its script must also have run (the model badge shows the configured model), and its request for the model list must have worked.
+- The "LLM Timeout (ms)" field of that page, after 1000 is typed into it, does not show the stored value 5000 (a value below the minimum is saved as 5000, and the field must not keep the typed number).
 - With `--mock` only: the generic fallback plan is used, the finish is unconfirmed, a task logs an error entry, or the number of model calls is not one plan call plus one call per step.
 
 ## What it proves
@@ -116,6 +120,9 @@ For the cheapest offer it adds price and shipping itself, and clicks the link th
 For price, shipping and delivery it copies those lines from the page text.
 When what it needs is not in the prompt, it finishes with an answer that starts with `MOCK-FAIL:` and says what is missing, so the smoke run fails.
 Every reply is checked against the schema of the request before it is sent, and a request that is not valid JSON gets HTTP 400.
+The extension talks to Ollama through ChatOllama, which always streams.
+So the mock answers a request with `stream: true`, or with no `stream`, as Ollama does: NDJSON, one JSON object per line, the reply text in two pieces and a last line with `done: true`, `done_reason` and the counts.
+A request with `stream: false` still gets one JSON object.
 
 The mock knows the fixture site and the engine's step message.
 When either changes, its self-test shows what broke.
@@ -135,6 +142,7 @@ Use it to check that the smoke run can fail.
 | `worker-error` | Adds a `console.error` at the top of `background/sw.js`. | Exit 1 on the worker error, although all tasks pass. |
 | `broken-panel` | Makes the side panel script throw when it loads. | Exit 1 on the side panel gate. |
 | `empty-page-text` | Makes the content script return no page text. | Exit 1: `store-price` and `cheapest-offer` answer `MOCK-FAIL`. |
+| `zod-not-jitless` | Removes the `globalThis.__zod_globalConfig = { jitless: true }` statement from `background/sw.js`, so zod probes `new Function('')`. | Exit 1 on two `service worker CSP violation` lines (`kEvalViolation`), although all tasks pass. |
 | `broken-net-recorder` | Makes `content/net-recorder.js` (the MAIN-world content script) throw when it loads. | Exit 1 on every fixture page: the recorder flag is not set, and the page reports a page error. |
 
 ## Real mode and the Origin note
@@ -142,6 +150,8 @@ Use it to check that the smoke run can fail.
 Ollama answers 403 to any request from a `chrome-extension://` origin, unless `OLLAMA_ORIGINS` was set when the server started.
 The harness must not restart your Ollama, so in real mode the extension talks to a small proxy on port 11435.
 The proxy drops the Origin header and forwards the request to Ollama.
+The answer is NDJSON, because the extension streams.
+The proxy reads all of it before it passes it on, and joins the pieces only for its own record of the call.
 If Ollama is not reachable, the run stops with a hint to use `--mock`.
 
 ## Chromium

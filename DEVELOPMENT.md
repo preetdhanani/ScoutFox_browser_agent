@@ -22,16 +22,17 @@ When modifying background scripts, content scripts, or sidepanel UI:
 ### Scripts
 | Script | What it does |
 | --- | --- |
-| `npm run build` | Builds the extension into `dist/` with Vite, then checks that `dist/` can be loaded (manifest paths, one-file worker, classic content scripts, that every function passed to `executeScript({ func })` uses only its own names and page globals, reserved `_` names, page references). |
-| `npm run check` | Runs `node --check` on the 10 source files listed in `package.json`. |
-| `npm test` | Runs the unit tests with `node --test tests/*.test.js`, no browser needed. |
-| `npm run evalscan` | Fails when `dist/` calls `eval`, `new Function` or `Function()` (one hit is allowed, see section 4), so run `npm run build` first. |
+| `npm run build` | Builds the extension into `dist/` with Vite, then checks that `dist/` can be loaded (manifest paths, one-file worker, classic content scripts, that every function passed to `executeScript({ func })` uses only its own names and page globals, that zod's jitless flag is set before any library code, reserved `_` names, page references). Any bundler warning that is not on the short list in `vite.config.mjs` fails it. It prints the size of every file, raw and gzip. |
+| `npm run check` | Runs `node --check` on the 7 plain JS source files listed in `package.json` (the `.ts` files are covered by `typecheck`). |
+| `npm run typecheck` | Runs `tsc --noEmit` twice (TypeScript 7): over `src/` with `tsconfig.json`, and over the tests, their helpers and `src/` again with `tests/tsconfig.json`. |
+| `npm test` | Runs the unit tests (`tests/**/*.test.js` and `tests/**/*.test.ts`) with `node --test`, no browser and no build step needed: Node runs the `.ts` files by stripping their types. |
+| `npm run evalscan` | Fails when `dist/` calls `eval`, `new Function` or `Function()` (five hits are allowed, see "Worker Bundle and CSP" in section 3), so run `npm run build` first. |
 | `npm run zip` | Zips the contents of `dist/` into `scoutfox-chrome-extension.zip` in the repository root, without sourcemaps, so run `npm run build` first. |
 | `npm run test:e2e` | Builds, then runs the browser smoke test in Chromium against an offline mock model (needs a one-time setup, see "E2E Smoke" in section 3). |
 
 ### CI
 `.github/workflows/ci.yml` runs on every push to `main` or `dev` and on every pull request into them, on Node 22.x and 24.x.
-It runs `npm ci`, `npm run check`, `npm test`, `npm run build`, `npm run evalscan` and `npm run zip`.
+It runs `npm ci`, `npm run check`, `npm run typecheck`, `npm test`, `npm run build`, `npm run evalscan` and `npm run zip`.
 On a push, the Node 22.x run uploads the zip as the `scoutfox-chrome-extension` artifact.
 Flaky tests are fixed, never retried.
 
@@ -48,7 +49,8 @@ To inspect background service worker output:
 
 The worker is one bundled file, `background/sw.js`, built from `background/background.js` and the modules it imports (`agentEngine.js`, `apiClients.js` and so on).
 DevTools shows `background/sw.js`.
-The code is not minified, so it stays readable, and the `//#region` comments in it name the original source file of most parts (a few small modules, such as the ones in `background/harness/`, sit inside a neighbour's region).
+The code is not minified, so it stays readable, and the `//#region` comments in it name the original source file of most parts (a few small modules, such as the ones in `src/background/agent/`, sit inside a neighbour's region).
+It is about 3.1 MB because the LangChain provider packages are in it, see "Worker Bundle and CSP" in section 3.
 The build also writes sourcemaps next to the files (`sourcemap: 'hidden'`), but they are kept only for `npm run evalscan`, which uses them to name the original file and line of a hit.
 The built files have no `sourceMappingURL` line and the zip has no maps, so DevTools does not load them and debugging works on the built code.
 
@@ -64,14 +66,105 @@ Run the full suite with:
 ```bash
 npm test
 ```
-This runs `node --test tests/*.test.js` - 429 tests across 51 files as of this writing.
+This runs `node --test` on `tests/**/*.test.js` and `tests/**/*.test.ts` - 1264 tests across 90 files as of this writing.
 None of it needs a real browser.
 
 ### Syntax Check
 ```bash
 npm run check
 ```
-Runs `node --check` across the 10 source files listed in `package.json`, catching a syntax error before it ever reaches a browser reload.
+Runs `node --check` across the 7 plain JS source files listed in `package.json`, catching a syntax error before it ever reaches a browser reload.
+
+### Type Check
+```bash
+npm run typecheck
+```
+Runs `tsc --noEmit` in two projects.
+`tsconfig.json` covers `src/`, the code of the extension.
+It runs in the MV3 service worker, so it has the WebWorker lib and the `chrome` types, and nothing from Node or from a page: `Buffer`, `process`, `NodeJS.Timeout` and `document` do not compile there.
+`tests/tsconfig.json` extends it for the tests, the test helpers and the Node scripts, which run in Node, and adds the `node` types.
+`tests/tsconfigScopes.test.ts` checks both rules with the real compiler.
+
+TypeScript files use erasable syntax only (no `enum`, `namespace` or constructor parameter properties) and explicit `.ts` extensions in imports, because Node runs them directly by stripping types.
+Nothing in `tsc` or Vite enforces the extensions (they accept `./name` and `./name.js` for `name.ts`, and Node does not), so `tests/importSpecifiers.test.ts` reads every relative import and fails when it names a file that is not there exactly as written.
+
+### Action Registry
+Every verb the agent can use is defined once in `shared/actions.json`: name, category, tiers, policy modes, prompt line, schema and aliases.
+`src/background/agent/actions.ts` reads it, and `src/background/agent/schemas.ts` builds the JSON schemas that go to Ollama in `format` and validates replies with `@cfworker/json-schema`, which never uses `eval`.
+The engine's `KNOWN_ACTIONS` and its alias table (`click_element` to `click`, `done` to `finish`) come from the same file.
+To add a verb, add its entry to the file and an example to `tests/shared/actions.test.ts`; `tests/shared/actionsRegistry.test.ts` checks the file itself.
+`shared/fixtures/action-schemas.json` holds the exact schema and prompt bytes that go to Ollama, and `tests/actionRegistrySnapshot.test.js` compares them.
+Change that fixture only when the model request is meant to change.
+
+### Reply Parser
+`src/background/agent/parse.ts` turns a model reply into an action, or into the parse error that the model sees on its next turn.
+`repairJson.ts` (the string-aware brace scanner and the repair ladder for cut-off JSON), `sanitize.ts` (aliases, the verb check, element ids) and `toolCalls.ts` (tool-call markup) are its parts, and the engine's `parseResponse` only calls it.
+Tool-call markup is detected first and never becomes an answer: it is converted into the action it asks for, or it is the tool-call parse error.
+That covers DeepSeek DSML, Anthropic `invoke`, Qwen and Granite `tool_call`, Llama `python_tag` and `<function=...>`, Mistral `[TOOL_CALLS]`, OpenAI `tool_calls` and `function_call`, and a bare `{"name", "arguments"}` object.
+Words of markup inside the strings of a complete action (an answer that explains tool calls) are the action's content and do not count.
+When a reply holds several JSON objects, the first one with an `action` key wins, and only when there is none the last alias shape (`{"click": 3}`) does, as in the old engine.
+`shared/fixtures/parse-cases.json` holds the reply cases as data (also meant for the Python runner), and `tests/parse.test.ts` runs them next to the rules that data cannot say.
+
+### LLM Providers
+The engine still calls `ApiClients.generateCompletion` in `background/apiClients.js`, which is now a thin shim over `src/background/llm/`.
+Every provider runs on a LangChain chat model, and a model is built for every call with `maxRetries: 0`, so `callWithRetry` stays the only retry layer.
+OpenRouter, OpenAI, OpenAI-compatible servers (Groq, LM Studio, vLLM), Anthropic and Gemini are in `factory.ts`.
+Ollama is `ollama.ts` (`ChatOllama`): the action or plan schema goes out as `format`, with `think:false`, `num_ctx` and `num_predict`.
+It keeps the two fallbacks, a model that rejects `think` and a server older than 0.5 that rejects a schema, and each is remembered for the life of the worker.
+`ChatOllama` always streams, and its own abort is broken, so its fetch is wrapped to carry the call's signal, and a model is built per call.
+AgentRouter is `agentRouter.ts`: `ChatAnthropic` on `/v1/messages` first, and `ChatOpenAICompletions` on `/v1/chat/completions` when the first fails in a way that another endpoint might not.
+A 401, an abort and a network error do not fall back, and the first error is logged.
+A 200 that `ChatAnthropic` cannot read (an `{"error": ...}` object, `{}`, HTML) did get an answer, so it does fall back, unless it is a chat reply in the OpenAI shape, which is simply read.
+The declarativeNetRequest rule 8888 in `background.js` still sets the `User-Agent` for agentrouter.org, because Chromium replaces it on every fetch.
+`deadline.ts` gives every call a deadline (`llmTimeoutMs`) and joins it with the task's abort signal, so a timeout, Pause and Stop really cancel the request.
+Pause and Stop abort with a reason tagged `{ scoutfox: 'user' }`, and that tag, never the text of an error, tells them from a timeout.
+The SDK clients' own 10 minute `timeout` is set out of the way (`SDK_TIMEOUT_MS`), so `llmTimeoutMs` is the only timer, also above 10 minutes.
+`errors.ts` keeps the old user-facing error texts, `models.ts` keeps the model lists and their cache, and API keys are taken out of every error text.
+Every model's `fetch` is a `watchFetch` (`factory.ts`): it keeps the raw text of a response for the error texts and tells "nobody answered" from "the client could not read the answer".
+The second is an `UnreadableReplyError` with the status of the answer, so a 200 that is no chat reply reads `API Error (200): not a chat reply: <what the server said>` and not an internal TypeError.
+It also takes the key out of an error response before the SDK reads it, because LangChain hands that error to every callback (tracing) unchanged, and Gemini's error is scrubbed where the request is made.
+The key is never in the options of a model either: AgentRouter's wire image, which carries it, is put on the request by that `fetch` and not in `defaultHeaders`, and `tests/llm/keys.test.ts` runs every provider against a server that echoes its headers.
+The requests are built by LangChain and the SDKs, so provider tests capture them with a fetch spy (`tests/helpers/llmWire.ts`) instead of stubbing a response object.
+
+### Worker Bundle and CSP
+The worker bundles the LangChain provider packages, so `background/sw.js` is 3,187 KB unminified (671 KB gzip).
+The build prints the size of every file, raw and gzip, and CI runs the build, so a jump in the worker shows in the log.
+Minify stays off.
+Minified, the worker would be 1,432 KB (363 KB gzip) and would start about 13 ms faster, and that is not worth an unreadable `dist/` and a rewrite of the zod check below.
+`vite.config.mjs` has the numbers and the reasons.
+
+The extension CSP (`script-src 'self'`) forbids `eval` and `new Function`, and Chromium reports even a caught `new Function('')` as a CSP violation.
+zod 4 makes exactly that call, once, to probe whether it may compile object parsers, unless `globalThis.__zod_globalConfig.jitless` is `true` when zod's core module runs.
+`src/background/boot/zodJitless.ts` sets the flag, and it must be the first import of the worker entry (`background/background.js`) and of the side panel entry, because an ES module import runs before the next one.
+`npm run build` checks the order in `dist/` ("zod is jitless before any library code"): the flag must be a top-level statement, and the only `//#region` blocks above it may be rolldown's own helpers.
+The check reads comments, so it needs unminified output, and it refuses a bundle without them.
+`tests/boot/zodJitless.test.ts` runs zod with and without the module and counts constructions of a `Function` (0 with it, at least 2 without).
+The smoke test watches the worker's CSP violations too, which Chromium reports only to the CDP Audits domain and not as a console message, and `--tamper=zod-not-jitless` shows that it fails without the flag.
+
+`npm run evalscan` reads the map of a built file from `<file>.map` only, and refuses a built file that ends in a `sourceMappingURL` comment, because the build writes hidden maps and a string of our own code must not be able to name a map.
+It allows five hits, each keyed by the original file (through the sourcemap), the kind of hit and the source line:
+- `background/agentEngine.js`: the `new Function` of `execute_js`, which runs in the web page, not in the worker.
+- `node_modules/zod/v4/core/util.js`: the probe above.
+  `allowsEval` returns before it when the flag is set.
+- `node_modules/zod/v4/core/doc.js`: `Doc.compile`, which only zod's object fast path calls, and that path is off under jitless.
+- `node_modules/openai/lib/EventStream.mjs`, two places: the SDK reads the source text of the native `Function` constructor and lists it among the native constructors whose descriptors it reads.
+  It never calls it.
+
+Every entry but the first names a file in `node_modules/`, so no entry can hide a hit in our own code, and `tests/evalscan.test.js` pins that.
+A library entry needs a reason and the version that was read; versions are exact pins, so a changed line fails loudly.
+
+The build also fails on every bundler warning that is not on a short list.
+The list is 7 pairs of a Node built-in and the file that imports it, all in the credential code of `@anthropic-ai/sdk` (`node:fs` and `node:path`, which Vite replaces with an empty module).
+That code runs only for a client that has neither an API key nor a token, and ours always have a key; `tests/llm/anthropicCredentials.test.ts` shows it with a spy on the file system.
+Warnings are recorded and the build fails after the pass, because a throw from the bundler's `onLog` is swallowed for a warning of a plugin (the build used to exit 0 for a new `import fs from 'node:fs'`).
+`tests/buildWarnings.test.js` covers the list.
+
+Chrome only wakes a worker for the listeners that were registered in the first run of the script.
+All eight `chrome.*` listeners of `background.js` are registered at the top level, and a probe that wrapped `addListener` in Chromium 152 saw all of them inside that first run.
+The worker's start, from the creation of its global scope to the end of that run (median of six starts on a fresh profile), is about 52 ms with LangChain in it and was about 12 ms before.
+
+Gemini always streams, and its SDK leaves an unhandled rejection behind when a reply is cut halfway (Pause, Stop or a dropped connection) or when a 200 is not an event stream.
+The worker's `unhandledrejection` handler ignores exactly those errors (`src/background/boot/rejections.ts`) and logs every other one as an error.
 
 ### Test Approach
 `chrome.*` APIs are hand-mocked per test file, not a real browser.
@@ -84,9 +177,25 @@ The shared fakes in `tests/helpers/` are for new tests:
   You declare only what a test needs, and touching any other API throws, so a missing API cannot give a false green.
 - `fakeStorageSession.ts` fakes `chrome.storage.session` and `chrome.storage.local`, with byte counting and quota errors.
   A service worker restart in a test is a new connection to the same store.
+- `fakeLlm.ts` is a scripted model.
+  A script is a list of replies (a string, or `{ text, reasoning, delayMs, error }`, or a function that answers by what the model was shown).
+  `generateCompletion` returns them in order, `install(ApiClients)` puts it in place of the real client, and every call is recorded with its settings, messages, schema and how it ended (`text`, `error` or `aborted`).
+  An abort rejects the way `fetch` does, and a script that runs out throws.
+  `chatModel()` is a LangChain chat model over the same script and log.
+- `llmWire.ts` is a fetch spy for the provider tests.
+  `spyFetch(t)` replaces `globalThis.fetch` until the test ends and records every request as the SDK built it (URL, lower-case headers, parsed JSON body, signal).
+  It answers with a real `Response` in the wire format of the endpoint (`textReply`, and `ollamaReply` for what Ollama streams), or with what the test returns (`jsonResponse`, an HTTP error, a fetch that never answers).
+- `slowServer.ts` is a local HTTP server that answers late or never (or sends the first piece of a streamed reply and stalls), and remembers whether the client hung up first.
+  That is the proof that a request was really cancelled and not only abandoned.
+  `redirectFetch` sends the fixed hosts of Anthropic and Gemini to it.
+- `fakeDom.ts` builds page snapshots and a fake content script from a small description of a site.
+  `pageSnapshot(page)` is what `content/domCompressor.js` returns, and `fakeDom({ pages }).attach(fc, tabId)` answers `GET_DOM_SNAPSHOT` and `EXECUTE_ACTION` for the page the tab is on: clicks, typing, scrolling, links that open pages, and the other verbs of the content script except `browser_batch` and typing into a `<select>`, which throw so a test can script them.
+- `checkpointFixtures.ts` and `holdGraphs.ts` are for the checkpoint saver tests: hand-made checkpoints and the two small graphs (flat and with a subgraph) that stop at an interrupt.
 
 The older tests were not moved to these helpers.
-The helpers have their own tests: `tests/fakeChrome.test.js` and `tests/fakeStorageSession.test.js`.
+The helpers have their own tests: `tests/fakeChrome.test.js`, `tests/fakeStorageSession.test.js`, `tests/fakeLlm.test.ts` and `tests/fakeDom.test.ts`.
+`fakeDom` is pinned to the real content scripts there: the same page description must give exactly what the real `DOMCompressor` returns and the same reply as the real `doType`, `doScroll` and `doPressKey`.
+`tests/agentEngineFakeHarness.test.ts` drives the whole old engine through `fakeChrome`, `fakeDom` and `fakeLlm`.
 The helpers are TypeScript files, and Node runs them directly through type stripping, which is on by default from Node 22.18.
 Tests need no build step.
 
@@ -107,6 +216,7 @@ Run:
 npm run test:e2e
 ```
 It builds first, runs the tasks, and ends with `SMOKE PASSED` or `SMOKE FAILED`.
+It fails on a console error or an exception in the worker, on a CSP violation in the worker or in the side panel, and on an error on a fixture page.
 See [tests/e2e/README.md](tests/e2e/README.md) for all options, what a run checks, and the negative controls.
 In CI it runs from `.github/workflows/e2e.yml`, when a pull request gets the `e2e` label or when you start it by hand.
 
@@ -125,8 +235,10 @@ Before packaging for the Chrome Web Store:
    The build copies them into `dist/icons/`.
 4. **Eval Scan**: Run `npm run build && npm run evalscan`.
    The extension's Content Security Policy blocks `eval`, `new Function` and `Function()`, so the scan fails on any call to them in `dist/`.
-   It has exactly one allowed hit: the `new Function` of the `execute_js` action in `background/agentEngine.js`.
+   It has five allowed hits, listed in "Worker Bundle and CSP" in section 3.
+   One is the `new Function` of the `execute_js` action in `background/agentEngine.js`.
    That code runs in the web page (the `MAIN` world, through `chrome.scripting.executeScript`), not in the extension, and the page's own policy can block it.
+   The other four are in zod and the openai SDK, and never run in the worker.
 5. **Create Zip Package**:
    ```bash
    npm run build && npm run zip
@@ -145,11 +257,14 @@ Before packaging for the Chrome Web Store:
 What is true today:
 - `npm run build` bundles the extension with Vite into `dist/`, and you load `dist/` unpacked in `chrome://extensions`, not the repository folder.
 - The manifest and the icons live in `public/`, and the build copies them into `dist/`.
-- The sources are still plain JavaScript ES modules, and the build changes no behavior.
+- The shared core is TypeScript in `src/` (phase P1): storage and logger, the action registry, the reply parser, outcome and recovery rules, the checkpoint saver and the interrupt shim.
+  The saver and the shim are tested but no code calls them yet.
+- The providers run on LangChain (phase P2), so the worker bundle is about 3.1 MB, see "Worker Bundle and CSP" in section 3.
+- The engine (`background/`), the content scripts and the side panel are still plain JavaScript ES modules, and the build changes no behavior.
 - CI zips the built `dist/`, not the raw source folders.
 
 Planned, not built yet:
-- TypeScript comes in a later phase.
+- The engine, the content scripts and the side panel move to TypeScript in later phases.
   Vite is also needed to bundle LangGraph.js so it can run in the MV3 service worker.
 - `public/manifest.json` will request the `debugger` permission, so the agent can do real clicks while a task runs.
   During a task, Chrome shows a yellow "is debugging this browser" bar.

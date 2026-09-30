@@ -3,7 +3,10 @@
  *
  * It speaks what the extension calls for provider "ollama", on the same port as the real-mode
  * proxy (11435):
- *   POST /api/chat     non-streaming JSON: {model, created_at, message, done, done_reason, ...counts}
+ *   POST /api/chat     what ChatOllama asks for (stream absent or true): NDJSON, one JSON object per line,
+ *                      the reply text in two pieces {model, created_at, message, done:false} and a last line
+ *                      {model, created_at, message, done:true, done_reason, ...counts}, as Ollama streams.
+ *                      With stream:false, one JSON object with all of it (the old client asked for that)
  *   GET  /api/tags     the model list (the side panel asks for it when it opens)
  *   GET  /api/version
  *   OPTIONS            CORS preflight
@@ -31,15 +34,16 @@
  *     line, a goal it does not know): a finish whose answer starts with "MOCK-FAIL:" and says
  *     what is missing. That answer is wrong on purpose, so a content script or a perception step
  *     that no longer delivers the page makes the smoke fail.
- * Every reply is checked against the JSON schema the request itself carried (with
- * tests/helpers/miniJsonSchema.js) before it is sent; a reply that does not fit is an HTTP 500.
+ * Every reply is checked against the JSON schema the request itself carried (validateAgainst in
+ * src/background/agent/schemas.ts, the validator the engine uses) before it is sent; a reply that
+ * does not fit is an HTTP 500.
  *
  * This is fixture-specific by design: it understands the layout of tests/fixtures/site and the
  * step message of background/agentEngine.js (buildStepMessage). When either changes, update
  * parseStepMessage() or the skills below; the self-test (mockOllama.selftest.mjs) shows what broke.
  */
 import http from 'node:http';
-import { validate, unsupportedKeywords } from '../../helpers/miniJsonSchema.js';
+import { validateAgainst } from '../../../src/background/agent/schemas.ts';
 import { buildCallRecord } from './callRecord.mjs';
 
 export const MOCK_VERSION = '0.0.0-mock';
@@ -316,7 +320,16 @@ function tagOf(name) {
   };
 }
 
-const warnedKeywords = new Set();
+/**
+ * The streamed form of a reply: the text in two pieces, then a last line with everything else. A client that
+ * joins the pieces (ChatOllama does) sees the same text as one that reads the single object.
+ */
+export function toNdjson(reply) {
+  const { message, ...rest } = reply;
+  const cut = Math.ceil(message.content.length / 2);
+  const piece = (content) => JSON.stringify({ model: reply.model, created_at: reply.created_at, message: { role: message.role, content }, done: false });
+  return `${[piece(message.content.slice(0, cut)), piece(message.content.slice(cut)), JSON.stringify({ ...rest, message: { role: message.role, content: '' } })].join('\n')}\n`;
+}
 
 /**
  * Same return shape as startOllamaProxy: { server, calls, url }.
@@ -359,8 +372,6 @@ export function startMockOllama({ host = '127.0.0.1', port = 11435, models = ['m
       } else if (!Array.isArray(sent.messages) || sent.messages.length === 0
         || sent.messages.some((m) => !m || typeof m.role !== 'string' || typeof m.content !== 'string')) {
         reject(400, 'messages must be a non-empty array of {role, content} with string content');
-      } else if (sent.stream !== false) {
-        reject(400, 'this mock only answers with stream:false');
       }
     }
 
@@ -371,17 +382,9 @@ export function startMockOllama({ host = '127.0.0.1', port = 11435, models = ['m
         reject(decision.error.status, decision.error.message);
       } else {
         // The reply has to fit the schema the request carried, as Ollama's grammar would force.
-        if (typeof sent.format === 'object') {
-          for (const k of unsupportedKeywords(sent.format)) {
-            if (!warnedKeywords.has(k)) {
-              warnedKeywords.add(k);
-              console.warn(`mock: the checker does not know the schema keyword "${k}", replies are not fully checked for it`);
-            }
-          }
-        }
-        const problems = validate(sent.format, decision.reply);
-        if (problems.length) {
-          reject(500, `mock bug: the scripted reply does not fit the request's schema: ${problems.join('; ')}`);
+        const { ok, errors } = validateAgainst(sent.format, decision.reply);
+        if (!ok) {
+          reject(500, `mock bug: the scripted reply does not fit the request's schema: ${errors.slice(0, 5).join('; ')}`);
         } else {
           note = decision.note;
           const content = JSON.stringify(decision.reply);
@@ -405,7 +408,9 @@ export function startMockOllama({ host = '127.0.0.1', port = 11435, models = ['m
       }
     }
 
-    const responseText = JSON.stringify(body);
+    // Ollama streams unless the request says stream:false. An error is one JSON object either way.
+    const streaming = status === 200 && sent.stream !== false;
+    const responseText = streaming ? toNdjson(body) : JSON.stringify(body);
     const call = buildCallRecord({
       n: calls.length + 1,
       status,
@@ -418,7 +423,7 @@ export function startMockOllama({ host = '127.0.0.1', port = 11435, models = ['m
     if (note) call.note = note;
     calls.push(call);
     onCall(call);
-    send(res, status, body);
+    send(res, status, responseText, { 'Content-Type': streaming ? 'application/x-ndjson' : 'application/json; charset=utf-8' });
   };
 
   const server = http.createServer(async (req, res) => {

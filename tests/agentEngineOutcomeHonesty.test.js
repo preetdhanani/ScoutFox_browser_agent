@@ -11,8 +11,8 @@
  *   3. An explicit `finish` with no answer field was reported as "Task completed successfully."
  *      - a claim the model never actually made.
  *
- * See harness/outcome.js and tests/harnessOutcome.test.js for the isolated unit tests of the
- * classification logic; this file drives the real engine loop the way the panel does.
+ * See src/background/agent/outcome.ts and tests/agent/outcome.test.ts for the isolated unit tests of
+ * the classification logic; this file drives the real engine loop the way the panel does.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';

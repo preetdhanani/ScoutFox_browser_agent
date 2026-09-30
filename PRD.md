@@ -38,14 +38,14 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
    For Ollama, the main action call now sends a JSON schema in `format` with `think:false` (constrained decoding), so the model can only answer with a real action.
    A server older than 0.5 that rejects a schema falls back to `format:"json"`, and the other providers are unchanged.
    *Planned (decided 2026-09-28, not built yet):* replaced by LangChain chat model packages.
-4. **Fault-Tolerant Action Loop (`background/agentEngine.js`, `background/harness/`)**: Self-correcting execution loop with a JSON fallback parser and error recovery for 8B-32B small models.
+4. **Fault-Tolerant Action Loop (`background/agentEngine.js`, `src/background/agent/`)**: Self-correcting execution loop with a JSON fallback parser and error recovery for 8B-32B small models.
    Hallucinated element IDs and unrecognized action verbs are now rejected as correctable parse errors instead of being silently "corrected" or failing a layer later.
    Restricted-page navigation (chrome://, the Chrome Web Store, etc.) is now blocked before it happens rather than discovered a step later, and the agent is now shown its own step-by-step plan and remaining step budget when choosing its next action.
    For Ollama, the system prompt is now a compact one (one line per action, no few-shot examples), and a reply that is one bare JSON object is parsed whole.
    The prompt for every other provider is unchanged.
    *Planned (decided 2026-09-28, not built yet):* replaced by a LangGraph.js graph (see section 3).
 
-   **Reliability & honesty harness** (`background/harness/recovery.js`, `background/harness/outcome.js`):
+   **Reliability & honesty harness** (`src/background/agent/recovery.ts`, `src/background/agent/outcome.ts`):
    A failed LLM call is retried up to 3 attempts with a short backoff before the task is parked in a resumable `paused` state (naming the provider and attempt count) instead of dying as `idle`, so the existing Resume button picks up from the exact failed step.
    Hitting the step budget, an unstructured (non-JSON) model reply, and a finish with no answer are now each reported honestly - as an unfinished run, a distinctly labeled "Unconfirmed answer," or an honest no-answer - instead of looking like a normal completion.
    A new `ask_user` action lets the agent pause with a clarifying question the user can actually answer, via a new answer box in the side panel.
@@ -121,7 +121,7 @@ Rebuild the whole agent on LangGraph.js.
    A new task is refused while another one is paused.
 9. **Build** (the Vite part is built in phase P0, 2026-09-29): TypeScript + Vite (needed anyway to bundle LangGraph for MV3).
    `npm run build` writes `dist/`, and CI zips the built `dist/` instead of the raw folders.
-   TypeScript is planned for phase P1.
+   The TypeScript core in `src/` is built in phase P1, and the rest of the code moves in later phases.
 10. **Side panel**: the UI stays vanilla JS with the same messages, plus a new live graph view that shows the node the agent is in right now.
 11. **Python runner**: `python_runner/agent.py` also moves to LangGraph (Python) in this iteration.
 12. **LLM calls**: switch to LangChain chat model packages, replacing `background/apiClients.js`.
@@ -172,12 +172,16 @@ Rebuild the whole agent on LangGraph.js.
 - Still to test: graph checkpoints of a subgraph with the custom saver (spike S5, the first task of phase P4).
 
 ### 3.6 Next step
-The design is written and waits for Prit's review, and phases P0a and P0 are built.
+The design is written and waits for Prit's review, and phases P0a, P0 and P1 are built.
 - P0a: constrained decoding for Ollama (see 3.3, item 17).
 - P0 (build foundation, no behaviour change): Vite builds today's JS into `dist/` (`npm run build`), you load `dist/` in Chrome, and CI runs on Node 22.x and 24.x and zips the built `dist/`.
   It also added an opt-in browser smoke test (`npm run test:e2e`) and two test helpers (`fakeChrome` and `fakeStorageSession`).
+- P1 (TypeScript core): `src/` holds the storage and logger, the action registry (`shared/actions.json`), the reply parser, the outcome and recovery rules, the checkpoint saver and the interrupt shim, with `fakeLlm` and `fakeDom` next to the two P0 helpers.
+  The old engine calls the new parser and registry, and behaves as before except for these parser rules.
+  Tool-call markup is never turned into an answer, nested JSON is read whole, and an element id is read strictly (`"12abc"` is not 12).
+  The saver and the shim are tested but not used yet.
 
-Next comes phase P1 (TypeScript core), then the phases up to P3, and the graph itself from P4 on.
+Next come the phases up to P3, and the graph itself from P4 on.
 Every phase keeps the tests green, and the graph stays behind an engine switch until it works on real sites.
 
 ### 3.7 How today's harness concepts map to the planned graph
@@ -192,10 +196,12 @@ This is a summary of the design, which still waits for Prit's approval.
   Prompt-injection hardening is out of scope for now.
 - **Recovery** -> the blocked-site ladder by effort level, `recover` (failure memory, retries, bans), stuck detection, and checkpoints with resume.
 
-### 3.8 Current facts (checked 2026-09-29)
-- `npm test`: 429 tests across 51 test files, all passing.
-- `npm run check` runs `node --check` on 10 source files (see `package.json`).
+### 3.8 Current facts (checked 2026-09-30)
+- `npm test`: 994 tests across 70 test files (`.js` and `.ts`), all passing.
+- `npm run check` runs `node --check` on the 7 plain JS source files (see `package.json`).
+  The TypeScript files are covered by `npm run typecheck`, which runs `tsc --noEmit` on `src/` (`tsconfig.json`) and on the tests with their helpers (`tests/tsconfig.json`).
 - Today the extension is built with Vite (phase P0): `npm run build` writes `dist/`, and you load `dist/` unpacked in Chrome, not the repo folder.
-  The sources are still plain JS ES modules, with no TypeScript yet.
-- CI (`.github/workflows/ci.yml`) runs on Node 22.x and 24.x: `npm ci`, check, test, build, evalscan and a zip of the built `dist/`.
+  The shared core in `src/` is TypeScript (phase P1).
+  The engine, the content scripts and the side panel are still plain JS ES modules.
+- CI (`.github/workflows/ci.yml`) runs on Node 22.x and 24.x: `npm ci`, check, typecheck, test, build, evalscan and a zip of the built `dist/`.
 - `public/manifest.json` does not have the `debugger` permission yet.

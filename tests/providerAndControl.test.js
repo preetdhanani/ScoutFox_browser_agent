@@ -14,6 +14,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spyFetch, hangUntilAborted, settledWithin, waitForRequests } from './helpers/llmWire.ts';
 
 global.chrome = {
   runtime: { lastError: null },
@@ -28,36 +29,21 @@ global.chrome = {
 
 const { ApiClients } = await import('../background/apiClients.js');
 const { AgentEngine } = await import('../background/agentEngine.js');
-const { DEFAULT_PROVIDER_CONFIGS } = await import('../utils/storage.js');
-
-/** Capture what the client hands to fetch, without any network access. */
-function stubFetch() {
-  const calls = [];
-  global.fetch = async (url, init = {}) => {
-    calls.push({ url: String(url), init });
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ content: [{ type: 'text', text: '{"action":"finish"}' }] }),
-      text: async () => '{}'
-    };
-  };
-  return calls;
-}
+const { DEFAULT_PROVIDER_CONFIGS } = await import('../src/shared/storage.ts');
 
 const MESSAGES = [{ role: 'user', content: 'hi' }];
 
 
 /* ---------------------------- #9 ---------------------------- */
 
-test('#9 Anthropic client sends the real browser-access header', async () => {
-  const calls = stubFetch();
+test('#9 Anthropic client sends the real browser-access header', async (t) => {
+  const sent = spyFetch(t);
 
   await ApiClients.callAnthropic(
     { model: 'claude-3-5-sonnet-20241022', apiKey: 'k', providerConfigs: {} },
     MESSAGES, 'sys', {});
 
-  const headers = calls[0].init.headers;
+  const headers = sent[0].headers;
   assert.equal(headers['anthropic-dangerous-direct-browser-access'], 'true');
   assert.equal(headers['dangerously-allow-browser'], undefined,
     'the SDK option name must not be sent as a header, it fails CORS preflight');
@@ -68,36 +54,46 @@ test('#9 Anthropic client sends the real browser-access header', async () => {
 
 /* ---------------------------- #10 ---------------------------- */
 
+// The request is built by the LangChain client now, so `init.signal` is never the caller's own signal:
+// the SDK derives its own from it (Ollama's fetch wrapper merges it with the call's). What the fix guards
+// is that Stop reaches the request that is on the wire, so that is what these check: the signal fetch got
+// is aborted when the task's signal aborts. Every provider is in the table, Ollama and AgentRouter too.
 const SIGNAL_CASES = [
   ['callAnthropic', { model: 'claude-3-5-sonnet-20241022', apiKey: 'k' }],
   ['callOpenAI', { model: 'gpt-4o-mini', apiKey: 'k', baseUrl: 'https://api.openai.com' }],
   ['callGemini', { model: 'gemini-1.5-flash', apiKey: 'k' }],
   ['callOpenRouter', { model: 'x/y', apiKey: 'k', baseUrl: 'https://openrouter.ai/api/v1' }],
-  ['callOllama', { model: 'qwen2.5:14b', baseUrl: 'http://localhost:11434' }]
+  ['callOllama', { model: 'qwen2.5:14b', baseUrl: 'http://localhost:11434' }],
+  ['callAgentRouter', { model: 'claude-3-5-sonnet', apiKey: 'k', baseUrl: 'https://agentrouter.org/v1' }]
 ];
 
 for (const [method, settings] of SIGNAL_CASES) {
-  test(`#10 ${method} forwards the abort signal to fetch`, async () => {
-    const calls = stubFetch();
+  test(`#10 ${method} cancels the request on the wire when the task signal aborts`, async (t) => {
+    const sent = spyFetch(t, hangUntilAborted);
     const controller = new AbortController();
 
-    await ApiClients[method]({ ...settings, providerConfigs: {} }, MESSAGES, 'sys',
+    const call = ApiClients[method]({ ...settings, providerConfigs: {} }, MESSAGES, 'sys',
       { signal: controller.signal });
+    await waitForRequests(sent);
+    assert.equal(sent[0].signal.aborted, false, 'the request is in flight');
 
-    assert.ok(calls.length > 0, 'fetch must have been called');
-    assert.equal(calls[0].init.signal, controller.signal,
+    controller.abort();
+
+    assert.equal(await settledWithin(call), 'rejected', `${method} kept waiting after the abort`);
+    assert.equal(sent[0].signal.aborted, true,
       `${method} dropped the signal, so Stop would not cancel the request`);
   });
 }
 
-test('#10 clients still work when no signal is supplied', async () => {
-  const calls = stubFetch();
+test('#10 clients still work when no signal is supplied', async (t) => {
+  const sent = spyFetch(t);
 
-  await ApiClients.callAnthropic(
+  const text = await ApiClients.callAnthropic(
     { model: 'claude-3-5-sonnet-20241022', apiKey: 'k', providerConfigs: {} },
     MESSAGES, 'sys');
 
-  assert.equal(calls[0].init.signal, null, 'absent signal must be null, not undefined-crash');
+  assert.equal(text, '{"action":"done"}', 'an absent signal must not crash the call');
+  assert.equal(sent.length, 1);
 });
 
 

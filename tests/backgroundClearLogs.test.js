@@ -7,7 +7,7 @@
  * so a cleared log pane silently refilled itself.
  *
  * This is its own file (rather than a test() inside a larger file) because background.js
- * imports Logger via the plain '../utils/logger.js' specifier, and node --test isolates by
+ * imports Logger via the plain '../src/shared/logger.ts' specifier, and node --test isolates by
  * file, not by individual test() - a fresh process here is what guarantees this test's Logger
  * import and background.js's internal Logger import resolve to the exact same module instance.
  */
@@ -49,7 +49,7 @@ global.self = { addEventListener: () => {} };
 global.chrome = makeBackgroundChromeMock();
 
 // Same specifier background.js itself uses - this IS the instance routeMessage will act on.
-const { Logger } = await import('../utils/logger.js');
+const { Logger } = await import('../src/shared/logger.ts');
 await import('../background/background.js');
 
 test('CLEAR_LOGS message calls through to Logger.clearLogs()', async () => {

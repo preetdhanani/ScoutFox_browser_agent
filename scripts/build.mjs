@@ -11,9 +11,11 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import zlib from 'node:zlib';
 import { performance } from 'node:perf_hooks';
-import { build, parseSync, version as viteVersion } from 'vite';
+import { build, createLogger, parseSync, version as viteVersion } from 'vite';
 import { passes, ROOT, OUT_DIR } from '../vite.config.mjs';
 
 const DIST = path.join(ROOT, OUT_DIR);
@@ -226,6 +228,75 @@ function checkExecuteScriptFuncs({ manifest }) {
   return { detail: `${checked} func checked`, problems };
 }
 
+/** The module that sets zod's flag (src/background/boot/zodJitless.ts), as rolldown names it in its //#region comments. */
+const ZOD_JITLESS_REGION = 'src/background/boot/zodJitless.ts';
+/** Rolldown's own modules (its runtime helpers) are written in the comment as a backslash and a zero: `//#region \0rolldown/runtime.js`. */
+const ROLLDOWN_VIRTUAL = '\\0rolldown/';
+
+/** Is this top-level statement `globalThis.__zod_globalConfig = { jitless: true }` (other keys may be there too)? */
+function isZodJitlessStatement(statement) {
+  const e = statement.type === 'ExpressionStatement' && statement.expression;
+  if (!e || e.type !== 'AssignmentExpression' || e.operator !== '=') return false;
+  const { left, right } = e;
+  if (left.type !== 'MemberExpression' || left.computed || left.property.name !== '__zod_globalConfig') return false;
+  if (left.object.type !== 'Identifier' || left.object.name !== 'globalThis') return false;
+  return right.type === 'ObjectExpression' && right.properties.some((p) => p.type === 'Property' && !p.computed
+    && (p.key.name ?? p.key.value) === 'jitless' && p.value.type === 'Literal' && p.value.value === true);
+}
+
+/**
+ * What is wrong with the way one built script sets zod's jitless flag, as a list of problems (empty
+ * means fine). zod reads `globalThis.__zod_globalConfig` once, when its core module runs, and a flag set
+ * later is ignored: then its `new Function` probe runs and the extension CSP reports a violation.
+ * So the statement must be at the top level of the file, and must come before any library code.
+ * Rolldown writes the modules of a bundle in the order they run, each after a `//#region <module>`
+ * comment, so "first" means: the only regions above the statement are rolldown's own runtime helpers
+ * and the zodJitless module itself. That reads comments, which is why it needs unminified output: with
+ * none found the check says so, and does not pass. A file that imports another file is refused too,
+ * because that file would run first and its position could not be judged from this one.
+ */
+export function zodJitlessProblems(file, code, program, staticImports = 0) {
+  const at = program.body.find(isZodJitlessStatement);
+  if (!at) return [`${file}: no top-level "globalThis.__zod_globalConfig = { jitless: true }". zod would probe new Function, which the extension CSP reports as a violation. Import src/background/boot/zodJitless.ts first in the entry`];
+  const regions = [...code.matchAll(/^\/\/#region (.+)$/gm)].map((m) => ({ name: m[1], at: m.index }));
+  if (regions.length === 0) return [`${file}: has no //#region comments, so this check cannot see the order of the modules (is minify on? change the check first)`];
+  const problems = [];
+  if (staticImports) problems.push(`${file}: has ${staticImports} import statement(s), a file that runs before this one could load zod first`);
+  for (const region of regions) {
+    if (region.at > at.start) break;
+    if (region.name.startsWith(ROLLDOWN_VIRTUAL) || region.name === ZOD_JITLESS_REGION) continue;
+    problems.push(`${file}: "${region.name}" runs before zodJitless sets the flag. zodJitless must be the first import of the entry`);
+  }
+  return problems;
+}
+
+/** The worker and every script of the side panel page must set the flag before anything else runs. */
+function checkZodJitless({ manifest }) {
+  const files = [];
+  if (manifest.background?.service_worker) files.push(manifest.background.service_worker.replace(/^\/+/, ''));
+  const page = manifest.side_panel?.default_path?.replace(/^\/+/, '');
+  if (page && fs.existsSync(distPath(page))) {
+    const html = fs.readFileSync(distPath(page), 'utf8');
+    for (const [, tag] of html.matchAll(/<script\b([^>]*)>/gi)) {
+      const src = /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
+      const ref = src && (src[1] ?? src[2]).split('#')[0].split('?')[0];
+      if (!ref || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(ref)) continue;
+      const target = ref.startsWith('/') ? path.join(DIST, ref) : path.resolve(DIST, path.dirname(page), ref);
+      files.push(path.relative(DIST, target).split(path.sep).join('/'));
+    }
+  }
+  const problems = [];
+  let checked = 0;
+  for (const file of files) {
+    if (!fs.existsSync(distPath(file))) continue; // the paths check reports it
+    const { code, program, module } = parseBuilt(file, 'module');
+    problems.push(...zodJitlessProblems(file, code, program, module.staticImports.length));
+    checked++;
+  }
+  if (checked === 0) problems.push('no worker or side panel script found, so the zod jitless check is blind');
+  return { detail: `${checked} script(s)`, problems };
+}
+
 /**
  * Chrome refuses to load an extension that has a file or folder whose name starts with "_"
  * (reserved). Two are reserved but valid, and only at the top of the extension folder: `_locales`
@@ -284,6 +355,7 @@ function verifyDist() {
     ['worker is one ES module', checkWorker],
     ['content scripts are classic', checkContentScripts],
     ['executeScript func is self-contained', checkExecuteScriptFuncs],
+    ['zod is jitless before any library code', checkZodJitless],
     ['no name starts with "_"', checkNames],
     ['html references resolve', checkHtml]
   ];
@@ -299,14 +371,31 @@ function verifyDist() {
 
 const kb = (bytes) => `${(bytes / 1024).toFixed(1)} KB`;
 
+/** The files that compress well and are sent as text. A PNG is already compressed. */
+const TEXT_FILE = /\.(?:js|css|html|json)$/;
+
 function printFiles() {
   const files = walk().filter((e) => !e.isDir).map((e) => ({ rel: e.rel, size: fs.statSync(distPath(e.rel)).size }));
   const shipped = files.filter((f) => !f.rel.endsWith('.map'));
   const maps = files.filter((f) => f.rel.endsWith('.map'));
   console.log(`\n${OUT_DIR}/ (${shipped.length} files + ${maps.length} sourcemaps)`);
   const width = Math.max(...shipped.map((f) => f.rel.length));
-  for (const f of shipped) console.log(`  ${f.rel.padEnd(width)}  ${kb(f.size).padStart(9)}`);
+  // The gzip column is what a store download or a zip holds. CI prints this table, so a jump in the worker's size shows in the log.
+  for (const f of shipped) {
+    const gzip = TEXT_FILE.test(f.rel) ? `${kb(zlib.gzipSync(fs.readFileSync(distPath(f.rel))).length)} gzip` : '';
+    console.log(`  ${f.rel.padEnd(width)}  ${kb(f.size).padStart(9)}  ${gzip}`.trimEnd());
+  }
   console.log(`  ${'sourcemaps (not zipped)'.padEnd(width)}  ${kb(maps.reduce((sum, f) => sum + f.size, 0)).padStart(9)}`);
+}
+
+/** Vite's logger, with its warnings also written to the pass's recorder, so that they fail the build like the bundler's own. */
+function recordingLogger(recorder) {
+  const logger = createLogger('warn', { allowClearScreen: false });
+  const warn = (message, options) => {
+    recorder.viteWarning(message);
+    logger.warn(message, options);
+  };
+  return { ...logger, warn, warnOnce: warn };
 }
 
 async function main() {
@@ -315,8 +404,11 @@ async function main() {
   if (!verifyOnly) {
     console.log(`ScoutFox build, vite ${viteVersion}`);
     for (const pass of passes()) {
-      await build(pass.config); // throws on any error, which exits 1 below
-      console.log(`  built ${pass.kind.padEnd(9)} ${pass.entry}`);
+      await build({ ...pass.config, customLogger: recordingLogger(pass.warnings) }); // throws on any error, which exits 1 below
+      const { allowed, unexpected } = pass.warnings;
+      // A warning is not thrown from the bundler's hook (see vite.config.mjs): it is recorded, and the build fails here.
+      if (unexpected.length) throw new Error(`a bundler warning fails the build (${pass.kind} ${pass.entry}), ${unexpected.length} of them:\n${unexpected.map((w) => `  - ${w}`).join('\n')}`);
+      console.log(`  built ${pass.kind.padEnd(9)} ${pass.entry}${allowed.length ? `  (${allowed.length} known warnings allowed, see vite.config.mjs)` : ''}`);
     }
   }
 
@@ -335,7 +427,10 @@ async function main() {
   console.log(`\n${verifyOnly ? 'checked' : 'built'} in ${(performance.now() / 1000).toFixed(2)} s`);
 }
 
-main().catch((err) => {
-  console.error(`\nbuild FAILED: ${err && err.stack ? err.stack : err}`);
-  process.exitCode = 1;
-});
+// Run only when started as a script: tests/buildSelfCheck.test.js imports the check functions and must not trigger a build.
+if (fs.realpathSync(process.argv[1] ?? '') === fs.realpathSync(fileURLToPath(import.meta.url))) {
+  main().catch((err) => {
+    console.error(`\nbuild FAILED: ${err && err.stack ? err.stack : err}`);
+    process.exitCode = 1;
+  });
+}
