@@ -23,8 +23,8 @@ jobs:
       # Let both Node versions finish, so a failure that only one of them has is visible.
       fail-fast: false
       matrix:
-        # package.json "engines" is node >=22.18, so nothing older is tested: the test helpers
-        # (.ts files) run through Node's type stripping, which is on by default only from 22.18.
+        # package.json "engines" is node >=22.18, so nothing older is tested: the .ts sources and tests
+        # run through Node's type stripping, which is on by default only from 22.18.
         node-version: [22.x, 24.x]
 
     steps:
@@ -42,6 +42,9 @@ jobs:
 
       - name: Validate JavaScript Syntax across Extension Files
         run: npm run check
+
+      - name: Typecheck the TypeScript sources (tsc --noEmit)
+        run: npm run typecheck
 
       - name: Execute Automated QA Test Suite
         run: npm test

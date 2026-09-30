@@ -15,7 +15,7 @@
  *            why a proxy is needed).
  *
  * The run fails (exit code 1, every problem printed) when a task does not finish, its answer is
- * wrong, the service worker logs an error, the fixture page a task runs on shows a console error
+ * wrong, the service worker logs an error or hits a CSP violation, the fixture page a task runs on shows a console error
  * or a page error, the page's content scripts are not there (the MAIN-world net recorder did not
  * run, or the isolated-world content script does not answer), or the side panel page loaded on
  * its own shows a console error, a page error or a CSP violation.
@@ -40,7 +40,7 @@
  *             skips the Ollama preflight and the proxy.
  *   --tamper=<name>   makes one deliberate break in the temp COPY (never in dist/) to prove that
  *             this run can fail: no-content-script, worker-error, broken-panel, empty-page-text,
- *             broken-net-recorder.
+ *             zod-not-jitless, broken-net-recorder.
  *
  * Needs Chromium (branded Chrome ignores --load-extension) at CHROMIUM_PATH, default
  * /Applications/Chromium.app/Contents/MacOS/Chromium. Real mode also needs Ollama at OLLAMA_URL,
@@ -189,8 +189,9 @@ function checkDist() {
 }
 
 // What the build reads. Update this list when sources move (it only feeds a warning).
-// Paths that do not exist are skipped, so the ones a later phase adds (src, shared) are listed already.
-const BUILD_INPUTS = ['background', 'content', 'sidepanel', 'utils', 'src', 'shared', 'public', 'vite.config.mjs', 'scripts/build.mjs', 'package.json', 'package-lock.json'];
+// Paths that do not exist are skipped, so the ones a later phase adds (shared) are listed already.
+// tsconfig.json is read by Vite's TypeScript transform (target, verbatimModuleSyntax), so it counts too.
+const BUILD_INPUTS = ['background', 'content', 'sidepanel', 'src', 'shared', 'public', 'vite.config.mjs', 'scripts/build.mjs', 'tsconfig.json', 'package.json', 'package-lock.json'];
 
 /** The smoke run tests dist/, so say so when dist/ is older than what it was built from. */
 function warnIfDistIsStale() {
@@ -246,13 +247,26 @@ function textOfArgs(list) {
 }
 
 /**
- * Collects the errors of one service worker: console errors and asserts, uncaught exceptions and
- * the browser's own error log entries. A raw CDP session is used because puppeteer's worker
- * object drops uncaught exceptions. Runtime.enable replays what the worker logged before we
- * attached, so an error at start-up (top level of sw.js) is caught too.
+ * Collects the errors of one service worker: console errors and asserts, uncaught exceptions,
+ * the browser's own error log entries and CSP violations. A raw CDP session is used because
+ * puppeteer's worker object drops uncaught exceptions. Runtime.enable replays what the worker
+ * logged before we attached, so an error at start-up (top level of sw.js) is caught too.
+ *
+ * A CSP violation in a worker is NOT a console message and not a log entry. Chromium reports it
+ * only as a `ContentSecurityPolicyIssue` of the Audits domain (and as a `securitypolicyviolation`
+ * event in the worker, which is too late to listen for at start-up). That is why zod's blocked
+ * `new Function('')` probe passed this harness before Audits was watched (--tamper=zod-not-jitless
+ * is the control). Audits.enable replays the issues collected so far, like Runtime.enable does.
  */
 async function watchWorker(target, errors) {
   const session = await target.createCDPSession();
+  session.on('Audits.issueAdded', (e) => {
+    const issue = e.issue || {};
+    const d = (issue.details && issue.details.contentSecurityPolicyIssueDetails) || {};
+    if (issue.code !== 'ContentSecurityPolicyIssue' || d.isReportOnly) return;
+    const at = d.sourceCodeLocation ? ` at ${d.sourceCodeLocation.url}:${d.sourceCodeLocation.lineNumber + 1}:${d.sourceCodeLocation.columnNumber + 1}` : '';
+    errors.push(`service worker CSP violation: ${d.violatedDirective} ${d.contentSecurityPolicyViolationType}${at}`);
+  });
   session.on('Runtime.consoleAPICalled', (e) => {
     if (e.type === 'error' || e.type === 'assert') errors.push(`service worker console.${e.type}: ${oneLine(textOfArgs(e.args), 300)}`);
   });
@@ -265,6 +279,8 @@ async function watchWorker(target, errors) {
   });
   await session.send('Runtime.enable');
   await session.send('Log.enable').catch(() => { /* not every target has the Log domain */ });
+  // Not optional: without it a CSP violation in the worker cannot be seen, so a failure to enable it is an error of its own.
+  await session.send('Audits.enable');
 }
 
 async function closeBrowser(browser) {
@@ -449,6 +465,32 @@ async function collectCsp(page, sink) {
 }
 
 /**
+ * The LLM timeout field is in ms and its min="5000" is not enforced when the panel reads it, so a
+ * value below that is saved as 5000. The field must then show 5000, the stored value, and not keep
+ * the number that was typed. The change is made the way a user makes it (type, then the change
+ * event that leaving the field fires), and the value that was in the field is put back after.
+ */
+async function checkTimeoutField(page) {
+  const result = { typed: 1000, shown: null, stored: null, problems: [] };
+  const original = await page.$eval('#llmTimeoutInput', (el) => el.value);
+  const set = async (value) => {
+    await page.$eval('#llmTimeoutInput', (el, v) => {
+      el.value = v;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, String(value));
+  };
+  await set(result.typed);
+  await page.waitForFunction(() => document.getElementById('llmTimeoutInput').value !== '1000', { timeout: 3000 }).catch(() => { /* judged below */ });
+  result.shown = await page.$eval('#llmTimeoutInput', (el) => el.value);
+  result.stored = await page.evaluate(() => chrome.storage.local.get('agent_settings').then((r) => r.agent_settings && r.agent_settings.llmTimeoutMs));
+  await set(original);
+  await page.waitForFunction((v) => document.getElementById('llmTimeoutInput').value === v, { timeout: 3000 }, original).catch(() => {});
+  if (result.stored !== 5000) result.problems.push(`typing ${result.typed} into "LLM Timeout (ms)" stored ${JSON.stringify(result.stored)}, expected 5000`);
+  if (result.shown !== '5000') result.problems.push(`after saving, the "LLM Timeout (ms)" field shows ${JSON.stringify(result.shown)} and not the stored value 5000`);
+  return result;
+}
+
+/**
  * The side panel gate. Chrome's side panel cannot be opened from a script (that needs a user
  * gesture), so sidepanel.html is opened as a page, like panelScreenshots does. It must load with
  * no console error, no page error and no CSP violation, its script must actually have run (the
@@ -473,11 +515,13 @@ async function checkSidePanel(ctx) {
     ).catch(() => { /* judged below, with what the page shows */ });
     gate.badge = await page.$eval('#currentModelBadge', (el) => el.textContent).catch(() => null);
     gate.modelStatus = await page.$eval('#modelFetchStatus', (el) => el.textContent).catch(() => null);
+    gate.timeoutField = await checkTimeoutField(page);
     await sleep(500); // late errors
     await collectCsp(page, ctx.panel);
   } finally {
     await page.close().catch(() => {});
   }
+  gate.problems.push(...gate.timeoutField.problems);
   if (gate.badge !== MODEL) gate.problems.push(`the panel script did not run: the model badge shows ${JSON.stringify(gate.badge)}, expected ${JSON.stringify(MODEL)}`);
   if (!/^(Loaded|Retrieved) \d+ model/.test(gate.modelStatus || '')) gate.problems.push(`the panel did not get the model list: status ${JSON.stringify(gate.modelStatus)}`);
   return gate;
@@ -824,7 +868,7 @@ async function main() {
   for (const r of reports) {
     console.log(`${r.task}: ${r.finished ? 'finished' : 'not finished'}, answer ${r.answerCorrect ? 'right' : 'wrong'}, ${r.steps.length} step(s), ${(r.wallMs / 1000).toFixed(1)} s, ${r.modelCalls} model call(s), ${fmtInt(r.promptTokens)} prompt + ${fmtInt(r.outputTokens)} output tokens`);
   }
-  console.log(`service worker console errors: ${ctx.workerErrors.length}`);
+  console.log(`service worker errors (console, exceptions, CSP violations): ${ctx.workerErrors.length}`);
   if (reports.length) {
     const probes = reports.flatMap((r) => r.probes);
     console.log(`fixture pages: ${probes.length} page check(s), ${probes.filter((p) => p.recorderActive).length} with the net recorder active, ${probes.filter((p) => p.contentScript).length} with the content script answering, ${reports.reduce((n, r) => n + r.pageErrors.length, 0)} console or page errors`);

@@ -14,6 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { textReply } from './helpers/llmWire.ts';
 
 const STORED = { agent_settings: {} };
 
@@ -30,9 +31,10 @@ global.chrome = {
 };
 
 const { AgentEngine } = await import('../background/agentEngine.js');
-const { ACTION_VERBS, buildActionSchema, buildPlanSchema, PLAN_MAX_STEPS } = await import('../background/actionSchema.js');
-const { DEFAULT_SETTINGS } = await import('../utils/storage.js');
-const { Logger } = await import('../utils/logger.js');
+const { ACTION_VERBS } = await import('../src/background/agent/actions.ts');
+const { buildActionSchema, buildPlanSchema, PLAN_MAX_STEPS } = await import('../src/background/agent/schemas.ts');
+const { DEFAULT_SETTINGS } = await import('../src/shared/storage.ts');
+const { Logger } = await import('../src/shared/logger.ts');
 
 // The legacy system prompt exactly as the pre-P0a engine built it for the default identity.
 // Cloud providers must keep getting this, byte for byte. If it ever changes on purpose,
@@ -60,22 +62,10 @@ const CLOUD = {
 };
 const OLLAMA = { provider: 'ollama', model: 'qwen3.5:9b', baseUrl: 'http://localhost:11434' };
 
-/** A response every client can read its text from (Anthropic, OpenAI, Gemini and Ollama shapes). */
-function llmResponse(text) {
-  const json = {
-    content: [{ type: 'text', text }],
-    choices: [{ message: { content: text } }],
-    candidates: [{ content: { parts: [{ text }] } }],
-    message: { role: 'assistant', content: text },
-    done: true,
-    done_reason: 'stop'
-  };
-  return { ok: true, status: 200, json: async () => json, text: async () => JSON.stringify(json), clone() { return this; } };
-}
-
 /**
  * Stub fetch with a queue of replies (text, or a function that throws or returns a Response).
- * Returns the captured requests.
+ * Returns the captured requests. A text reply becomes a real Response in the wire format of the endpoint
+ * that was called (the cloud providers are LangChain chat models now, and their SDKs need one).
  */
 function stubFetch(replies) {
   const calls = [];
@@ -83,7 +73,7 @@ function stubFetch(replies) {
   global.fetch = async (url, init) => {
     calls.push({ url: String(url), body: JSON.parse(init.body) });
     const next = queue.length > 1 ? queue.shift() : queue[0];
-    return typeof next === 'function' ? next() : llmResponse(next);
+    return typeof next === 'function' ? next() : textReply(String(url), next);
   };
   return calls;
 }
@@ -107,7 +97,7 @@ async function runTask(settings, planReply) {
 }
 
 function systemPromptOf(provider, body) {
-  if (provider === 'gemini') return body.system_instruction.parts[0].text;
+  if (provider === 'gemini') return body.systemInstruction.parts[0].text;
   if (provider === 'anthropic' || provider === 'agent_router') return body.system;
   return body.messages[0].role === 'system' ? body.messages[0].content : null;
 }
@@ -124,7 +114,7 @@ test('Ollama: the action request sends the schema, think:false and the compact p
   assert.equal(step.url, 'http://localhost:11434/api/chat');
   assert.deepEqual(step.body.format, buildActionSchema(), 'the action schema replaces format:"json"');
   assert.equal(step.body.think, false);
-  assert.equal(step.body.stream, false);
+  assert.equal(step.body.stream, true, 'ChatOllama always streams; the client joins the chunks');
   assert.equal(step.body.options.num_ctx, DEFAULT_SETTINGS.ollamaNumCtx);
 
   const system = step.body.messages[0];
@@ -250,7 +240,7 @@ test('the Ollama plan fallback is used only on real failure', async () => {
     'steps with no goal text': ['{"steps":[{"source":"idealo.de","goal":"  "}]}'],
     'a reply that is not JSON': ['I think you should look at the price.'],
     'an object without steps': ['{"plan":["Read the price"]}'],
-    'an HTTP error': [() => ({ ok: false, status: 500, text: async () => 'boom', clone() { return this; } })],
+    'an HTTP error': [() => new Response('boom', { status: 500 })],
     'a network failure': [() => { throw new Error('fetch failed ECONNREFUSED'); }]
   };
   for (const [why, replies] of Object.entries(failures)) {

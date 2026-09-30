@@ -7,7 +7,9 @@
  *
  * It starts the mock on a free port and talks to it over HTTP, the way the extension does:
  *   - the protocol: CORS preflight, /api/version, /api/tags, HTTP 400 for a request that is not
- *     valid JSON (and for other malformed ones), 501 for a call it has no script for, 404;
+ *     valid JSON (and for other malformed ones), 501 for a call it has no script for, 404, and the
+ *     two reply forms of /api/chat: NDJSON in pieces for a streaming request (what ChatOllama sends)
+ *     and one JSON object for stream:false;
  *   - the scripted runs: for every smoke task it feeds the mock the step messages the ENGINE
  *     builds (AgentEngine.buildStepMessage) from the committed fixture snapshots, follows the
  *     reply (a click moves to the next page), and judges the result with the same `check` as the
@@ -20,8 +22,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { validate } from '../../helpers/miniJsonSchema.js';
-import { buildActionSchema, buildPlanSchema } from '../../../background/actionSchema.js';
+import { buildActionSchema, buildPlanSchema, validateAgainst } from '../../../src/background/agent/schemas.ts';
 import { AgentEngine } from '../../../background/agentEngine.js';
 import { TASKS } from './tasks.mjs';
 import { MOCK_FAIL_PREFIX, parseStepMessage, startMockOllama } from './mockOllama.mjs';
@@ -71,8 +72,17 @@ async function call(base, method, pathname, body, raw = false) {
   });
   const text = await res.text();
   let json = null;
-  try { json = JSON.parse(text); } catch { /* not JSON */ }
-  return { status: res.status, headers: res.headers, text, json };
+  try { json = JSON.parse(text); } catch { /* not one JSON value: NDJSON, or not JSON */ }
+  // A streamed reply is one JSON object per line.
+  let lines = null;
+  try { lines = text.split('\n').filter(Boolean).map((line) => JSON.parse(line)); } catch { /* not NDJSON */ }
+  return { status: res.status, headers: res.headers, text, json, lines };
+}
+
+/** The reply text of a /api/chat answer in either form: the pieces joined, or the one message. */
+function contentOf(res) {
+  const objects = res.lines || [];
+  return objects.map((line) => (line.message && typeof line.message.content === 'string' ? line.message.content : '')).join('');
 }
 
 /** One task on the fixture snapshots, the way the engine would run it. */
@@ -87,17 +97,18 @@ async function simulate(base, taskName, blind) {
     const stepMessage = AgentEngine.prototype.buildStepMessage.call(
       { planSteps: [{ text: 'a step', status: 'in_progress' }], stepCount: step, currentTask: task.prompt }, snapshot, 10
     );
+    // stream:true is what the extension sends (ChatOllama always streams).
     const res = await call(base, 'POST', '/api/chat', {
       model: 'mock-agent',
-      stream: false,
+      stream: true,
       think: false,
       format: ACTION_SCHEMA,
       messages: [{ role: 'system', content: COMPACT_PROMPT }, ...messages, { role: 'user', content: stepMessage }]
     });
     if (res.status !== 200) return { answer: null, steps, problems: [`HTTP ${res.status}: ${res.text.slice(0, 200)}`] };
-    const content = res.json.message.content;
+    const content = contentOf(res);
     const action = JSON.parse(content);
-    problems.push(...validate(ACTION_SCHEMA, action).map((p) => `step ${step}: ${p}`));
+    problems.push(...validateAgainst(ACTION_SCHEMA, action).errors.map((p) => `step ${step}: ${p}`));
     steps.push({ step, action });
     if (action.action === 'finish') return { answer: action.answer, steps, problems };
     messages.push({ role: 'assistant', content }, { role: 'user', content: 'Action Executed Successfully: ok' });
@@ -139,7 +150,7 @@ export async function runMockSelfTest() {
       ['no model', { messages: [{ role: 'user', content: 'x' }], stream: false }, false],
       ['no messages', { model: 'm', stream: false }, false],
       ['a message without string content', { model: 'm', stream: false, messages: [{ role: 'user' }] }, false],
-      ['no stream:false', { model: 'm', messages: [{ role: 'user', content: 'x' }] }, false]
+      ['a streaming request without messages', { model: 'm', stream: true }, false]
     ];
     for (const [what, body, raw] of malformed) {
       const res = await call(base, 'POST', '/api/chat', body, raw);
@@ -157,15 +168,35 @@ export async function runMockSelfTest() {
     });
     check('a reply that does not fit the request schema is an HTTP 500, never sent', misfit.status === 500 && /does not fit/.test(misfit.json?.error || ''), `${misfit.status} ${misfit.text}`);
 
-    // --- the reply shape and the recorded calls ----------------------------------------------
-    const shaped = await call(base, 'POST', '/api/chat', {
-      model: 'mock-agent', stream: false, think: false, format: ACTION_SCHEMA,
-      messages: [{ role: 'system', content: COMPACT_PROMPT }, { role: 'user', content: stepMessage }]
+    // --- the reply shapes and the recorded calls ---------------------------------------------
+    const askBody = (extra) => ({
+      model: 'mock-agent', think: false, format: ACTION_SCHEMA,
+      messages: [{ role: 'system', content: COMPACT_PROMPT }, { role: 'user', content: stepMessage }], ...extra
     });
+
+    // What ChatOllama asks for: a stream, in pieces, ended by a line with done:true and the counts.
+    const streamed = await call(base, 'POST', '/api/chat', askBody({ stream: true }));
+    const pieces = (streamed.lines || []).filter((line) => line.done === false);
+    const final = (streamed.lines || []).at(-1) || {};
+    check('a streaming request gets NDJSON: pieces with done:false, then one line with done:true, the counts and done_reason',
+      streamed.status === 200 && /ndjson/.test(streamed.headers.get('content-type') || '') && pieces.length >= 2
+      && pieces.every((line) => line.model === 'mock-agent' && line.message?.role === 'assistant' && typeof line.message.content === 'string')
+      && final.done === true && final.done_reason === 'stop' && final.prompt_eval_count > 0 && final.eval_count > 0 && final.model === 'mock-agent'
+      && final.message?.content === '', `${streamed.status} ${streamed.text.slice(0, 300)}`);
+    check('the pieces join to one reply that is a valid action', (() => {
+      try { return validateAgainst(ACTION_SCHEMA, JSON.parse(contentOf(streamed))).ok; } catch { return false; }
+    })(), contentOf(streamed));
+
+    const absent = await call(base, 'POST', '/api/chat', askBody({}));
+    check('a request without stream is streamed too, as Ollama does', absent.status === 200 && absent.json === null && (absent.lines || []).length >= 3, absent.text.slice(0, 200));
+
+    const shaped = await call(base, 'POST', '/api/chat', askBody({ stream: false }));
     const body = shaped.json || {};
-    check('/api/chat reply has the fields the extension reads', shaped.status === 200 && body.model === 'mock-agent'
-      && typeof body.created_at === 'string' && body.message?.role === 'assistant' && typeof body.message?.content === 'string'
+    check('stream:false gets one JSON object with the fields the old client read', shaped.status === 200 && /application\/json/.test(shaped.headers.get('content-type') || '')
+      && body.model === 'mock-agent' && typeof body.created_at === 'string' && body.message?.role === 'assistant' && typeof body.message?.content === 'string'
       && body.done === true && body.done_reason === 'stop' && body.prompt_eval_count > 0 && body.eval_count > 0, shaped.text.slice(0, 200));
+    check('both forms carry the same reply text', body.message?.content === contentOf(streamed), `${body.message?.content} vs ${contentOf(streamed)}`);
+
     const last = mock.calls[mock.calls.length - 1];
     check('calls[] keeps the fields the report uses', last && last.n === mock.calls.length && last.status === 200
       && last.format === 'schema(oneOf x15)' && last.think === false && last.messages === 2 && last.systemChars === COMPACT_PROMPT.length
@@ -175,12 +206,12 @@ export async function runMockSelfTest() {
     // --- the plan -----------------------------------------------------------------------------
     for (const [name, task] of Object.entries(TASKS)) {
       const res = await call(base, 'POST', '/api/chat', {
-        model: 'mock-agent', stream: false, think: false, format: PLAN_SCHEMA,
+        model: 'mock-agent', stream: true, think: false, format: PLAN_SCHEMA,
         messages: [{ role: 'system', content: 'You are a web task planner.' }, { role: 'user', content: `Task: "${task.prompt}"\nMake a short plan for this web browsing task.` }]
       });
       let plan = null;
-      try { plan = JSON.parse(res.json.message.content); } catch { /* checked below */ }
-      const problems = plan ? validate(PLAN_SCHEMA, plan) : ['not JSON'];
+      try { plan = JSON.parse(contentOf(res)); } catch { /* checked below */ }
+      const problems = plan ? validateAgainst(PLAN_SCHEMA, plan).errors : ['not JSON'];
       check(`plan for ${name}: valid, 2 or more steps with a goal`, res.status === 200 && problems.length === 0
         && plan.steps.length >= 2 && plan.steps.every((s) => s.goal.trim()), `${res.status} ${problems.join('; ')}`);
     }

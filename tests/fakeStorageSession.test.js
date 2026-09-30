@@ -337,6 +337,19 @@ test('getKeys: all keys, sorted, in both call styles', async () => {
   assert.deepEqual(viaCallback, ['alpha', 'sf:lg:ix:7', 'zed']);
 });
 
+test('getKeys takes no arguments but a callback: a key prefix or any other argument is an invalid invocation, like Chrome', async () => {
+  const conn = createFakeStorage().connect();
+  await conn.session.set({ a: 1, 'sf:lg:cp:1': 2 });
+  assert.throws(() => conn.session.getKeys('sf:lg:'), /Error in invocation of storage\.session\.getKeys: No matching signature\./);
+  assert.throws(() => conn.session.getKeys(['a']), /No matching signature/);
+  assert.throws(() => conn.session.getKeys(null), /No matching signature/);
+  assert.throws(() => conn.local.getKeys({}, () => {}), /No matching signature/, 'a callback does not make an extra argument fine');
+  // What Chrome accepts: nothing, an explicit undefined for the optional callback, or the callback.
+  assert.deepEqual(await conn.session.getKeys(), ['a', 'sf:lg:cp:1']);
+  assert.deepEqual(await conn.session.getKeys(undefined), ['a', 'sf:lg:cp:1']);
+  assert.deepEqual(await new Promise((resolve) => conn.session.getKeys(resolve)), ['a', 'sf:lg:cp:1']);
+});
+
 test('setAccessLevel is recorded, and the area starts as TRUSTED_CONTEXTS', async () => {
   const store = createFakeStorage();
   const conn = store.connect();

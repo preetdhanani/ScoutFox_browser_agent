@@ -9,7 +9,7 @@
  * status='idle' and returned, and resume() then refuses because it requires status==='paused'.
  * The task was gone for good, with no way back in short of re-running it from scratch.
  *
- * Now a transient failure gets retried (harness/recovery.js), and only once every retry is
+ * Now a transient failure gets retried (agent/recovery.ts), and only once every retry is
  * spent does the run stop - by pausing, not going idle, so the existing Resume button (which
  * already preserves stepCount/history/planSteps) continues from the exact step that failed.
  *
@@ -42,7 +42,7 @@ global.chrome = {
 
 const { ApiClients } = await import('../background/apiClients.js');
 const { AgentEngine } = await import('../background/agentEngine.js');
-const { LLM_MAX_ATTEMPTS } = await import('../background/harness/recovery.js');
+const { LLM_MAX_ATTEMPTS } = await import('../src/background/agent/recovery.ts');
 
 function freshEngine() {
   const engine = new AgentEngine();
@@ -116,6 +116,34 @@ test('an LLM failure that outlasts every retry pauses the run instead of killing
   assert.match(err.content, /agent_router/, 'must name the provider that failed');
   assert.match(err.content, new RegExp(`${LLM_MAX_ATTEMPTS} attempts`), 'must say how many attempts were made');
   assert.equal(err.step, engine.stepCount, 'must name the exact step it paused at');
+});
+
+test('a provider failure that merely says "aborted" is retried and reported, not taken for the user\'s Stop', async () => {
+  // Ollama's runner crash. The engine used to read /abort/i in the error text, so this ended the step with no retry and no
+  // error in the history, with status still 'running' and isLoopActive false: the task hung, and there was no Resume.
+  const engine = freshEngine();
+  await engine.restorePromise;
+  engine.abortController = new AbortController();
+
+  let calls = 0;
+  const realCompletion = ApiClients.generateCompletion;
+  ApiClients.generateCompletion = async () => {
+    calls++;
+    throw new Error('Ollama API error (500): {"error":"llama runner process has terminated: signal: aborted (core dumped)"}');
+  };
+
+  try {
+    await engine.runLoopBody();
+  } finally {
+    ApiClients.generateCompletion = realCompletion;
+  }
+
+  assert.equal(calls, LLM_MAX_ATTEMPTS, 'a real failure is retried like any other');
+  assert.equal(engine.status, 'paused', 'and then pauses, resumable, instead of staying "running"');
+  assert.equal(engine.isLoopActive, false);
+  const err = engine.history.filter((h) => h.type === 'error').pop();
+  assert.ok(err, 'the user must see why it stopped');
+  assert.match(err.content, /llama runner process has terminated/);
 });
 
 test('resuming after an exhausted-retry pause continues the same run from the same step', async () => {

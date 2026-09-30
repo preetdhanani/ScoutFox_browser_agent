@@ -34,16 +34,18 @@
  *   - import('data:...') and other dynamic imports of a URL: scripts/build.mjs rejects any dynamic
  *     import in the worker and in content scripts, but not in the side panel page
  *
- * The allowlist is narrow but not exact. An entry matches the ORIGINAL file, a snippet that must
- * be in the ORIGINAL source line of the hit, and a maximum count. It does not know the enclosing
+ * The allowlist is narrow but not exact. An entry matches the ORIGINAL file, the kind of hit, a
+ * snippet that must be in the ORIGINAL source line of the hit, and a maximum count. It does not know the enclosing
  * function or context: a second call with the same snippet on another line of that file is
  * allowed until the count is used up, even if it sits in a different function and does something
  * else. Raise `max` only after reading the new call.
  *
  * The maps are read, never scanned. Build first (`npm run build`), because dist/ is what ships.
  * The build writes them with sourcemap 'hidden': the .map files are next to the built files, but
- * the built files have no sourceMappingURL line, so loadMap() falls back to `<file>.map`. A file
- * with no map is still scanned, but its hits point at the built file and no allowlist entry
+ * the built files have no sourceMappingURL line. loadMap() reads `<file>.map` and nothing else, and
+ * a built file that does end in a sourceMappingURL comment is an error: the build changed, and a
+ * comment (or a string that looks like one) must not choose which map the hits are attributed by.
+ * A file with no map is still scanned, but its hits point at the built file and no allowlist entry
  * matches them.
  */
 import fs from 'node:fs';
@@ -55,14 +57,23 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = path.join(ROOT, 'dist');
 
 /**
- * Hits that are on purpose. An entry is narrow: one original source file, plus a snippet that
- * must appear on the ORIGINAL source line of the hit (the line the map points at), plus the
- * number of times it may occur. A second copy of the snippet in that file, or the same snippet
- * in another file, is a new hit and fails. Add an entry only with a reason.
+ * Hits that are on purpose. An entry is narrow: one original source file, plus the kind of hit,
+ * plus a snippet that must appear on the ORIGINAL source line of the hit (the line the map points
+ * at), plus the number of times it may occur. A second copy of the snippet in that file, the same
+ * snippet in another file, or another kind of hit on that line is a new hit and fails. Add an
+ * entry only with a reason.
+ *
+ * Every entry but the first names a file under node_modules/. That is what keeps the list from
+ * hiding a hit in our own sources: a hit in src/, background/ or content/ has a different file, so
+ * no library entry can match it (tests/evalscan.test.js pins that). Never add an entry for our own
+ * code, fix the code. A library entry says why the call cannot run or why it is harmless, and names
+ * the version that was read. Versions are exact pins, so an entry goes stale loudly (its snippet or
+ * kind stops matching, and the hit fails) when an upgrade changes the line.
  */
-const ALLOWLIST = [
+export const ALLOWLIST = [
   {
     file: 'background/agentEngine.js',
+    kind: 'new Function(',
     snippet: 'new Function(`return (async () => { ${src} })()`)',
     max: 1,
     // The execute_js action. This code is the `func` of chrome.scripting.executeScript({ world: 'MAIN' }):
@@ -70,6 +81,46 @@ const ALLOWLIST = [
     // worker and the extension pages never call it, and the action reports "EVAL_BLOCKED" when
     // the page's CSP refuses it.
     why: 'execute_js runs this in the page (MAIN world), not in the worker'
+  },
+  {
+    // zod 4.6.5. `allowsEval` returns false on its first line when globalThis.__zod_globalConfig.jitless is true,
+    // before it gets to this call. src/background/boot/zodJitless.ts sets the flag as the first import of the
+    // worker, scripts/build.mjs checks that order in dist/, and the smoke test's zod-not-jitless control shows
+    // the CSP violation that this call causes when the flag is missing.
+    file: 'node_modules/zod/v4/core/util.js',
+    kind: 'new Function(',
+    snippet: 'new F("")',
+    max: 1,
+    why: "zod's allowsEval probe, skipped under jitless (zodJitless is the first import of the worker)"
+  },
+  {
+    // zod 4.6.5. Doc.compile is called from one place that is in the bundle: generateFastpass of an object schema,
+    // which runs only when `jit && allowsEval.value`. jit is `!globalConfig.jitless`, so it is false here.
+    // (compileFn in compile.js has the same alias, and it is not in the bundle because nothing calls it.)
+    file: 'node_modules/zod/v4/core/doc.js',
+    kind: 'Function (used as a value)',
+    snippet: 'const F = Function;',
+    max: 1,
+    why: "zod's Doc.compile, only reached by the object fast path, which is off under jitless"
+  },
+  {
+    // openai 7.25.0, lib/EventStream.mjs. It builds a set of trusted native error and intrinsic constructors.
+    // The native Function constructor is only asked for its source text, to compare that text with another.
+    file: 'node_modules/openai/lib/EventStream.mjs',
+    kind: 'Function (used as a value)',
+    snippet: 'functionToString.call(Function)',
+    max: 1,
+    why: 'the openai SDK reads the source text of the native Function constructor and compares it, it never calls it'
+  },
+  {
+    // openai 7.25.0, lib/EventStream.mjs. `Function` is one entry of a list of native constructors. The loop only reads
+    // each one's `prototype` descriptor and its source text (rememberTrustedIntrinsic), and the only Reflect.construct
+    // in the file takes a constructor whose source text equals the native Error constructor's, so never Function.
+    file: 'node_modules/openai/lib/EventStream.mjs',
+    kind: 'Function (used as a value)',
+    snippet: 'Function,',
+    max: 1,
+    why: 'the openai SDK lists Function among native constructors whose descriptors it reads, it never calls it'
   }
 ];
 
@@ -120,22 +171,22 @@ function decodeMappings(mappings) {
   return lines;
 }
 
-/** The map that belongs to a built file, or null. Follows the sourceMappingURL comment, else `<file>.map`. */
-function loadMap(file, code) {
-  const comment = [...code.matchAll(/^\s*\/\/[#@]\s*sourceMappingURL=(\S+)\s*$/gm)].pop();
-  let json = null;
-  let mapPath = null;
-  if (comment && comment[1].startsWith('data:')) {
-    const comma = comment[1].indexOf(',');
-    const payload = comment[1].slice(comma + 1);
-    json = comment[1].slice(0, comma).endsWith(';base64') ? Buffer.from(payload, 'base64').toString('utf8') : decodeURIComponent(payload);
-    mapPath = file;
-  } else {
-    mapPath = comment ? path.resolve(path.dirname(file), decodeURIComponent(comment[1])) : `${file}.map`;
-    if (fs.existsSync(mapPath)) json = fs.readFileSync(mapPath, 'utf8');
+/** A `//# sourceMappingURL=` comment on the last non-empty line of a built file: where a real one always is. */
+const TRAILING_MAP_COMMENT = /^[ \t]*\/\/[#@][ \t]*sourceMappingURL=/;
+
+/**
+ * The map that belongs to a built file, or null: always `<file>.map`. The map is never taken from a comment inside the
+ * code, because that could be a string of our own code that names a forged map. A built file that ends in such a
+ * comment is refused, since the build is meant to write hidden maps (vite.config.mjs).
+ */
+export function loadMap(file, code) {
+  const lastLine = code.trimEnd().split('\n').pop() ?? '';
+  if (TRAILING_MAP_COMMENT.test(lastLine)) {
+    throw new Error(`${displayPath(file)} ends in a sourceMappingURL comment, but the build writes hidden sourcemaps. Read its map from ${displayPath(file)}.map only, so fix the build (sourcemap: 'hidden') instead of following the comment.`);
   }
-  if (json === null) return null;
-  const map = JSON.parse(json);
+  const mapPath = `${file}.map`;
+  if (!fs.existsSync(mapPath)) return null;
+  const map = JSON.parse(fs.readFileSync(mapPath, 'utf8'));
   if (!map.mappings || !Array.isArray(map.sources)) throw new Error(`${path.relative(ROOT, mapPath)}: not a sourcemap with sources and mappings`);
   const dir = path.dirname(mapPath);
   return {
@@ -306,6 +357,21 @@ export function findHits(program) {
   return hits;
 }
 
+/**
+ * Matches every hit against the allowlist: { results: [{ hit, entry }], used }. `entry` is the allowlist
+ * entry that took the hit, or null when it is not allowed. An entry takes at most `max` hits, in the
+ * order given, so the caller sorts first. `hit` is { kind, file, text }, where file is the ORIGINAL file.
+ */
+export function classifyHits(hits, list = ALLOWLIST) {
+  const used = new Map(list.map((entry) => [entry, 0]));
+  const results = hits.map((hit) => {
+    const entry = list.find((e) => e.file === hit.file && e.kind === hit.kind && hit.text.includes(e.snippet) && used.get(e) < e.max) ?? null;
+    if (entry) used.set(entry, used.get(entry) + 1);
+    return { hit, entry };
+  });
+  return { results, used };
+}
+
 function jsFiles(dir) {
   const files = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -358,7 +424,14 @@ function main() {
       console.error(`evalscan: cannot parse ${shown}: ${errors[0].message}`);
       process.exit(1);
     }
-    const map = loadMap(file, code);
+    let map;
+    try {
+      map = loadMap(file, code);
+    } catch (error) {
+      // Fail closed: a map that cannot be trusted cannot vouch for a hit.
+      console.error(`evalscan: ${error.message}`);
+      process.exit(1);
+    }
     if (map) mapsUsed++;
     const starts = lineStarts(code);
     for (const { kind, node } of findHits(program)) {
@@ -378,14 +451,12 @@ function main() {
   }
   hits.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line || a.column - b.column));
 
-  const used = new Map(ALLOWLIST.map((entry) => [entry, 0]));
+  const { results, used } = classifyHits(hits);
   let allowed = 0;
   let denied = 0;
-  for (const hit of hits) {
-    const entry = ALLOWLIST.find((e) => e.file === hit.file && hit.text.includes(e.snippet) && used.get(e) < e.max);
+  for (const { hit, entry } of results) {
     const at = `${hit.file}:${hit.line}:${hit.column}`;
     if (entry) {
-      used.set(entry, used.get(entry) + 1);
       allowed++;
       console.log(`allowed      ${at}  ${hit.kind}  (${entry.why})`);
     } else {
@@ -394,7 +465,7 @@ function main() {
     }
   }
   for (const [entry, count] of used) {
-    if (count === 0) console.log(`note: allowlist entry for ${entry.file} matched nothing, remove it if the code is gone`);
+    if (count === 0) console.log(`note: allowlist entry for ${entry.file} (${entry.snippet}) matched nothing, remove it if the code is gone`);
   }
 
   console.log(`evalscan: ${files.length} files scanned (${mapsUsed} sourcemaps used), ${hits.length} hit(s): ${allowed} allowed, ${denied} not allowed`);

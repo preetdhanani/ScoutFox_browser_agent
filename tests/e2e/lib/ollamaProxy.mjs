@@ -9,9 +9,12 @@
  * It also records every /api/chat call (request size, format, think flag, and Ollama's own
  * prompt_eval_count and eval_count), which is how the smoke run counts model calls and tokens.
  * The record has the same shape as the one the offline mock keeps (see callRecord.mjs).
+ * The extension streams (ChatOllama always does). The proxy reads the whole NDJSON answer before it
+ * forwards it, and does not change it: the record needs the last line, and a reply of a few hundred
+ * bytes gains nothing from being passed on piece by piece.
  */
 import http from 'node:http';
-import { buildCallRecord } from './callRecord.mjs';
+import { buildCallRecord, collapseChatResponse } from './callRecord.mjs';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -54,9 +57,9 @@ export function startOllamaProxy({ host = '127.0.0.1', port = 11435, target = 'h
 
     if (req.url.startsWith('/api/chat')) {
       let sent = {};
-      let got = {};
       try { sent = JSON.parse(reqBody.toString('utf8')); } catch { /* not JSON */ }
-      try { got = JSON.parse(respBody.toString('utf8')); } catch { /* not JSON */ }
+      // ChatOllama streams, so the answer is NDJSON; the record wants it as one object.
+      const got = collapseChatResponse(respBody.toString('utf8'));
       const call = buildCallRecord({
         n: calls.length + 1,
         status: upstream.status,

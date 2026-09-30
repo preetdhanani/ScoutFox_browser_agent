@@ -168,7 +168,8 @@ What will change for you:
 * **Local models keep working**: small local Ollama models stay supported.
 * **New setup step (already built)**: the project now has a Vite build step.
   You run `npm run build` and load the `dist/` folder in Chrome, as in the Quick Setup above.
-  The code is still plain JavaScript today, and TypeScript comes in a later phase.
+  The shared core in `src/` is TypeScript now (phase P1).
+  The engine, the content scripts and the side panel are still plain JavaScript, and they move in later phases.
 
 See [PRD.md](PRD.md) for the details.
 

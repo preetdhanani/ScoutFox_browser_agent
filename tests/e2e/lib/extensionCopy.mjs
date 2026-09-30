@@ -47,6 +47,10 @@ export const TAMPERS = {
       fs.appendFileSync(file, '\n;(function () { if (window.domCompressor) window.domCompressor.extractPageText = function () { return \'\'; }; })();\n');
     }
   },
+  'zod-not-jitless': {
+    does: 'removes the statement that switches zod code generation off from background/sw.js, so zod probes new Function under the CSP (the CSP violation in the worker must fail the run)',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'globalThis.__zod_globalConfig = { jitless: true };', '')
+  },
   'broken-net-recorder': {
     does: 'makes content/net-recorder.js (the MAIN-world content script) throw when it loads (the fixture page checks must fail)',
     apply: (dir) => prepend(inside(dir, 'content/net-recorder.js'), 'throw new Error(\'recorder boom (tamper=broken-net-recorder)\');\n')
@@ -62,6 +66,14 @@ function inside(dir, rel) {
 
 function prepend(file, text) {
   fs.writeFileSync(file, text + fs.readFileSync(file, 'utf8'));
+}
+
+/** Replaces the one place `from` occurs. Anything else is an error, so a control never turns into a silent no-op after a rebuild changed the file. */
+function replaceOnce(file, from, to) {
+  const code = fs.readFileSync(file, 'utf8');
+  const count = code.split(from).length - 1;
+  if (count !== 1) throw new Error(`tamper: expected exactly one "${from}" in ${path.basename(file)}, found ${count}`);
+  fs.writeFileSync(file, code.replace(from, () => to));
 }
 
 /**

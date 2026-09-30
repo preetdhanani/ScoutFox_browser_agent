@@ -7,11 +7,16 @@
  */
 
 import { ApiClients } from './apiClients.js';
-import { Storage } from '../utils/storage.js';
-import { Logger } from '../utils/logger.js';
-import { callWithRetry, LLM_MAX_ATTEMPTS } from './harness/recovery.js';
-import { buildFinishEntry, buildMaxStepsEntry } from './harness/outcome.js';
-import { buildActionSchema, buildActionPromptLines, buildPlanSchema, PLAN_MAX_STEPS } from './actionSchema.js';
+import { Storage } from '../src/shared/storage.ts';
+import { Logger } from '../src/shared/logger.ts';
+import { callWithRetry, LLM_MAX_ATTEMPTS } from '../src/background/agent/recovery.ts';
+import { userAbortReason } from '../src/background/llm/deadline.ts';
+import { buildFinishEntry, buildMaxStepsEntry } from '../src/background/agent/outcome.ts';
+import { ACTION_VERBS, buildActionPromptLines } from '../src/background/agent/actions.ts';
+import { buildActionSchema, buildPlanSchema, PLAN_MAX_STEPS } from '../src/background/agent/schemas.ts';
+import { parsePartialOrTruncatedJson } from '../src/background/agent/repairJson.ts';
+import { parseModelReply, planTextsFromStepsObject } from '../src/background/agent/parse.ts';
+import { refsFromCount, sanitizeAction } from '../src/background/agent/sanitize.ts';
 
 // Sessions are multi-turn and would otherwise grow without bound, and the whole array is
 // serialised to chrome.storage on every state change.
@@ -19,20 +24,19 @@ const MAX_HISTORY = 400;
 // How many completed-turn recaps previousTurnsSummary() keeps for a follow-up prompt.
 const PREVIOUS_TURNS_LIMIT = 4;
 
-// Every verb the system can actually dispatch (sanitizeActionSchema's aliases already resolve
+// Every verb the system can actually dispatch (the aliases of shared/actions.json already resolve
 // onto these), whether or not the current system prompt happens to declare it. An unrecognised
 // verb used to sail straight through parsing, get pushed to history, and only fail one layer
 // past the page boundary at actionExecutor.js's default `throw new Error('Unknown action')` -
 // a wasted step with a generic failure instead of a correctable parse error naming the problem.
 //
-// Exported so a test can keep it equal to the verbs of the schema registry (actionSchema.js):
-// a verb the engine dispatches but Ollama's grammar cannot produce, or the other way round,
-// would fail silently.
-export const KNOWN_ACTIONS = new Set([
-  'click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward',
-  'read_page_text', 'execute_js', 'read_network_requests', 'browser_batch', 'wait',
-  'finish', 'ask_user', 'open_window'
-]);
+// It is the verb list of the registry (shared/actions.json), so a verb the engine dispatches but
+// Ollama's grammar cannot produce, or the other way round, cannot exist.
+export const KNOWN_ACTIONS = new Set(ACTION_VERBS);
+
+// The pure parser modules (src/background/agent/) report a rejection through this, so their
+// [GUARDRAIL_REJECTED] and [UNIVERSAL_GUARDRAIL] lines stay in the same log as before.
+const engineLog = (level, message) => Logger[level]('AgentEngine', message);
 
 /**
  * Safely read chrome.runtime.lastError. It MUST be read inside every chrome.* callback or
@@ -96,128 +100,6 @@ export function describeRestrictedUrl(url) {
     return `ScoutFox cannot read ${url.split(':')[0]}: pages. Switch to a normal website tab and start the task again.`;
   }
   return null;
-}
-
-/**
- * Robust Truncated & Partial JSON Repair Engine
- * Salvages unclosed strings, missing braces, or raw unescaped newlines in JSON action payloads.
- */
-function parsePartialOrTruncatedJson(str) {
-  if (!str || typeof str !== 'string') return null;
-  const trimmed = str.trim();
-
-  // 1. Standard JSON parse
-  try {
-    return JSON.parse(trimmed);
-  } catch (_) {}
-
-  // 2. Fix unescaped control characters & raw newlines inside JSON string values
-  try {
-    const escapedNewlines = trimmed.replace(/[\r\n]+/g, '\\n');
-    return JSON.parse(escapedNewlines);
-  } catch (_) {}
-
-  // 3. Balance unclosed string quotes and closing braces/brackets
-  try {
-    let repaired = trimmed.replace(/[\r\n]+/g, '\\n');
-    const quoteCount = (repaired.match(/(?<!\\)"/g) || []).length;
-    if (quoteCount % 2 !== 0) {
-      repaired += '"';
-    }
-
-    const openBraces = (repaired.match(/\{/g) || []).length;
-    const closeBraces = (repaired.match(/\}/g) || []).length;
-    for (let i = 0; i < openBraces - closeBraces; i++) {
-      repaired += '}';
-    }
-
-    const openBrackets = (repaired.match(/\[/g) || []).length;
-    const closeBrackets = (repaired.match(/\]/g) || []).length;
-    for (let i = 0; i < openBrackets - closeBrackets; i++) {
-      repaired += ']';
-    }
-
-    return JSON.parse(repaired);
-  } catch (_) {}
-
-  // 4. Regex extraction fallback for truncated execute_js / browser_batch payloads
-  try {
-    const actionMatch = trimmed.match(/"action"\s*:\s*"([^"]+)"/i);
-    if (actionMatch) {
-      const actName = actionMatch[1];
-      
-      if (actName === 'execute_js' || actName === 'eval_js') {
-        const codeMatch = trimmed.match(/"code"\s*:\s*"([\s\S]*)/i);
-        if (codeMatch) {
-          let codeStr = codeMatch[1].replace(/"\s*\}?\s*\]?\s*$/, '').trim();
-          codeStr = codeStr.replace(/\\"/g, '"').replace(/\\n/g, '\n');
-          return {
-            action: 'execute_js',
-            code: codeStr,
-            world: 'MAIN',
-            reason: 'Recovered from truncated model output'
-          };
-        }
-      }
-
-      if (actName === 'click' || actName === 'type') {
-        const idMatch = trimmed.match(/"element_id"\s*:\s*(\d+)/i) || trimmed.match(/"click"\s*:\s*(\d+)/i);
-        const textMatch = trimmed.match(/"text"\s*:\s*"([^"]+)"/i);
-        return {
-          action: actName,
-          element_id: idMatch ? parseInt(idMatch[1], 10) : undefined,
-          text: textMatch ? textMatch[1] : undefined,
-          reason: 'Recovered from truncated model output'
-        };
-      }
-    }
-  } catch (_) {}
-
-  return null;
-}
-
-/**
- * The reply is exactly one JSON object with a string "action" - what Ollama returns when the
- * action schema is sent as `format`. Parsed whole, so nested objects (browser_batch steps, a
- * read_network_requests filter) survive; the older stages below cut a bare reply at its first
- * closing brace. Anything else returns null and goes through the older stages unchanged.
- */
-function parseBareActionJson(text) {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
-  try {
-    const obj = JSON.parse(trimmed);
-    return obj && typeof obj === 'object' && !Array.isArray(obj) && typeof obj.action === 'string' ? obj : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-/**
- * Plan checklist texts from the Ollama plan reply, {steps: [{source, goal}]}.
- *
- * The grammar should already cap the array, but a server that fell back to format:"json"
- * does not, so the cap is applied here too. Plain string steps are accepted for the same
- * reason. Returns [] when nothing usable is there, and the caller falls back.
- */
-function planTextsFromStepsObject(resp) {
-  const parsed = parsePartialOrTruncatedJson(resp);
-  const steps = parsed && !Array.isArray(parsed) && Array.isArray(parsed.steps) ? parsed.steps : [];
-  return steps
-    .map((step) => {
-      if (typeof step === 'string') return step.trim();
-      if (!step || typeof step !== 'object') return '';
-      const goal = String(step.goal || '').trim();
-      const source = String(step.source || '').trim();
-      // The source is shown only when it adds something: "idealo.de: Find the price" helps,
-      // "current page: Read the price" or a goal that already names the site does not.
-      if (!goal || !source || /^(the )?(current|this) (page|tab|site)$/i.test(source) || goal.toLowerCase().includes(source.toLowerCase())) {
-        return goal;
-      }
-      return `${source}: ${goal}`;
-    })
-    .filter(Boolean)
-    .slice(0, PLAN_MAX_STEPS);
 }
 
 export class AgentEngine {
@@ -1008,7 +890,7 @@ export class AgentEngine {
         timeoutHandle = setTimeout(() => reject(new Error('execute_js timed out after 5000ms')), timeoutMs);
       });
 
-      // Same shape of bug fixed in harness/recovery.js for the LLM call: a Promise.race with no
+      // Same shape of bug fixed in agent/recovery.ts for the LLM call: a Promise.race with no
       // cancellation of the losing side leaves this timer pending for the full 5s regardless of
       // how fast resultPromise actually settled - and execute_js is called potentially every
       // step, so those pile up. Cleared unconditionally in `finally` below.
@@ -1221,7 +1103,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
   abortInFlight(reason) {
     if (this.abortController && !this.abortController.signal.aborted) {
       try {
-        this.abortController.abort();
+        // The reason is tagged { scoutfox: 'user' }: the llm layer tells a Pause or Stop from a
+        // provider timeout by that tag on the signal, never by the text of an error.
+        this.abortController.abort(userAbortReason(reason));
         Logger.info('AgentEngine', `[ABORT_IN_FLIGHT] Cancelled the in-flight request (${reason}).`);
       } catch (err) {
         Logger.warn('AgentEngine', '[ABORT_FAILED] Could not abort the in-flight request', err);
@@ -1235,9 +1119,14 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
    * Checks three independent signals because not every provider surfaces an abort the same
    * way: a genuine DOMException AbortError, the controller's own aborted flag, and the
    * engine status the user's action already set. Any one of them is enough.
+   *
+   * The text of the error is never read. A provider failure can say "aborted" in its own words
+   * (Ollama's "llama runner process has terminated: signal: aborted (core dumped)"), and taking
+   * that for a Stop ended the step without a retry and without an error, with status still
+   * 'running', so the task hung with no Resume. A real Pause or Stop is told by the three signals.
    */
   isUserAbort(err) {
-    if (err && (err.name === 'AbortError' || /abort/i.test(err.message || ''))) return true;
+    if (err && err.name === 'AbortError') return true;
     if (this.abortController && this.abortController.signal.aborted) return true;
     return this.status === 'paused' || this.status === 'stopped';
   }
@@ -1282,7 +1171,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
    * Answers a pending ask_user question and continues the run - the recourse that did not
    * exist before: notifyStateChange({question}) had zero consumers anywhere in the repo, so
    * an agent honest enough to ask for help had no way to actually hear back. Pushes the answer
-   * as a visible history entry (see harness/outcome.js's sibling module, formatMessagesForLLM
+   * as a visible history entry (see agent/outcome.ts's sibling module, formatMessagesForLLM
    * below feeds it back to the model) and resumes exactly like the plain Resume button does.
    */
   answerQuestion(answerText) {
@@ -1353,7 +1242,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     const MAX_PARSE_ERRORS = 3;
 
     // Constrained decoding for Ollama: its sampler can only produce one well-formed action
-    // (see actionSchema.js). Only this main action call gets it - verifyStep and other JSON
+    // (see agent/schemas.ts). Only this main action call gets it - verifyStep and other JSON
     // side calls keep plain format:"json" - and cloud providers get nothing new on the wire.
     const actionSchema = settings.provider === 'ollama' ? buildActionSchema() : null;
 
@@ -1514,7 +1403,11 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           step: this.stepCount,
           type: 'execution_result',
           success: false,
-          error: `${actionResult.error} Reply with a single JSON object containing an "action" key and nothing else.`
+          // A tool-call reply is an unusable reply like any other (it counts toward the circuit
+          // breaker below), and its error already says what to reply with, so it is not repeated.
+          error: actionResult.kind === 'tool_call_markup'
+            ? actionResult.error
+            : `${actionResult.error} Reply with a single JSON object containing an "action" key and nothing else.`
         });
 
         if (consecutiveParseErrors >= MAX_PARSE_ERRORS) {
@@ -1654,7 +1547,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       this.status = 'idle';
       this.isLoopActive = false;
       this.currentPhase = '';
-      // Pushed as an 'error', never 'finish' - see harness/outcome.js. This run did not
+      // Pushed as an 'error', never 'finish' - see agent/outcome.ts. This run did not
       // complete, and must never render or be recapped as though it did.
       this.history.push(buildMaxStepsEntry(maxSteps));
       this.notifyStateChange();
@@ -2092,188 +1985,30 @@ Choose your next action based on the goal: "${this.currentTask}"`;
   }
 
   /**
-   * Universal Multi-Stage Guardrail Action Parser
+   * Universal Multi-Stage Guardrail Action Parser (agent/parse.ts holds the stages).
+   *
+   * The engine has no policy modes yet, so every verb is allowed. Element ids are 1..maxElementCount,
+   * as the snapshot numbers them; a count of 0 leaves the ids unbounded. A rejected element_id keeps
+   * the wording this engine always used (the graph engine uses the design text).
    */
   parseResponse(text, maxElementCount = 999) {
-    if (!text || typeof text !== 'string') {
-      return { thought: '', error: 'Empty output from model.' };
-    }
-
-    let thought = '';
-
-    // 0. The whole reply is one JSON object with an "action" key - the shape Ollama's schema
-    // forces. Stages 1-6 are skipped for it, and run exactly as before for everything else.
-    let actionObj = parseBareActionJson(text);
-
-    if (!actionObj) {
-      // 1. Extract <think> or <thought> or <reasoning>
-      const thinkMatch = text.match(/<(?:think|thought|reasoning)>([\s\S]*?)<\/(?:think|thought|reasoning)>/i);
-      if (thinkMatch) {
-        thought = thinkMatch[1].trim();
-      }
-
-      let cleanText = text.replace(/<(?:think|thought|reasoning)>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
-
-      // 2. Extract JSON from ```json ... ``` or ``` ... ```
-      const codeBlockMatch = cleanText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-      if (codeBlockMatch) {
-        actionObj = parsePartialOrTruncatedJson(codeBlockMatch[1].trim());
-      }
-
-      // 3. Extract JSON object containing "action" key
-      if (!actionObj) {
-        const braceMatch = cleanText.match(/\{[\s\S]*?"action"\s*:[\s\S]*?\}/i);
-        if (braceMatch) {
-          actionObj = parsePartialOrTruncatedJson(braceMatch[0].trim());
-        }
-      }
-
-      // 4. Reverse SCAN all { ... } blocks in text for valid action JSON
-      if (!actionObj) {
-        const matches = cleanText.match(/\{[\s\S]*?\}/g) || [];
-        for (let i = matches.length - 1; i >= 0; i--) {
-          const parsed = parsePartialOrTruncatedJson(matches[i]);
-          if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.execute_js || parsed.browser_batch || parsed.read_network_requests)) {
-            actionObj = parsed;
-            break;
-          }
-        }
-      }
-
-      // 5. REGEX Intent Extractor for Dumber / Smaller LLMs outputting plain text
-      if (!actionObj) {
-        const clickMatch = cleanText.match(/(?:action:?\s*)?(?:click|press|tap)\s+(?:on\s+)?(?:element\s+)?\[?(\d+)\]?/i);
-        if (clickMatch) {
-          actionObj = { action: 'click', element_id: parseInt(clickMatch[1], 10), reason: 'Extracted via text intent' };
-        }
-
-        if (!actionObj) {
-          const typeMatch = cleanText.match(/(?:action:?\s*)?(?:type|enter|write|input)\s+["']([^"']+)["']\s+(?:in|into|on)\s+(?:element\s+)?\[?(\d+)\]?/i);
-          if (typeMatch) {
-            actionObj = { action: 'type', text: typeMatch[1], element_id: parseInt(typeMatch[2], 10), submit: true, reason: 'Extracted via text intent' };
-          }
-        }
-
-        if (!actionObj) {
-          const navMatch = cleanText.match(/(?:action:?\s*)?(?:navigate|go\s+to|open)\s+(https?:\/\/[^\s]+)/i);
-          if (navMatch) {
-            actionObj = { action: 'navigate', url: navMatch[1], reason: 'Extracted via text intent' };
-          }
-        }
-
-        if (!actionObj) {
-          const scrollMatch = cleanText.match(/(?:action:?\s*)?(?:scroll)\s+(down|up)/i);
-          if (scrollMatch) {
-            actionObj = { action: 'scroll', direction: scrollMatch[1].toLowerCase(), amount: 500, reason: 'Extracted via text intent' };
-          }
-        }
-
-        if (!actionObj && /read.*page.*text|extract.*text|get.*page.*content/i.test(cleanText)) {
-          actionObj = { action: 'read_page_text', reason: 'Extracted via text intent' };
-        }
-      }
-
-      // 6. Freeform Text Auto-Wrapping Guardrail (PROTECTED AGAINST TRUNCATED JSON PAYLOADS)
-      const looksLikeActionJson = /"action"\s*:|"execute_js"|"browser_batch"|```json/i.test(cleanText);
-
-      if (!actionObj && cleanText.length > 5 && !looksLikeActionJson) {
-        Logger.info('AgentEngine', '[UNIVERSAL_GUARDRAIL] Model provided direct text response. Auto-wrapping into finish action.');
-        actionObj = {
-          action: 'finish',
-          answer: cleanText,
-          reason: 'Direct text output from model',
-          // The model never actually emitted {"action":"finish"} - it just replied in prose and
-          // this guardrail inferred an ending so the run has somewhere to go. buildFinishEntry
-          // (harness/outcome.js) turns this into an `unconfirmed` flag so it is shown as inferred,
-          // not declared. See harness/outcome.js for why that distinction matters.
-          autoWrapped: true
-        };
-      }
-    }
-
-    if (!actionObj) {
-      return { thought, error: 'Model output contained a truncated or malformed action JSON. Retrying with simpler prompt.', raw: text };
-    }
-
-    // 7. Action Schema & Element ID Sanitizer
-    actionObj = this.sanitizeActionSchema(actionObj, maxElementCount);
-
-    if (actionObj.invalidAction) {
-      return {
-        thought,
-        error: `Unknown action "${actionObj.invalidAction}". Valid actions are: ${[...KNOWN_ACTIONS].join(', ')}.`
-      };
-    }
-
-    if (actionObj.invalidElementId) {
-      // A hallucinated or out-of-range element_id used to be silently clamped/coerced onto a
-      // DIFFERENT, real element - the agent then confidently acted on the wrong thing instead
-      // of visibly failing. Routing it through the same parse-error/retry path as malformed
-      // JSON (consecutiveParseErrors, corrective feedback, the 3-strike circuit breaker) gives
-      // the model a chance to look at the element list again instead of clicking blind.
-      return {
-        thought,
-        error: `Selected element_id ${actionObj.invalidElementId} does not exist on this page (valid range: 1-${maxElementCount}). Re-check the numbered element list and choose a real one.`
-      };
-    }
-
-    return { thought, action: actionObj, expectedOutcome: actionObj.expected_outcome || actionObj.expectedOutcome || null };
+    return parseModelReply(text, {
+      verbs: ACTION_VERBS,
+      refs: maxElementCount > 0 ? refsFromCount(maxElementCount) : undefined,
+      log: engineLog,
+      legacyElementIdError: true
+    });
   }
 
   /**
-   * Action Schema Normalizer & Element ID Bounds Validator
+   * Action Schema Normalizer & Element ID Validator (agent/sanitize.ts holds the rules).
    */
   sanitizeActionSchema(actionObj, maxElementCount = 999) {
-    const act = { ...actionObj };
-    
-    if (act.click !== undefined && !act.action) { act.action = 'click'; act.element_id = act.click; }
-    if (act.type !== undefined && !act.action) { act.action = 'type'; }
-    if (act.action === 'click_element' || act.action === 'press') act.action = 'click';
-    if (act.action === 'type_text' || act.action === 'input') act.action = 'type';
-    if (act.action === 'done' || act.action === 'complete' || act.action === 'finished') act.action = 'finish';
-    if (act.action === 'scroll_page') act.action = 'scroll';
-    if (act.action === 'extract_text' || act.action === 'read_text' || act.action === 'extract_page_text') act.action = 'read_page_text';
-    if (act.action === 'eval_js' || act.action === 'run_js' || act.action === 'javascript') act.action = 'execute_js';
-    if (act.action === 'read_network' || act.action === 'network_requests' || act.action === 'get_network') act.action = 'read_network_requests';
-    if (act.action === 'batch' || act.action === 'batch_actions') act.action = 'browser_batch';
-    if (act.action === 'new_window' || act.action === 'open_new_window' || act.action === 'create_window') act.action = 'open_window';
-
-    // After alias normalization, anything still not a real verb is a hallucination the executor
-    // would only catch one layer later (actionExecutor.js's default `throw new Error('Unknown
-    // action')`) after this action had already been pushed to history. invalidAction is read by
-    // parseResponse (the caller), which turns it into a correctable parse error instead.
-    if (!KNOWN_ACTIONS.has(act.action)) {
-      Logger.warn('AgentEngine', `[GUARDRAIL_REJECTED] Model requested an unrecognised action "${act.action}".`);
-      act.invalidAction = act.action;
-    }
-
-    if (act.element_id === undefined) {
-      if (act.element !== undefined) act.element_id = act.element;
-      else if (act.id !== undefined) act.element_id = act.id;
-      else if (act.elementId !== undefined) act.element_id = act.elementId;
-    }
-
-    // Parsed unconditionally, NOT only when the value already happens to be a number. Gating
-    // on `typeof === 'number'` let a string element_id through untouched, and page content is
-    // attacker-controlled input to the model, so a prompt-injected reply could put arbitrary
-    // markup in this field.
-    //
-    // A non-numeric or out-of-range id is REJECTED, not clamped/coerced. Clamping to
-    // maxElementCount or coercing to 1 used to silently redirect the action onto a different,
-    // REAL element the model never chose - a hallucinated click landed somewhere else on the
-    // page with no visible failure. invalidElementId is read by parseResponse (the caller),
-    // which turns it into a correctable parse error instead of returning this action at all.
-    if (act.element_id !== undefined) {
-      const parsed = parseInt(act.element_id, 10);
-      if (!Number.isFinite(parsed) || parsed < 1 || (maxElementCount > 0 && parsed > maxElementCount)) {
-        Logger.warn('AgentEngine', `[GUARDRAIL_REJECTED] Model selected an invalid element_id (${JSON.stringify(act.element_id)}, valid range 1-${maxElementCount}). Rejecting instead of guessing a different element.`);
-        act.invalidElementId = JSON.stringify(act.element_id);
-      } else {
-        act.element_id = parsed;
-      }
-    }
-
-    return act;
+    return sanitizeAction(actionObj, {
+      verbs: ACTION_VERBS,
+      refs: maxElementCount > 0 ? refsFromCount(maxElementCount) : undefined,
+      log: engineLog
+    });
   }
 }
 

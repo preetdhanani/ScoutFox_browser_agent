@@ -5,8 +5,11 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { parseSync } from 'vite';
-import { findHits } from '../scripts/evalscan.mjs';
+import { ALLOWLIST, classifyHits, findHits, loadMap } from '../scripts/evalscan.mjs';
 
 function kindsOf(code) {
   const { program, errors } = parseSync('case.js', code, { lang: 'js', sourceType: 'unambiguous' });
@@ -96,4 +99,105 @@ test('importing the scanner does not start a scan of dist/', () => {
   // Importing the module at the top of this file would already have exited the process (or
   // printed a scan) if main() ran on import, so reaching this line is the check.
   assert.equal(typeof findHits, 'function');
+});
+
+// ---- the allowlist ----------------------------------------------------------------------------
+
+/** A hit as evalscan builds it after the sourcemap lookup: the ORIGINAL file, the kind, and the trimmed source line. */
+const hitOf = (entry, patch = {}) => ({ kind: entry.kind, file: entry.file, text: entry.snippet, line: 1, column: 1, ...patch });
+
+// Files of ours, and a library that has no entry. A hit here must never be allowed, whatever it says.
+const NOT_ALLOWED_FILES = [
+  'src/background/llm/factory.ts',
+  'src/background/agent/parse.ts',
+  'src/shared/storage.ts',
+  'background/background.js',
+  'sidepanel/sidepanel.js',
+  'content/content.js',
+  'node_modules/some-other-library/index.js',
+  'node_modules/zod/v4/core/schemas.js'
+];
+
+test('every allowlist entry is narrow: a file, a kind, a snippet and a count', () => {
+  for (const entry of ALLOWLIST) {
+    assert.match(entry.file, /^[\w@./-]+\.(?:js|mjs|ts)$/, `file of ${JSON.stringify(entry.snippet)}`);
+    assert.ok(entry.kind && entry.snippet.length >= 8 && Number.isInteger(entry.max) && entry.max >= 1 && entry.why, `entry ${JSON.stringify(entry.snippet)} is incomplete`);
+  }
+});
+
+test('the only allowlist entry that is not a library is the in-page execute_js', () => {
+  const ours = ALLOWLIST.filter((entry) => !entry.file.startsWith('node_modules/'));
+  assert.deepEqual(ours.map((entry) => entry.file), ['background/agentEngine.js']);
+  assert.match(ours[0].snippet, /async \(\) => \{ \$\{src\} \}/);
+});
+
+test('the known hits are allowed, each as often as its max says and no more', () => {
+  for (const entry of ALLOWLIST) {
+    const hits = Array.from({ length: entry.max + 1 }, () => hitOf(entry));
+    const { results } = classifyHits(hits);
+    assert.deepEqual(results.map((r) => r.entry === entry), [...Array(entry.max).fill(true), false], entry.snippet);
+  }
+});
+
+test('no entry can hide a hit in our own sources, nor in a library it was not written for', () => {
+  for (const entry of ALLOWLIST) {
+    for (const file of NOT_ALLOWED_FILES.filter((f) => f !== entry.file)) {
+      const { results } = classifyHits([hitOf(entry, { file })]);
+      assert.equal(results[0].entry, null, `${entry.snippet} in ${file} was allowed`);
+    }
+  }
+});
+
+test('an entry does not take another kind of hit, or another line, in its own file', () => {
+  for (const entry of ALLOWLIST) {
+    const otherKind = ['eval(', 'new Function(', 'Function(', 'Function (used as a value)', 'setTimeout(string)'].find((kind) => kind !== entry.kind);
+    assert.equal(classifyHits([hitOf(entry, { kind: otherKind })]).results[0].entry, null, `${entry.snippet} with kind ${otherKind}`);
+    assert.equal(classifyHits([hitOf(entry, { text: 'return new Function(userText)()' })]).results[0].entry, null, `${entry.snippet} on an unrelated line`);
+  }
+});
+
+test('the zod probe entry is keyed by the zod source path, so another copy of zod is a new hit', () => {
+  const probe = ALLOWLIST.find((entry) => entry.snippet === 'new F("")');
+  assert.equal(probe.file, 'node_modules/zod/v4/core/util.js');
+  const nested = hitOf(probe, { file: 'node_modules/@langchain/core/node_modules/zod/v4/core/util.js' });
+  assert.equal(classifyHits([nested]).results[0].entry, null);
+});
+
+// ---- the sourcemap of a built file --------------------------------------------------------------
+
+/** A built file `sw.js` with its `sw.js.map` (line 0 comes from `src/real.js`) in a temporary directory. */
+function builtFile(t, code, { withMap = true } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalscan-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'sw.js');
+  fs.writeFileSync(file, code);
+  if (withMap) fs.writeFileSync(`${file}.map`, JSON.stringify({ version: 3, sources: ['src/real.js'], sourcesContent: ['new Function("real")'], mappings: 'AAAA' }));
+  return file;
+}
+
+/** A sourcemap as a data: URI comment that puts line 0 in a library file, where an allowlist entry would take it. */
+const FORGED_MAP_COMMENT = `//# sourceMappingURL=data:application/json;base64,${Buffer.from(JSON.stringify({
+  version: 3, sources: ['node_modules/zod/v4/core/util.js'], sourcesContent: ['new F("")'], mappings: 'AAAA'
+})).toString('base64')}`;
+
+test('the map of a built file is its own .map, and null when there is none', (t) => {
+  const map = loadMap(builtFile(t, 'const f = 1;\n'), 'const f = 1;\n');
+  assert.ok(map.sources[0].endsWith(path.join('src', 'real.js')));
+  assert.equal(loadMap(builtFile(t, 'const f = 1;\n', { withMap: false }), 'const f = 1;\n'), null);
+});
+
+test('a sourceMappingURL line inside a string of the code does not choose the map (a forged data: URI must not win over <file>.map)', (t) => {
+  // The line sits in the middle of a template literal, as the string of a file of ours could: it is not a comment at all.
+  const code = `const f = new Function("return 1");\nconst s = \`\n${FORGED_MAP_COMMENT}\n\`;\n`;
+  const { errors } = parseSync('case.js', code, { lang: 'js', sourceType: 'unambiguous' });
+  assert.deepEqual(errors, [], 'the code must parse');
+  const map = loadMap(builtFile(t, code), code);
+  assert.ok(map.sources[0].endsWith(path.join('src', 'real.js')), `the forged map was followed: ${map.sources[0]}`);
+});
+
+test('a built file that ends in a sourceMappingURL comment is refused: the build writes hidden maps', (t) => {
+  for (const comment of ['//# sourceMappingURL=sw.js.map', '//@ sourceMappingURL=sw.js.map', FORGED_MAP_COMMENT]) {
+    const code = `const f = 1;\n${comment}\n`;
+    assert.throws(() => loadMap(builtFile(t, code), code), /ends in a sourceMappingURL comment.*hidden sourcemaps/s, comment.slice(0, 40));
+  }
 });

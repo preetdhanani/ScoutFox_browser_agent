@@ -607,7 +607,11 @@ function makeView(area: StoreArea, host: Host, root: FakeEvent<[StorageChanges, 
     getBytesInUse: call('getBytesInUse', (keys?: unknown) =>
       area.bytesInUse(keys === undefined || keys === null ? null : stringList('getBytesInUse', keys))
     ),
-    getKeys: call('getKeys', () => area.keys()),
+    // Chrome's getKeys() has no parameter but the optional callback: getKeys('sf:lg:') is "No matching signature".
+    getKeys: call('getKeys', (...extra: unknown[]) => {
+      if (extra.some((arg) => arg !== undefined)) throw invalidInvocation(`${name}.getKeys`, 'No matching signature.');
+      return area.keys();
+    }),
     setAccessLevel: call('setAccessLevel', (options: unknown) => {
       const level = isPlainObject(options) ? options.accessLevel : undefined;
       if (level !== 'TRUSTED_CONTEXTS' && level !== 'TRUSTED_AND_UNTRUSTED_CONTEXTS') {

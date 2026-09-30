@@ -1,11 +1,13 @@
 /**
- * Opt-in eval of what ScoutFox sends to Ollama (phase P0a). Not part of `npm test`: it needs a
- * local Ollama with the models pulled, and a full run takes about 15-25 minutes.
+ * Opt-in eval of what ScoutFox sends to Ollama (phase P0a, moved onto ChatOllama in P2). Not part of `npm test`:
+ * it needs a local Ollama with the models pulled, and a full run takes about 15-25 minutes.
  *
  * Everything under test is imported from the extension code, so the eval cannot drift from
- * it: the schemas (background/actionSchema.js), both system prompts, the step message and the
- * parser (background/agentEngine.js), the plan call (generatePlan) and the real Ollama request
- * builder (ApiClients.callOllama). The pages are what the real content script saw on the local
+ * it: the schemas (src/background/agent/schemas.ts, from shared/actions.json), both system prompts, the step message and the
+ * parser (background/agentEngine.js), the plan call (generatePlan) and the real Ollama client
+ * (ApiClients.callOllama, which is src/background/llm/ollama.ts: a new ChatOllama per call with the
+ * schema as `format`, think:false, num_ctx and num_predict, and the same think and schema fallbacks the
+ * extension has). The requests are streamed, as they are in the extension. The pages are what the real content script saw on the local
  * fixture site (tests/fixtures/snapshots, written by `node tests/e2e/smoke.mjs --dump-snapshots`).
  *
  * Sections:
@@ -32,6 +34,7 @@ import Ajv from 'ajv';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { collapseChatResponse } from '../e2e/lib/callRecord.mjs';
 
 // The engine logs every call at info level; the eval prints its own table instead.
 const quiet = () => {};
@@ -41,9 +44,9 @@ console.error = quiet;
 
 const { AgentEngine } = await import('../../background/agentEngine.js');
 const { ApiClients } = await import('../../background/apiClients.js');
-const { DEFAULT_SETTINGS } = await import('../../utils/storage.js');
-const { Logger } = await import('../../utils/logger.js');
-const { buildActionSchema, buildPlanSchema, PLAN_MAX_STEPS } = await import('../../background/actionSchema.js');
+const { DEFAULT_SETTINGS } = await import('../../src/shared/storage.ts');
+const { Logger } = await import('../../src/shared/logger.ts');
+const { buildActionSchema, buildPlanSchema, PLAN_MAX_STEPS } = await import('../../src/background/agent/schemas.ts');
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SNAPSHOTS = path.resolve(HERE, '..', 'fixtures', 'snapshots');
@@ -67,17 +70,22 @@ function isValid(schema, value) {
 }
 
 // Captures the exchange of the last real fetch, so the eval reads Ollama's own token counts
-// while the request itself is still built by ApiClients.callOllama.
+// while the request itself is still built by ApiClients.callOllama. The answer is a stream (NDJSON), so it is
+// read from a clone while the client reads the original, and lastExchange.json is the whole answer as one object
+// (the last line with the counts, and the text of all the pieces joined). settledExchange() waits for it.
 const realFetch = globalThis.fetch;
 let lastExchange = null;
+let exchangeRead = Promise.resolve();
 globalThis.fetch = async (url, init) => {
   const res = await realFetch(url, init);
-  const text = await res.clone().text();
-  let json = null;
-  try { json = JSON.parse(text); } catch { /* not JSON */ }
-  lastExchange = { request: init && init.body ? JSON.parse(init.body) : null, status: res.status, json };
+  const request = init && init.body ? JSON.parse(init.body) : null;
+  exchangeRead = res.clone().text().then((text) => { lastExchange = { request, status: res.status, json: collapseChatResponse(text) }; }, () => {});
   return res;
 };
+async function settledExchange() {
+  await exchangeRead;
+  return lastExchange;
+}
 
 function loadSnapshot(name) {
   return JSON.parse(fs.readFileSync(path.join(SNAPSHOTS, `${name}.json`), 'utf8'));
@@ -121,7 +129,7 @@ function stepMessages(goal, snapshot) {
   return engine.formatMessagesForLLM(engine.buildStepMessage(snapshot, DEFAULT_SETTINGS.maxSteps));
 }
 
-/** One real call through ApiClients.callOllama. */
+/** One real call through ApiClients.callOllama (ChatOllama). */
 async function callModel(model, system, messages, options) {
   lastExchange = null;
   const startedAt = Date.now();
@@ -132,14 +140,16 @@ async function callModel(model, system, messages, options) {
   } catch (err) {
     error = err.message;
   }
-  const json = lastExchange && lastExchange.json;
+  const ms = Date.now() - startedAt;
+  const exchange = await settledExchange();
+  const json = exchange && exchange.json;
   return {
     content,
     error,
-    ms: Date.now() - startedAt,
+    ms,
     promptTokens: json ? json.prompt_eval_count ?? null : null,
     outputTokens: json ? json.eval_count ?? null : null,
-    format: lastExchange && lastExchange.request ? (typeof lastExchange.request.format === 'string' ? lastExchange.request.format : 'schema') : null
+    format: exchange && exchange.request ? (typeof exchange.request.format === 'string' ? exchange.request.format : 'schema') : null
   };
 }
 
@@ -234,7 +244,8 @@ async function runPlans(model) {
     const startedAt = Date.now();
     await engine.generatePlan(task, settingsFor(model));
     const ms = Date.now() - startedAt;
-    const json = lastExchange && lastExchange.json;
+    const exchange = await settledExchange();
+    const json = exchange && exchange.json;
     const content = json && json.message ? json.message.content : '';
     const fellBack = Logger.getLogsHistory().some((e) => FALLBACK_MARK.test(e.message));
     const texts = engine.planSteps.map((s) => s.text.toLowerCase());

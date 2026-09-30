@@ -4,7 +4,9 @@
  * Employs persistent per-provider API key storage, automatic model fetching, instant key auto-saving, and a smart searchable combobox component.
  */
 
-import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../utils/storage.js';
+// Must stay the first import: it sets zod's jitless flag before any module that bundles zod runs (see the file).
+import '../src/background/boot/zodJitless.ts';
+import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../src/shared/storage.ts';
 
 let backgroundPort = null;
 let currentSettings = { ...DEFAULT_SETTINGS };
@@ -170,7 +172,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // not read directly from storage here. That used to be a second, racing path: the background
   // worker's own restore of persisted logs is async, so a resync landing before it finished got
   // back an empty array and this direct read's result was overwritten with it. The background
-  // now awaits its own restore before answering GET_AGENT_STATE (see logger.js/background.js),
+  // now awaits its own restore before answering GET_AGENT_STATE (see logger.ts/background.js),
   // so it is the single, complete, authoritative source and this duplicate is no longer needed.
   await loadSettings();
   initTabs();
@@ -431,11 +433,16 @@ async function autoSaveCurrentForm() {
     maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || DEFAULT_SETTINGS.maxSteps,
     actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || DEFAULT_SETTINGS.actionDelayMs,
     ollamaNumPredict: parseInt(document.getElementById('ollamaNumPredictInput').value, 10) || DEFAULT_SETTINGS.ollamaNumPredict,
-    llmTimeoutMs: parseInt(document.getElementById('llmTimeoutInput').value, 10) || DEFAULT_SETTINGS.llmTimeoutMs,
+    // The input's min="5000" is not enforced on read, and the field is in ms - a user typing "1"
+    // or "1000" (thinking seconds) would otherwise make every LLM call abort almost immediately.
+    llmTimeoutMs: Math.max(5000, parseInt(document.getElementById('llmTimeoutInput').value, 10) || DEFAULT_SETTINGS.llmTimeoutMs),
     showElementBadges: document.getElementById('badgesToggle').checked
   };
 
   currentSettings = await Storage.saveSettings(newSettings);
+  // Show the value that was stored: one below the minimum was raised above, and the field must not
+  // keep showing the raw number that was typed.
+  document.getElementById('llmTimeoutInput').value = currentSettings.llmTimeoutMs;
   updateModelBadge(newSettings.model);
 }
 
