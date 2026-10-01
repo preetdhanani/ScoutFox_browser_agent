@@ -36,6 +36,8 @@ import {
   resolveGateDecision,
   withoutAcknowledgedGaps
 } from '../src/background/agent/planEvidence.ts';
+import { inputDispatcher } from '../src/background/browser/input.ts';
+import { cdp } from '../src/background/browser/cdp.ts';
 
 // Sessions are multi-turn and would otherwise grow without bound, and the whole array is
 // serialised to chrome.storage on every state change.
@@ -160,6 +162,7 @@ export class AgentEngine {
     this.stateVersion = 0;
     this.recentActionSignatures = [];
     this.currentPlanIndex = 0;
+    this.currentDocId = null;
     this.networkBuffers = new Map(); // tabId -> Array of Network Requests (capped at 100)
 
     // What the ENGINE read from pages (see agent/evidence.ts), never what the model said. It is kept for
@@ -1406,10 +1409,13 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
   pause() {
     this.dirty = true;
     if (this.status !== 'running') {
-      Logger.warn('AgentEngine', `[PAUSE_IGNORED] Pause requested while status is "${this.status}" — nothing to pause.`);
+      Logger.warn('AgentEngine', `[PAUSE_IGNORED] Pause requested while status is "${this.status}" - nothing to pause.`);
       return { success: false, error: `Cannot pause: the agent is ${this.status}, not running.` };
     }
     this.status = 'paused';
+    if (this.activeTabId) {
+      cdp.startPauseTimer(this.activeTabId);
+    }
     this.abortInFlight('paused by user');
     this.setPhase('Task paused by user');
     Logger.info('AgentEngine', '[PAUSED] Task paused by user.');
@@ -1423,9 +1429,12 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       // restart, so Resume can legitimately find nothing to resume. Say so instead of
       // answering success and doing nothing.
       Logger.warn('AgentEngine', `[RESUME_IGNORED] Resume requested while status is "${this.status}". The paused task did not survive; re-run it to continue.`);
-      return { success: false, error: `Cannot resume: the agent is ${this.status}. The paused task did not survive a background restart — please re-run it.` };
+      return { success: false, error: `Cannot resume: the agent is ${this.status}. The paused task did not survive a background restart - please re-run it.` };
     }
     this.status = 'running';
+    if (this.activeTabId) {
+      cdp.clearPauseTimer(this.activeTabId);
+    }
     // A plain Resume (not answering) is a legitimate way to unstick an ask_user pause too - the
     // model just gets no answer and has to proceed without one. Either way, the question is no
     // longer pending once the loop is moving again.
@@ -1473,6 +1482,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     this.status = 'stopped';
     this.isLoopActive = false;
     this.currentPhase = '';
+    if (this.activeTabId) {
+      cdp.detach(this.activeTabId).catch(() => {});
+    }
     this.abortInFlight('stopped by user');
     Logger.info('AgentEngine', '[STOPPED] Task stopped by user.');
     this.notifyStateChange({ message: 'Task stopped.' });
@@ -1823,7 +1835,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           error: finalError,
           label: execResult.label || null,
           submitted: execResult.submitted || false,
-          resultData: execResult.result || execResult.results || null
+          resultData: execResult.result || execResult.results || null,
+          via: execResult.via || 'synthetic',
+          effect: execResult.effect || null
         });
 
         if (finalSuccess) {
@@ -1993,6 +2007,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           return reject(new Error(chrome.runtime.lastError.message));
         }
         if (response && response.success) {
+          if (response.docId) {
+            this.currentDocId = response.docId;
+          }
           resolve(response.data);
         } else {
           reject(new Error(response?.error || 'Failed to communicate with page script'));
@@ -2010,7 +2027,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     if ((actionPayload.action === 'navigate' || actionPayload.action === 'open_window') && actionPayload.url) {
       const restriction = describeRestrictedUrl(actionPayload.url);
       if (restriction) {
-        return { success: false, error: restriction };
+        return { success: false, error: restriction, via: 'background' };
       }
     }
 
@@ -2018,28 +2035,26 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       // `world` is no longer accepted: ISOLATED can never run dynamic code (its own content-
       // script CSP blocks eval unconditionally), so execute_js always runs in MAIN now - see
       // executeJs()'s doc comment for why. Any `world` the model still sends is simply ignored.
-      return this.executeJs(tabId, actionPayload.code);
+      const res = await this.executeJs(tabId, actionPayload.code);
+      return { ...res, via: 'background' };
     }
 
     if (actionPayload.action === 'open_window') {
       // A background-only browser API, not a content-script action - dispatched here directly
       // rather than via chrome.tabs.sendMessage(tabId, ...) below, which targets a page's own
       // content script and has nothing to do with creating a new window.
-      return this.openNewWindow(actionPayload.url);
+      const res = await this.openNewWindow(actionPayload.url);
+      return { ...res, via: 'background' };
     }
 
     if (actionPayload.action === 'read_network_requests') {
       const netFormatted = this.readNetworkRequests(tabId, actionPayload.filter, actionPayload.includeBody !== false, actionPayload.limit || 10);
-      return { success: true, message: `Recent Network Activity:\n${netFormatted}` };
+      return { success: true, message: `Recent Network Activity:\n${netFormatted}`, via: 'background' };
     }
 
-    return new Promise((resolve, reject) => {
-      chrome.tabs.sendMessage(tabId, { action: 'EXECUTE_ACTION', payload: actionPayload }, (response) => {
-        if (chrome.runtime.lastError) {
-          return reject(new Error(chrome.runtime.lastError.message));
-        }
-        resolve(response || { success: true });
-      });
+    return await inputDispatcher.dispatchAction(tabId, actionPayload, {
+      docId: this.currentDocId,
+      signal: this.abortController?.signal
     });
   }
 

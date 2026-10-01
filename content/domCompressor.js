@@ -124,8 +124,20 @@
 
   class DOMCompressor {
     constructor() {
-      this.elementMap = new Map(); // Maps numeric ID to DOM Element reference
+      this.elementMap = new Map(); // Maps numeric ID to DOM Element reference (WeakRef if supported)
       this.counter = 0;
+      this.docId = this.generateDocId();
+    }
+
+    generateDocId() {
+      try {
+        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+          const buf = new Uint32Array(2);
+          crypto.getRandomValues(buf);
+          return `${buf[0].toString(36)}-${buf[1].toString(36)}`;
+        }
+      } catch (_) {}
+      return Math.random().toString(36).slice(2);
     }
 
     /**
@@ -135,6 +147,7 @@
       const maxElements = options.maxElements || 120;
       this.elementMap.clear();
       this.counter = 0;
+      this.docId = this.docId || this.generateDocId();
 
       const interactiveElements = this.findInteractiveElements();
       const formattedElements = [];
@@ -144,7 +157,11 @@
 
         this.counter++;
         const id = this.counter;
-        this.elementMap.set(id, el);
+        if (typeof WeakRef !== 'undefined') {
+          this.elementMap.set(id, new WeakRef(el));
+        } else {
+          this.elementMap.set(id, el);
+        }
 
         // Store ID on element attribute for visual highlighting
         el.setAttribute('data-agent-id', id);
@@ -304,7 +321,28 @@
      * Retrieve element by assigned ID
      */
     getElement(id) {
-      return this.elementMap.get(Number(id));
+      const entry = this.elementMap.get(Number(id));
+      if (!entry) return null;
+      const el = (typeof WeakRef !== 'undefined' && entry instanceof WeakRef) ? entry.deref() : entry;
+      if (!el) return null;
+      if (typeof document !== 'undefined' && typeof document.contains === 'function' && !document.contains(el)) {
+        return null;
+      }
+      return el;
+    }
+
+    /**
+     * Resolve element with docId check and status
+     */
+    resolveElementWithStatus(id, expectedDocId) {
+      if (expectedDocId && this.docId && expectedDocId !== this.docId) {
+        return { success: false, stale: true, error: `Document navigated (expected ${expectedDocId}, got ${this.docId}).` };
+      }
+      const el = this.getElement(id);
+      if (!el) {
+        return { success: false, stale: true, error: `Element [${id}] is no longer attached to the document.` };
+      }
+      return { success: true, element: el };
     }
 
     /**

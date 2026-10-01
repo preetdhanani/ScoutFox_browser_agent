@@ -1281,6 +1281,13 @@ function buildDebugger(ctx: Ctx, opts: DebuggerOptions): Built {
       const tabId = tabOf('detach', target);
       if (!attached.delete(tabId)) throw notAttached(tabId);
     }),
+    getTargets: call('getTargets', () => {
+      const targets = [];
+      for (const [tabId] of attached.entries()) {
+        targets.push({ tabId, attached: true, type: 'page' });
+      }
+      return afterwards(targets, (res) => jsonClone(res));
+    }),
     sendCommand: call('sendCommand', (target: unknown, method: unknown, params?: unknown) => {
       const tabId = tabOf('sendCommand', target);
       if (typeof method !== 'string') throw invalid('debugger.sendCommand');

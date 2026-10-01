@@ -630,8 +630,27 @@ export function fakeDom(options: FakeDomOptions): FakeDom {
           const { snapshot, listed } = build(doc.page, doc.elements, doc.scrollY, maxElements || MAX_ELEMENTS);
           doc.listed = listed;
           reads.push({ tabId, snapshot: structuredClone(snapshot) });
-          return { success: true, data: snapshot };
+          return { success: true, data: snapshot, docId: 'fake-doc-id' };
         },
+        RESOLVE_ELEMENT_POINT: (message) => {
+          const payload = isObject(message) && isObject(message.payload) ? message.payload : {};
+          const doc = docOf(host, tabId);
+          const id = typeof payload.element_id === 'number' ? payload.element_id : undefined;
+          const el = id !== undefined && id >= 1 && id <= doc.listed.length ? doc.listed[id - 1] : undefined;
+          if (!el) {
+            return { success: false, error: `Element [${id}] not found.` };
+          }
+          return {
+            success: true,
+            point: { x: 100, y: 100 },
+            tag: el.tag.toLowerCase(),
+            text: el.text || ''
+          };
+        },
+        EFFECT_PROBE_BEGIN: () => ({ success: true }),
+        EFFECT_PROBE_END: () => ({ success: true, effect: 'dom_changed' }),
+        WAIT_DOM_QUIET: () => ({ success: true, quiet: true, elapsedMs: 50 }),
+        CLEAR_BADGES: () => ({ success: true }),
         EXECUTE_ACTION: (message) => {
           const payload = isObject(message) && isObject(message.payload) ? message.payload : {};
           const doc = docOf(host, tabId);
