@@ -66,7 +66,9 @@ function freshEngine() {
   engine.getTabDOMWithAutoInject = async () => ({
     elementCount: 3,
     elements: '[1] <button> Go',
-    pageText: 'hello',
+    // The page shows the price the scripted finish answers below state. The finish gate (agent/answerAudit.ts)
+    // accepts a number only when a page the engine read showed it.
+    pageText: 'The Framework Laptop 16 costs 1.599,00 EUR',
     title: 'Test',
     url: 'https://example.com',
     scrollState: { scrollY: 0, pageHeight: 1000, viewportHeight: 800 }

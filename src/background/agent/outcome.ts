@@ -20,7 +20,8 @@
 /** The part of a parsed `finish` action that this module reads. */
 export interface FinishAction {
   action?: string;
-  answer?: string;
+  /** A string as asked for; anything else is turned into text by coerceAnswerText. */
+  answer?: unknown;
   autoWrapped?: boolean;
 }
 
@@ -40,15 +41,43 @@ export interface MaxStepsEntry {
 // anything the model actually reported).
 export const NO_ANSWER_GIVEN = '(The model did not provide an answer.)';
 
+/**
+ * The text of a final answer. The prompt asks for a string, but nothing checks the type of a reply field yet, and a
+ * cloud model may answer with a list of table rows or an object. The panel shows String(answer), and the audit must
+ * check exactly what is shown and stored, so it is turned into text once, here: a list becomes its items on separate
+ * lines, an object becomes indented JSON, anything else its String form. Nothing throws.
+ */
+export function coerceAnswerText(answer: unknown): string {
+  if (typeof answer === 'string') return answer;
+  if (answer === null || answer === undefined) return '';
+  try {
+    if (Array.isArray(answer)) return answer.map((item) => (typeof item === 'string' ? item : coerceAnswerText(item))).join('\n');
+    if (typeof answer === 'object') return JSON.stringify(answer, null, 2) ?? '';
+    return String(answer);
+  } catch {
+    return '';
+  }
+}
+
 /** Builds the history entry for an explicit `finish` action. */
 export function buildFinishEntry(actionObj: FinishAction): FinishEntry {
-  const entry: FinishEntry = { type: 'finish', answer: actionObj.answer || NO_ANSWER_GIVEN };
+  const entry: FinishEntry = { type: 'finish', answer: coerceAnswerText(actionObj.answer) || NO_ANSWER_GIVEN };
   if (actionObj.autoWrapped) entry.unconfirmed = true;
   return entry;
 }
 
-/** Builds the history entry for hitting the step ceiling without the model ever calling finish. */
-export function buildMaxStepsEntry(maxSteps: number): MaxStepsEntry {
+/**
+ * Builds the history entry for hitting the step ceiling without the model ever calling finish. When the run ran out of
+ * steps after its finish was sent back (`answerKept`), the answer it gave is shown above this entry, marked by the
+ * audit, and this entry says why the run stopped.
+ */
+export function buildMaxStepsEntry(maxSteps: number, options: { answerKept?: boolean } = {}): MaxStepsEntry {
+  if (options.answerKept) {
+    return {
+      type: 'error',
+      content: `Stopped at the maximum allowed steps (${maxSteps}): the model's answer was sent back and there was no step left to correct it. The last answer it gave is shown above, marked by ScoutFox.`
+    };
+  }
   return {
     type: 'error',
     content: `Stopped without finishing - reached the maximum allowed steps (${maxSteps}) before the task called finish.`

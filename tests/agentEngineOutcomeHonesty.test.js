@@ -40,7 +40,9 @@ function freshEngine(maxSteps = 2) {
   engine.getTabDOMWithAutoInject = async () => ({
     elementCount: 3,
     elements: '[1] <button> Go',
-    pageText: 'hello',
+    // The page shows what the scripted finish answer of 'finish with a real answer' states. The finish gate
+    // (agent/answerAudit.ts) accepts a number only when a page the engine read showed it.
+    pageText: 'The price is $120.',
     title: 'Test',
     url: 'https://example.com',
     scrollState: { scrollY: 0, pageHeight: 1000, viewportHeight: 800 }

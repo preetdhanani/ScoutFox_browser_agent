@@ -113,7 +113,24 @@ To use ScoutFox 100% locally and privately without sending data to cloud APIs:
    ```bash
    OLLAMA_ORIGINS="*" ollama serve
    ```
+   Quit the Ollama menu-bar app first, or port 11434 will be busy.
+   If you use the macOS menu-bar app instead, set the variable once and restart the app:
+   ```bash
+   launchctl setenv OLLAMA_ORIGINS "chrome-extension://*"
+   ```
 4. In ScoutFox Settings, select **Ollama (Local Host)** and pick `qwen2.5:14b`!
+
+### Troubleshooting: HTTP 403 from Ollama
+
+Ollama rejects requests from `chrome-extension://` origins unless `OLLAMA_ORIGINS` was set when the server started.
+Check it with this command (`200` is good, `403` means the variable did not reach the running server):
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -H "Origin: chrome-extension://test" http://localhost:11434/api/tags
+```
+
+Plain `curl` without the `Origin` header always works, so it cannot detect this problem.
+The `launchctl` setting is lost after a reboot, so run it again if the error comes back.
 
 ---
 

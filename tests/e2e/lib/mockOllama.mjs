@@ -30,6 +30,14 @@
  *     whose text best matches the product named in the goal.
  *   - a goal that asks for price, shipping or delivery: it copies those lines from the page text
  *     into the answer.
+ *   - a goal that names two shops (shop-a.test and shop-b.test): the small model of the incident that
+ *     started the finish gate. It reads the shop it is on (a read_page_text), then finishes at once with
+ *     a full row for EVERY named shop, although only one of them was ever opened: the price, shipping,
+ *     delivery and link of the other shop are invented (twoSources.mjs). When the engine refuses that
+ *     finish ("Your finish was refused ..."), what it does depends on the model NAME, because the
+ *     request carries it and the mock stays stateless: "mock-agent" is the stubborn model and writes
+ *     the same answer again, "mock-agent-honest" gives in and writes "not checked" for the shop it
+ *     never opened (and keeps the real row of the shop it did read).
  *   - anything it cannot find in the prompt (empty page text, no elements, no offers, no price
  *     line, a goal it does not know): a finish whose answer starts with "MOCK-FAIL:" and says
  *     what is missing. That answer is wrong on purpose, so a content script or a perception step
@@ -45,9 +53,12 @@
 import http from 'node:http';
 import { validateAgainst } from '../../../src/background/agent/schemas.ts';
 import { buildCallRecord } from './callRecord.mjs';
+import { INVENTED, SHOP_B } from './twoSources.mjs';
 
 export const MOCK_VERSION = '0.0.0-mock';
 export const MOCK_FAIL_PREFIX = 'MOCK-FAIL:';
+// The model name that makes the two-sources skill give in when the engine refuses its finish.
+export const HONEST_MODEL_SUFFIX = '-honest';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -181,7 +192,12 @@ export function findProductLink(goal, elements) {
   return best;
 }
 
+// The shops of the fixture world a goal can name: "shop-a.test", "shop-b.test".
+const SHOP_NAME = /\b[a-z0-9][a-z0-9-]*\.test\b/gi;
+export const namedShops = (goal) => [...new Set(String(goal || '').match(SHOP_NAME)?.map((h) => h.toLowerCase()) ?? [])];
+
 function kindOfGoal(goal) {
+  if (namedShops(goal).length >= 2) return 'sources';
   if (/\b(cheapest|lowest|least expensive|best price)\b/i.test(goal)) return 'cheapest';
   if (/\b(price|cost|shipping|delivery|preis|versand|lieferung)\b/i.test(goal)) return 'facts';
   return 'unknown';
@@ -234,6 +250,87 @@ function cheapestOffer(goal, page, prior) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Two sources: the small model of the incident
+// ---------------------------------------------------------------------------------------------
+
+// What the engine writes when the finish gate refuses a finish (formatSendBack in answerAudit.ts,
+// and the fallback text of that function): the refusal is a user message of the next request.
+const FINISH_REFUSED = /^Your finish was refused/;
+const refusedBefore = (messages) => messages.some((m) => m.role === 'user' && FINISH_REFUSED.test(m.content));
+
+function hostnameOf(url) {
+  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; }
+}
+
+/** The price, shipping and delivery lines of the shop page the tab is on, as the page writes them. null when one is missing. */
+function shopRow(page) {
+  const lines = pageLines(page.pageText);
+  const find = (re) => lines.find((l) => re.test(l));
+  const trim = (l) => l.replace(/[.\s]+$/, '');
+  const price = find(MONEY);
+  const shippingLine = find(/versand|shipping/i);
+  const delivery = find(/lieferung|lieferzeit|delivery/i);
+  if (!price || !shippingLine || !delivery) return null;
+  return { price: trim(MONEY.exec(price)[0]), shipping: trim(MONEY.exec(shippingLine)?.[0] ?? shippingLine), delivery: trim(delivery) };
+}
+
+const factsOf = (host, row, link) => [`### ${host}`, `- **Price**: ${row.price}`, `- **Shipping**: ${row.shipping}`, `- **Delivery**: ${row.delivery}`, `- **URL**: ${link}`].join('\n');
+const tableRow = (host, row) => `| ${host} | ${row.price} | ${row.shipping} | ${row.delivery} |`;
+
+/** A full row for every named shop. Only `here` was read: the row of any other shop is made up. */
+function answerWithInventedRow(here, hereUrl, row, others) {
+  const invented = { price: INVENTED.price, shipping: INVENTED.shipping, delivery: INVENTED.delivery };
+  return [
+    '## Prices found', '',
+    factsOf(here, row, hereUrl),
+    ...others.flatMap((host) => ['', factsOf(host, invented, INVENTED.url)]),
+    '',
+    '| Source | Price | Shipping | Delivery |', '|--------|-------|----------|----------|',
+    tableRow(here, row),
+    ...others.map((host) => tableRow(host, invented))
+  ].join('\n');
+}
+
+/** The real row of the shop that was read, and "not checked" for the others, with no numbers. */
+function answerNotChecked(here, hereUrl, row, others) {
+  return [
+    '## Prices found', '',
+    factsOf(here, row, hereUrl),
+    ...others.flatMap((host) => ['', `### ${host}`, `Not checked. I did not open ${host}, so I have no price, shipping or delivery for it.`])
+  ].join('\n');
+}
+
+/**
+ * The goal names several shops and the tab is on one of them. Like the incident's model, the mock
+ * reads the page it is on (one read_page_text) and then finishes at once with a row for every shop
+ * in the goal. When the engine has refused that finish, the model name decides (see the header).
+ * Returns { reply, note }.
+ */
+function twoSources(goal, page, prior, messages, model) {
+  const shops = namedShops(goal);
+  const here = hostnameOf(page.url);
+  if (!shops.includes(here)) {
+    return { reply: fail(`the tab is on "${here || page.url || 'no URL in the prompt'}", which is not one of the shops the goal names (${shops.join(', ')}).`), note: 'two sources: not on a named shop' };
+  }
+  const refused = refusedBefore(messages);
+  if (!refused && !prior.some((a) => a.action === 'read_page_text')) {
+    return { reply: { action: 'read_page_text', reason: `I read the whole text of ${here} first.` }, note: `two sources: read the page of ${here}` };
+  }
+  const row = shopRow(page);
+  if (!row) return { reply: fail('the page text in the prompt has no price, shipping and delivery line.'), note: 'two sources: no facts in the prompt' };
+  const others = shops.filter((h) => h !== here);
+  if (others.some((h) => h !== SHOP_B)) return { reply: fail(`the mock has no invented row for ${others.filter((h) => h !== SHOP_B).join(', ')}.`), note: 'two sources: unknown shop' };
+
+  if (refused && model.endsWith(HONEST_MODEL_SUFFIX)) {
+    return { reply: finish(answerNotChecked(here, page.url, row, others), 'The engine said I never opened the other shop, so I say that.'), note: `refused: gives in, "not checked" for ${others.join(', ')}` };
+  }
+  return {
+    reply: finish(answerWithInventedRow(here, page.url, row, others), 'I have the price of every shop, so I can answer.'),
+    note: refused ? `refused: repeats the same answer (invented row for ${others.join(', ')})` : `finish at once: invented row for ${others.join(', ')}, never opened`
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Deciding a reply
 // ---------------------------------------------------------------------------------------------
 
@@ -248,6 +345,13 @@ function isActionSchema(format) {
 function planFor(prompt) {
   const task = /^Task: "(.*)"$/m.exec(prompt)?.[1] ?? '';
   const kind = kindOfGoal(task);
+  if (kind === 'sources') {
+    // One step per named shop, then the answer: the plan the incident's planner made.
+    return { steps: [
+      ...namedShops(task).map((host) => ({ source: host, goal: 'Find the price, shipping and delivery of the laptop' })),
+      { source: 'current page', goal: 'Write the answer with the link of each price' }
+    ] };
+  }
   const goals = kind === 'cheapest'
     ? ['Open the offers page of the product', 'Add price and shipping for every offer', 'Name the shop with the lowest total']
     : kind === 'facts'
@@ -290,7 +394,9 @@ export function decide(request) {
     }
   } else {
     const kind = kindOfGoal(goal);
-    if (kind === 'cheapest') {
+    if (kind === 'sources') {
+      ({ reply, note } = twoSources(goal, page, prior, messages, String(request.model || '')));
+    } else if (kind === 'cheapest') {
       reply = cheapestOffer(goal, page, prior);
       note = reply.action === 'click' ? `cheapest offer: click [${reply.element_id}]` : 'cheapest offer: answer from the offers table';
     } else if (kind === 'facts') {

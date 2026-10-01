@@ -66,7 +66,7 @@ Run the full suite with:
 ```bash
 npm test
 ```
-This runs `node --test` on `tests/**/*.test.js` and `tests/**/*.test.ts` - 1264 tests across 90 files as of this writing.
+This runs `node --test` on `tests/**/*.test.js` and `tests/**/*.test.ts` - 2640 tests across 257 files as of this writing.
 None of it needs a real browser.
 
 ### Syntax Check
@@ -165,6 +165,94 @@ The worker's start, from the creation of its global scope to the end of that run
 
 Gemini always streams, and its SDK leaves an unhandled rejection behind when a reply is cut halfway (Pause, Stop or a dropped connection) or when a 200 is not an event stream.
 The worker's `unhandledrejection` handler ignores exactly those errors (`src/background/boot/rejections.ts`) and logs every other one as an error.
+
+### Answer audit (finish gate)
+A small model can finish with a table for three sites after it opened only one, with prices, shipping and links it made up.
+The engine used to accept any `finish` and mark every plan step completed.
+Now every final answer is checked by code, against what the engine itself read.
+The model only picks actions.
+
+**The ledger** (`src/background/agent/evidence.ts`).
+It holds what the ENGINE read: the URL the tab was really on, the title and the visible text of every snapshot, and the text results of `read_page_text`, `execute_js` and `read_network_requests`.
+A `navigate` action that the model typed does not count.
+Where the tab landed does.
+The text the model wrote is never stored, and an `execute_js` result that is only a literal from the model's own code is left out.
+The current value of an input is not page text (the snapshot shows it as `value="..."`, and the model may have typed it), and every string with a digit or a link in it that the model typed is cut out of the page texts read afterwards, so a price typed into a search box and echoed by the results page is not a price that site shows.
+A site is "opened" when a page on its registrable domain was read (`www.` is ignored).
+When a `navigate` action is followed by a page on another site (`twitter.com` leads to `x.com`), the site asked for counts as opened through that page.
+A snapshot that still shows the page the tab was on before is not a redirect.
+The ledger lasts for the whole session, so a follow-up turn can use a page an earlier turn read.
+When its texts are too long, the oldest pages are cut down to the lines around their numbers and links first, and whole pages go only after that.
+Which pages and sites were read is kept apart from the texts (a short line per page, never cut for room), so cutting never turns an opened site into an unopened one.
+It is stored with the session in a cut-down form (`compactLedgerSnapshot`, at most 40 pages and about 60,000 characters, plus up to 100 short visit lines with the newest page of every site among them).
+A session stored before this existed has no ledger, and one stored before the visit list existed rebuilds it from its pages.
+New Session clears it.
+The first time a URL is read, the log says `[EVIDENCE_RECORDED]`.
+
+**The audit** (`src/background/agent/answerAudit.ts`).
+It checks PROVENANCE, not truth: was this page opened, was this number on a page that was read.
+A price can still be wrong on the page itself, and the audit cannot know that.
+What it finds:
+- lies: a link that was never opened, data for a site that was never opened, a number that is on no page that was read (or only on another site's page);
+- gaps: a site named in the task or plan that was never opened, where the answer claims nothing for it;
+- soft notes: a shipping or delivery statement with no supporting wording on that site's pages.
+
+An honest "blocked", "not checked" or "nicht geprueft" line is not a lie in any wording (`UNCHECKED_RE`), and it is the only kind of line that counts as an acknowledgement: "they do not differ by more than 5%" says nothing about what was opened.
+Sites that the goal sends the agent to are found by the words around them ("on", "from", a list in brackets), so "explain what socket.io is used for" does not make `socket.io` a source to open (`goalSources`).
+A shop that an opened comparison page lists (`notebooksbilliger.de` on `idealo.de`) is a row of that page, not a second source.
+A number is grounded by a price (a review count or a postal code is not one), or by a sum or difference of numbers that belong together: a price and the shipping beside it, the leading prices of the shops one sentence names, prices the answer states.
+"About EUR 2,100" must be a rounding (half of the unit it is written with, never over 2%), and "6%" is as precise as it is written.
+A duration may be less specific than the page ("3-5 days" for "3-5 Werktage"), never more.
+
+Verdict: any lie gives `unverified`, else any gap gives `partial`, else `verified`.
+Soft notes never change it.
+The audit is on the `finish` history entry as `audit`, and the side panel shows the verdict, so a failed answer is never a plain green "Done".
+
+**The gate** (`gateFinish` in `background/agentEngine.js`).
+A `verified` answer is accepted as it is.
+Any other answer goes to `engine.finishPolicy`, which is `decideOnFailedAudit` in `src/background/agent/finishPolicy.ts` and answers with one of:
+- `send_back`: the finish is not recorded, the model is told what was wrong (`formatSendBack`), and the run goes on.
+  It costs a step.
+- `annotate`: the run ends with the model's answer, made-up links cut out and a "Verification notes" section added.
+  A site the answer itself says it did not check gets no extra note.
+- `replace`: the run ends with a report written by code only (`buildEvidenceReport`).
+
+`annotate` puts one warning line, written by code, at the very top of the answer (`WARNING - UNVERIFIED ANSWER: ...` or `PARTIAL ANSWER: ...`), before the model's words.
+Annotating again gives the same text, and an answer that is unchanged because it honestly says what was not checked gets no line.
+The side panel shows the verdict as its own card, so it does not print that line and the notes section a second time.
+If the run ends while a finish is sent back (the model ran out of steps), the answer it gave goes through the gate once more with no send-back left, and is shown with its verdict, followed by the reason the run stopped.
+
+There is deliberately no outcome that accepts a failed answer.
+The engine clamps the policy (`resolveGateDecision` in `planEvidence.ts`): a send-back becomes `annotate` when no step is left, after 4 send-backs in one turn, and for a plain-text reply that the engine wrapped into a finish.
+It also becomes `annotate` for an answer that states nothing false and already says, for every site it did not open, that it was not checked, once the model was sent back one time.
+That answer has done what the send-back asked, and sending it back again would only push a small model towards inventing the missing values.
+A policy that throws or answers anything else gets `annotate`.
+A test can replace `engine.finishPolicy` to force one branch.
+
+**The plan.**
+A plan step that names a site (for example `idealo.de: find the price`, or `Check Idealo` from a cloud planner, which is mapped to the goal's site by its brand name) is never shown as completed before a page of that site was read, and the marker `[>]` goes to the first step that is not completed.
+When the run ends, steps for sites that were never opened become `skipped`, not `completed`.
+Plans that name no site behave as before.
+
+**The step message** has a short block after the plan: the pages read so far (the page that showed a price is named next to the page read last, when they differ), the named sites that are not opened yet, and one rule.
+With a site still to open the rule says to open it, and to write "not checked" only for a site that blocked the agent or did not load.
+With none it only asks for facts from pages that were read.
+It is under 600 characters, and it is left out only when there is nothing to say.
+
+**Log tags** (read them to see what happened):
+- `[FINISH_AUDIT] verdict=... lies=N gaps=N softs=N`, with the notes as the detail, on every finish;
+- `[FINISH_SENT_BACK]`, `[FINISH_ANNOTATED]`, `[FINISH_REPLACED]`, `[FINISH_POLICY_CLAMPED]` (WARN, with the reason) when the policy's answer could not be followed (no step left, too many send-backs, a policy that threw or answered nonsense, a plain-text reply), and `[FINISH_ACCEPTED_PARTIAL]` (INFO, not a problem) when an honest answer that already says which sites were not checked is accepted as it is, with verdict partial, after a send-back;
+- `[TASK_FINISHED] Task completed successfully.` only for a `verified` answer, else `[TASK_FINISHED_PARTIAL]` or `[TASK_FINISHED_UNVERIFIED]`.
+
+**Tests.**
+```bash
+node --test tests/agentEngineFinishGate.test.ts   # the incident replay and the three policy branches
+node --test tests/agentEngineEvidence.test.ts     # ledger, storage, clamps, log tags, step message, plan
+node --test tests/agent/evidence.test.ts tests/agent/answerAudit.test.ts tests/agent/planEvidence.test.ts
+npm test
+```
+`shared/fixtures/answer-audit-cases.json` holds the cases of the audit as data.
+If an existing engine test finishes with a number or a link, the page it runs on must show it, or the gate correctly refuses the answer.
 
 ### Test Approach
 `chrome.*` APIs are hand-mocked per test file, not a real browser.

@@ -200,6 +200,11 @@ test('maxElements cuts the list like the real one, and the ids run 1..n', () => 
   assert.deepEqual(fake.elements.map((e) => e.id), [1, 2, 3, 4, 5]);
 });
 
+/** A name for number i made of letters only (0 is "q", 10 is "a"...), so that no two are the same after masking digits. */
+function letters(i: number): string {
+  return i.toString(26).replace(/\d/g, (d) => 'qrstuvwxyz'[Number(d)] ?? d);
+}
+
 test('a page whose text is one string matches the real extractor for a plain text page', () => {
   const page: PageSpec = { url: 'https://raw.test/a', pageHeight: 800, text: 'A README that is long enough to skip the sparse-page fallback of the real extractor, with no headings at all.' };
   assert.deepStrictEqual(pageSnapshot(page), realSnapshot(page));
@@ -215,32 +220,38 @@ test('a page whose text is one string is trimmed like the real extractor trims i
   assert.deepStrictEqual(fake, realSnapshot(page));
   assert.match(fake.pageText, /^A README/);
   assert.doesNotMatch(fake.pageText, /\s$/);
-  // Trimmed first and cut after, so the blanks in front do not use up the 4500 characters.
-  const padded: PageSpec = { url: 'https://raw.test/b', pageHeight: 800, text: `${' '.repeat(1000)}${'word '.repeat(2000)}` };
-  assert.deepStrictEqual(pageSnapshot(padded), realSnapshot(padded));
-  assert.equal(pageSnapshot(padded).pageText.length, 4500);
+  // Trimmed first and cut after, so the blanks in front do not use up the 4500 characters. The words are all
+  // different (not "word word word ..." and not "w1 w2 w3 ...", which the real extractor now collapses into
+  // one "(N similar entries)"), and the cut text ends with the marker line.
+  const words = Array.from({ length: 2000 }, (_, i) => `w${letters(i)}`).join(' ');
+  const padded: PageSpec = { url: 'https://raw.test/b', pageHeight: 800, text: `${' '.repeat(1000)}${words}` };
+  const paddedFake = pageSnapshot(padded);
+  assert.deepStrictEqual(paddedFake, realSnapshot(padded));
+  assert.equal(paddedFake.pageText, `${words.slice(0, 4500)}\n[page text truncated at 4500 characters]`);
 });
 
 test('a page text that is a list is cut at its first 90 pieces before the short ones are dropped, like the real extractor', () => {
   const long: PageSpec = {
     url: 'https://long.test/',
     pageHeight: 800,
-    text: Array.from({ length: 120 }, (_, i) => `paragraph number ${i}`),
+    // Letters, not digits, tell the pieces apart: the real extractor collapses four or more in a row that
+    // differ only by a number ("paragraph number 0" ... "paragraph number 89") into one line.
+    text: Array.from({ length: 120 }, (_, i) => `paragraph number ${letters(i)}`),
   };
   const fake = pageSnapshot(long);
   assert.deepStrictEqual(fake, realSnapshot(long));
-  assert.match(fake.pageText, /paragraph number 89$/);
-  assert.doesNotMatch(fake.pageText, /paragraph number 90/);
+  assert.match(fake.pageText, new RegExp(`paragraph number ${letters(89)}$`));
+  assert.doesNotMatch(fake.pageText, new RegExp(`paragraph number ${letters(90)}`));
 
   // The cap counts pieces, not survivors: 45 pieces that are too short to keep use up half of it.
   const padded: PageSpec = {
     url: 'https://padded.test/',
     pageHeight: 800,
-    text: [...Array.from({ length: 45 }, () => 'ab'), ...Array.from({ length: 75 }, (_, i) => `paragraph ${i}`)],
+    text: [...Array.from({ length: 45 }, () => 'ab'), ...Array.from({ length: 75 }, (_, i) => `paragraph ${letters(i)}`)],
   };
   const paddedFake = pageSnapshot(padded);
   assert.deepStrictEqual(paddedFake, realSnapshot(padded));
-  assert.match(paddedFake.pageText, /paragraph 44$/);
+  assert.match(paddedFake.pageText, new RegExp(`paragraph ${letters(44)}$`));
   assert.equal(paddedFake.pageText.split('\n').length, 45);
 });
 
@@ -376,10 +387,14 @@ test('defaults: no title is "Untitled Page", the page is as tall as its lowest e
   assert.equal(tall.scrollState.pageHeight, 2000);
 });
 
-test('a page text is cut at 4500 characters, in either form', () => {
-  const long = 'word '.repeat(2000);
-  assert.equal(pageSnapshot({ url: 'https://a.test/', text: long }).pageText.length, 4500);
-  assert.equal(pageSnapshot({ url: 'https://a.test/', text: [long, long] }).pageText.length, 4500);
+test('a page text is cut at 4500 characters, in either form, and a cut text ends with the marker line', () => {
+  const marker = '\n[page text truncated at 4500 characters]';
+  const long = Array.from({ length: 2000 }, (_, i) => `w${letters(i)}`).join(' ');
+  assert.equal(pageSnapshot({ url: 'https://a.test/', text: long }).pageText, `${long.slice(0, 4500)}${marker}`);
+  assert.equal(pageSnapshot({ url: 'https://a.test/', text: [long, long] }).pageText, `${long.slice(0, 4500)}${marker}`);
+  // Exactly at the limit is not cut, so it has no marker.
+  assert.equal(pageSnapshot({ url: 'https://a.test/', text: 'a'.repeat(4500) }).pageText, 'a'.repeat(4500));
+  assert.equal(pageSnapshot({ url: 'https://a.test/', text: ['a'.repeat(4500)] }).pageText, 'a'.repeat(4500));
 });
 
 test('a typo in a page or element description throws instead of being ignored', () => {

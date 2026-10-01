@@ -34,7 +34,10 @@
  *         node smoke.mjs --timeout=360000          per task, in milliseconds
  *         node smoke.mjs --dump-snapshots          save what the content script sees on each
  *                                                  fixture page to tests/fixtures/snapshots/
- *                                                  (the evals read these files; no model needed)
+ *                                                  (the evals read these files; no model needed).
+ *                                                  The pages that a task serves under another host
+ *                                                  name (shop-a.html) go to tests/e2e/lib/snapshots/.
+ *         node smoke.mjs --dump-snapshots=shop-a   only the pages named here
  *   --build   runs `npm run build` first (a child process this script owns), so dist/ is fresh.
  *   --mock    uses the offline mock. It first runs the mock's own quick self-test, and it also
  *             skips the Ollama preflight and the proxy.
@@ -58,12 +61,16 @@ import { startFixtureServer } from './lib/fixtureServer.mjs';
 import { startOllamaProxy } from './lib/ollamaProxy.mjs';
 import { missingManifestFiles, prepareExtensionCopy, TAMPERS } from './lib/extensionCopy.mjs';
 import { TASKS } from './lib/tasks.mjs';
+import { HOST_RULES } from './lib/twoSources.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
 const DIST = path.join(REPO, 'dist');
 const SITE = path.join(REPO, 'tests', 'fixtures', 'site');
 const SNAPSHOT_DIR = path.join(REPO, 'tests', 'fixtures', 'snapshots');
+// Pages that a task serves under another host name. The committed fixture snapshots are what the evals
+// read, so these go into the e2e folder, where the mock's self-test reads them.
+const E2E_SNAPSHOT_DIR = path.join(HERE, 'lib', 'snapshots');
 
 const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'mock', 'tamper']);
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
@@ -86,6 +93,17 @@ const MAX_STEPS = Number(args['max-steps'] || 10);
 const POLL_MS = 250;
 
 const SNAPSHOT_PAGES = ['store', 'search', 'compare', 'challenge', 'error'];
+// `page` is the address the task starts on, query included; `name` is the file it is served from.
+const HOST_PAGES = Object.values(TASKS).filter((t) => t.host).map((t) => ({ name: t.page.replace(/[?#].*$/, '').replace(/\.html$/, ''), page: t.page, host: t.host }))
+  .filter((p, i, all) => all.findIndex((q) => q.name === p.name) === i);
+
+/** The origin of the fixture server as a site of the task's host name (http://shop-a.test:8765), or as it is without one. */
+function originFor(fixtures, host) {
+  if (!host) return fixtures.origin;
+  const url = new URL(fixtures.origin);
+  url.hostname = host;
+  return url.origin;
+}
 
 // The side panel links Google Fonts. When the machine is offline those two requests fail, which
 // is a network fact and not an extension bug, so that one console line is not counted.
@@ -312,6 +330,8 @@ async function launch(puppeteer, extensionDir) {
       '--no-first-run',
       '--no-default-browser-check',
       '--window-size=1280,900',
+      // shop-a.test -> the fixture server (see twoSources.mjs): a task about named sites runs on a page of one of them.
+      `--host-resolver-rules=${HOST_RULES}`,
       ...CHROMIUM_ARGS
     ]
   });
@@ -417,10 +437,17 @@ async function probePage(ctx, page, tabId) {
   return probe;
 }
 
-async function dumpSnapshots(ctx, fixtures) {
-  fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
-  for (const name of SNAPSHOT_PAGES) {
-    const url = `${fixtures.origin}/${name}.html`;
+async function dumpSnapshots(ctx, fixtures, only) {
+  const pages = [
+    ...SNAPSHOT_PAGES.map((name) => ({ name, origin: fixtures.origin, dir: SNAPSHOT_DIR })),
+    ...HOST_PAGES.map(({ name, page, host }) => ({ name, page, origin: originFor(fixtures, host), dir: E2E_SNAPSHOT_DIR }))
+  ];
+  const wanted = only ? pages.filter((p) => only.includes(p.name)) : pages;
+  for (const name of only || []) {
+    if (!pages.some((p) => p.name === name)) throw new UserError(`Unknown page "${name}" for --dump-snapshots. Known: ${pages.map((p) => p.name).join(', ')}`);
+  }
+  for (const { name, page: startPage, origin, dir } of wanted) {
+    const url = `${origin}/${startPage || `${name}.html`}`;
     const page = await ctx.browser.newPage();
     await page.goto(url, { waitUntil: 'load' });
     const tabId = await tabIdFor(ctx.driver, url);
@@ -428,7 +455,8 @@ async function dumpSnapshots(ctx, fixtures) {
     // `elements` holds the per-element locators for the executor. The model never sees them,
     // so they are left out to keep the files small and readable.
     const { elements, ...forModel } = snap;
-    const file = path.join(SNAPSHOT_DIR, `${name}.json`);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${name}.json`);
     fs.writeFileSync(file, `${JSON.stringify(forModel, null, 2)}\n`);
     console.log(`snapshot ${name}: ${snap.elementCount} elements, ${snap.pageText.length} chars of text -> ${path.relative(REPO, file)}`);
     await page.close();
@@ -529,7 +557,7 @@ async function checkSidePanel(ctx) {
 
 /**
  * Screenshots of the real side panel showing the finished run, in light and dark, at a panel
- * width of 400 px. Puppeteer cannot open Chrome's side panel (that needs a user gesture), so
+ * width of 400 px (900 px high; "-tall" is 1800 px high and shows a long card from its top; "-tall-open" has the action group open, where the plan rows and the refused finishes are; "-zoom-plan" and "-zoom-card" are close-ups at twice the pixel density, and "-zoom-card-details" is the card again with its audit details open when they were closed). Puppeteer cannot open Chrome's side panel (that needs a user gesture), so
  * sidepanel.html is opened as a page. The panel finds its tab with
  * chrome.tabs.query({active, currentWindow}), which would return the panel page itself here,
  * so only that one query is pointed at the task's tab.
@@ -555,8 +583,55 @@ async function panelScreenshots(ctx, tabId, name, dir, schemes = ['light', 'dark
     await sleep(2000);
     const file = path.join(dir, `${name}-${scheme}.png`);
     await panel.screenshot({ path: file, fullPage: true });
-    await collectCsp(panel, ctx.panel);
     files.push(file);
+    // The panel scrolls inside itself and shows the newest card at the bottom, so a 900 px shot can cut off
+    // the top of a long card (its title, the plan rows). A tall window shows the whole run in one picture.
+    await panel.setViewport({ width: 400, height: 1800 });
+    await sleep(300);
+    const tall = path.join(dir, `${name}-${scheme}-tall.png`);
+    await panel.screenshot({ path: tall, fullPage: true });
+    files.push(tall);
+    // The action group is closed on a finished run, and it holds the plan rows (a skipped step says "not checked"
+    // there) and the rows of refused finishes, so one more picture with the group open.
+    const opened = await panel.evaluate(() => {
+      const head = document.querySelector('.act-group:not(.open) .act-head');
+      if (head) head.click();
+      return !!head;
+    }).catch(() => false);
+    if (opened) {
+      await sleep(300);
+      const open = path.join(dir, `${name}-${scheme}-tall-open.png`);
+      await panel.screenshot({ path: open, fullPage: true });
+      files.push(open);
+    }
+    // Two close-ups at twice the pixel density (the action group with its plan rows, and the finish card), to
+    // judge icons, spacing, clipped text and long addresses at a size where they can be read.
+    await panel.setViewport({ width: 400, height: 1800, deviceScaleFactor: 2 });
+    await sleep(300);
+    for (const [label, selector] of [['zoom-plan', '.act-group'], ['zoom-card', '.finish-card']]) {
+      const element = await panel.$(selector);
+      if (!element) continue;
+      const zoom = path.join(dir, `${name}-${scheme}-${label}.png`);
+      await element.screenshot({ path: zoom });
+      files.push(zoom);
+    }
+    // The audit details of the finish card ("What could not be verified", "Checked against N pages") are closed on a
+    // partial or a verified run, so one more close-up with them open.
+    const detailsOpened = await panel.evaluate(() => {
+      const closed = document.querySelector('.finish-card details.audit:not([open]) summary');
+      if (closed) closed.click();
+      return !!closed;
+    }).catch(() => false);
+    if (detailsOpened) {
+      await sleep(300);
+      const card = await panel.$('.finish-card');
+      if (card) {
+        const zoom = path.join(dir, `${name}-${scheme}-zoom-card-details.png`);
+        await card.screenshot({ path: zoom });
+        files.push(zoom);
+      }
+    }
+    await collectCsp(panel, ctx.panel);
     await panel.close();
   }
   return files;
@@ -586,10 +661,29 @@ function logsOfRun(stateLogs, portLogs, tabId) {
   return at >= 0 ? stateLogs.slice(at) : (portLogs || []);
 }
 
+/**
+ * Saves the settings the extension runs with. Same shape the side panel's own save writes: the panel
+ * header shows providerConfigs[provider].model, the engine uses the top-level model.
+ */
+async function saveSettings(ctx, llm, model) {
+  await ctx.driver.evaluate(async (settings) => {
+    await chrome.storage.local.set({ agent_settings: settings });
+  }, {
+    provider: 'ollama', baseUrl: llm.url, apiKey: '', model, maxSteps: MAX_STEPS,
+    providerConfigs: { ollama: { baseUrl: llm.url, apiKey: '', model } }
+  });
+  ctx.model = model;
+}
+
+/** The model a task runs with: the mock's behaviour can depend on the model name (see mockOllama.mjs), a real run never does. */
+const modelOf = (name) => (MOCK && TASKS[name].mockModel) || MODEL;
+
 async function runTask(ctx, fixtures, llm, name) {
   const task = TASKS[name];
   if (!task) throw new Error(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
-  const url = `${fixtures.origin}/${task.page}`;
+  const model = modelOf(name);
+  if (ctx.model !== model) await saveSettings(ctx, llm, model);
+  const url = `${originFor(fixtures, task.host)}/${task.page}`;
 
   const page = await ctx.browser.newPage();
   const pageErrors = [];
@@ -621,7 +715,7 @@ async function runTask(ctx, fixtures, llm, name) {
   // begin and end between two polls, so "started" is also read from the history: the turn's
   // user_goal entry is written right after the status becomes "running". Each task has a fresh
   // tab and so a fresh session, which means any user_goal in it is this run's.
-  const shotName = `${name}-${MODEL.replace(/[^a-z0-9.]+/gi, '_')}`;
+  const shotName = `${name}-${model.replace(/[^a-z0-9.]+/gi, '_')}`;
   const shotDir = args['panel-screenshots'] ? path.resolve(String(args['panel-screenshots'])) : null;
   const screenshots = [];
   let state = null;
@@ -669,6 +763,12 @@ async function runTask(ctx, fixtures, llm, name) {
   }
   const calls = llm.calls.slice(firstCall);
   const answer = finish ? finish.answer : null;
+  // What the engine's finish gate did: the audit it attached to the finish entry, how many finishes it
+  // refused on the way (each one is a step with a model call), and the plan rows as they ended.
+  const audit = finish && finish.audit ? finish.audit : null;
+  const refusals = turn.filter((h) => h.type === 'execution_result' && h.finishRefused).length;
+  const plan = (state.planSteps || []).map((s) => ({ text: s.text, status: s.status }));
+  const judged = { answer, steps, audit, plan, refusals };
   // Before the tab closes: closing it ends its session, and the panel would show nothing.
   if (shotDir) screenshots.push(...await panelScreenshots(ctx, tabId, shotName, shotDir));
   if (page.url() !== probes[0].url) probes.push(await probePage(ctx, page, tabId));
@@ -677,7 +777,7 @@ async function runTask(ctx, fixtures, llm, name) {
 
   return {
     task: name,
-    model: MODEL,
+    model,
     startUrl: url,
     prompt: task.prompt,
     status: state.status,
@@ -685,11 +785,15 @@ async function runTask(ctx, fixtures, llm, name) {
     finished: !!finish,
     unconfirmed: !!(finish && finish.unconfirmed),
     answer,
-    answerCorrect: answer ? task.check({ answer, steps }) : false,
+    answerCorrect: answer ? task.check(judged) : false,
+    audit,
+    refusals,
+    planStatus: plan,
+    expectProblems: MOCK && answer && task.expectMock ? task.expectMock(judged) : [],
     errors,
     pageErrors,
     probes,
-    plan: (state.planSteps || []).map((s) => s.text),
+    plan: plan.map((s) => s.text),
     planFallback: logs.some((l) => /\[PLANNER_FALLBACK\]/.test(l.message)),
     steps,
     wallMs,
@@ -709,10 +813,14 @@ function printReport(r) {
   const outcome = r.timedOut ? 'TIMED OUT' : r.finished ? (r.unconfirmed ? 'FINISHED (unconfirmed)' : 'FINISHED') : `ENDED WITHOUT FINISH (status ${r.status})`;
   console.log(`outcome:    ${outcome}; answer check: ${r.answerCorrect ? 'PASS' : 'FAIL'}`);
   if (r.answer) console.log(`answer:     ${oneLine(r.answer, 400)}`);
+  if (r.audit) {
+    console.log(`gate:       verdict ${r.audit.verdict}; refused ${r.refusals} finish(es) first; read ${(r.audit.opened || []).map((o) => o.host).join(', ') || 'nothing'}; not opened ${(r.audit.notOpened || []).join(', ') || 'none'}${(r.audit.notes || []).length ? `; notes ${r.audit.notes.map((n) => `${n.code} (${n.severity})`).join(', ')}` : ''}`);
+  }
+  for (const p of r.expectProblems) console.log(`gate check: ${oneLine(p, 300)}`);
   for (const e of r.errors) console.log(`error:      ${oneLine(e, 300)}`);
   for (const p of r.probes) console.log(`page check: ${p.url.replace(/^https?:\/\/[^/]+/, '')} net recorder ${p.recorderActive ? 'active' : 'NOT ACTIVE'}, content script ${p.contentScript ? 'answers' : `DOES NOT ANSWER (${p.contentScriptError})`}`);
   for (const e of r.pageErrors) console.log(`page error: ${oneLine(e, 300)}`);
-  console.log(`plan (${r.plan.length}${r.planFallback ? ', generic fallback' : ''}): ${r.plan.map((t, i) => `${i + 1}. ${t}`).join(' | ')}`);
+  console.log(`plan (${r.plan.length}${r.planFallback ? ', generic fallback' : ''}): ${r.planStatus.map((s, i) => `${i + 1}. [${s.status}] ${s.text}`).join(' | ')}`);
   console.log('steps:');
   for (const s of r.steps) console.log(`  #${s.step} ${oneLine(s.action, 140)}${s.result ? ` -> ${oneLine(s.result, 100)}` : ''}`);
   console.log(`wall time:  ${(r.wallMs / 1000).toFixed(1)} s`);
@@ -735,6 +843,7 @@ function judge(ctx, reports, gate) {
   for (const r of reports) {
     if (!r.finished) failures.push(`${r.task}: the run did not finish (${r.timedOut ? 'timed out' : `status ${r.status}`})`);
     else if (!r.answerCorrect) failures.push(`${r.task}: the answer is wrong`);
+    for (const p of r.expectProblems) failures.push(`${r.task}: ${p}`);
     for (const p of r.probes) {
       const where = p.url.replace(/^https?:\/\/[^/]+/, '');
       if (!p.recorderActive) failures.push(`${r.task}: the net recorder (content/net-recorder.js, MAIN world) did not run on ${where}: window.__scoutfox_net_recorder_active is not true`);
@@ -788,7 +897,8 @@ async function main() {
   if (args.tamper !== undefined && !TAMPERS[args.tamper]) {
     throw new UserError(`Unknown --tamper "${args.tamper}". Known: ${Object.entries(TAMPERS).map(([k, v]) => `${k} (${v.does})`).join('; ')}`);
   }
-  const names = args.task ? String(args.task).split(',') : Object.keys(TASKS);
+  // A real model meets the same goal in a task and in its mock-only variant, so the variants only run with --mock.
+  const names = args.task ? String(args.task).split(',') : Object.keys(TASKS).filter((n) => MOCK || !TASKS[n].mockOnly);
   for (const name of names) {
     if (!TASKS[name]) throw new UserError(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
   }
@@ -845,28 +955,23 @@ async function main() {
   const reports = [];
   let gate = null;
   if (args['dump-snapshots']) {
-    await dumpSnapshots(ctx, fixtures);
+    await dumpSnapshots(ctx, fixtures, typeof args['dump-snapshots'] === 'string' ? args['dump-snapshots'].split(',') : null);
   } else {
-    // Same shape the side panel's own save writes: the panel header shows
-    // providerConfigs[provider].model, the engine uses the top-level model.
-    await ctx.driver.evaluate(async (settings) => {
-      await chrome.storage.local.set({ agent_settings: settings });
-    }, {
-      provider: 'ollama', baseUrl: llm.url, apiKey: '', model: MODEL, maxSteps: MAX_STEPS,
-      providerConfigs: { ollama: { baseUrl: llm.url, apiKey: '', model: MODEL } }
-    });
+    await saveSettings(ctx, llm, MODEL);
 
     for (const name of names) {
       const report = await runTask(ctx, fixtures, llm, name);
       reports.push(report);
       printReport(report);
     }
+    // A task can use another model name (the mock's persona): the side panel gate reads the configured one.
+    if (ctx.model !== MODEL) await saveSettings(ctx, llm, MODEL);
     gate = await checkSidePanel(ctx);
   }
 
   console.log('\n=== summary ===');
   for (const r of reports) {
-    console.log(`${r.task}: ${r.finished ? 'finished' : 'not finished'}, answer ${r.answerCorrect ? 'right' : 'wrong'}, ${r.steps.length} step(s), ${(r.wallMs / 1000).toFixed(1)} s, ${r.modelCalls} model call(s), ${fmtInt(r.promptTokens)} prompt + ${fmtInt(r.outputTokens)} output tokens`);
+    console.log(`${r.task}: ${r.finished ? 'finished' : 'not finished'}, answer ${r.answerCorrect ? 'right' : 'wrong'}${r.audit ? `, gate ${r.audit.verdict}${r.refusals ? ` after ${r.refusals} refusal(s)` : ''}` : ''}, ${r.steps.length} step(s), ${(r.wallMs / 1000).toFixed(1)} s, ${r.modelCalls} model call(s), ${fmtInt(r.promptTokens)} prompt + ${fmtInt(r.outputTokens)} output tokens`);
   }
   console.log(`service worker errors (console, exceptions, CSP violations): ${ctx.workerErrors.length}`);
   if (reports.length) {
