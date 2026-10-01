@@ -7,6 +7,8 @@
   --surface: #f2f0ee;
   --card: #ffffff;
   --border: rgba(20, 18, 16, 0.10);
+  /* The edge of a box that sits on a card (the audit details, a table): 1.5:1 against the card, where the hairline above is 1.2:1. */
+  --border-strong: rgba(20, 18, 16, 0.20);
   --text-main: #1c1a18;
   --text-muted: #6b665f;
   --text-faint: #9a948c;
@@ -17,6 +19,10 @@
   --success-soft: rgba(95, 122, 90, 0.11);
   --danger: #9c4a3f;
   --danger-soft: rgba(156, 74, 63, 0.11);
+  /* Ochre, apart from the copper accent and the brick danger. 4.6:1 on the card, so it can
+     colour a one-word label as well as an icon or a border. */
+  --warning: #946f0c;
+  --warning-soft: rgba(148, 111, 12, 0.12);
   --shadow-soft: 0 1px 2px rgba(30, 20, 10, 0.05);
 
   --font-display: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -30,6 +36,7 @@
     --surface: #131314;
     --card: #1a1a1b;
     --border: rgba(255, 255, 255, 0.09);
+    --border-strong: rgba(255, 255, 255, 0.16);
     --text-main: #f1efec;
     --text-muted: #8f8c88;
     --text-faint: #625f5c;
@@ -40,6 +47,8 @@
     --success-soft: rgba(124, 148, 115, 0.15);
     --danger: #b1524a;
     --danger-soft: rgba(177, 82, 74, 0.15);
+    --warning: #c49a3a;
+    --warning-soft: rgba(196, 154, 58, 0.15);
     --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.4);
   }
 }
@@ -49,6 +58,7 @@
   --surface: #131314;
   --card: #1a1a1b;
   --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
   --text-main: #f1efec;
   --text-muted: #8f8c88;
   --text-faint: #625f5c;
@@ -59,6 +69,8 @@
   --success-soft: rgba(124, 148, 115, 0.15);
   --danger: #b1524a;
   --danger-soft: rgba(177, 82, 74, 0.15);
+  --warning: #c49a3a;
+  --warning-soft: rgba(196, 154, 58, 0.15);
   --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
@@ -632,10 +644,31 @@ a:hover { color: var(--text-main); }
 
 .finish-title svg { color: var(--accent); }
 
+/* The answer audit found only some sources unchecked: same plain card as Done and Unverified,
+   with an amber edge and icon instead of the accent. No tint: it put the subtitle at 4.07:1 in
+   dark mode, and the border, the icon and the title already tell it from a Done card. */
+.finish-card.partial { border-left-color: var(--warning); }
+.finish-card.partial .finish-title svg { color: var(--warning); }
+
 /* The model never actually called finish - parseResponse's freeform guardrail inferred an
-   ending from raw prose. Same card, but the border/icon must not read as a confirmed success. */
-.finish-card.unconfirmed { border-left-color: var(--danger); }
-.finish-card.unconfirmed .finish-title svg { color: var(--danger); }
+   ending from raw prose. Same card, but the border/icon must not read as a confirmed success.
+   `unverified` (the audit found a claim no page backs) gets the same danger look. These two
+   rules stay AFTER .partial: a partial answer that was also unconfirmed shows the worse colour. */
+.finish-card.unconfirmed,
+.finish-card.unverified { border-left-color: var(--danger); }
+.finish-card.unconfirmed .finish-title svg,
+.finish-card.unverified .finish-title svg { color: var(--danger); }
+
+/* One-line explanation under the title of an audited card. */
+.finish-card.has-sub .finish-title { margin-bottom: 3px; }
+.finish-subs { margin-bottom: 8px; }
+.finish-sub {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  /* A host name in the subtitle of a partial answer can be long. */
+  overflow-wrap: anywhere;
+}
 
 .finish-body {
   font-size: 12px;
@@ -643,7 +676,103 @@ a:hover { color: var(--text-main); }
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+  min-width: 0;
 }
+
+/* ---- Markdown blocks in the answer (formatMarkdownText in sidepanel.js) ----
+   Used only when the answer has a heading or a table; other answers stay pre-wrapped text.
+   Everything is sized for a panel about 340px wide. The block container turns pre-wrap off and
+   the paragraphs and list items turn it back on, so the author's line breaks inside them stay
+   and there is no stray blank line between blocks. Vertical space comes from margins, which
+   collapse: 8px between blocks, 12px above a heading, 4px under it. */
+.md-doc { white-space: normal; }
+.md-doc > * { margin: 0 0 8px; }
+.md-doc > :last-child { margin-bottom: 0; }
+
+.md-h {
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text-main);
+}
+.md-doc > .md-h { margin: 12px 0 4px; }
+.md-doc > .md-h:first-child { margin-top: 0; }
+.md-doc > .md-h + .md-h { margin-top: 6px; }
+.md-h1 { font-size: 14px; }
+.md-h2 { font-size: 13px; }
+/* The two section levels get a hairline, so "Prices found" and a "shop-a.test" under it read as two levels. */
+.md-h1,
+.md-h2 {
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--border);
+}
+.md-h3 { font-size: 12.5px; }
+.md-h4, .md-h5, .md-h6 { font-size: 12px; }
+.md-h5, .md-h6 { color: var(--text-muted); }
+
+.md-p { white-space: pre-wrap; }
+
+/* A list item hangs: the bullet has its own column, so a wrapped line lines up under the text. */
+.md-list { list-style: none; }
+.md-li { display: flex; gap: 6px; }
+.md-li + .md-li { margin-top: 1px; }
+.md-mark {
+  flex: 0 0 auto;
+  min-width: 0.9em;
+  color: var(--text-muted);
+  text-align: right;
+}
+ol > .md-li > .md-mark { min-width: 1.4em; }
+.md-li-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.md-d1 { margin-left: 1.1em; }
+.md-d2 { margin-left: 2.2em; }
+.md-d3 { margin-left: 3.3em; }
+
+/* A table scrolls inside its own box, so a wide one never widens the card or the page. */
+.md-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: normal;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+.md-table-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  line-height: 1.45;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+  /* A word is not cut in half to squeeze a column ("Shippin" / "g"): a cell wraps at spaces, and a
+     word that is wider than the card makes the table scroll inside its box. The card text allows
+     a break anywhere; a table is the one place where that is wrong. */
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+.md-table th,
+.md-table td {
+  padding: 5px 8px;
+  vertical-align: top;
+  border-top: 1px solid var(--border);
+}
+.md-table th + th,
+.md-table td + td { border-left: 1px solid var(--border); }
+.md-table thead th {
+  border-top: 0;
+  background: var(--surface);
+  color: var(--text-main);
+  font-weight: 600;
+}
+.md-table td { color: var(--text-main); }
+.md-table .md-nw { white-space: nowrap; }
+.md-table .md-al-c { text-align: center; }
+.md-table .md-al-r { text-align: right; }
 
 /* Input Panel */
 .input-panel {
@@ -1177,8 +1306,24 @@ a:hover { color: var(--text-main); }
 .act-row.fault { color: var(--danger); }
 .act-row.bad .act-ico,
 .act-row.fault .act-ico { color: currentColor; }
-.act-row.fault { align-items: flex-start; }
+/* A row that can run to several lines keeps its icon on the FIRST line, not at the middle of the
+   block: the icon is 14px in a line of 1.45em, so it drops by half the difference. */
+.act-row.fault,
+.act-row.refused { align-items: start; }
+.act-row.fault .act-ico,
+.act-row.refused .act-ico { margin-top: calc((1.45em - 14px) / 2); }
 .act-row.fault .act-text { white-space: normal; }
+
+/* A finish the answer audit sent back: a warning, not a failed action (no red, no cross). */
+.act-row.refused { color: var(--warning); }
+.act-row.refused .act-ico { color: currentColor; }
+.act-row.refused .act-text { white-space: normal; }
+.act-detail {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
 
 .act-state { display: inline-flex; }
 .act-state.bad { color: var(--danger); }
@@ -1212,21 +1357,36 @@ a:hover { color: var(--text-main); }
   margin-bottom: 4px;
   border-bottom: 1px dashed var(--border);
 }
+/* One grid with the action rows below it: the same 4px inset and the same 16px icon column and
+   9px gap, so the icons and the text start at the same x in both lists. The action rows are the
+   standard (they are the ones a reader scans); the plan rows follow them. */
 .act-plan-row {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr);
-  align-items: center;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: start;
   gap: 9px;
+  padding: 0 4px;
   font-size: 12px;
-  color: var(--text-faint);
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+/* The icons are 8 to 12px wide; an action icon is 13px wide and starts at the left of its column.
+   A 13px box centres each plan icon on that same axis, and is one text line high so that on a
+   step that wraps the icon stays on the first line. */
+.act-plan-row > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 1.45em;
 }
 .act-plan-row.in_progress { color: var(--text-main); }
-.act-plan-row.completed { color: var(--text-muted); }
-.act-plan-row.completed span:last-child { text-decoration: line-through; opacity: 0.65; }
+/* Done is told by the check and the line through it, not by fading: a faded row is under 3:1. */
+.act-plan-row.completed span:last-child { text-decoration: line-through; }
 
 .act-phase {
   font-size: 11.5px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   padding: 7px 4px 2px;
   font-style: italic;
 }
@@ -1252,8 +1412,130 @@ a:hover { color: var(--text-main); }
 .ask-user-input-row { display: flex; gap: 6px; }
 .ask-user-input { flex: 1; }
 
+/* A plan step the harness skipped because its source was never read. Muted and NOT struck
+   through: a struck-through row means done, and this one is the opposite. */
+.act-plan-row.skipped { color: var(--text-muted); }
+.act-plan-row.skipped svg { color: var(--warning); }
+.plan-skip-note { color: var(--warning); }
+
+/* ============================================================
+   Answer audit block on the finish card
+   A native <details>: no script needed to open it, and the keyboard works for free.
+   ============================================================ */
+
+.audit { margin-bottom: 10px; }
+/* On a checked answer it is only a receipt: sit below the answer, behind a hairline. */
+.audit.verified {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.audit-summary,
+.audit-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.audit-summary {
+  cursor: pointer;
+  list-style: none;
+  border-radius: 4px;
+}
+.audit-summary::-webkit-details-marker { display: none; }
+.audit-summary:hover { color: var(--text-main); }
+.audit-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Above a doubtful answer the toggle is the point of the card, so it reads as a label. */
+.audit.attention .audit-summary { color: var(--text-main); font-weight: 600; }
+
+.audit-chev {
+  display: inline-flex;
+  color: var(--text-faint);
+  transition: transform 0.15s ease;
+}
+.audit[open] > .audit-summary .audit-chev { transform: rotate(90deg); }
+
+.audit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--surface);
+  /* A clear edge against the card in both themes: the fill alone is 1.1:1. */
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.audit-label {
+  margin-bottom: 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.audit-notes,
+.audit-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+}
+
+.audit-note {
+  display: grid;
+  grid-template-columns: 6px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  color: var(--text-main);
+}
+/* Centre the dot on the first line of text: (line height - dot) / 2. */
+.audit-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: calc((1.5em - 6px) / 2);
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.audit-dot.lie { background: var(--danger); }
+.audit-dot.gap { background: var(--warning); }
+
+.audit-page { display: flex; flex-direction: column; min-width: 0; }
+.audit-host { color: var(--text-main); font-weight: 500; }
+.audit-url {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+a.audit-url {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+a.audit-url:hover { color: var(--text-main); }
+a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
+
+.audit-plain { color: var(--text-main); }
+.audit-meta { font-size: 11px; color: var(--text-muted); }
+
 @media (prefers-reduced-motion: reduce) {
   .act-chev { transition: none; }
+  .audit-chev { transition: none; }
   .act-state.live { animation: none; opacity: 0.85; }
 }
 

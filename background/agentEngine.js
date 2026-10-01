@@ -17,6 +17,25 @@ import { buildActionSchema, buildPlanSchema, PLAN_MAX_STEPS } from '../src/backg
 import { parsePartialOrTruncatedJson } from '../src/background/agent/repairJson.ts';
 import { parseModelReply, planTextsFromStepsObject } from '../src/background/agent/parse.ts';
 import { refsFromCount, sanitizeAction } from '../src/background/agent/sanitize.ts';
+import { EvidenceLedger, siteOf } from '../src/background/agent/evidence.ts';
+import { annotateAnswer, auditAnswer, buildEvidenceReport, describeEvidenceForPrompt, formatSendBack, goalSources, namedSources, prepareAnswer } from '../src/background/agent/answerAudit.ts';
+import { decideOnFailedAudit } from '../src/background/agent/finishPolicy.ts';
+import {
+  NO_SEND_BACK_ACKNOWLEDGED,
+  NO_SEND_BACK_OUT_OF_STEPS,
+  NO_SEND_BACK_PLAIN_TEXT,
+  answerAcknowledgesEveryGap,
+  auditRecordOf,
+  compactLedgerSnapshot,
+  evidenceFromActionResult,
+  finishedPlanStatuses,
+  gateClampLog,
+  gateContextOf,
+  honestPlanStatuses,
+  planNamesSites,
+  resolveGateDecision,
+  withoutAcknowledgedGaps
+} from '../src/background/agent/planEvidence.ts';
 
 // Sessions are multi-turn and would otherwise grow without bound, and the whole array is
 // serialised to chrome.storage on every state change.
@@ -142,6 +161,28 @@ export class AgentEngine {
     this.recentActionSignatures = [];
     this.currentPlanIndex = 0;
     this.networkBuffers = new Map(); // tabId -> Array of Network Requests (capped at 100)
+
+    // What the ENGINE read from pages (see agent/evidence.ts), never what the model said. It is kept for
+    // the whole session, so a follow-up turn can still rely on a page an earlier turn read, and it is
+    // only emptied when the session is cleared (clearHistory). The final answer of every turn is checked
+    // against it (see gateFinish).
+    this.evidence = new EvidenceLedger();
+    // What the engine does with an answer that failed the audit: 'send_back' | 'annotate' | 'replace'
+    // (agent/finishPolicy.ts). A field so a test can swap in a policy to force one branch. The engine
+    // clamps whatever it returns (resolveGateDecision), and there is no way to accept such an answer as it is.
+    this.finishPolicy = decideOnFailedAudit;
+    // How many times this turn's finish was sent back to the model. Reset by startTask.
+    this.finishSendBacks = 0;
+    // The finish that was sent back last, kept so that a run that ends before the model can fix it still shows
+    // the answer, checked and marked, and not nothing (see runLoopBody). Reset by startTask.
+    this.lastRefusedFinish = null;
+    // The strings the model typed into pages. A page that echoes one back (a search box that keeps its value, a
+    // results page that repeats the query) must not turn the model's own words into something the engine "read".
+    this.typedTexts = [];
+    // The site a navigate action was sent to ({ site, before }: `before` is the site the tab was on), until the next
+    // action: if the tab then landed on another site, that is a redirect, and the site the model asked for was
+    // opened through it.
+    this.navigatedFrom = null;
 
     // Sandboxed Chrome Tab Group ID(s). A Chrome tab group is intrinsically single-window, but
     // one session can span MORE than one window (an agent-opened new window stays part of the
@@ -278,6 +319,8 @@ export class AgentEngine {
       this.currentPlanIndex = stored.currentPlanIndex || 0;
       this.activeTabId = stored.activeTabId || null;
       this.scoutFoxGroupId = stored.scoutFoxGroupId || null;
+      // Sessions stored before the audit existed have no ledger: an empty one is the honest reading.
+      this.evidence = EvidenceLedger.fromSnapshot(stored.evidence);
 
       // Keep the version counter monotonic across worker restarts so the sidepanel's
       // out-of-order guard still holds even within a single boot.
@@ -306,7 +349,7 @@ export class AgentEngine {
   async persistState() {
     try {
       updateAgentSessions((all) => {
-        all[String(this.sessionId)] = {
+        const session = {
           history: this.history,
           planSteps: this.planSteps,
           task: this.currentTask,
@@ -317,6 +360,10 @@ export class AgentEngine {
           stateVersion: this.stateVersion,
           scoutFoxGroupId: this.scoutFoxGroupId
         };
+        // Only when something was read: a session that read nothing is stored as it always was.
+        const evidence = this.storedEvidence();
+        if (evidence) session.evidence = evidence;
+        all[String(this.sessionId)] = session;
       }, (err) => {
         Logger.warn('AgentEngine', '[STATE_PERSIST_FAILED] Could not write session to storage', err.message);
       });
@@ -345,8 +392,13 @@ export class AgentEngine {
     this.stepCount = 0;
     this.currentPlanIndex = 0;
     this.currentTask = null;
+    this.evidence.clear();
+    this.typedTexts = [];
+    this.navigatedFrom = null;
+    this.lastRefusedFinish = null;
+    this.finishSendBacks = 0;
     this.notifyStateChange();
-    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history and plan cleared for fresh session.');
+    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history, plan and evidence cleared for fresh session.');
   }
 
   /**
@@ -379,7 +431,9 @@ export class AgentEngine {
         goal = item.prompt;
       } else if (item.type === 'finish' && goal) {
         const answer = String(item.answer || '').replace(/\s+/g, ' ').slice(0, 280);
-        lines.push(`- Asked: "${goal}"\n  Result: ${answer}`);
+        // An answer the audit did not verify is not handed to a later turn as plain fact.
+        const verdict = item.audit && item.audit.verdict && item.audit.verdict !== 'verified' ? ` (${item.audit.verdict}: not everything in it was checked against pages that were read)` : '';
+        lines.push(`- Asked: "${goal}"\n  Result${verdict}: ${answer}`);
         goal = null;
       }
     }
@@ -962,6 +1016,9 @@ export class AgentEngine {
     this.stepCount = 0;
     this.currentPlanIndex = 0;
     this.planSteps = [];
+    this.finishSendBacks = 0;
+    this.lastRefusedFinish = null;
+    this.navigatedFrom = null;
     this.activeTabId = tabId;
     this.isLoopActive = true;
     this.abortController = new AbortController();
@@ -1055,18 +1112,27 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         { id: 1, text: 'Analyze visible documentation text on page', status: 'in_progress' },
         { id: 2, text: 'Synthesize concise summary', status: 'pending' }
       ] : [
-        { id: 1, text: `Analyze page state for "${this.currentTask}"`, status: 'in_progress' },
+        { id: 1, text: 'Analyze the page state for the task', status: 'in_progress' },
         { id: 2, text: 'Execute targeted web actions & navigate', status: 'pending' },
         { id: 3, text: 'Extract relevant information & synthesize answer', status: 'pending' }
       ];
     }
   }
 
+  /**
+   * Plan checklist progress. The position moves by action counts, as it always did (navigate, type, a
+   * click after the first step). What changed is what the position is allowed to SHOW: a step that
+   * names a site is never completed before a page of that site was read (agent/planEvidence.ts), and
+   * when the run finishes the steps of sites that were never opened become 'skipped' instead of the
+   * old blanket "everything completed" - which is what showed a green checklist for two sites the
+   * model never visited.
+   */
   updatePlanProgress(lastActionObj = null, isFinished = false) {
     if (!this.planSteps || this.planSteps.length === 0) return;
 
     if (isFinished) {
-      this.planSteps.forEach(step => step.status = 'completed');
+      const finished = finishedPlanStatuses(this.planSteps.map(step => step.text), this.evidence, goalSources(this.currentTask));
+      this.planSteps.forEach((step, idx) => { step.status = finished[idx]; });
       this.currentPlanIndex = this.planSteps.length;
       this.notifyStateChange();
       return;
@@ -1082,17 +1148,223 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       }
     }
 
-    this.planSteps.forEach((step, idx) => {
-      if (idx < this.currentPlanIndex) {
-        step.status = 'completed';
-      } else if (idx === this.currentPlanIndex) {
-        step.status = 'in_progress';
-      } else {
-        step.status = 'pending';
-      }
-    });
+    this.applyPlanStatuses();
 
     this.notifyStateChange();
+  }
+
+  /** Sets every step's status from the position and the evidence (see honestPlanStatuses). Does not notify. */
+  applyPlanStatuses() {
+    const statuses = honestPlanStatuses(this.planSteps.map(step => step.text), this.currentPlanIndex, this.evidence, goalSources(this.currentTask));
+    this.planSteps.forEach((step, idx) => { step.status = statuses[idx]; });
+  }
+
+  /**
+   * Re-derives the checklist after a page was read, so the model sees the marks that match what it has
+   * read NOW, not as of the last action. A plan that names no site is left exactly as it is: its
+   * statuses depend only on the position, which did not move.
+   */
+  refreshPlanStatuses() {
+    try {
+      if (!this.planSteps || this.planSteps.length === 0) return;
+      if (!planNamesSites(this.planSteps.map(step => step.text), goalSources(this.currentTask))) return;
+      this.applyPlanStatuses();
+    } catch (err) {
+      Logger.warn('AgentEngine', '[PLAN_REFRESH_ERROR] Could not refresh the plan checklist', err);
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Evidence and the finish gate (agent/evidence.ts, agent/answerAudit.ts, agent/planEvidence.ts)
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * The ledger as it is stored with the session, cut down to a few dozen pages (compactLedgerSnapshot),
+   * or null when nothing was read. persistState runs on every state change, so this stays cheap: at most
+   * 60 entries are copied and their text is sliced, not rebuilt.
+   */
+  storedEvidence() {
+    return this.evidence.size === 0 ? null : compactLedgerSnapshot(this.evidence.toSnapshot());
+  }
+
+  /**
+   * Puts one read into the ledger. The URL is where the tab really was, the text is what the page
+   * returned, never a word the model wrote. "[EVIDENCE_RECORDED]" is logged the first time a URL is seen.
+   */
+  recordEvidence(input) {
+    const firstTime = !this.evidence.wasVisited(input.url);
+    const entry = this.evidence.record({ step: this.stepCount, ...input, text: this.withoutTypedText(input.text) });
+    if (!entry) return;
+    if (firstTime) {
+      Logger.info('AgentEngine', `[EVIDENCE_RECORDED] ${entry.kind} read on ${entry.host || '(no site)'}: ${entry.url}`);
+    }
+  }
+
+  /**
+   * A DOM snapshot the engine read: what the model is shown of that page (its text and its element labels). The
+   * current value of an input is not part of the page: it is whatever was typed there, and the model may have
+   * typed it (a price in a search box would otherwise be a price "seen" on that site). And when the tab landed on
+   * another site than the one the last navigate action asked for, the site asked for was opened through a redirect.
+   */
+  recordPageEvidence(snapshot) {
+    try {
+      if (!snapshot || typeof snapshot.url !== 'string') return;
+      const elements = typeof snapshot.elementsText === 'string' ? snapshot.elementsText.replace(/ value="[\s\S]*?"\)/g, ')') : '';
+      const text = [snapshot.pageText, elements].filter(t => typeof t === 'string' && t !== '').join('\n');
+      const via = [];
+      if (this.navigatedFrom) {
+        const landed = siteOf(snapshot.url);
+        const { site, before } = this.navigatedFrom;
+        // A snapshot of the site the tab was on before is the old page (the new one has not loaded yet): keep waiting for it.
+        if (!(landed === before && landed !== site)) {
+          if (landed !== '' && landed !== site) via.push(site);
+          this.navigatedFrom = null;
+        }
+      }
+      this.recordEvidence({ kind: 'page', url: snapshot.url, title: snapshot.title, text, via });
+    } catch (err) {
+      Logger.warn('AgentEngine', '[EVIDENCE_ERROR] Could not record a page read', err);
+    }
+  }
+
+  /**
+   * The text result of read_page_text, execute_js or read_network_requests. It belongs to the URL the
+   * tab is on NOW, not to the page of the last snapshot, which a click or a script may have left.
+   */
+  async recordActionEvidence(actionObj, execResult, snapshot) {
+    try {
+      const read = evidenceFromActionResult(actionObj, execResult);
+      if (!read) return;
+      const snapshotUrl = snapshot && typeof snapshot.url === 'string' ? snapshot.url : '';
+      const url = await this.liveTabUrl(this.activeTabId, snapshotUrl);
+      this.recordEvidence({ kind: read.kind, url, title: url === snapshotUrl && snapshot ? snapshot.title : '', text: read.text });
+    } catch (err) {
+      Logger.warn('AgentEngine', '[EVIDENCE_ERROR] Could not record an action result', err);
+    }
+  }
+
+  /**
+   * Remembers what a type action (also inside a browser_batch) is about to type, when it could launder a fact: a string
+   * with a digit or a link in it. Plain words cannot turn into a price or a page, and cutting them out of every page text
+   * read later would only damage the text.
+   */
+  noteTypedText(actionObj) {
+    try {
+      const steps = actionObj && actionObj.action === 'browser_batch' && Array.isArray(actionObj.steps) ? actionObj.steps : [actionObj];
+      for (const step of steps) {
+        if (step && step.action === 'type' && typeof step.text === 'string') {
+          const typed = step.text.trim().slice(0, 300);
+          if (typed.length >= 3 && /\d|https?:|www\./i.test(typed)) this.typedTexts.push(typed);
+        }
+      }
+      if (this.typedTexts.length > 50) this.typedTexts.splice(0, this.typedTexts.length - 50);
+    } catch (_) { /* a note that could not be taken only leaves a page text as it was */ }
+  }
+
+  /** The text of a page without the strings the model typed, each replaced by a space (case does not matter). */
+  withoutTypedText(text) {
+    if (typeof text !== 'string' || text === '' || this.typedTexts.length === 0) return text;
+    let out = text;
+    for (const typed of this.typedTexts) {
+      out = out.replace(new RegExp(typed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
+    }
+    return out;
+  }
+
+  /** The URL a tab is on right now, or `fallback` when the browser cannot say. */
+  async liveTabUrl(tabId, fallback) {
+    try {
+      if (!tabId || typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.get) return fallback;
+      // Both call styles, as in isTabInScope: some test doubles are promise-only.
+      const tab = await new Promise((resolve, reject) => {
+        const maybePromise = chrome.tabs.get(tabId, (t) => { lastRuntimeError(); resolve(t); });
+        if (maybePromise && typeof maybePromise.then === 'function') maybePromise.then(resolve, reject);
+      });
+      return tab && typeof tab.url === 'string' && tab.url !== '' ? tab.url : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  /**
+   * The finish gate: checks the model's final answer against what the engine really read, then decides
+   * what happens to it. Returns either { sendBack: true, message } (the run goes on) or
+   * { sendBack: false, entry, finishedLog } (the run ends with that history entry).
+   *
+   *   verified  the answer is accepted as it is, with the audit attached.
+   *   otherwise the policy (this.finishPolicy) picks send_back, annotate or replace. There is no way to
+   *             accept such an answer unchanged and green: the audit is on the entry either way, the panel
+   *             shows the verdict, and only a verified run logs "[TASK_FINISHED] Task completed successfully.".
+   *
+   * It audits the text that would be stored, so a finish with no answer is checked as what it is, and an answer that
+   * is a list or an object is the text the panel will show (prepareAnswer). A plain text reply the engine wrapped
+   * into a finish (autoWrapped) is gated too, but never sent back: a model that cannot produce an action will not
+   * do better when asked again. `options.final` says the run is out of steps: nothing can be sent back then.
+   */
+  gateFinish(actionObj, maxSteps, options = {}) {
+    const base = buildFinishEntry(actionObj);
+    base.answer = prepareAnswer(base.answer);
+    const audit = auditAnswer({
+      goal: this.currentTask || '',
+      answer: base.answer,
+      ledger: this.evidence,
+      planTexts: this.planSteps.map(step => step.text)
+    });
+    const sendBacks = this.finishSendBacks;
+    const record = auditRecordOf(audit, sendBacks);
+    Logger.info('AgentEngine', `[FINISH_AUDIT] verdict=${audit.verdict} lies=${audit.lies} gaps=${audit.gaps} softs=${audit.softs}`, record.notes.length > 0 ? record.notes.map(n => ({ code: n.code, severity: n.severity, text: n.text })) : null);
+
+    if (audit.verdict === 'verified') {
+      this.lastRefusedFinish = null;
+      return {
+        sendBack: false,
+        entry: { ...base, audit: record },
+        finishedLog: base.unconfirmed
+          ? '[TASK_FINISHED] Model gave a direct text answer instead of a finish action - accepted, but flagged unconfirmed.'
+          : '[TASK_FINISHED] Task completed successfully.'
+      };
+    }
+
+    const ctx = gateContextOf(audit, sendBacks, maxSteps - this.stepCount);
+    // Two finishes that a send-back cannot improve: a plain-text reply (a model that cannot produce an action
+    // will not do better when asked again), and an honest answer that already says which sites it did not
+    // check, after the model was told once to open them or to say so.
+    let noSendBack;
+    if (options.final) noSendBack = NO_SEND_BACK_OUT_OF_STEPS;
+    else if (base.unconfirmed) noSendBack = NO_SEND_BACK_PLAIN_TEXT;
+    else if (sendBacks >= 1 && answerAcknowledgesEveryGap(base.answer, audit)) noSendBack = NO_SEND_BACK_ACKNOWLEDGED;
+    const resolved = resolveGateDecision(this.finishPolicy, ctx, { noSendBack });
+    const { decision } = resolved;
+    // A real clamp (no step left, the hard cap, a policy that threw or answered nonsense) is a WARN. The honest answer that is
+    // accepted as it is after a send-back is not a problem: INFO, with its own tag (see gateClampLog).
+    const clampLog = gateClampLog(resolved, { sendBacks, verdict: audit.verdict });
+    if (clampLog && clampLog.level === 'info') Logger.info('AgentEngine', clampLog.message);
+    else if (clampLog) Logger.warn('AgentEngine', clampLog.message);
+
+    if (decision === 'send_back') {
+      this.finishSendBacks++;
+      this.lastRefusedFinish = actionObj;
+      Logger.info('AgentEngine', `[FINISH_SENT_BACK] The finish was refused (send-back ${this.finishSendBacks} of this turn, ${ctx.stepsLeft} steps left): ${audit.lies} lies, ${audit.gaps} gaps. The model was told what is wrong and the run goes on.`);
+      return { sendBack: true, message: formatSendBack(audit) };
+    }
+
+    let answer;
+    if (decision === 'replace') {
+      answer = buildEvidenceReport(audit);
+      Logger.info('AgentEngine', `[FINISH_REPLACED] The model's answer was dropped. The answer is a report of the pages that were read (verdict ${audit.verdict}).`);
+    } else {
+      answer = annotateAnswer(base.answer, withoutAcknowledgedGaps(base.answer, audit));
+      const cutLinks = audit.notes.some(n => n.code === 'fabricated_url');
+      Logger.info('AgentEngine', `[FINISH_ANNOTATED] Finished with the model's answer marked ${audit.verdict}. ${answer === base.answer ? 'The text is unchanged: it already says which sites were not checked.' : `${cutLinks ? 'Links that were never opened were cut out. ' : ''}A warning line and a verification section were added.`}`);
+    }
+    this.lastRefusedFinish = null;
+    return {
+      sendBack: false,
+      entry: { ...base, answer, audit: record },
+      finishedLog: audit.verdict === 'partial'
+        ? `[TASK_FINISHED_PARTIAL] The task ended with a partial answer: ${audit.notOpened.length} named site(s) were not opened.`
+        : `[TASK_FINISHED_UNVERIFIED] The task ended with an unverified answer: ${audit.lies} statement(s) are not backed by any page that was read.`
+    };
   }
 
   /**
@@ -1260,6 +1532,8 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         Logger.info('AgentEngine', `[DOM_SNAPSHOT_INPUT] Title: "${domSnapshot.title}" | URL: ${domSnapshot.url} | Elements: ${domSnapshot.elementCount} | PageTextLen: ${domSnapshot.pageText ? domSnapshot.pageText.length : 0}`);
       } catch (err) {
         consecutiveDomErrors++;
+        // No page was read after the navigation, so nothing says where it led.
+        this.navigatedFrom = null;
         Logger.error('AgentEngine', `[DOM_ERROR] Failed to read page state (attempt ${consecutiveDomErrors}/3)`, err);
 
         const isErrorPage = err.message.includes('error page') || err.message.includes('Restricted') || err.message.includes('cannot read');
@@ -1299,6 +1573,11 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         this.notifyStateChange({ error: err.message });
         break;
       }
+
+      // The engine read this page: that is the fact the audit of the final answer rests on. Outside the try
+      // above on purpose: a bug in here must never be taken for a failed page read and start the self-heal.
+      this.recordPageEvidence(domSnapshot);
+      this.refreshPlanStatuses();
 
       const systemPrompt = this.buildSystemPrompt(settings.systemInstructions, settings.provider);
       let userMessage = this.buildStepMessage(domSnapshot, maxSteps);
@@ -1442,17 +1721,35 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       if (this.recentActionSignatures.length > 5) this.recentActionSignatures.shift();
 
       Logger.info('AgentEngine', `[ACTION_DISPATCH] Executing [${actionObj.action}]`, actionObj);
+      this.navigatedFrom = null;
+      this.noteTypedText(actionObj);
 
       if (actionObj.action === 'finish') {
+        // The finish gate. Every final answer is checked against what the engine really read before it
+        // is accepted. A verified answer goes through untouched; any other one is sent back to the
+        // model, marked as unverified, or replaced by a report written by code (gateFinish).
+        const gate = this.gateFinish(actionObj, maxSteps);
+
+        if (gate.sendBack) {
+          // Not a finish: no finish entry, the run goes on, the step is used up. The model reads the
+          // refusal as the result of its last action, like any other failed action.
+          this.history.push({
+            step: this.stepCount,
+            type: 'execution_result',
+            success: false,
+            error: gate.message,
+            finishRefused: true
+          });
+          this.notifyStateChange();
+          continue;
+        }
+
         this.status = 'idle';
         this.isLoopActive = false;
         this.currentPhase = '';
         this.updatePlanProgress(null, true);
-        const finishEntry = buildFinishEntry(actionObj);
-        this.history.push(finishEntry);
-        Logger.info('AgentEngine', finishEntry.unconfirmed
-          ? '[TASK_FINISHED] Model gave a direct text answer instead of a finish action - accepted, but flagged unconfirmed.'
-          : '[TASK_FINISHED] Task completed successfully.');
+        this.history.push(gate.entry);
+        Logger.info('AgentEngine', gate.finishedLog);
         this.notifyStateChange();
         break;
       }
@@ -1489,6 +1786,14 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         const execResult = await this.executeActionOnTab(this.activeTabId, actionObj);
         Logger.info('AgentEngine', `[ACTION_RESULT] ${execResult.success ? 'Success' : 'Failed'}: ${execResult.message || execResult.error}`);
 
+        // The text that read_page_text, execute_js and read_network_requests returned is something the
+        // engine read too.
+        await this.recordActionEvidence(actionObj, execResult, domSnapshot);
+        // A navigation that worked: the next page read says where it led (a redirect to another site included).
+        if (actionObj.action === 'navigate' && execResult.success !== false && typeof actionObj.url === 'string' && siteOf(actionObj.url) !== '') {
+          this.navigatedFrom = { site: siteOf(actionObj.url), before: siteOf(domSnapshot.url) };
+        }
+
         // RAV Verification: If the action technically succeeded, verify it achieved the expected outcome
         let finalSuccess = execResult.success !== false;
         let finalMessage = execResult.message;
@@ -1497,6 +1802,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         if (finalSuccess && actionResult.expectedOutcome) {
           this.setPhase(`🔍 Step ${this.stepCount}/${maxSteps}: Verifying expected outcome...`);
           const postActionDom = await this.getTabDOMWithAutoInject(this.activeTabId, settings.showElementBadges);
+          this.recordPageEvidence(postActionDom);
           const verification = await this.verifyStep(actionResult.expectedOutcome, postActionDom, settings);
 
           if (!verification.success) {
@@ -1547,9 +1853,25 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       this.status = 'idle';
       this.isLoopActive = false;
       this.currentPhase = '';
+      // The last finish was sent back and the model ran out of steps before it could fix it. The answer it gave is
+      // still worth showing: the part the pages back is real. It goes through the gate one more time, with no
+      // send-back left, so what the user gets is that answer with its verdict, then the reason the run stopped.
+      let answerKept = false;
+      if (this.lastRefusedFinish) {
+        try {
+          const gate = this.gateFinish(this.lastRefusedFinish, maxSteps, { final: true });
+          this.updatePlanProgress(null, true);
+          this.history.push(gate.entry);
+          answerKept = true;
+          Logger.info('AgentEngine', `[FINISH_AT_STEP_CAP] The run ran out of steps after a send-back. The model's last answer is shown, marked ${gate.entry.audit ? gate.entry.audit.verdict : 'unchecked'}.`);
+        } catch (err) {
+          Logger.warn('AgentEngine', '[FINISH_AT_STEP_CAP_ERROR] Could not keep the last refused answer', err);
+        }
+        this.lastRefusedFinish = null;
+      }
       // Pushed as an 'error', never 'finish' - see agent/outcome.ts. This run did not
       // complete, and must never render or be recapped as though it did.
-      this.history.push(buildMaxStepsEntry(maxSteps));
+      this.history.push(buildMaxStepsEntry(maxSteps, { answerKept }));
       this.notifyStateChange();
     }
   }
@@ -1747,7 +2069,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           role: 'user',
           content: item.success
             ? `Action Executed Successfully: ${item.message}`
-            : `Action Failed: ${item.error}. Choose a different element or action.`
+            // A refused finish is not a failed click: its text says what to do, and "choose a different
+            // element" would only confuse the model.
+            : item.finishRefused ? item.error : `Action Failed: ${item.error}. Choose a different element or action.`
         });
       } else if (item.type === 'user_answer') {
         messages.push({ role: 'user', content: `You asked a question and the user answered: "${item.content}". Continue the task using this answer.` });
@@ -1965,14 +2289,24 @@ Rules:
     // planSteps has always been computed (generatePlan) and shown in the side panel's own
     // progress bar - but buildStepMessage never included it, so the model choosing the actual
     // next action never saw the plan it was supposedly following, or how many steps remained.
+    // "[-]" (skipped) is only a safety net here: a step becomes skipped when the run ends, so the model never
+    // sees one in a step message of a run that goes on.
     const planText = (this.planSteps && this.planSteps.length)
-      ? `\nPlan (step ${this.stepCount}${maxSteps ? `/${maxSteps}` : ''} overall):\n${this.planSteps.map((s, i) => `${i + 1}. [${s.status === 'completed' ? 'x' : s.status === 'in_progress' ? '>' : ' '}] ${s.text}`).join('\n')}\n`
+      ? `\nPlan (step ${this.stepCount}${maxSteps ? `/${maxSteps}` : ''} overall):\n${this.planSteps.map((s, i) => `${i + 1}. [${s.status === 'completed' ? 'x' : s.status === 'in_progress' ? '>' : s.status === 'skipped' ? '-' : ' '}] ${s.text}`).join('\n')}\n`
       : '';
+
+    // Which pages the engine has really read, and which sites the task names that it has not opened yet,
+    // with one rule about it. Without this a model never learns that two of its three sources are
+    // still unvisited, nor that "not checked" is an acceptable thing to report. Empty when there is
+    // nothing to say, which leaves the message exactly as it was.
+    const planTexts = (this.planSteps || []).map(s => s.text);
+    const evidenceBlock = describeEvidenceForPrompt(this.evidence, namedSources(this.currentTask, planTexts));
+    const evidenceText = evidenceBlock ? `\n${evidenceBlock}\n` : '';
 
     return `Current Page Title: "${snapshot.title}"
 Current URL: ${snapshot.url}
 Scroll Position: Y=${snapshot.scrollState.scrollY} / ${snapshot.scrollState.pageHeight}px
-${planText}
+${planText}${evidenceText}
 Webpage Visible Text Content (Use this to read content or summarize):
 """
 ${snapshot.pageText || '(No visible text extracted)'}

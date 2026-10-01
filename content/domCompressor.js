@@ -5,6 +5,123 @@
  */
 
 (function() {
+  // ---------------------------------------------------------------------------------------------
+  // Repeated text
+  //
+  // extractPageText() reads textContent, which also holds hidden markup, so a page can hand it the
+  // same few words again and again. On frame.work's laptop configurator every option <li> was about
+  // 5000 characters of "Batch 1 Shipped Batch 2 Shipped Batch 3 Ships December - Sold Out ..." (the
+  // list once where people see it, then in several hidden copies). That filled the whole cap, so the
+  // price, the shipping and the delivery text never reached the model, and read_page_text returns the
+  // same text, so the model could not get past it. collapseRepeatedRuns() shortens such runs before
+  // the cap is applied.
+  // ---------------------------------------------------------------------------------------------
+  const PAGE_TEXT_CAP = 4500;
+  // How much text is searched for repeats. Bounds the work on a page with megabytes of text.
+  const PAGE_TEXT_SCAN_LIMIT = 1000000;
+  // A run needs this many identical units in a row. Fewer are a short list, and stay as they are.
+  const REPEAT_MIN_RUN = 4;
+  // The longest unit, in words. A cycle of runs ("9 shipped, 7 sold out, 1 Q1") is one unit on the
+  // second pass, after its runs are short.
+  const REPEAT_MAX_UNIT_WORDS = 64;
+  // Each pass shortens the text or stops, this only bounds the work.
+  const REPEAT_MAX_PASSES = 4;
+  // A unit that holds no letter ("1 2 3 4", "- - - -") is numbers or a separator, not an entry.
+  const HAS_LETTER = /\p{L}/u;
+  // When the digits of a run carry a price or a lead time, dropping the middle of the run would
+  // drop information, so such a run is kept whole. "Ships" and "Shipped" are deliberately not
+  // here: "Batch 3 Ships December - Sold Out" is a batch status, not a shipping cost or lead time,
+  // and it is exactly the noise this exists for.
+  const PRICE_LIKE = /[€$£¥₹]\s?\d|\d\s?(?:[€$£¥₹]|EUR\b|USD\b|GBP\b|CHF\b|CAD\b|AUD\b|Euro\b)/i;
+  const DELIVERY_LIKE = /\b(?:shipping|shipment\w*|deliver\w*|arriv\w*|versand\w*|liefer\w*|werktag\w*|business days?|working days?|porto)\b/i;
+
+  /**
+   * One pass: finds runs of REPEAT_MIN_RUN or more identical units (the same words after masking
+   * digits, each unit 1 to REPEAT_MAX_UNIT_WORDS words, line breaks ignored) and replaces each run by
+   *   - "unit (repeated N times)" when every unit is word for word the same, which loses nothing,
+   *   - "first ... last (N similar entries)" when only digits differ,
+   *   - nothing at all (the run stays) when the digits differ and carry a price or a delivery time,
+   *     or when the replacement would not be shorter than the run.
+   * Everything outside the runs keeps its words and its white space.
+   */
+  function collapseRepeatedRunsOnce(text) {
+    const lead = text.match(/^\s*/)[0];
+    const words = [];
+    const gaps = []; // gaps[i] is the white space after words[i]
+    for (const [, word, gap] of text.matchAll(/(\S+)(\s*)/g)) {
+      words.push(word);
+      gaps.push(gap);
+    }
+    const n = words.length;
+    if (n < REPEAT_MIN_RUN) return text;
+    const shapes = words.map((word) => word.replace(/\d+/g, '#'));
+
+    const sameShape = (a, b, size) => {
+      for (let t = 0; t < size; t++) {
+        if (shapes[a + t] !== shapes[b + t]) return false;
+      }
+      return true;
+    };
+    // The unit of `size` words that starts at word `start`, without the white space after it.
+    const unitText = (start, size) => {
+      let out = '';
+      for (let t = 0; t < size; t++) out += words[start + t] + (t < size - 1 ? gaps[start + t] : '');
+      return out;
+    };
+    // The run at word `i` that covers the most words, the smaller unit when two cover the same (so
+    // "Batch 1 Shipped" x 8 is one run of 8, not two of 4). Taking the first unit that repeats would
+    // take the inner run of a repeated cycle and leave the cycle itself cut at the wrong place.
+    // `skip` is how many words a run without letters covers there, so that a long "1 2 3 4 ..." is
+    // passed once and not searched again from every word of it.
+    const runAt = (i) => {
+      let best = { size: 0, count: 0 };
+      let skip = 0;
+      const longest = Math.min(REPEAT_MAX_UNIT_WORDS, Math.floor((n - i) / REPEAT_MIN_RUN));
+      for (let size = 1; size <= longest; size++) {
+        let count = 1;
+        while (i + (count + 1) * size <= n && sameShape(i, i + count * size, size)) count++;
+        if (count < REPEAT_MIN_RUN) continue;
+        if (!HAS_LETTER.test(unitText(i, size))) {
+          skip = Math.max(skip, size * count);
+        } else if (size * count > best.size * best.count) {
+          best = { size, count };
+        }
+      }
+      return { ...best, skip };
+    };
+
+    const out = [lead];
+    let i = 0;
+    while (i < n) {
+      const { size, count, skip } = runAt(i);
+      if (size === 0) {
+        const stay = Math.max(1, skip);
+        for (let t = 0; t < stay; t++) out.push(words[i + t], gaps[i + t]);
+        i += stay;
+        continue;
+      }
+
+      const end = i + size * count; // the word after the run
+      const first = unitText(i, size);
+      let identical = true;
+      for (let u = 1; u < count && identical; u++) identical = unitText(i + u * size, size) === first;
+
+      let summary = null;
+      if (identical) summary = `${first} (repeated ${count} times)`;
+      else if (!PRICE_LIKE.test(first) && !DELIVERY_LIKE.test(first)) summary = `${first} ... ${unitText(end - size, size)} (${count} similar entries)`;
+
+      let runLength = words[end - 1].length;
+      for (let t = i; t < end - 1; t++) runLength += words[t].length + gaps[t].length;
+      if (summary !== null && summary.length < runLength) {
+        out.push(summary, gaps[end - 1]);
+      } else {
+        for (let t = i; t < end; t++) out.push(words[t], gaps[t]);
+      }
+      i = end;
+    }
+    return out.join('');
+  }
+
   class DOMCompressor {
     constructor() {
       this.elementMap = new Map(); // Maps numeric ID to DOM Element reference
@@ -80,7 +197,9 @@
           && document.contentType !== 'text/html' && document.contentType !== 'text/xml';
         if (window.location.hostname.includes('raw.githubusercontent.com') || rawContentType) {
           const rawText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-          return rawText.trim().slice(0, 4500);
+          // The text of a raw markdown or plain text file IS the content (a log, a table, source), so
+          // it is capped and marked but never collapsed.
+          return this.capPageText(rawText.trim());
         }
 
         // 2. Targeted Article / README / Documentation Containers
@@ -139,10 +258,46 @@
           extractedText = (container.innerText || container.textContent || '').trim();
         }
 
-        return extractedText.slice(0, 4500);
+        return this.finishPageText(extractedText);
       } catch (_) {
-        return (document.body ? (document.body.innerText || document.body.textContent || '') : '').slice(0, 3000);
+        return this.capPageText(document.body ? (document.body.innerText || document.body.textContent || '') : '', 3000);
       }
+    }
+
+    /**
+     * Collapses the repeated text of a rendered page, then applies the cap (see the notes above
+     * collapseRepeatedRunsOnce). Only the first PAGE_TEXT_SCAN_LIMIT characters are searched.
+     */
+    finishPageText(text) {
+      const scanned = text.length > PAGE_TEXT_SCAN_LIMIT ? text.slice(0, PAGE_TEXT_SCAN_LIMIT) : text;
+      return this.capPageText(this.collapseRepeatedRuns(scanned), PAGE_TEXT_CAP, scanned.length < text.length);
+    }
+
+    /**
+     * Runs of repeated units (REPEAT_MIN_RUN or more, the same after masking digits) become
+     * "first ... last (N similar entries)", or "unit (repeated N times)" when they are word for word
+     * the same. A second pass collapses a cycle of such runs, which is what a page that repeats a
+     * list several times leaves after the first. Runs whose digits carry a price or a delivery time
+     * are kept. See collapseRepeatedRunsOnce.
+     */
+    collapseRepeatedRuns(text) {
+      let current = text;
+      for (let pass = 0; pass < REPEAT_MAX_PASSES; pass++) {
+        const next = collapseRepeatedRunsOnce(current);
+        if (next === current) break;
+        current = next;
+      }
+      return current;
+    }
+
+    /**
+     * Cuts the text at the cap. A text that is cut ends with a marker line, so the model knows it
+     * saw part of the page and can scroll or read on. `cutEarlier` says the page was already cut
+     * before this (the scan limit) even though what is left fits.
+     */
+    capPageText(text, cap = PAGE_TEXT_CAP, cutEarlier = false) {
+      if (text.length > cap) return `${text.slice(0, cap)}\n[page text truncated at ${cap} characters]`;
+      return cutEarlier ? `${text}\n[page text truncated]` : text;
     }
 
     /**

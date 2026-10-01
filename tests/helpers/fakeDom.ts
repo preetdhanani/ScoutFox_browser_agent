@@ -39,13 +39,18 @@
  *   text     the visible text. A string is trimmed, as the real extractor trims innerText. A list is formatted like the real
  *            extractor does for a page of headings and paragraphs: only the first 90 pieces are read,
  *            { heading } becomes "\n### heading\n", pieces of 3 characters or less are dropped, the
- *            rest is joined with "\n". Both forms are cut at 4500 characters. Two things of the real
- *            extractor are NOT modelled, because a description has no positions and no innerText: it
- *            falls back to the whole innerText when the pieces add up to under 100 characters, and
- *            on a page scrolled more than 200 px with more than 30 pieces it reads the pieces near
- *            the viewport instead of the first 90, so the text there changes as the page scrolls.
- *            Here the text is the same at every scroll position. A description just gives the text
- *            the model should see, whatever it is.
+ *            rest is joined with "\n". Both forms are cut at 4500 characters, and a text that is cut
+ *            ends with the line "[page text truncated at 4500 characters]", like the real one. Three
+ *            things of the real extractor are NOT modelled, because a description has no positions
+ *            and no innerText: it falls back to the whole innerText when the pieces add up to under
+ *            100 characters, and on a page scrolled more than 200 px with more than 30 pieces it
+ *            reads the pieces near the viewport instead of the first 90, so the text there changes
+ *            as the page scrolls. Here the text is the same at every scroll position. The third is
+ *            the collapse of repeated text: the real extractor turns four or more units in a row that
+ *            are the same after masking digits ("Batch 1 Shipped" ... "Batch 9 Shipped") into
+ *            "first ... last (N similar entries)", and this fake does not. A description just gives
+ *            the text the model should see, whatever it is, so describe such a page already collapsed.
+ *            (Pieces that differ in more than digits are never collapsed.)
  *   elements the interactive elements in document order (see ElementSpec). Only these appear in the
  *            list the model sees, numbered 1, 2, 3... from the top on every snapshot, first 120.
  * An element (ElementSpec): tag, text, type, role, placeholder, label (the aria-label), id, name,
@@ -242,6 +247,8 @@ const DEFAULT_VIEWPORT_HEIGHT = 800;
 const ELEMENT_HEIGHT = 20;
 const MAX_ELEMENTS = 120;
 const PAGE_TEXT_LIMIT = 4500;
+/** The last line of a page text that was cut at the limit (content/domCompressor.js capPageText). */
+const PAGE_TEXT_MARKER = `[page text truncated at ${PAGE_TEXT_LIMIT} characters]`;
 /** How many text pieces (headings, paragraphs...) of a page the real extractor reads when the page is not scrolled far. */
 const MAX_TEXT_PIECES = 90;
 const ELEMENT_TEXT_LIMIT = 60;
@@ -320,18 +327,24 @@ export function input(type: string, extra: Partial<ElementSpec> = {}): ElementSp
 // Snapshots
 // ---------------------------------------------------------------------------------------------
 
+/** content/domCompressor.js capPageText(): a text over the limit is cut there and ends with a marker line. */
+function capPageText(text: string): string {
+  return text.length > PAGE_TEXT_LIMIT ? `${text.slice(0, PAGE_TEXT_LIMIT)}\n${PAGE_TEXT_MARKER}` : text;
+}
+
 /** content/domCompressor.js extractPageText() for a page of headings and paragraphs. */
 function formatPageText(text: PageText | undefined): string {
   if (text === undefined) return '';
-  // A plain page is its innerText, trimmed and then cut (extractPageText: `.trim()` then `.slice(0, 4500)`).
-  if (typeof text === 'string') return text.trim().slice(0, PAGE_TEXT_LIMIT);
+  // A plain page is its innerText, trimmed and then cut (extractPageText: `.trim()` then the cap).
+  if (typeof text === 'string') return capPageText(text.trim());
   // The first 90 pieces of the page, counted before the short ones are dropped (allTextNodes.slice(0, 90)).
-  return text
-    .slice(0, MAX_TEXT_PIECES)
-    .map((piece) => (typeof piece === 'string' ? collapse(piece) : `\n### ${collapse(piece.heading)}\n`))
-    .filter((piece) => piece.length > 3)
-    .join('\n')
-    .slice(0, PAGE_TEXT_LIMIT);
+  return capPageText(
+    text
+      .slice(0, MAX_TEXT_PIECES)
+      .map((piece) => (typeof piece === 'string' ? collapse(piece) : `\n### ${collapse(piece.heading)}\n`))
+      .filter((piece) => piece.length > 3)
+      .join('\n'),
+  );
 }
 
 function pageHeightOf(page: PageSpec, viewportHeight: number): number {
