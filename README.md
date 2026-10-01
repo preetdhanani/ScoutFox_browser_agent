@@ -85,9 +85,11 @@ After you change the code:
 - If the agent needs to ask you something mid-task, a question box appears right in the timeline - type your answer and hit **Send**, and it continues with that answer.
 
 ### Read the result honestly
-- A green **"✓ Done"** card means the agent actually finished and is confident in the answer.
-- An amber **"⚠ Unconfirmed answer"** card means the model replied in plain text instead of a structured action - the run still ended, but the answer wasn't explicitly confirmed as final.
-- A turn marked **"did not finish"** (no green card at all) means it ran out of its step budget or hit an error before completing - it's never silently shown as done.
+- A green **"✓ Done"** card means the agent finished and verified the answer against visited page evidence.
+- An amber **"⚠ Partial answer"** card means the answer is missing data from one or more planned sites that were not opened.
+- A red **"⚠ Unverified answer"** card means the answer cited links, prices, or numbers not observed on visited pages.
+- An amber **"⚠ Unconfirmed answer"** card means the model replied in plain text instead of a structured action - the run still ended, but the answer was not explicitly confirmed as final.
+- A turn marked **"did not finish"** (no card at all) means it ran out of its step budget or hit an error before completing - it is never silently shown as done.
 
 ### Configure it (Settings tab)
 - **LLM Provider / Model**: pick from OpenRouter, AgentRouter, Gemini, Ollama, OpenAI, Anthropic, or Groq, and search/select the exact model.
@@ -185,7 +187,9 @@ What will change for you:
 * **Local models keep working**: small local Ollama models stay supported.
 * **New setup step (already built)**: the project now has a Vite build step.
   You run `npm run build` and load the `dist/` folder in Chrome, as in the Quick Setup above.
-  The shared core in `src/` is TypeScript now (phase P1).
+  The shared core is TypeScript now (phase P1).
+  Providers use LangChain clients behind the API client surface (phase P2).
+  Final answers are audited against visited page evidence before completion.
   The engine, the content scripts and the side panel are still plain JavaScript, and they move in later phases.
 
 See [PRD.md](PRD.md) for the details.

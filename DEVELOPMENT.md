@@ -50,7 +50,7 @@ To inspect background service worker output:
 The worker is one bundled file, `background/sw.js`, built from `background/background.js` and the modules it imports (`agentEngine.js`, `apiClients.js` and so on).
 DevTools shows `background/sw.js`.
 The code is not minified, so it stays readable, and the `//#region` comments in it name the original source file of most parts (a few small modules, such as the ones in `src/background/agent/`, sit inside a neighbour's region).
-It is about 3.1 MB because the LangChain provider packages are in it, see "Worker Bundle and CSP" in section 3.
+It is about 3.3 MB because the LangChain provider packages and answer audit are in it, see "Worker Bundle and CSP" in section 3.
 The build also writes sourcemaps next to the files (`sourcemap: 'hidden'`), but they are kept only for `npm run evalscan`, which uses them to name the original file and line of a hit.
 The built files have no `sourceMappingURL` line and the zip has no maps, so DevTools does not load them and debugging works on the built code.
 
@@ -66,7 +66,7 @@ Run the full suite with:
 ```bash
 npm test
 ```
-This runs `node --test` on `tests/**/*.test.js` and `tests/**/*.test.ts` - 2640 tests across 257 files as of this writing.
+This runs `node --test` on `tests/**/*.test.js` and `tests/**/*.test.ts` (2792 tests across 239 files as of this writing).
 None of it needs a real browser.
 
 ### Syntax Check
@@ -127,7 +127,7 @@ The key is never in the options of a model either: AgentRouter's wire image, whi
 The requests are built by LangChain and the SDKs, so provider tests capture them with a fetch spy (`tests/helpers/llmWire.ts`) instead of stubbing a response object.
 
 ### Worker Bundle and CSP
-The worker bundles the LangChain provider packages, so `background/sw.js` is 3,187 KB unminified (671 KB gzip).
+The worker bundles the LangChain provider packages and answer audit, so `background/sw.js` is 3,349 KB unminified (723 KB gzip).
 The build prints the size of every file, raw and gzip, and CI runs the build, so a jump in the worker shows in the log.
 Minify stays off.
 Minified, the worker would be 1,432 KB (363 KB gzip) and would start about 13 ms faster, and that is not worth an unreadable `dist/` and a rewrite of the zod check below.
@@ -339,15 +339,16 @@ Before packaging for the Chrome Web Store:
 
 ## 5. Build Foundation and What Comes Next
 
-> Status: the build step is done (phase P0 of the LangGraph rework, 2026-09-29).
-> The rest of the rework is decided but not built yet, see section 3 of [PRD.md](PRD.md).
+> Status: phases P0, P1, and P2 are built, along with the answer audit gate and honest finish policy.
+> The graph itself is decided but not built yet, see section 3 of [PRD.md](PRD.md).
 
 What is true today:
 - `npm run build` bundles the extension with Vite into `dist/`, and you load `dist/` unpacked in `chrome://extensions`, not the repository folder.
 - The manifest and the icons live in `public/`, and the build copies them into `dist/`.
 - The shared core is TypeScript in `src/` (phase P1): storage and logger, the action registry, the reply parser, outcome and recovery rules, the checkpoint saver and the interrupt shim.
   The saver and the shim are tested but no code calls them yet.
-- The providers run on LangChain (phase P2), so the worker bundle is about 3.1 MB, see "Worker Bundle and CSP" in section 3.
+- The providers run on LangChain (phase P2), so the worker bundle is about 3.3 MB, see "Worker Bundle and CSP" in section 3.
+- Final answers pass through the answer audit provenance gate and honest finish policy before completion.
 - The engine (`background/`), the content scripts and the side panel are still plain JavaScript ES modules, and the build changes no behavior.
 - CI zips the built `dist/`, not the raw source folders.
 

@@ -34,10 +34,9 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
    This now includes a stale-element fallback (re-find a moved/re-rendered element by its id, CSS path, or tag plus visible text) and a `browser_batch` bulk-action mode that correctly reports partial success/failure with a readable message, instead of a blank all-or-nothing result.
    *Planned (decided 2026-09-28, not built yet):* real clicks through `chrome.debugger` (CDP input events) while a task runs.
    If the debugger cannot attach, it falls back to today's synthetic DOM events.
-3. **Multi-Provider API Client (`background/apiClients.js`)**: Universal REST client supporting Ollama (`http://localhost:11434`), OpenAI-compatible endpoints (Groq, LM Studio, vLLM, Llama API), OpenAI, Anthropic Claude, and Google Gemini.
+3. **Multi-Provider API Client (`background/apiClients.js`, `src/background/llm/`)**: Universal client migrated to LangChain chat model packages behind the `ApiClients` surface, supporting Ollama (`http://localhost:11434`), OpenAI-compatible endpoints (Groq, LM Studio, vLLM, Llama API), OpenAI, Anthropic Claude, and Google Gemini.
    For Ollama, the main action call now sends a JSON schema in `format` with `think:false` (constrained decoding), so the model can only answer with a real action.
    A server older than 0.5 that rejects a schema falls back to `format:"json"`, and the other providers are unchanged.
-   *Planned (decided 2026-09-28, not built yet):* replaced by LangChain chat model packages.
 4. **Fault-Tolerant Action Loop (`background/agentEngine.js`, `src/background/agent/`)**: Self-correcting execution loop with a JSON fallback parser and error recovery for 8B-32B small models.
    Hallucinated element IDs and unrecognized action verbs are now rejected as correctable parse errors instead of being silently "corrected" or failing a layer later.
    Restricted-page navigation (chrome://, the Chrome Web Store, etc.) is now blocked before it happens rather than discovered a step later, and the agent is now shown its own step-by-step plan and remaining step budget when choosing its next action.
@@ -57,9 +56,9 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
 ## 3. Next version (planned, decided 2026-09-28, revised 2026-09-29): LangGraph rework
 
 > **Status**: Decided by Prit on 2026-09-28, and revised on 2026-09-29 after his design review.
-> Only two phases are built: P0a (constrained decoding for Ollama in today's engine, see 3.3, item 17) and P0 (the Vite build foundation, see 3.3, item 9, and 3.6).
-> Nothing else in this section is implemented.
-> Everything in section 2 still describes the current code.
+> Phases P0a, P0, P1, P2, and the answer audit provenance gate with honest finish policy are built.
+> The graph itself is not built yet.
+> Everything in section 2 describes the current code.
 > The target audience and the local-first, small-model niche from section 1 stay the same.
 
 ### 3.1 Why the direction changed
@@ -172,7 +171,7 @@ Rebuild the whole agent on LangGraph.js.
 - Still to test: graph checkpoints of a subgraph with the custom saver (spike S5, the first task of phase P4).
 
 ### 3.6 Next step
-The design is written and waits for Prit's review, and phases P0a, P0 and P1 are built.
+The design is written and waits for Prit's review, and phases P0a, P0, P1 and P2 are built, along with the answer audit provenance gate.
 - P0a: constrained decoding for Ollama (see 3.3, item 17).
 - P0 (build foundation, no behaviour change): Vite builds today's JS into `dist/` (`npm run build`), you load `dist/` in Chrome, and CI runs on Node 22.x and 24.x and zips the built `dist/`.
   It also added an opt-in browser smoke test (`npm run test:e2e`) and two test helpers (`fakeChrome` and `fakeStorageSession`).
@@ -180,8 +179,14 @@ The design is written and waits for Prit's review, and phases P0a, P0 and P1 are
   The old engine calls the new parser and registry, and behaves as before except for these parser rules.
   Tool-call markup is never turned into an answer, nested JSON is read whole, and an element id is read strictly (`"12abc"` is not 12).
   The saver and the shim are tested but not used yet.
+- P2 (LangChain providers): provider fetch logic moved to LangChain chat models behind the `ApiClients` surface (`src/background/llm/`).
+  ChatOllama enforces action schema with `think:false`.
+  AgentRouter falls back to OpenAI format on message endpoint errors.
+  Abort signals strictly handle timeout, pause, and stop.
+- Answer audit provenance gate and honest finish policy: answers are checked against the session ledger.
+  Unverified claims or missing planned sites are refused or annotated.
 
-Next come the phases up to P3, and the graph itself from P4 on.
+Next comes the graph itself from P4 on.
 Every phase keeps the tests green, and the graph stays behind an engine switch until it works on real sites.
 
 ### 3.7 How today's harness concepts map to the planned graph
@@ -196,12 +201,13 @@ This is a summary of the design, which still waits for Prit's approval.
   Prompt-injection hardening is out of scope for now.
 - **Recovery** -> the blocked-site ladder by effort level, `recover` (failure memory, retries, bans), stuck detection, and checkpoints with resume.
 
-### 3.8 Current facts (checked 2026-09-30)
-- `npm test`: 994 tests across 70 test files (`.js` and `.ts`), all passing.
+### 3.8 Current facts
+- Automated test suite runs with `node --test` across unit and integration tests (see [DEVELOPMENT.md](DEVELOPMENT.md) for details).
 - `npm run check` runs `node --check` on the 7 plain JS source files (see `package.json`).
   The TypeScript files are covered by `npm run typecheck`, which runs `tsc --noEmit` on `src/` (`tsconfig.json`) and on the tests with their helpers (`tests/tsconfig.json`).
 - Today the extension is built with Vite (phase P0): `npm run build` writes `dist/`, and you load `dist/` unpacked in Chrome, not the repo folder.
   The shared core in `src/` is TypeScript (phase P1).
+  The providers run on LangChain behind `ApiClients` (phase P2).
   The engine, the content scripts and the side panel are still plain JS ES modules.
 - CI (`.github/workflows/ci.yml`) runs on Node 22.x and 24.x: `npm ci`, check, typecheck, test, build, evalscan and a zip of the built `dist/`.
 - `public/manifest.json` does not have the `debugger` permission yet.
