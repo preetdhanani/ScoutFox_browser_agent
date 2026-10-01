@@ -31,15 +31,15 @@ Once it's loaded, open any webpage, open the ScoutFox Side Panel, and test your 
 * Follow standard ES6 module imports, and write every relative import with the file's extension (`./parse.ts`).
   Node runs the TypeScript files without a build step, so it cannot guess an extension.
   `tests/importSpecifiers.test.ts` fails on an import that names a file that is not there exactly as written.
-* Run `npm test` before submitting a PR (1264 tests across 90 test files currently).
+* Run `npm test` before submitting a PR (see [DEVELOPMENT.md](DEVELOPMENT.md) for details).
 * For bug-fix PRs specifically, it is recommended practice (not a hard requirement for every PR - a new feature test does not need this) to write a regression test, then briefly `git stash` the fix and confirm the new test actually fails, before finalizing.
 
 ## Next version (planned, decided 2026-09-28)
 
 A LangGraph + TypeScript + Vite rework of the agent is planned.
 It is decided.
-The Vite build (phase P0) and the TypeScript core (phase P1) are built, and the graph itself is not built yet.
-Today the shared core is TypeScript in `src/` (storage, logger, action registry, reply parser, checkpoint saver), with its tests.
+The Vite build (phase P0), TypeScript core (phase P1), and LangChain provider integration (phase P2) are built, and the graph itself is not built yet.
+Today the shared core is TypeScript in `src/` (storage, logger, action registry, reply parser, checkpoint saver, providers, audit gate), with its tests.
 The engine, the content scripts and the side panel are still plain JavaScript ES modules, and the extension is built with Vite (`npm run build`).
 During the rework, put new agent logic into graph nodes.
 Do not grow `background/agentEngine.js` with new logic.
