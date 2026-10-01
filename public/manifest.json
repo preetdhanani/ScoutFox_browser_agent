@@ -10,7 +10,8 @@
     "tabs",
     "tabGroups",
     "alarms",
-    "declarativeNetRequest"
+    "declarativeNetRequest",
+    "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
