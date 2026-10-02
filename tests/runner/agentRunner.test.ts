@@ -347,3 +347,42 @@ test('AgentRunner - clearHistory deletes checkpoints in SessionStorageSaver', as
   runner.dispose();
   runner2.dispose();
 });
+
+test('AgentRunner - requestedEffort and effortDefault settings integration', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const mockLlm = createScriptedLlm(JSON.stringify({ action: 'finish', answer: 'Done.' }));
+
+  const runner = new AgentRunner(101, 1, undefined, mockLlm);
+  await runner.restorePromise;
+
+  // 1. Explicit requestedEffort: 'high'
+  await runner.startTask('Search products', 101, 'high');
+  assert.equal(runner.status, 'idle');
+  assert.equal(runner.getState().effort?.requested, 'high');
+  assert.equal(runner.getState().effort?.level, 'high');
+  assert.equal(runner.getState().effort?.suggestedBy, 'user');
+
+  // 2. Default from storage settings: 'low'
+  await env.store.connect().local.set({
+    agent_settings: {
+      provider: 'openrouter',
+      model: 'test-model',
+      effortDefault: 'low',
+    },
+  });
+
+  const runner2 = new AgentRunner(102, 1, undefined, mockLlm);
+  await runner2.restorePromise;
+
+  await runner2.startTask('Quick search', 102);
+  assert.equal(runner2.status, 'idle');
+  assert.equal(runner2.getState().effort?.requested, 'low');
+  assert.equal(runner2.getState().effort?.level, 'low');
+  assert.equal(runner2.getState().effort?.suggestedBy, 'default');
+
+  runner.dispose();
+  runner2.dispose();
+});
+

@@ -478,6 +478,11 @@ a:hover { color: var(--text-main); }
   gap: 5px;
 }
 
+.processing-phase-row {
+  display: flex;
+  align-items: center;
+}
+
 .processing-phase {
   font-size: 10.5px;
   font-weight: 500;

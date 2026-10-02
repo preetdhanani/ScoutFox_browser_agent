@@ -32,10 +32,12 @@ test('Storage - DEFAULT_SETTINGS sanity check', () => {
 test('Storage - getSettings & saveSettings roundtrip', async () => {
   const initial = await Storage.getSettings();
   assert.equal(initial.maxSteps, 250);
+  assert.equal(initial.effortDefault, 'medium');
 
-  await Storage.saveSettings({ maxSteps: 300 });
+  await Storage.saveSettings({ maxSteps: 300, effortDefault: 'high' });
   const updated = await Storage.getSettings();
   assert.equal(updated.maxSteps, 300);
+  assert.equal(updated.effortDefault, 'high');
 });
 
 test('Storage - one-time migration from maxSteps 25 to 250', async () => {
