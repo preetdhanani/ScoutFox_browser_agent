@@ -150,3 +150,25 @@ test('findings: compileTruthTable and renderTruthTableMarkdown', () => {
   assert.ok(md.includes('[1.000,00 EUR](https://frame.work)'));
   assert.ok(md.includes('[1.150,00 EUR](https://idealo.de) (+15.0% vs reference)'));
 });
+
+test('findings: compileTruthTable handles missing or string criteria fields safely', () => {
+  const sites: any[] = [
+    {
+      id: 's1',
+      domain: 'action.test',
+      criteria: { doneWhen: 'predicate' },
+    },
+    {
+      id: 's2',
+      domain: 'store.test',
+      criteria: { fields: ['price', 'shipping'], doneWhen: 'all_required' },
+    },
+  ];
+
+  const table = compileTruthTable(sites, []);
+  assert.equal(table.columns.length, 2);
+  assert.ok(table.columns.includes('price'));
+  assert.ok(table.columns.includes('shipping'));
+  assert.equal(table.rows.length, 2);
+});
+

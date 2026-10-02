@@ -182,7 +182,14 @@ export function compileTruthTable(
 ): FindingsTable {
   const allColumns = new Set<string>();
   for (const s of sites) {
-    for (const f of s.criteria.fields) allColumns.add(f.name);
+    if (Array.isArray(s.criteria?.fields)) {
+      for (const f of s.criteria.fields) {
+        const colName = typeof f === 'string' ? f : (f as any)?.name;
+        if (colName && typeof colName === 'string') {
+          allColumns.add(colName);
+        }
+      }
+    }
   }
   const columns = Array.from(allColumns);
 

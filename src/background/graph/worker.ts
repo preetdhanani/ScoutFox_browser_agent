@@ -672,7 +672,9 @@ const verifyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 've
   }
 
   const pageSigs = state.siteRun?.pageSigs ?? [];
-  const stuckRes = detectStuck(actionRecords, pageSigs);
+  const currentSig = state.page?.sig;
+  const allPageSigs = currentSig ? [...pageSigs, currentSig] : pageSigs;
+  const stuckRes = detectStuck(actionRecords, allPageSigs);
   let stuckLevel = state.siteRun?.stuckLevel ?? 0;
   if (stuckRes.isStuck) {
     stuckLevel = (stuckLevel + 1) as any;
@@ -687,7 +689,7 @@ const verifyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 've
   };
 
   const newActionSigs = exec?.signature ? [...(state.siteRun?.actionSigs ?? []), exec.signature] : (state.siteRun?.actionSigs ?? []);
-  const newPageSigs = state.page?.sig ? [...pageSigs, state.page.sig] : pageSigs;
+  const newPageSigs = allPageSigs;
 
   return {
     verifyResult,

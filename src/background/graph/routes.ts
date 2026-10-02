@@ -188,12 +188,12 @@ export const WORKER_ROUTE_MAPS = {
     hold: 'hold',
     perceive: 'perceive',
     recover: 'recover',
-    end_stuck: END,
   },
   recover: {
     end_stopped: END,
     hold: 'hold',
     end_partial: END,
+    end_stuck: END,
     perceive: 'perceive',
   },
   record: {
@@ -302,13 +302,6 @@ export function verifyRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MAP
   if (!result || result.outcome === 'ok') {
     return 'perceive';
   }
-  if (result.outcome === 'stuck') {
-    const level = state.siteRun?.stuckLevel ?? 0;
-    if (level >= 3) {
-      return 'end_stuck';
-    }
-    return 'recover';
-  }
   return 'recover';
 }
 
@@ -317,6 +310,9 @@ export function recoverRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MA
   if (state.ctl?.pauseRequested) return 'hold';
 
   const stuckLevel = state.siteRun?.stuckLevel ?? 0;
+  if (stuckLevel >= 3) {
+    return 'end_stuck';
+  }
   if (stuckLevel >= 2) {
     return 'end_partial';
   }
