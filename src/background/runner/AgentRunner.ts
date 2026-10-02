@@ -204,11 +204,42 @@ export class AgentRunner {
           chrome.tabs.sendMessage(tabId, { action: 'GET_DOM_SNAPSHOT', maxElements: opts.maxElements, showBadges: opts.showBadges }, (resp) => {
             const err = lastRuntimeError();
             if (err) reject(new Error(err));
-            else resolve(resp);
+            else {
+              const data = resp?.data ?? resp;
+              resolve({
+                ...data,
+                docId: resp?.docId ?? data?.docId ?? 'doc-1',
+              });
+            }
           });
         });
       },
-      pageSig: async (tabId, _opts) => {
+      pageSig: async (tabId, opts) => {
+        try {
+          const resp = await new Promise<any>((resolve, reject) => {
+            chrome.tabs.sendMessage(tabId, { action: 'GET_PAGE_SIG', payload: opts }, (res) => {
+              const err = lastRuntimeError();
+              if (err) reject(new Error(err));
+              else resolve(res);
+            });
+          });
+          if (resp?.success && resp.data) {
+            const d = resp.data;
+            return {
+              sig: {
+                url: d.url,
+                title: d.title,
+                elementCount: d.elementCount,
+                interactiveHash: d.interactiveHash,
+                textHash: d.textHash,
+                scrollY: d.scrollY,
+              },
+              priceHits: d.priceHits || 0,
+              found: d.visibleWords || [],
+            };
+          }
+        } catch (_) {}
+
         const info = await browser.tabInfo(tabId);
         if (!info) return null;
         return {

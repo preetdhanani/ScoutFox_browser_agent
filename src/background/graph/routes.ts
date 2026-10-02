@@ -203,6 +203,7 @@ export const WORKER_ROUTE_MAPS = {
     end_not_found: END,
     end_blocked: END,
     end_unverified: END,
+    end_partial: END,
     perceive: 'perceive',
   },
 } as const;
@@ -332,6 +333,7 @@ export function recordRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MAP
     if (exit.status === 'not_found') return 'end_not_found';
     if (exit.status === 'blocked') return 'end_blocked';
     if (exit.status === 'unverified') return 'end_unverified';
+    if (exit.status === 'partial') return 'end_partial';
   }
 
   if (state.siteRun?.criteriaMet) {

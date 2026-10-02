@@ -138,21 +138,23 @@ test('AgentRunner - Public API surface parity and getters', async (t) => {
   runner.dispose();
 });
 
-test('AgentRunner - startTask lifecycle: plan auto-approved, worker execution, finish', async (t) => {
-  const env = setupEnvironment();
-  t.after(env.cleanup);
-
+function createScriptedLlm(scriptedReplies: string[] | string): LlmPort {
+  const replies = Array.isArray(scriptedReplies) ? scriptedReplies : [scriptedReplies];
   let mockCallIndex = 0;
-  const scriptedReplies = [
-    // Step 1: policy node chooses to click item 42
-    JSON.stringify({ action: 'click', element_id: 1, reason: 'Open item details' }),
-    // Step 2: policy node finishes with answer
-    JSON.stringify({ action: 'finish', answer: 'Item 42 costs 99 USD.' }),
-  ];
-
-  const mockLlm: LlmPort = {
-    complete: async (_req) => {
-      const reply = scriptedReplies[mockCallIndex++] ?? JSON.stringify({ action: 'finish', answer: 'Finished.' });
+  return {
+    complete: async (req) => {
+      if (req.node === 'plan') {
+        return {
+          text: JSON.stringify({
+            taskKind: 'action',
+            sites: [{ id: 's1', name: 'shop.test', domain: 'shop.test', role: 'reference', kind: 'page', goal: 'Do task' }],
+          }),
+          provider: 'openrouter',
+          model: 'test-model',
+          meta: {},
+        };
+      }
+      const reply = replies[mockCallIndex++] ?? JSON.stringify({ action: 'finish', answer: 'Finished.' });
       return {
         text: reply,
         provider: 'openrouter',
@@ -161,6 +163,20 @@ test('AgentRunner - startTask lifecycle: plan auto-approved, worker execution, f
       };
     },
   };
+}
+
+test('AgentRunner - startTask lifecycle: plan auto-approved, worker execution, finish', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const scriptedReplies = [
+    // Step 1: policy node chooses to click item 42
+    JSON.stringify({ action: 'click', element_id: 1, reason: 'Open item details' }),
+    // Step 2: policy node finishes with answer
+    JSON.stringify({ action: 'finish', answer: 'Item 42 costs 99 USD.' }),
+  ];
+
+  const mockLlm = createScriptedLlm(scriptedReplies);
 
   const runner = new AgentRunner(101, 1, undefined, mockLlm);
   await runner.restorePromise;
@@ -213,14 +229,7 @@ test('AgentRunner - restoreState across simulated service worker restart', async
   t.after(env.cleanup);
 
   // Instance 1: start and run a task that writes checkpoints to shared fake storage
-  const mockLlm: LlmPort = {
-    complete: async () => ({
-      text: JSON.stringify({ action: 'finish', answer: 'Completed task.' }),
-      provider: 'openrouter',
-      model: 'test-model',
-      meta: {},
-    }),
-  };
+  const mockLlm = createScriptedLlm(JSON.stringify({ action: 'finish', answer: 'Completed task.' }));
 
   const runner1 = new AgentRunner(101, 1, undefined, mockLlm);
   await runner1.restorePromise;
@@ -250,20 +259,12 @@ test('AgentRunner - ask_user interrupt and answerQuestion resume', async (t) => 
   const env = setupEnvironment();
   t.after(env.cleanup);
 
-  let mockCallIndex = 0;
   const scriptedReplies = [
     JSON.stringify({ action: 'ask_user', question: 'Which color do you prefer?' }),
     JSON.stringify({ action: 'finish', answer: 'Found blue item.' }),
   ];
 
-  const mockLlm: LlmPort = {
-    complete: async () => ({
-      text: scriptedReplies[mockCallIndex++] ?? JSON.stringify({ action: 'finish', answer: 'Done.' }),
-      provider: 'openrouter',
-      model: 'test-model',
-      meta: {},
-    }),
-  };
+  const mockLlm = createScriptedLlm(scriptedReplies);
 
   const runner = new AgentRunner(101, 1, undefined, mockLlm);
   await runner.restorePromise;
@@ -292,14 +293,7 @@ test('AgentRunner - stop while paused at interrupt', async (t) => {
   const env = setupEnvironment();
   t.after(env.cleanup);
 
-  const mockLlm: LlmPort = {
-    complete: async () => ({
-      text: JSON.stringify({ action: 'ask_user', question: 'Need input' }),
-      provider: 'openrouter',
-      model: 'test-model',
-      meta: {},
-    }),
-  };
+  const mockLlm = createScriptedLlm(JSON.stringify({ action: 'ask_user', question: 'Need input' }));
 
   const runner = new AgentRunner(101, 1, undefined, mockLlm);
   await runner.restorePromise;
@@ -323,14 +317,7 @@ test('AgentRunner - clearHistory deletes checkpoints in SessionStorageSaver', as
   const env = setupEnvironment();
   t.after(env.cleanup);
 
-  const mockLlm: LlmPort = {
-    complete: async () => ({
-      text: JSON.stringify({ action: 'finish', answer: 'Finished 1.' }),
-      provider: 'openrouter',
-      model: 'test-model',
-      meta: {},
-    }),
-  };
+  const mockLlm = createScriptedLlm(JSON.stringify({ action: 'finish', answer: 'Finished 1.' }));
 
   const runner = new AgentRunner(101, 1, undefined, mockLlm);
   await runner.restorePromise;
@@ -344,14 +331,7 @@ test('AgentRunner - clearHistory deletes checkpoints in SessionStorageSaver', as
   assert.deepEqual(runner.history, []);
   assert.equal(runner.currentTask, '');
 
-  const mockLlm2: LlmPort = {
-    complete: async () => ({
-      text: JSON.stringify({ action: 'finish', answer: 'Finished 2.' }),
-      provider: 'openrouter',
-      model: 'test-model',
-      meta: {},
-    }),
-  };
+  const mockLlm2 = createScriptedLlm(JSON.stringify({ action: 'finish', answer: 'Finished 2.' }));
 
   const runner2 = new AgentRunner(101, 1, undefined, mockLlm2);
   await runner2.restorePromise;

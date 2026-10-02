@@ -109,6 +109,57 @@
     return false;
   }
 
+  function hashString(str) {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < str.length; i++) {
+      h = Math.imul(h ^ str.charCodeAt(i), 16777619) >>> 0;
+    }
+    return h.toString(16);
+  }
+
+  function getLightPageSignature(wordsToLookFor) {
+    const pageText = window.domCompressor ? window.domCompressor.extractPageText() : (document.body ? document.body.innerText : '');
+    const normText = (pageText || '').replace(/\s+/g, ' ').trim().slice(0, 2000);
+    const textHash = hashString(normText);
+
+    const interactiveSel = 'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [tabindex]:not([tabindex="-1"])';
+    const nodes = document.querySelectorAll(interactiveSel);
+    const parts = [];
+    let count = 0;
+
+    for (let i = 0; i < nodes.length && count < 150; i++) {
+      const el = nodes[i];
+      if (el.offsetParent === null && el.offsetWidth === 0 && el.offsetHeight === 0) continue;
+      count++;
+      const tag = el.tagName.toLowerCase();
+      const role = el.getAttribute('role') || tag;
+      const label = (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || '').slice(0, 40).trim();
+      parts.push(`${tag}:${role}:${label}`);
+    }
+
+    const interactiveHash = hashString(parts.join(';'));
+    const priceRegex = /[€$£¥₹]\s?\d|\d\s?(?:[€$£¥₹]|EUR\b|USD\b|GBP\b)/gi;
+    const priceMatches = (pageText || '').match(priceRegex);
+    const priceHits = priceMatches ? priceMatches.length : 0;
+
+    let visibleWords = [];
+    if (Array.isArray(wordsToLookFor) && wordsToLookFor.length > 0) {
+      const lower = (pageText || '').toLowerCase();
+      visibleWords = wordsToLookFor.filter(w => typeof w === 'string' && lower.includes(w.toLowerCase()));
+    }
+
+    return {
+      url: window.location.href,
+      title: document.title,
+      elementCount: count,
+      interactiveHash,
+      textHash,
+      scrollY: Math.round(window.scrollY || 0),
+      priceHits,
+      visibleWords
+    };
+  }
+
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const { action, payload } = request;
 
@@ -278,6 +329,16 @@
           window.actionExecutor.removeBadges();
         }
         sendResponse({ success: true });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+      return true;
+    }
+
+    if (action === 'GET_PAGE_SIG') {
+      try {
+        const sig = getLightPageSignature(payload?.words);
+        sendResponse({ success: true, data: sig });
       } catch (err) {
         sendResponse({ success: false, error: err.message });
       }

@@ -65,7 +65,7 @@ export const DEFAULT_SETTINGS: Settings = {
   model: 'anthropic/claude-3.5-sonnet',
   providerConfigs: DEFAULT_PROVIDER_CONFIGS,
   temperature: 0.1,
-  maxSteps: 25,
+  maxSteps: 250,
   // Hard ceiling on a single LLM call. A provider that accepts the connection and never
   // answers would otherwise park the agent loop indefinitely, with the keepalive actively
   // preventing Chrome from reclaiming the worker.
@@ -98,6 +98,10 @@ export const Storage = {
       }
       chrome.storage.local.get<{ agent_settings?: Partial<Settings> }>(['agent_settings'], (result) => {
         const loaded = result.agent_settings || {};
+        // One-time migration: if stored maxSteps is 25 (the old default), upgrade to 250 for long-horizon runs
+        if (loaded.maxSteps === 25) {
+          loaded.maxSteps = 250;
+        }
         const mergedConfigs: ProviderConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
         const provider = loaded.provider || DEFAULT_SETTINGS.provider;
         const activeCfg: Partial<ProviderConfig> = mergedConfigs[provider] || {};
