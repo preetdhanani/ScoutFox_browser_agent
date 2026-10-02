@@ -26,6 +26,8 @@
 import '../src/background/boot/zodJitless.ts';
 import { isGeminiStreamCut } from '../src/background/boot/rejections.ts';
 import { AgentEngine, describeRestrictedUrl, lastRuntimeError } from './agentEngine.js';
+import { AgentRunner } from '../src/background/runner/AgentRunner.ts';
+import { Storage } from '../src/shared/storage.ts';
 import { ApiClients } from './apiClients.js';
 import { Logger } from '../src/shared/logger.ts';
 
@@ -64,6 +66,22 @@ self.addEventListener('unhandledrejection', (event) => {
  */
 const sessions = new Map();
 
+let activeEngineKind = 'legacy';
+
+Storage.getSettings().then((s) => {
+  if (s && s.engine) {
+    activeEngineKind = s.engine;
+  }
+}).catch(() => {});
+
+if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.agent_settings?.newValue?.engine) {
+      activeEngineKind = changes.agent_settings.newValue.engine;
+    }
+  });
+}
+
 /**
  * Register an extra tab against an existing session, so a run can span tabs without the panel
  * losing its place. Idempotent.
@@ -86,7 +104,9 @@ function getOrCreateSession(tabId, windowId) {
   let session = sessions.get(tabId);
   if (session) return session;
 
-  const engine = new AgentEngine(tabId, windowId);
+  const engine = activeEngineKind === 'graph'
+    ? new AgentRunner(tabId, windowId)
+    : new AgentEngine(tabId, windowId);
   session = { engine, ports: new Set(), lastBroadcastHadNoListeners: false, ownerTabId: tabId };
   sessions.set(tabId, session);
 
@@ -104,7 +124,7 @@ function getOrCreateSession(tabId, windowId) {
     adoptTabIntoSession(session, newTabId);
   });
 
-  Logger.info('Background', `[SESSION_CREATED] New session for tab [${tabId}].`);
+  Logger.info('Background', `[SESSION_CREATED] New session (${activeEngineKind} engine) for tab [${tabId}].`);
   return session;
 }
 
@@ -135,7 +155,12 @@ function endSessionForClosedTab(tabId) {
   if (session.engine.status === 'running' || session.engine.status === 'paused') {
     session.engine.stop();
   }
-  AgentEngine.forgetSession(session.engine.sessionId);
+  if (session.engine instanceof AgentRunner || session.engine.constructor.name === 'AgentRunner') {
+    AgentRunner.forgetSession(session.engine.sessionId);
+    session.engine.dispose?.();
+  } else {
+    AgentEngine.forgetSession(session.engine.sessionId);
+  }
   Logger.info('Background', `[SESSION_CLOSED] Tab [${tabId}] closed. Its session and persisted state are gone.`);
   syncKeepaliveAlarm();
 }
@@ -724,7 +749,7 @@ function routeMessage(request, sender, sendResponse) {
 
   // Every action below this point belongs to one window's session.
   const session = getOrCreateSession(request.tabId !== undefined ? request.tabId : 'legacy');
-  const agentEngine = session.engine;
+  let agentEngine = session.engine;
 
   if (action === 'GET_AGENT_STATE') {
     // Logger's own cold-boot restore is itself async. Answering with getLogsHistory()
@@ -752,6 +777,24 @@ function routeMessage(request, sender, sendResponse) {
   }
 
   if (action === 'START_TASK') {
+    if (session.engine.status === 'idle') {
+      const isGraph = session.engine instanceof AgentRunner || session.engine.constructor.name === 'AgentRunner';
+      if ((activeEngineKind === 'graph' && !isGraph) || (activeEngineKind === 'legacy' && isGraph)) {
+        session.engine.dispose?.();
+        session.engine = (activeEngineKind === 'graph')
+          ? new AgentRunner(session.ownerTabId, session.engine.windowId)
+          : new AgentEngine(session.ownerTabId, session.engine.windowId);
+        session.engine.setStateChangeCallback((state) => {
+          broadcastToSession(session, 'STATE_UPDATE', state);
+          syncKeepaliveAlarm();
+        });
+        session.engine.setTabAdoptedCallback((newTabId) => {
+          adoptTabIntoSession(session, newTabId);
+        });
+        agentEngine = session.engine;
+      }
+    }
+
     // Claim synchronously, before any await, so a double-clicked send button cannot open two
     // concurrent runs. onMessage handlers are serialized, so this is the one point where the
     // second request is guaranteed to see the first.

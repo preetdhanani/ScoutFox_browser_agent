@@ -28,6 +28,7 @@ export interface Settings {
   autoScroll: boolean;
   theme: string;
   systemInstructions: string;
+  engine?: 'legacy' | 'graph';
 }
 
 /** A session as the side panel saves it into the history drawer. */
@@ -81,7 +82,8 @@ export const DEFAULT_SETTINGS: Settings = {
   showElementBadges: true,
   autoScroll: true,
   theme: 'system',
-  systemInstructions: 'You are ScoutFox, an autonomous web browsing AI agent. Your goal is to help the user complete tasks on the web efficiently and accurately.'
+  systemInstructions: 'You are ScoutFox, an autonomous web browsing AI agent. Your goal is to help the user complete tasks on the web efficiently and accurately.',
+  engine: 'legacy'
 };
 
 export const Storage = {
