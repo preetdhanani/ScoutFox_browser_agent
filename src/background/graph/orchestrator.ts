@@ -346,7 +346,17 @@ const allocNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 
   if (state.planPrev !== null && state.budget) {
     const existingBudget = state.budget;
     const existingSitesMap = existingBudget.sites ?? {};
-    const newSiteBudgetMap: Record<string, { base: number; alloc: number; used: number; extended: boolean }> = { ...existingSitesMap };
+    const currentSiteIds = new Set(sites.map((s) => s.id));
+    const newSiteBudgetMap: Record<string, { base: number; alloc: number; used: number; extended: boolean }> = {};
+    let freedAlloc = 0;
+
+    for (const [id, b] of Object.entries(existingSitesMap)) {
+      if (currentSiteIds.has(id)) {
+        newSiteBudgetMap[id] = { ...b };
+      } else {
+        freedAlloc += Math.max(0, b.alloc - b.used);
+      }
+    }
 
     let additionalAlloc = 0;
     for (const s of sites) {
@@ -367,8 +377,9 @@ const allocNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 
     const currentUsed = existingBudget.used ?? 0;
     const currentSlack = existingBudget.slack ?? 0;
     const rawReserve = existingBudget.reserve ?? 0;
-    const nextReserve = Math.max(0, rawReserve - additionalAlloc);
-    const nextWorkingTotal = currentUsed + Object.values(newSiteBudgetMap).reduce((sum, b) => sum + (b.used > 0 ? b.used : b.alloc), 0) + nextReserve;
+    const nextReserve = Math.max(0, rawReserve + freedAlloc - additionalAlloc);
+    const pendingAlloc = Object.values(newSiteBudgetMap).reduce((sum, b) => sum + (b.used > 0 ? 0 : b.alloc), 0);
+    const nextWorkingTotal = currentUsed + pendingAlloc + nextReserve;
 
     const budget = {
       ...existingBudget,
@@ -736,11 +747,7 @@ const reflectNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
   } catch (err: any) {
     Logger.warn('Orchestrator', `Reflect LLM call failed: ${err?.message || err}. Continuing existing plan.`);
     return {
-      lastDecision: {
-        kind: 'llm_failed',
-        error: String(err?.message || err),
-        node: 'reflect',
-      },
+      lastDecision: null,
       reflectResult: {
         decision: 'continue',
         reason: 'LLM reflection failed, continuing existing plan',

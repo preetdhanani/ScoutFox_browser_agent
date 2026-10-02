@@ -20,7 +20,7 @@ export const MAX_FINDINGS = 200;       // per turn, including superseded ones
 // ---------- small unions ----------
 export type RunStatus = 'idle' | 'running' | 'paused' | 'stopped';
 export type ModelTier = 'small' | 'large';
-export type Level = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type Level = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type OrchestratorNode =
   | 'intake' | 'profile' | 'plan' | 'hold' | 'alloc' | 'sched' | 'site'
   | 'summary' | 'reflect' | 'compile' | 'offer' | 'finalize';
@@ -89,6 +89,15 @@ export interface EffortProfile {         // one level of shared/effort.json; fro
   reservePct: number;                    // 0.15, 0.15, 0.12, 0.10, 0.10
   useModelOverrides: boolean;            // High and above: settings.planModel / reflectModel when set
   softCapAsk: boolean;                   // Max: ask before going on at the soft cap (P7b)
+  searchDepth?: number;
+  maxSites?: number;
+  stepBudgetPerSite?: number;
+  tokenBudgetPerSite?: number;
+  reflectMode?: 'off' | 'site_end' | 'site_end_and_failure' | 'mid_site' | string;
+  workerPlanning?: boolean;
+  replanBudgetPerSite?: number;
+  replanMaxRounds?: number;
+  screenshotMode?: 'never' | 'on_failure' | 'always' | string;
 }
 export interface EffortChoice {
   requested: 'auto' | Level;             // from START_TASK, else settings.effortDefault
