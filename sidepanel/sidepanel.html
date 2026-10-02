@@ -95,6 +95,7 @@
           <div class="spinner-ring"></div>
           <div class="processing-text-wrapper">
             <span class="processing-phase" id="processingPhaseText">Agent is processing...</span>
+            <span class="processing-effort-chip" id="processingEffortBadge" style="display: none;"></span>
             <div class="progress-bar-track">
               <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
             </div>
@@ -111,6 +112,16 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16"/></svg>
               Stop Task
             </button>
+          </div>
+
+          <div class="effort-selector-bar" id="effortSelectorBar">
+            <span class="effort-label">Effort</span>
+            <div class="effort-segmented-control" role="radiogroup" aria-label="Task Effort Level">
+              <button type="button" class="effort-btn active" data-effort="auto" title="Automatic heuristic based on task">Auto</button>
+              <button type="button" class="effort-btn" data-effort="low" title="Fast single-pass lookup (1x budget, 0 retries)">Low</button>
+              <button type="button" class="effort-btn" data-effort="medium" title="Balanced multi-site depth (2x budget, 1 retry)">Medium</button>
+              <button type="button" class="effort-btn" data-effort="high" title="Thorough investigation (3x budget, 2 retries)">High</button>
+            </div>
           </div>
 
           <div class="input-wrapper">
@@ -217,6 +228,17 @@
             <label class="form-label" for="llmTimeoutInput">LLM Timeout (ms)</label>
             <input type="number" id="llmTimeoutInput" class="form-input" value="120000" min="5000" step="5000">
             <span class="subtext-hint">How long to wait for a single reply before retrying. Raise this if you see "did not respond within Ns" errors on a slow provider or local model.</span>
+          </div>
+
+          <!-- Default Effort Level -->
+          <div class="form-group" id="effortDefaultGroup">
+            <label class="form-label" for="effortDefaultSelect">Default Effort Level</label>
+            <select id="effortDefaultSelect" class="form-select">
+              <option value="medium">Medium (2x budget, 1 retry - Recommended)</option>
+              <option value="low">Low (1x budget, 0 retries - Fast)</option>
+              <option value="high">High (3x budget, 2 retries - Thorough)</option>
+            </select>
+            <span class="subtext-hint">Default effort used when Auto mode resolves or when no level is explicitly chosen.</span>
           </div>
 
           <!-- Feature Toggles -->

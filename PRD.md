@@ -2,7 +2,7 @@
 ## ScoutFox AI Browser Agent (Chrome Extension MVP)
 
 > **Version**: 1.0.0  
-> **Status**: Approved / Draft  
+> **Status**: Draft (Decisioned by Prit on 2026-09-25; build-ready as of 2026-10-03 after LangGraph integration and multi-phase autonomous execution capability)
 > **Target Audience**: Privacy-First Power Users, Developers, & Local AI Enthusiasts (Ollama / Open-Source 8B-32B LLMs)
 
 ---

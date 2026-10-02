@@ -25,6 +25,7 @@ const { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } = await import('..
 test('Storage - DEFAULT_SETTINGS sanity check', () => {
   assert.equal(DEFAULT_SETTINGS.provider, 'openrouter');
   assert.equal(DEFAULT_SETTINGS.maxSteps, 250);
+  assert.equal(DEFAULT_SETTINGS.effortDefault, 'medium');
   assert.ok(DEFAULT_SETTINGS.providerConfigs);
 });
 

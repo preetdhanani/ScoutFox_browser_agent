@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "defaultLevel": "medium",
+  "levels": {
+    "low": {
+      "level": "low",
+      "multiplier": 1,
+      "retriesPerAction": 0,
+      "altStrategy": false,
+      "verifyMode": "url",
+      "blockedLadder": ["mark"],
+      "reflect": "off",
+      "maxReplans": 0,
+      "evidence": "url",
+      "reservePct": 0.10,
+      "useModelOverrides": false,
+      "softCapAsk": false
+    },
+    "medium": {
+      "level": "medium",
+      "multiplier": 2,
+      "retriesPerAction": 1,
+      "altStrategy": false,
+      "verifyMode": "url+dom",
+      "blockedLadder": ["reload", "mark"],
+      "reflect": "site_end",
+      "maxReplans": 1,
+      "evidence": "snippet",
+      "reservePct": 0.15,
+      "useModelOverrides": false,
+      "softCapAsk": false
+    },
+    "high": {
+      "level": "high",
+      "multiplier": 3,
+      "retriesPerAction": 2,
+      "altStrategy": false,
+      "verifyMode": "url+dom",
+      "blockedLadder": ["reload", "search", "mark"],
+      "reflect": "site_end_and_failure",
+      "maxReplans": 2,
+      "evidence": "second_source",
+      "reservePct": 0.20,
+      "useModelOverrides": true,
+      "softCapAsk": false
+    }
+  }
+}
