@@ -777,7 +777,7 @@ function routeMessage(request, sender, sendResponse) {
   }
 
   if (action === 'START_TASK') {
-    if (session.engine.status === 'idle') {
+    if (['idle', 'stopped'].includes(session.engine.status)) {
       const isGraph = session.engine instanceof AgentRunner || session.engine.constructor.name === 'AgentRunner';
       if ((activeEngineKind === 'graph' && !isGraph) || (activeEngineKind === 'legacy' && isGraph)) {
         session.engine.dispose?.();

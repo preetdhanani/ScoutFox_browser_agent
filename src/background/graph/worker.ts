@@ -207,6 +207,7 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
   const runtime = getRuntime(config);
   const promptText = `Task: ${state.siteIn?.task}\nPage: ${state.page?.url}\nElements:\n${state.page?.elementsText ?? ''}`;
 
+  const stepSignal = runtime.control.stepSignal();
   let replyText = '';
   try {
     const res = await runtime.llm.complete({
@@ -216,11 +217,11 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
       system: 'You are a browser automation agent. Choose the next action as JSON.',
       messages: [{ role: 'user', content: promptText }],
       schema: null,
-      signal: runtime.control.stepSignal(),
+      signal: stepSignal,
     });
     replyText = res.text;
   } catch (err: any) {
-    if (runtime.control.isUserAbort(err, runtime.control.stepSignal())) {
+    if (runtime.control.isUserAbort(err, stepSignal)) {
       return { lastDecision: { kind: 'aborted', mode: state.siteRun?.mode ?? 'browse' } };
     }
     return {
@@ -284,6 +285,7 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
 
   return {
     lastDecision: decision,
+    pendingHold: decision.kind === 'ask' ? { kind: 'ask_user', question: decision.question } : null,
     history: [responseEntry],
   };
 });
@@ -310,15 +312,29 @@ const holdNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'hold
   const resume = interruptWithConfig<any, any>(config, state.pendingHold ?? { kind: 'paused', reason: 'user' });
 
   if (resume?.kind === 'approve') {
-    return { resumeRoute: 'execute' };
+    return { resumeRoute: 'execute', pendingHold: null };
   }
   if (resume?.kind === 'reject') {
-    return { resumeRoute: 'recover' };
+    return { resumeRoute: 'recover', pendingHold: null };
   }
   if (resume?.kind === 'stop') {
-    return { resumeRoute: 'end' };
+    return { resumeRoute: 'end', pendingHold: null };
   }
-  return { resumeRoute: 'perceive' };
+  if (resume?.kind === 'answer') {
+    const text = resume.text ?? '';
+    const userAnswers = state.siteRun ? [...(state.siteRun.userAnswers ?? []), text] : [text];
+    const answerEntry: HistoryEntry = {
+      type: 'user_answer',
+      content: text,
+    };
+    return {
+      resumeRoute: 'perceive',
+      siteRun: state.siteRun ? { ...state.siteRun, userAnswers } : null,
+      history: [answerEntry],
+      pendingHold: null,
+    };
+  }
+  return { resumeRoute: 'perceive', pendingHold: null };
 });
 
 const executeNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'execute', async (state, config) => {

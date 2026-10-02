@@ -245,3 +245,125 @@ test('AgentRunner - restoreState across simulated service worker restart', async
   runner1.dispose();
   runner2.dispose();
 });
+
+test('AgentRunner - ask_user interrupt and answerQuestion resume', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  let mockCallIndex = 0;
+  const scriptedReplies = [
+    JSON.stringify({ action: 'ask_user', question: 'Which color do you prefer?' }),
+    JSON.stringify({ action: 'finish', answer: 'Found blue item.' }),
+  ];
+
+  const mockLlm: LlmPort = {
+    complete: async () => ({
+      text: scriptedReplies[mockCallIndex++] ?? JSON.stringify({ action: 'finish', answer: 'Done.' }),
+      provider: 'openrouter',
+      model: 'test-model',
+      meta: {},
+    }),
+  };
+
+  const runner = new AgentRunner(101, 1, undefined, mockLlm);
+  await runner.restorePromise;
+
+  await runner.startTask('Find item', 101);
+  assert.equal(runner.status, 'paused');
+  assert.equal(runner.pendingQuestion, 'Which color do you prefer?');
+
+  const answerRes = runner.answerQuestion('Blue');
+  assert.equal(answerRes.success, true);
+  assert.equal(runner.pendingQuestion, null);
+
+  while (runner.getStatus() === 'running') {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(runner.status, 'idle');
+  const userAnswer = runner.history.find((h) => h.type === 'user_answer');
+  assert.ok(userAnswer);
+  assert.equal((userAnswer as any).content, 'Blue');
+
+  runner.dispose();
+});
+
+test('AgentRunner - stop while paused at interrupt', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const mockLlm: LlmPort = {
+    complete: async () => ({
+      text: JSON.stringify({ action: 'ask_user', question: 'Need input' }),
+      provider: 'openrouter',
+      model: 'test-model',
+      meta: {},
+    }),
+  };
+
+  const runner = new AgentRunner(101, 1, undefined, mockLlm);
+  await runner.restorePromise;
+
+  await runner.startTask('Task asking question', 101);
+  assert.equal(runner.status, 'paused');
+  assert.equal(runner.pendingQuestion, 'Need input');
+
+  const stopRes = runner.stop();
+  assert.equal(stopRes.success, true);
+
+  while (runner.getStatus() === 'running') {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(runner.status, 'stopped');
+  runner.dispose();
+});
+
+test('AgentRunner - clearHistory deletes checkpoints in SessionStorageSaver', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const mockLlm: LlmPort = {
+    complete: async () => ({
+      text: JSON.stringify({ action: 'finish', answer: 'Finished 1.' }),
+      provider: 'openrouter',
+      model: 'test-model',
+      meta: {},
+    }),
+  };
+
+  const runner = new AgentRunner(101, 1, undefined, mockLlm);
+  await runner.restorePromise;
+
+  await runner.startTask('Task 1', 101);
+  assert.equal(runner.status, 'idle');
+  assert.ok(runner.history.length > 0);
+
+  runner.clearHistory();
+  assert.equal(runner.status, 'idle');
+  assert.deepEqual(runner.history, []);
+  assert.equal(runner.currentTask, '');
+
+  const mockLlm2: LlmPort = {
+    complete: async () => ({
+      text: JSON.stringify({ action: 'finish', answer: 'Finished 2.' }),
+      provider: 'openrouter',
+      model: 'test-model',
+      meta: {},
+    }),
+  };
+
+  const runner2 = new AgentRunner(101, 1, undefined, mockLlm2);
+  await runner2.restorePromise;
+
+  await runner2.startTask('Task 2', 101);
+  assert.equal(runner2.status, 'idle');
+  assert.equal(runner2.currentTask, 'Task 2');
+
+  const finishes = runner2.history.filter((h) => h.type === 'finish');
+  assert.equal(finishes.length, 1);
+  assert.equal((finishes[0] as any).answer, 'Finished 2.');
+
+  runner.dispose();
+  runner2.dispose();
+});
