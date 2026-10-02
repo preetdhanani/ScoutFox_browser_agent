@@ -66,7 +66,7 @@ Run the full suite with:
 ```bash
 npm test
 ```
-This runs `node --test` on `tests/**/*.test.js` and `tests/**/*.test.ts` (2792 tests across 239 files as of this writing).
+This runs `node --test` on `tests/**/*.test.js` and `tests/**/*.test.ts` (2844 tests as of this writing).
 None of it needs a real browser.
 
 ### Syntax Check
@@ -127,7 +127,7 @@ The key is never in the options of a model either: AgentRouter's wire image, whi
 The requests are built by LangChain and the SDKs, so provider tests capture them with a fetch spy (`tests/helpers/llmWire.ts`) instead of stubbing a response object.
 
 ### Worker Bundle and CSP
-The worker bundles the LangChain provider packages and answer audit, so `background/sw.js` is 3,349 KB unminified (723 KB gzip).
+The worker bundles the LangChain provider packages, answer audit, and LangGraph runtime, so `background/sw.js` is 4,247 KB unminified (941 KB gzip).
 The build prints the size of every file, raw and gzip, and CI runs the build, so a jump in the worker shows in the log.
 Minify stays off.
 Minified, the worker would be 1,432 KB (363 KB gzip) and would start about 13 ms faster, and that is not worth an unreadable `dist/` and a rewrite of the zod check below.
@@ -314,11 +314,10 @@ In CI it runs from `.github/workflows/e2e.yml`, when a pull request gets the `e2
 
 Before packaging for the Chrome Web Store:
 1. **Manifest V3 Verification**: Ensure `"manifest_version": 3` in `public/manifest.json`.
-2. **Permissions Audit**: `public/manifest.json` currently requests `sidePanel`, `scripting`, `storage`, `tabs`, `tabGroups`, `alarms` and `declarativeNetRequest`, plus `host_permissions: ["<all_urls>"]`.
+2. **Permissions Audit**: `public/manifest.json` currently requests `sidePanel`, `scripting`, `storage`, `tabs`, `tabGroups`, `alarms`, `declarativeNetRequest`, and `debugger`, plus `host_permissions: ["<all_urls>"]`.
    Confirm each is still used before submitting.
-   Store reviewers question `<all_urls>` and `declarativeNetRequest` most often, so have a justification ready for both.
-   Planned (not in `public/manifest.json` yet): the next version will add the `debugger` permission for real clicks.
-   It will need its own store justification, because reviewers look closely at `debugger`.
+   Store reviewers question `<all_urls>`, `declarativeNetRequest`, and `debugger` most often, so have a justification ready for them.
+   The `debugger` permission is required for real clicks via Chrome DevTools Protocol (CDP Input events).
 3. **Icons Audit**: Ensure `icon16.png`, `icon48.png`, and `icon128.png` are present in `public/icons/`.
    The build copies them into `dist/icons/`.
 4. **Eval Scan**: Run `npm run build && npm run evalscan`.
@@ -339,23 +338,21 @@ Before packaging for the Chrome Web Store:
 
 ## 5. Build Foundation and What Comes Next
 
-> Status: phases P0, P1, and P2 are built, along with the answer audit gate and honest finish policy.
-> The graph itself is decided but not built yet, see section 3 of [PRD.md](PRD.md).
+> Status: phases P0, P1, P2, P3 (CDP input, perception, visual cursor), and P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch) are built, along with the answer audit gate and honest finish policy.
+> See section 3 of [PRD.md](PRD.md) for architecture and roadmap details.
 
 What is true today:
 - `npm run build` bundles the extension with Vite into `dist/`, and you load `dist/` unpacked in `chrome://extensions`, not the repository folder.
 - The manifest and the icons live in `public/`, and the build copies them into `dist/`.
-- The shared core is TypeScript in `src/` (phase P1): storage and logger, the action registry, the reply parser, outcome and recovery rules, the checkpoint saver and the interrupt shim.
-  The saver and the shim are tested but no code calls them yet.
-- The providers run on LangChain (phase P2), so the worker bundle is about 3.3 MB, see "Worker Bundle and CSP" in section 3.
+- `public/manifest.json` requests the `debugger` permission for real CDP input events.
+  During a task, Chrome shows a yellow "is debugging this browser" bar, which is expected.
+- The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P4).
+- The providers run on LangChain (phase P2) and the graph runtime bundles LangGraph (phase P4), so the worker bundle is about 4.2 MB, see "Worker Bundle and CSP" in section 3.
 - Final answers pass through the answer audit provenance gate and honest finish policy before completion.
-- The engine (`background/`), the content scripts and the side panel are still plain JavaScript ES modules, and the build changes no behavior.
+- The background worker supports both legacy `AgentEngine` and graph `AgentRunner` behind `settings.engine` (`'legacy'` vs `'graph'`).
+- The legacy engine (`background/`), the content scripts and the side panel are still plain JavaScript ES modules.
 - CI zips the built `dist/`, not the raw source folders.
 
 Planned, not built yet:
-- The engine, the content scripts and the side panel move to TypeScript in later phases.
-  Vite is also needed to bundle LangGraph.js so it can run in the MV3 service worker.
-- `public/manifest.json` will request the `debugger` permission, so the agent can do real clicks while a task runs.
-  During a task, Chrome shows a yellow "is debugging this browser" bar.
-  This is expected.
-- The test suite will be rewritten for the new graph, and the test count above will change.
+- The legacy engine, content scripts, and side panel move to TypeScript in later phases.
+- Real-site benchmark evaluation and additional multi-turn recovery strategies on the LangGraph engine before deprecating the legacy loop.

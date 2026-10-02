@@ -95,6 +95,7 @@ After you change the code:
 - **LLM Provider / Model**: pick from OpenRouter, AgentRouter, Gemini, Ollama, OpenAI, Anthropic, or Groq, and search/select the exact model.
 - **Max Steps**, **Delay (ms)**, and **LLM Timeout (ms)**: tune how long a task can run, how long it pauses between actions, and how long it waits for a single LLM reply before retrying.
 - **Show Floating Element Badges**: toggle the numbered `[1]`, `[2]` overlays ScoutFox draws on page elements it can see.
+- **Engine**: configure `settings.engine` (`'legacy'` vs `'graph'`, defaulting to `'legacy'`) to choose between the legacy execution loop and the LangGraph orchestrator/worker engine.
 
 ### Everything else
 - **History (top-right)**: browse, reopen, or delete past runs.
@@ -159,16 +160,16 @@ python agent.py --goal "Find top 3 trending python repositories on GitHub and su
 ### Next version (planned, decided 2026-09-28)
 
 The next version is a rework of the agent on [LangGraph.js](https://github.com/langchain-ai/langgraphjs).
-This is planned and not built yet, except the new build step (the last item below).
+Phases P0 through P4 are built, including real CDP clicks, visual cursor overlay, and the graph runtime behind an engine switch.
 Everything above in this README describes the extension as it works today.
 
 What will change for you:
 
 * **Approve the plan first**: the agent shows its plan and the sites it will visit.
   You approve it once, and then it runs.
-* **Real clicks**: while a task runs, the agent clicks through Chrome's debugger, like a real mouse.
+* **Real clicks (built in phase P3)**: while a task runs, the agent clicks through Chrome's debugger, like a real mouse, with animated cursor overlay and click ripples.
   Chrome shows a yellow "is debugging this browser" bar during the task.
-  If the debugger cannot attach (for example when DevTools is open), it falls back to today's clicks.
+  If the debugger cannot attach (for example when DevTools is open), it falls back to synthetic clicks.
 * **Better long tasks**: a notebook where the agent saves what it finds, a longer memory of past steps, and an honest checklist.
   A checklist step is marked done only when its goal is really met.
 * **Blocked sites are skipped**: if a site shows a challenge or error page again and again, the agent marks it blocked and moves on.
@@ -185,12 +186,14 @@ What will change for you:
 * **Python runner too**: `python_runner/agent.py` also moves to LangGraph (Python).
 * **LangSmith tracing**: opt-in in Settings, off by default.
 * **Local models keep working**: small local Ollama models stay supported.
-* **New setup step (already built)**: the project now has a Vite build step.
+* **Architecture rework (built in phases P0-P4)**: the project now has a Vite build step.
   You run `npm run build` and load the `dist/` folder in Chrome, as in the Quick Setup above.
-  The shared core is TypeScript now (phase P1).
+  The shared core is TypeScript (phase P1).
   Providers use LangChain clients behind the API client surface (phase P2).
   Final answers are audited against visited page evidence before completion.
-  The engine, the content scripts and the side panel are still plain JavaScript, and they move in later phases.
+  Real clicks run through Chrome debugger (CDP) trusted events with visual cursor animation and fallback (phase P3).
+  The LangGraph runtime foundation and AgentRunner are available behind `settings.engine` (phase P4).
+  The legacy engine, content scripts, and side panel are still plain JavaScript, and they move in later phases.
 
 See [PRD.md](PRD.md) for the details.
 

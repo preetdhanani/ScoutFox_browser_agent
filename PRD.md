@@ -32,17 +32,16 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
    Today the ID map is cleared and numbering starts again at `[1]` on every snapshot.
 2. **Visual Action Overlay (`content/actionExecutor.js`)**: Injects floating numeric badges on page elements so users see target elements in real-time, then executes the model's chosen action against the indexed element.
    This now includes a stale-element fallback (re-find a moved/re-rendered element by its id, CSS path, or tag plus visible text) and a `browser_batch` bulk-action mode that correctly reports partial success/failure with a readable message, instead of a blank all-or-nothing result.
-   *Planned (decided 2026-09-28, not built yet):* real clicks through `chrome.debugger` (CDP input events) while a task runs.
-   If the debugger cannot attach, it falls back to today's synthetic DOM events.
+   Real clicks are dispatched via `chrome.debugger` (CDP input events) with realistic mouse hold delays, pointer events, and animated visual cursor overlay with ripples and element highlighting in content scripts, falling back to synthetic DOM events if the debugger cannot attach.
 3. **Multi-Provider API Client (`background/apiClients.js`, `src/background/llm/`)**: Universal client migrated to LangChain chat model packages behind the `ApiClients` surface, supporting Ollama (`http://localhost:11434`), OpenAI-compatible endpoints (Groq, LM Studio, vLLM, Llama API), OpenAI, Anthropic Claude, and Google Gemini.
    For Ollama, the main action call now sends a JSON schema in `format` with `think:false` (constrained decoding), so the model can only answer with a real action.
    A server older than 0.5 that rejects a schema falls back to `format:"json"`, and the other providers are unchanged.
-4. **Fault-Tolerant Action Loop (`background/agentEngine.js`, `src/background/agent/`)**: Self-correcting execution loop with a JSON fallback parser and error recovery for 8B-32B small models.
+4. **Fault-Tolerant Action Loop (`background/agentEngine.js`, `src/background/agent/`, `src/background/runner/AgentRunner.ts`)**: Self-correcting execution loop with a JSON fallback parser and error recovery for 8B-32B small models.
    Hallucinated element IDs and unrecognized action verbs are now rejected as correctable parse errors instead of being silently "corrected" or failing a layer later.
    Restricted-page navigation (chrome://, the Chrome Web Store, etc.) is now blocked before it happens rather than discovered a step later, and the agent is now shown its own step-by-step plan and remaining step budget when choosing its next action.
    For Ollama, the system prompt is now a compact one (one line per action, no few-shot examples), and a reply that is one bare JSON object is parsed whole.
    The prompt for every other provider is unchanged.
-   *Planned (decided 2026-09-28, not built yet):* replaced by a LangGraph.js graph (see section 3).
+   A dual-engine switch behind `settings.engine` (`'legacy'` vs `'graph'`, defaulting to `'legacy'`) selects between the legacy `AgentEngine` loop and the new LangGraph-powered `AgentRunner` at full API parity.
 
    **Reliability & honesty harness** (`src/background/agent/recovery.ts`, `src/background/agent/outcome.ts`):
    A failed LLM call is retried up to 3 attempts with a short backoff before the task is parked in a resumable `paused` state (naming the provider and attempt count) instead of dying as `idle`, so the existing Resume button picks up from the exact failed step.
@@ -56,8 +55,7 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
 ## 3. Next version (planned, decided 2026-09-28, revised 2026-09-29): LangGraph rework
 
 > **Status**: Decided by Prit on 2026-09-28, and revised on 2026-09-29 after his design review.
-> Phases P0a, P0, P1, P2, and the answer audit provenance gate with honest finish policy are built.
-> The graph itself is not built yet.
+> Phases P0a, P0, P1, P2, the answer audit provenance gate with honest finish policy, P3 (real input, CDP trusted events, and perception), and P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch) are built.
 > Everything in section 2 describes the current code.
 > The target audience and the local-first, small-model niche from section 1 stay the same.
 
@@ -109,10 +107,10 @@ Rebuild the whole agent on LangGraph.js.
 5. **Parser never auto-finishes on tool-call formats**: DSML, `<tool_call>` or `<function_calls>` output is parsed, or it is treated as a parse error and retried.
 6. **Stable element IDs** (idea taken from Claude in Chrome): a `WeakRef` map, so the same element keeps the same ID across snapshots.
    A stale ID gives a clear error instead of a silent wrong click.
-7. **Real clicks via `chrome.debugger`** (CDP `Input.dispatchMouseEvent` and similar), always on while a task runs.
+7. **Real clicks via `chrome.debugger`** (CDP `Input.dispatchMouseEvent` and similar), always on while a task runs (built in phase P3).
    Chrome shows a yellow "is debugging this browser" bar; this is accepted.
-   If the debugger cannot attach (for example, DevTools is open), it falls back to today's synthetic DOM events.
-   This needs the `debugger` permission in the manifest.
+   If the debugger cannot attach (for example, DevTools is open), it falls back to synthetic DOM events.
+   The `debugger` permission is present in `public/manifest.json`.
    The debugger detaches after 30 minutes of pause.
 8. **Approve plan first**: the agent shows its plan and the sites it will visit.
    The user approves once, then it runs (LangGraph `interrupt`).
@@ -166,12 +164,12 @@ Rebuild the whole agent on LangGraph.js.
   Browsers have no `AsyncLocalStorage`, so `interrupt` needs a small helper, and a paused task resumed correctly after the worker was stopped by force.
 - LangChain chat models work from the worker, including AgentRouter (`ChatAnthropic` first, with a hand-written fallback to the OpenAI format).
 - Constrained decoding works on real local models, and it is built (phase P0a).
-- Real clicks through `chrome.debugger` work, including React inputs, iframes and zoom.
+- Real clicks through `chrome.debugger` work, including React inputs, iframes and zoom, and are built (phase P3).
   On a hidden tab they need focus emulation.
-- Still to test: graph checkpoints of a subgraph with the custom saver (spike S5, the first task of phase P4).
+- Graph checkpoints of a subgraph with the custom saver (`SessionStorageSaver`) are verified and built (spike S5 in phase P4).
 
 ### 3.6 Next step
-The design is written and waits for Prit's review, and phases P0a, P0, P1 and P2 are built, along with the answer audit provenance gate.
+The design is written and phases P0a, P0, P1, P2, the answer audit provenance gate, P3, and P4 are built.
 - P0a: constrained decoding for Ollama (see 3.3, item 17).
 - P0 (build foundation, no behaviour change): Vite builds today's JS into `dist/` (`npm run build`), you load `dist/` in Chrome, and CI runs on Node 22.x and 24.x and zips the built `dist/`.
   It also added an opt-in browser smoke test (`npm run test:e2e`) and two test helpers (`fakeChrome` and `fakeStorageSession`).
@@ -186,8 +184,10 @@ The design is written and waits for Prit's review, and phases P0a, P0, P1 and P2
 - Answer audit provenance gate and honest finish policy: answers are checked against the session ledger.
   Unverified claims or missing planned sites are refused or annotated.
 
-Next comes the graph itself from P4 on.
-Every phase keeps the tests green, and the graph stays behind an engine switch until it works on real sites.
+- P3 (Perception and real input): `src/background/browser/cdp.ts` and `input.ts` dispatch CDP trusted events with realistic mouse hold delays, pointer events, visual cursor overlay with ripples, element highlighting, and fallback to synthetic DOM events.
+- P4 (Graph runtime foundation and dual-engine runner): Spike S5 subgraph checkpointing with `SessionStorageSaver`, orchestrator graph (`src/background/graph/orchestrator.ts`), worker subgraph (`src/background/graph/worker.ts`), and `AgentRunner` (`src/background/runner/AgentRunner.ts`) at API parity with `AgentEngine`, selectable via `settings.engine` (`'legacy'` vs `'graph'`).
+
+Every phase keeps the tests green, and the graph remains selectable behind `settings.engine` while real-site evaluation and remaining graph features continue.
 
 ### 3.7 How today's harness concepts map to the planned graph
 This is a summary of the design, which still waits for Prit's approval.
@@ -206,8 +206,9 @@ This is a summary of the design, which still waits for Prit's approval.
 - `npm run check` runs `node --check` on the 7 plain JS source files (see `package.json`).
   The TypeScript files are covered by `npm run typecheck`, which runs `tsc --noEmit` on `src/` (`tsconfig.json`) and on the tests with their helpers (`tests/tsconfig.json`).
 - Today the extension is built with Vite (phase P0): `npm run build` writes `dist/`, and you load `dist/` unpacked in Chrome, not the repo folder.
-  The shared core in `src/` is TypeScript (phase P1).
+  The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P4).
   The providers run on LangChain behind `ApiClients` (phase P2).
-  The engine, the content scripts and the side panel are still plain JS ES modules.
+  The background worker supports both legacy `AgentEngine` and graph `AgentRunner` behind `settings.engine`.
+  The legacy engine, content scripts, and side panel are still plain JS ES modules.
 - CI (`.github/workflows/ci.yml`) runs on Node 22.x and 24.x: `npm ci`, check, typecheck, test, build, evalscan and a zip of the built `dist/`.
-- `public/manifest.json` does not have the `debugger` permission yet.
+- `public/manifest.json` includes the `debugger` permission for real CDP input events.
