@@ -174,8 +174,11 @@ What will change for you:
   A checklist step is marked done only when its goal is really met.
 * **Blocked sites are skipped**: if a site shows a challenge or error page again and again, the agent marks it blocked and moves on.
   The result shows what it found and which sources were blocked, instead of retrying forever.
-* **Effort levels**: you pick Low, Medium or High before a task (Medium is the default).
+* **Effort levels**: you pick Auto, Low, Medium or High before a task (Medium is the default).
+  Auto selects an effort level from task keywords and target sites.
+  You can also set the default effort in Settings, and an active badge shows the current effort during execution.
   A higher level gives each site more steps, more retries and stricter checks, and it takes longer.
+* **Reflection and replanning**: after each site finishes, the agent can reflect on findings to continue, stop early when goals are met, or replan alternative sites.
 * **One worker per site**: every website is handled on its own, with its own step budget.
   The result says which sites are done, partial or blocked.
 * **Checks after every action**: the agent checks whether an action changed the page, and it stops loops instead of repeating the same click.
@@ -193,7 +196,7 @@ What will change for you:
   Final answers are audited against visited page evidence before completion.
   Real clicks run through Chrome debugger (CDP) trusted events with visual cursor animation and fallback (phase P3).
   The LangGraph runtime foundation and AgentRunner are available behind `settings.engine` (phase P4).
-  Long-horizon multi-site orchestration, dynamic scheduling, multi-mode worker policy, budgeting with slack recycling, blocked escalation ladders, and loop/stuck detection are available in the graph engine (phase P5).
+  Long-horizon multi-site orchestration, dynamic scheduling, multi-mode worker policy, budgeting with slack recycling, blocked escalation ladders, loop/stuck detection, effort profiles, and LLM reflection with plan revisions are available in the graph engine (phase P5).
   The legacy engine, content scripts, and side panel are still plain JavaScript, and they move in later phases.
 
 See [PRD.md](PRD.md) for the details.

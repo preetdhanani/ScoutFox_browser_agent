@@ -254,6 +254,20 @@ npm test
 `shared/fixtures/answer-audit-cases.json` holds the cases of the audit as data.
 If an existing engine test finishes with a number or a link, the page it runs on must show it, or the gate correctly refuses the answer.
 
+### Effort Profiles and Reflection (Phases P5b, P5c)
+Effort profiles are defined in `shared/effort.json` (`auto`, `low`, `medium`, `high`, `max`).
+They configure `searchDepth`, `maxSites`, `stepBudgetPerSite`, `tokenBudgetPerSite`, `reflectMode`, `workerPlanning`, `replanBudgetPerSite`, `replanMaxRounds`, and `screenshotMode`.
+`src/background/agent/profile.ts` loads the matrix and provides heuristic level suggestion (`suggestEffortLevel`) when Auto mode is selected.
+The side panel provides segmented effort controls for Auto, Low, Medium, and High, and Settings stores the user default in `effortDefault`.
+An active effort badge in the processing banner displays the running task's level.
+
+Reflection and replanning run between sites in `reflectNode` (`src/background/graph/orchestrator.ts`).
+`src/background/agent/reflectPrompt.ts` generates structured reflection prompts and parses model decisions (`continue`, `stop_early`, `replan`).
+When `stop_early` is chosen, the run finishes immediately when all required findings and criteria are satisfied.
+When `replan` is chosen, `planNode` creates revised plans with monotonic site IDs and archives the previous plan in `planPrev`.
+`allocNode` preserves budget accounting across replans by crediting unspent allocations from dropped sites, funding new candidate sites, and protecting the reserve pool.
+Comprehensive tests cover profiles and reflection in `tests/agent/profile.test.ts`, `tests/agent/reflectPrompt.test.ts`, `tests/graph/orchestratorEffort.test.ts`, and `tests/graph/orchestratorReflect.test.ts`.
+
 ### Test Approach
 `chrome.*` APIs are hand-mocked per test file, not a real browser.
 New tests should use the shared fakes described under "Test Helpers" instead of a new hand-made mock.
@@ -338,7 +352,7 @@ Before packaging for the Chrome Web Store:
 
 ## 5. Build Foundation and What Comes Next
 
-> Status: phases P0 through P5 (including P5 Long-Horizon Worker) are built, along with the answer audit gate and honest finish policy.
+> Status: phases P0 through P5 (including P5 Long-Horizon Worker, P5b Effort Profiles, and P5c Reflect and Replan engine) are built, along with the answer audit gate and honest finish policy.
 > See section 3 of [PRD.md](PRD.md) for architecture and roadmap details.
 
 What is true today:

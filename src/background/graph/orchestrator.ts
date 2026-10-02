@@ -75,7 +75,7 @@ const profileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
     suggestedBy = 'heuristic';
   } else if (requested) {
     level = requested;
-    suggestedBy = 'user';
+    suggestedBy = state.effort?.suggestedBy ?? 'user';
   }
 
   const profile = getEffortProfile(level);

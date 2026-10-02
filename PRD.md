@@ -142,8 +142,10 @@ Rebuild the whole agent on LangGraph.js.
 21. **Risk gate**: submitting a form, logging in, buying, and leaving the approved sites wait for the user's OK.
     The agent never types passwords, card numbers or one-time codes.
 22. **Provenance**: every value in the final table carries its URL, the time and a page snippet that code found, never one written by the model.
-23. **Effort levels**: Low, Medium and High first, and XHigh and Max later, after real-run data.
-    A level sets the step budget per site, the retries, how strictly actions are verified, how hard the agent tries to get past blocked pages, when it reflects, and the evidence checks.
+23. **Effort levels**: Auto, Low, Medium, High, and Max defined in `shared/effort.json`.
+    The side panel exposes segmented controls for Auto, Low, Medium, and High, and Settings configures the default effort level.
+    Auto infers Low, Medium, or High via task keyword and target site heuristics.
+    A level sets search depth, max sites, step and token budgets per site, retries, verification mode, blocked ladders, reflection mode, replan budget and rounds, and screenshot mode.
     The default is Medium.
 24. **Step limit**: `settings.maxSteps` becomes a hard safety cap with a default of 250, and the effort level and the site budgets limit each task.
 25. **Optional later phases**: parallel sites, and a rerun of only the partial sites at a higher level.
@@ -186,7 +188,7 @@ The design is written and phases P0a, P0, P1, P2, the answer audit provenance ga
 
 - P3 (Perception and real input): `src/background/browser/cdp.ts` and `input.ts` dispatch CDP trusted events with realistic mouse hold delays, pointer events, visual cursor overlay with ripples, element highlighting, and fallback to synthetic DOM events.
 - P4 (Graph runtime foundation and dual-engine runner): Spike S5 subgraph checkpointing with `SessionStorageSaver`, orchestrator graph (`src/background/graph/orchestrator.ts`), worker subgraph (`src/background/graph/worker.ts`), and `AgentRunner` (`src/background/runner/AgentRunner.ts`) at API parity with `AgentEngine`, selectable via `settings.engine` (`'legacy'` vs `'graph'`).
-- P5 (Long-Horizon Worker): multi-site orchestration and dynamic scheduling in the orchestrator graph with offer synthesis and truth table compilation (`src/background/graph/orchestrator.ts`, `src/background/agent/findings.ts`).
+- P5 (Long-Horizon Worker, Effort Profiles, and Reflection): multi-site orchestration and dynamic scheduling in the orchestrator graph with offer synthesis and truth table compilation (`src/background/graph/orchestrator.ts`, `src/background/agent/findings.ts`).
   Multi-mode worker policy execution (browse, extract, answer, harvest).
   Light page signature hashing (`PageSig`) and DOM state comparison (`src/background/agent/stuck.ts`).
   Step and token budgeting with slack recycling across sites (`src/background/agent/budget.ts`).
@@ -194,6 +196,10 @@ The design is written and phases P0a, P0, P1, P2, the answer audit provenance ga
   Loop and stuck detection across URL/element/text changes.
   Failure memory with signature banning (`src/background/agent/failureMemory.ts`).
   Finding provenance snippet extraction (`src/background/agent/planEvidence.ts`).
+  Effort profiles (auto, low, medium, high, max) in `shared/effort.json` and loader in `src/background/agent/profile.ts` (Phase P5b).
+  Segmented effort selector buttons, active effort badge in processing status bar, and default effort dropdown in Settings with `chrome.storage` persistence.
+  Real LLM reflection in `reflectNode`, reflect prompt builder and parser in `src/background/agent/reflectPrompt.ts` (Phase P5c).
+  Plan revision support in `planNode` with monotonic site IDs and `planPrev` archiving, budget preservation in `allocNode`, and early finish recognition in `compileNode`.
   Default `maxSteps` upgrade from 25 to 250 with one-time storage migration and UI input up to 1,000 (`src/shared/storage.ts`, `sidepanel/sidepanel.html`).
 
 Every phase keeps the tests green, and the graph remains selectable behind `settings.engine` while real-site evaluation and remaining graph features continue.
