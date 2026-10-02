@@ -66,6 +66,7 @@ export class AgentRunner {
   private currentDrive: Promise<void> | null = null;
   private activeAbort: AbortController | null = null;
   private pauseTimer: ReturnType<typeof setTimeout> | null = null;
+  private clearPromise: Promise<void> = Promise.resolve();
 
   constructor(ownerTabId: number, windowId: number | 'default' = 'default', saver?: BaseCheckpointSaver, customLlm?: LlmPort) {
     this.ownerTabId = ownerTabId;
@@ -350,6 +351,7 @@ export class AgentRunner {
     }
 
     await this.restorePromise;
+    await this.clearPromise;
     this.dirty = true;
     this.activeTabId = tabId;
 
@@ -383,6 +385,7 @@ export class AgentRunner {
     this.dirty = true;
     this.status = 'paused';
     this.pauseReason = 'user';
+    this.activeAbort?.abort({ scoutfox: 'user', reason: 'user_pause' });
     this.runtime.control.abortStep('user_pause');
     this.notifyStateChange();
     this.startPauseDetachTimer();
@@ -409,13 +412,15 @@ export class AgentRunner {
     if (this.status === 'idle' || this.status === 'stopped') {
       return { success: false, error: 'No task is running or paused.' };
     }
+    const wasPaused = this.status === 'paused';
     this.clearPauseDetachTimer();
     this.dirty = true;
     this.status = 'stopped';
+    this.activeAbort?.abort({ scoutfox: 'user', reason: 'user_stop' });
     this.runtime.control.abortStep('user_stop');
     this.notifyStateChange();
 
-    if (this.isLoopActive) {
+    if (wasPaused) {
       void this.drive(new Command({ resume: { kind: 'stop' } }));
     }
     return { success: true };
@@ -466,6 +471,13 @@ export class AgentRunner {
     this.currentTask = '';
     this.planSteps = [];
     this.status = 'idle';
+    if (this.saver?.deleteThread) {
+      this.clearPromise = this.saver.deleteThread(this.threadId)
+        .then(() => {
+          this.saver.revive(this.threadId);
+        })
+        .catch(() => {});
+    }
     this.notifyStateChange();
   }
 
@@ -650,7 +662,7 @@ export class AgentRunner {
     if (snapshot.next && snapshot.next.length > 0 && !this.runtime.control.stopRequested) {
       // Worker died mid-step without interrupt
       this.status = 'paused';
-      this.pauseReason = 'worker_restart';
+      this.pauseReason = this.runtime.control.pauseRequested ? 'user' : 'worker_restart';
       this.startPauseDetachTimer();
       return null;
     }
