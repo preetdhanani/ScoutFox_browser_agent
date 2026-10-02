@@ -171,6 +171,214 @@ export function buildPlanSchema({ maxSteps = PLAN_MAX_STEPS }: { maxSteps?: numb
   };
 }
 
+const GRAPH_SITE_SCHEMA: JsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['domain', 'url', 'goal', 'role', 'kind', 'difficulty', 'required_fields', 'done_when', 'check'],
+  properties: {
+    domain: { type: 'string' },
+    url: { type: 'string' },
+    goal: { type: 'string' },
+    role: { enum: ['reference', 'compare', 'other'] },
+    kind: { enum: ['store', 'listing', 'search', 'page'] },
+    difficulty: { enum: [1, 2, 3] },
+    required_fields: { type: 'array', maxItems: 5, items: { type: 'string' } },
+    done_when: { enum: ['all_required', 'any', 'predicate'] },
+    check: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['type', 'value'],
+      properties: {
+        type: { enum: ['none', 'url_contains', 'text_present', 'element_text_present'] },
+        value: { type: 'string' }
+      }
+    }
+  }
+};
+
+/**
+ * Builds the LangGraph orchestrator plan schema for initial planning or replanning.
+ */
+export function buildGraphPlanSchema({ mode = 'initial' }: { mode?: 'initial' | 'revise' } = {}): JsonSchema {
+  if (mode === 'revise') {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: ['drop', 'add', 'order', 'reason'],
+      properties: {
+        drop: { type: 'array', maxItems: 6, items: { type: 'string' } },
+        add: { type: 'array', maxItems: 2, items: GRAPH_SITE_SCHEMA },
+        order: { type: 'array', maxItems: 8, items: { type: 'string' } },
+        reason: { type: 'string' }
+      }
+    };
+  }
+
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['task_kind', 'columns', 'search_query', 'compare', 'sites'],
+    properties: {
+      task_kind: { enum: ['research', 'action', 'answer'] },
+      columns: { type: 'array', maxItems: 5, items: { type: 'string' } },
+      search_query: { type: 'string' },
+      compare: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['reference_domain', 'field', 'threshold_pct'],
+        properties: {
+          reference_domain: { type: 'string' },
+          field: { type: 'string' },
+          threshold_pct: { type: 'number', minimum: 0, maximum: 100 }
+        }
+      },
+      sites: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 6,
+        items: GRAPH_SITE_SCHEMA
+      }
+    }
+  };
+}
+
+/**
+ * Builds the LangGraph orchestrator reflect schema.
+ */
+export function buildReflectSchema(): JsonSchema {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['decision', 'reason', 'changes'],
+    properties: {
+      decision: { enum: ['continue', 'replan', 'stop_early'] },
+      reason: { type: 'string' },
+      changes: { type: 'string' }
+    }
+  };
+}
+
+export interface PolicySchemaOptions {
+  mode: 'browse' | 'extract' | 'answer' | 'harvest';
+  tier?: 'small' | 'large';
+  columns?: string[];
+  priceLike?: boolean;
+  goalKind?: 'collect' | 'do' | 'answer';
+}
+
+function buildRecordFindingBranch(columns?: string[], priceLike?: boolean): JsonSchema {
+  const cols = (columns && columns.length > 0)
+    ? columns
+    : (priceLike ? ['price', 'shipping', 'delivery'] : ['value']);
+  const properties: Record<string, JsonSchema> = {
+    action: { const: 'record_finding' }
+  };
+  for (const col of cols) {
+    properties[col] = { type: 'string' };
+  }
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['action', ...cols],
+    properties
+  };
+}
+
+/**
+ * Builds the LangGraph worker policy schema for a specific mode, tier, and goal.
+ */
+export function buildPolicySchema(options: PolicySchemaOptions): JsonSchema {
+  const { mode, tier = 'small', columns = [], priceLike = false, goalKind = 'collect' } = options;
+
+  if (mode === 'extract') {
+    return {
+      oneOf: [
+        buildRecordFindingBranch(columns, priceLike),
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['action', 'reason'],
+          properties: { action: { const: 'mark_not_found' }, reason: { type: 'string' } }
+        },
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['action', 'reason'],
+          properties: { action: { const: 'continue_browsing' }, reason: { type: 'string' } }
+        },
+        branchFor(verbDef('scroll'), { withReason: true, batchSteps: BATCH_STEP_STYLE }),
+        branchFor(verbDef('read_page_text'), { withReason: true, batchSteps: BATCH_STEP_STYLE }),
+        branchFor(verbDef('ask_user'), { withReason: true, batchSteps: BATCH_STEP_STYLE })
+      ]
+    };
+  }
+
+  if (mode === 'harvest') {
+    return {
+      oneOf: [
+        buildRecordFindingBranch(columns, priceLike),
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['action', 'reason'],
+          properties: { action: { const: 'mark_not_found' }, reason: { type: 'string' } }
+        },
+        branchFor(verbDef('scroll'), { withReason: true, batchSteps: BATCH_STEP_STYLE }),
+        branchFor(verbDef('read_page_text'), { withReason: true, batchSteps: BATCH_STEP_STYLE }),
+        branchFor(verbDef('ask_user'), { withReason: true, batchSteps: BATCH_STEP_STYLE })
+      ]
+    };
+  }
+
+  if (mode === 'answer') {
+    return {
+      oneOf: [
+        branchFor(verbDef('finish'), { withReason: true, batchSteps: BATCH_STEP_STYLE }),
+        branchFor(verbDef('scroll'), { withReason: true, batchSteps: BATCH_STEP_STYLE }),
+        branchFor(verbDef('read_page_text'), { withReason: true, batchSteps: BATCH_STEP_STYLE }),
+        branchFor(verbDef('ask_user'), { withReason: true, batchSteps: BATCH_STEP_STYLE })
+      ]
+    };
+  }
+
+  // mode === 'browse'
+  const baseVerbs = ['click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward', 'wait', 'read_page_text', 'ask_user'];
+  if (tier === 'large') {
+    baseVerbs.push('execute_js', 'read_network_requests', 'browser_batch', 'open_window');
+  }
+
+  const branches: JsonSchema[] = baseVerbs.map((v) => branchFor(verbDef(v), { withReason: true, batchSteps: BATCH_STEP_STYLE }));
+
+  if (goalKind === 'collect') {
+    branches.push(buildRecordFindingBranch(columns, priceLike));
+    branches.push({
+      type: 'object',
+      additionalProperties: false,
+      required: ['action', 'reason'],
+      properties: { action: { const: 'mark_not_found' }, reason: { type: 'string' } }
+    });
+    branches.push({
+      type: 'object',
+      additionalProperties: false,
+      required: ['action', 'reason'],
+      properties: { action: { const: 'mark_blocked' }, reason: { type: 'string' } }
+    });
+  } else if (goalKind === 'do') {
+    branches.push({
+      type: 'object',
+      additionalProperties: false,
+      required: ['action', 'summary', 'evidence'],
+      properties: {
+        action: { const: 'subgoal_done' },
+        summary: { type: 'string' },
+        evidence: { type: 'string' }
+      }
+    });
+  }
+
+  return { oneOf: branches };
+}
+
 export interface ValidationResult {
   ok: boolean;
   /** One line per problem, "<where in the value>: <what is wrong>". Empty when ok. */

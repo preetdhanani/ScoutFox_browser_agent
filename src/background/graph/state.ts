@@ -179,7 +179,7 @@ export interface Finding {
   quality: 'verified' | 'single_source' | 'unverified';
   supersedes?: string;                   // id of the finding this one replaced; that one stays, but is not shown
 }
-export interface TableCell { value: string; url: string; capturedAt: string; snippet: string; quality: Finding['quality'] }
+export interface TableCell { value: string; url: string; capturedAt: string; snippet: string; quality: Finding['quality']; flag?: string }
 export interface FindingsTable {
   columns: string[];
   rows: Array<{

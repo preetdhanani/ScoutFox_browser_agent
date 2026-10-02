@@ -2,11 +2,28 @@
 // Orchestrator graph (StateGraph API, '@langchain/langgraph/web').
 // Manages high-level plan, profile, site scheduling, and outcomes across sites.
 import { END, START, StateGraph, type BaseCheckpointSaver } from '@langchain/langgraph/web';
-import { AgentState, DEFAULT_LIMITS, type AgentStateT, type AgentUpdate, type HistoryEntry, type PlanMeta, type SiteSpec } from './state.ts';
+import {
+  AgentState,
+  DEFAULT_LIMITS,
+  type AgentStateT,
+  type AgentUpdate,
+  type BlockedSource,
+  type Finding,
+  type FindingsTable,
+  type HistoryEntry,
+  type Offer,
+  type PlanMeta,
+  type SiteSpec,
+  type SiteSummary,
+} from './state.ts';
+import type { SiteIn } from './workerState.ts';
 import { ORCHESTRATOR_ROUTE_MAPS, planRouter, holdRouter, schedRouter, summaryRouter, reflectRouter, compileRouter } from './routes.ts';
 import { defineNode, getRuntime } from '../runner/runtimeRegistry.ts';
 import { buildWorkerGraph, buildSiteOut } from './worker.ts';
 import { interruptWithConfig } from './interrupt.ts';
+import { buildGraphPlanSchema } from '../agent/schemas.ts';
+import { computeSiteBase, computeSiteAlloc, computeWorkingTotal, computeUsableBudget } from '../agent/budget.ts';
+import { deduplicateFindings, compileTruthTable, renderTruthTableMarkdown } from '../agent/findings.ts';
 
 // ---------------------------------------------------------------------------------------------
 // Orchestrator Node Definitions
@@ -66,45 +83,130 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
   const activeTabId = runtime.tabs.activeTabId ?? runtime.ownerTabId;
   const tabInfo = await runtime.browser.tabInfo(activeTabId).catch(() => null);
 
-  let domain = 'this_page';
+  let currentDomain = 'this_page';
+  let currentUrl = tabInfo?.url ?? '';
   if (tabInfo?.url) {
     try {
-      domain = new URL(tabInfo.url).hostname;
-    } catch {
-      // Keep default
+      currentDomain = new URL(tabInfo.url).hostname;
+    } catch {}
+  }
+
+  const prompt = [
+    `USER TASK: "${state.task}"`,
+    `CURRENT BROWSER PAGE: ${currentDomain} (${currentUrl})`,
+    `INSTRUCTIONS: Create an execution plan with up to 4 sites.`,
+    `Classify taskKind as 'research', 'action', or 'answer'.`,
+    `Assign role 'reference' to the primary site, and 'compare' or 'other' to subsequent sites.`,
+    `Extract 1 to 5 data columns to collect (e.g. price, shipping).`,
+  ].join('\n');
+
+  const schema = buildGraphPlanSchema({ mode: 'initial' });
+  const stepSignal = runtime.control.stepSignal();
+  let parsedPlan: any = null;
+
+  try {
+    const res = await runtime.llm.complete({
+      node: 'plan',
+      mode: 'initial',
+      role: 'planner',
+      system: 'You are an autonomous web research and action planner. Output JSON adhering to the provided schema.',
+      messages: [{ role: 'user', content: prompt }],
+      schema,
+      signal: stepSignal,
+    });
+
+    const replyText = res.text || '';
+    const cleaned = replyText.replace(/<(?:think|thought|reasoning)>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
+    const fenceMatch = cleaned.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/i);
+    const jsonStr = fenceMatch ? fenceMatch[1] : (cleaned.match(/\{[\s\S]*\}/)?.[0] ?? '');
+    if (jsonStr) {
+      parsedPlan = JSON.parse(jsonStr);
+    }
+  } catch {
+    parsedPlan = null;
+  }
+
+  let planMeta: PlanMeta;
+  if (parsedPlan && Array.isArray(parsedPlan.sites) && parsedPlan.sites.length > 0) {
+    const columns: string[] = Array.isArray(parsedPlan.columns)
+      ? parsedPlan.columns.map((c: string) => String(c).toLowerCase().replace(/[^a-z0-9_]/g, '_')).slice(0, 5)
+      : ['value'];
+    const priceLike = columns.some((c) => /price|cost|preis|shipping/i.test(c));
+
+    const sites: SiteSpec[] = parsedPlan.sites.slice(0, 4).map((s: any, idx: number) => {
+      const id = `s${idx + 1}`;
+      const domain = s.domain || currentDomain;
+      return {
+        id,
+        name: s.name || domain,
+        domain,
+        goal: s.goal || state.task,
+        goalKind: s.goalKind || (parsedPlan.taskKind === 'action' ? 'do' : 'collect'),
+        startUrl: s.startUrl || (idx === 0 && currentUrl.startsWith('http') ? currentUrl : undefined),
+        searchQuery: s.searchQuery || `${parsedPlan.searchQuery || state.task} site:${domain}`,
+        role: idx === 0 ? 'reference' : (s.role || 'compare'),
+        kind: s.kind || 'store',
+        difficulty: (s.difficulty === 1 || s.difficulty === 2 || s.difficulty === 3) ? s.difficulty : 1,
+        namedByUser: true,
+        criteria: {
+          fields: columns.map((col) => ({ name: col, required: true })),
+          doneWhen: 'all_required' as const,
+        },
+      };
+    });
+
+    planMeta = {
+      version: 1,
+      taskKind: parsedPlan.taskKind || 'research',
+      columns,
+      priceLike,
+      searchQuery: parsedPlan.searchQuery || state.task.slice(0, 40),
+      compare: parsedPlan.compare,
+      sites,
+      source: 'llm',
+    };
+  } else {
+    // Deterministic fallback
+    const implicitSite: SiteSpec = {
+      id: 's1',
+      name: currentDomain,
+      domain: currentDomain,
+      goal: state.task,
+      goalKind: 'collect',
+      role: 'reference',
+      kind: 'page',
+      difficulty: 1,
+      namedByUser: true,
+      criteria: {
+        fields: [{ name: 'value', required: true }],
+        doneWhen: 'all_required',
+      },
+    };
+
+    planMeta = {
+      version: 1,
+      taskKind: 'research',
+      columns: ['value'],
+      priceLike: false,
+      searchQuery: state.task.slice(0, 40),
+      sites: [implicitSite],
+      source: 'fallback',
+    };
+  }
+
+  const siteMap: Record<string, { status: 'pending'; criteriaMet: false }> = {};
+  const approved = new Set<string>(state.approvedDomains ?? []);
+  for (const s of planMeta.sites) {
+    siteMap[s.id] = { status: 'pending', criteriaMet: false };
+    if (s.domain && s.domain !== 'this_page') {
+      approved.add(s.domain);
     }
   }
 
-  const implicitSite: SiteSpec = {
-    id: 's1',
-    name: domain,
-    domain,
-    goal: state.task,
-    goalKind: 'collect',
-    role: 'reference',
-    kind: 'page',
-    difficulty: 1,
-    namedByUser: true,
-    criteria: {
-      fields: [{ name: 'value', required: true }],
-      doneWhen: 'all_required',
-    },
-  };
-
-  const plan: PlanMeta = {
-    version: 1,
-    taskKind: 'research',
-    columns: ['value'],
-    priceLike: false,
-    searchQuery: state.task.slice(0, 40),
-    sites: [implicitSite],
-    source: 'fallback',
-  };
-
   return {
-    planMeta: plan,
-    sites: { $set: { s1: { status: 'pending', criteriaMet: false } } },
-    approvedDomains: [domain],
+    planMeta,
+    sites: { $set: siteMap },
+    approvedDomains: Array.from(approved),
     phase: 'approve',
     pendingHold: { kind: 'approve_plan' },
   };
@@ -127,19 +229,46 @@ const holdNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
 
 const allocNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'alloc', (state) => {
   const hardCap = state.limits?.maxSteps ?? 250;
+  const level = state.effort?.level ?? 'medium';
+  const multiplier = state.effortProfile?.multiplier ?? (level === 'max' ? 3 : level === 'medium' ? 2 : 1);
   const reservePct = state.effortProfile?.reservePct ?? 0.15;
-  const reserve = Math.round(hardCap * reservePct);
-  const usable = hardCap - reserve;
+  const sites = state.planMeta?.sites ?? [];
+
+  // Compute base for each site
+  const siteBases = sites.map((s) => computeSiteBase(s.kind, s.difficulty));
+  const siteAllocsUnscaled = siteBases.map((b) => computeSiteAlloc(b, multiplier));
+  const totalBase = siteAllocsUnscaled.reduce((a, b) => a + b, 0);
+
+  // Compute pool available for sites = hardCap * (1 - reservePct)
+  const maxPool = Math.round(hardCap * (1 - reservePct));
+
+  // If totalBase > maxPool, scale down; otherwise keep base
+  const scale = totalBase > maxPool && totalBase > 0 ? maxPool / totalBase : 1;
+  const siteBudgetMap: Record<string, { base: number; alloc: number; used: number; extended: boolean }> = {};
+  const siteAllocs: number[] = [];
+
+  for (let i = 0; i < sites.length; i++) {
+    const s = sites[i];
+    const base = siteBases[i];
+    const alloc = Math.max(1, Math.round(siteAllocsUnscaled[i] * scale));
+    siteAllocs.push(alloc);
+    siteBudgetMap[s.id] = {
+      base,
+      alloc,
+      used: 0,
+      extended: false,
+    };
+  }
+
+  const { workingTotal, reserve } = computeWorkingTotal(siteAllocs, reservePct);
 
   const budget = {
     hardCap,
-    workingTotal: hardCap,
+    workingTotal,
     reserve,
     slack: 0,
     used: 0,
-    sites: {
-      s1: { base: usable, alloc: usable, used: 0, extended: false },
-    },
+    sites: siteBudgetMap,
   };
 
   return {
@@ -150,28 +279,44 @@ const allocNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 
 
 const schedNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'sched', (state, config) => {
   const runtime = getRuntime(config);
-  const site = state.planMeta?.sites?.find((s) => {
+  const sites = state.planMeta?.sites ?? [];
+
+  // Sort sites: 'reference' first, then 'compare', then 'other'
+  const rolePriority: Record<string, number> = { reference: 0, compare: 1, other: 2 };
+  const sortedSites = [...sites].sort((a, b) => (rolePriority[a.role] ?? 3) - (rolePriority[b.role] ?? 3));
+
+  const site = sortedSites.find((s) => {
     const currentStatus = state.sites?.[s.id]?.status;
     return !currentStatus || currentStatus === 'pending';
   });
+
   if (!site) {
     return { siteIn: null, activeSiteId: null };
   }
 
-  const hardCap = state.limits?.maxSteps ?? 250;
+  const hardCap = state.budget?.hardCap ?? state.limits?.maxSteps ?? 250;
   const used = state.budget?.used ?? 0;
   const reserve = state.budget?.reserve ?? 0;
-  const hardCapLeft = hardCap - used - reserve;
+  const hardCapLeft = computeUsableBudget(hardCap, used, reserve);
 
-  const siteIn = {
+  // Build findingsLines from state.findings
+  const findingsLines: string[] = [];
+  if (state.findings && state.findings.length > 0) {
+    for (const f of state.findings) {
+      findingsLines.push(`- [${f.siteId}] ${f.field}: ${f.valueRaw} (${f.quality})`);
+    }
+  }
+
+  const siteIndex = sites.findIndex((s) => s.id === site.id) + 1;
+  const siteIn: SiteIn = {
     site,
-    index: 1,
-    total: 1,
+    index: siteIndex,
+    total: sites.length,
     task: state.task,
     taskKind: state.planMeta!.taskKind,
     columns: state.planMeta!.columns,
     priceLike: state.planMeta!.priceLike,
-    compare: null,
+    compare: state.planMeta!.compare ?? null,
     profile: state.effortProfile!,
     tier: state.tier,
     limits: state.limits,
@@ -188,10 +333,10 @@ const schedNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 
     approvedDomains: state.approvedDomains,
     blocked: Object.values(state.blocked ?? {}),
     visitedRecent: Object.values(state.visited ?? {}).slice(-10),
-    findingsLines: [],
-    earlierSites: [],
+    findingsLines,
+    earlierSites: (state.siteSummaries ?? []).map((s) => `${s.siteId}: ${s.status} (${s.findings} findings)`),
     recap: [],
-    priorFindings: [],
+    priorFindings: (state.priorFindings ?? []).map((f) => `${f.siteId}: ${f.field} = ${f.valueRaw}`),
   };
 
   return {
@@ -228,26 +373,54 @@ const summaryNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
     stepsUsed: siteOut.used,
   };
 
-  const summary = {
+  const summary: SiteSummary = {
     siteId,
     status: siteOut.status,
     criteriaMet: siteOut.criteriaMet,
     findings: siteOut.findings.length,
-    blockers: [],
+    blockers: siteOut.blocked.map((b) => `${b.domain}: ${b.reason} (${b.tries} tries)`),
     stepsUsed: siteOut.used,
     failures: siteOut.failures,
     anomalies: siteOut.anomalies,
     userAnswered: siteOut.userAnswered,
-    notes: siteOut.notes,
+    notes: siteOut.reason,
   };
 
+  // Recycle unused site allocation into slack pool
+  const siteBudget = state.budget?.sites?.[siteId];
+  const siteAlloc = siteBudget?.alloc ?? siteOut.used;
+  const unused = Math.max(0, siteAlloc - siteOut.used);
+  const currentSlack = state.budget?.slack ?? 0;
   const currentUsed = state.budget?.used ?? 0;
+
   const newBudget = state.budget
     ? {
         ...state.budget,
         used: currentUsed + siteOut.used,
+        slack: currentSlack + unused,
+        sites: {
+          ...state.budget.sites,
+          [siteId]: {
+            base: siteBudget?.base ?? siteAlloc,
+            alloc: siteAlloc,
+            used: siteOut.used,
+            extended: (siteOut.extendedBy ?? 0) > 0,
+          },
+        },
       }
     : state.budget;
+
+  // Merge findings with deduplication
+  let mergedFindings = [...(state.findings ?? [])];
+  for (const f of siteOut.findings) {
+    mergedFindings = deduplicateFindings(mergedFindings, f);
+  }
+
+  // Merge blocked sources into state.blocked map
+  const blockedUpdates: Record<string, BlockedSource> = {};
+  for (const b of siteOut.blocked) {
+    blockedUpdates[b.domain] = b;
+  }
 
   return {
     sites: {
@@ -259,6 +432,8 @@ const summaryNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
         },
       },
     },
+    findings: mergedFindings,
+    blocked: { $set: blockedUpdates },
     siteSummaries: [summary],
     siteIn: null,
     budget: newBudget,
@@ -284,6 +459,23 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
   const allDone = sites.length > 0 && sites.every((s) => s.status === 'done');
   const stopped = state.ctl?.stopRequested || state.siteOut?.status === 'stopped';
 
+  // Compile truth table if columns and sites exist
+  let table: FindingsTable | null = null;
+  let markdownTable = '';
+  if (state.planMeta?.sites && state.planMeta.sites.length > 0 && state.findings && state.findings.length > 0) {
+    const comp = state.planMeta.compare as any;
+    const compareOpt = comp
+      ? {
+          reference_domain: comp.reference_domain || state.planMeta.sites.find((s) => s.id === comp.referenceSiteId)?.domain || state.planMeta.sites[0].domain,
+          field: comp.field || 'price',
+          threshold_pct: comp.threshold_pct ?? comp.thresholdPct ?? 10,
+        }
+      : undefined;
+
+    table = compileTruthTable(state.planMeta.sites, state.findings ?? [], compareOpt);
+    markdownTable = renderTruthTableMarkdown(table);
+  }
+
   let endReason: any = 'stopped_early';
   let historyEntry: HistoryEntry;
 
@@ -291,23 +483,28 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
     endReason = 'stopped';
     historyEntry = {
       type: 'partial_result',
-      answer: 'Task was stopped by user.',
-      table: null,
+      answer: markdownTable ? `Task was stopped by user.\n\n${markdownTable}` : 'Task was stopped by user.',
+      table,
       reason: 'stopped',
     };
   } else if (allDone) {
     endReason = 'all_subgoals_done';
-    const answer = state.siteOut?.finalAnswer?.text ?? 'Task completed successfully.';
+    const baseAnswer = state.siteOut?.finalAnswer?.text ?? 'Task completed successfully.';
+    const answer = markdownTable ? `${baseAnswer}\n\n${markdownTable}` : baseAnswer;
     historyEntry = {
       type: 'finish',
       answer,
+      ...(table ? { table } : {}),
     };
   } else {
     endReason = 'stopped_early';
+    const answer = markdownTable
+      ? `Task ended without completing all goals.\n\n${markdownTable}`
+      : 'Task ended without completing all goals.';
     historyEntry = {
       type: 'partial_result',
-      answer: 'Task ended without completing all goals.',
-      table: null,
+      answer,
+      table,
       reason: 'stopped_early',
     };
   }
@@ -317,15 +514,26 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
     finalAnswer: {
       text: historyEntry.type === 'finish' ? historyEntry.answer : (historyEntry as any).answer,
       unconfirmed: false,
-      table: null,
+      table,
       partial: !allDone,
     },
     history: [historyEntry],
   };
 });
 
-const offerNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'offer', () => {
-  return {};
+const offerNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'offer', (state) => {
+  const sites = state.siteSummaries ?? [];
+  const incompleteSites = sites.filter((s) => s.status !== 'done');
+  if (incompleteSites.length === 0) return {};
+
+  const offer: Offer = {
+    partialSiteIds: incompleteSites.map((s) => s.siteId),
+    suggestedLevel: 'high',
+  };
+
+  return {
+    offerPayload: offer,
+  };
 });
 
 const finalizeNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'finalize', async (state, config) => {

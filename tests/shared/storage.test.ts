@@ -24,17 +24,24 @@ const { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } = await import('..
 
 test('Storage - DEFAULT_SETTINGS sanity check', () => {
   assert.equal(DEFAULT_SETTINGS.provider, 'openrouter');
-  assert.equal(DEFAULT_SETTINGS.maxSteps, 25);
+  assert.equal(DEFAULT_SETTINGS.maxSteps, 250);
   assert.ok(DEFAULT_SETTINGS.providerConfigs);
 });
 
 test('Storage - getSettings & saveSettings roundtrip', async () => {
   const initial = await Storage.getSettings();
-  assert.equal(initial.maxSteps, 25);
+  assert.equal(initial.maxSteps, 250);
 
-  await Storage.saveSettings({ maxSteps: 30 });
+  await Storage.saveSettings({ maxSteps: 300 });
   const updated = await Storage.getSettings();
-  assert.equal(updated.maxSteps, 30);
+  assert.equal(updated.maxSteps, 300);
+});
+
+test('Storage - one-time migration from maxSteps 25 to 250', async () => {
+  // Simulate legacy stored settings with maxSteps: 25
+  mockStorageData['agent_settings'] = { maxSteps: 25, provider: 'openrouter' };
+  const settings = await Storage.getSettings();
+  assert.equal(settings.maxSteps, 250);
 });
 
 test('Storage - Per-Provider API Key Isolation', async () => {

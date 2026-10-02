@@ -1,14 +1,35 @@
 // src/background/graph/worker.ts
 // Site worker subgraph: isolated context for browsing a single site.
 // Communicates with orchestrator strictly via SiteIn (input) and SiteOut (output).
+// Erasable TypeScript (no enums, no parameter properties).
+
 import { END, START, StateGraph } from '@langchain/langgraph/web';
-import { WorkerState, type SiteOut, type WorkerStateT, type WorkerUpdate } from './workerState.ts';
-import { WORKER_ROUTE_MAPS, meterRouter, blockedRouter, policyRouter, riskRouter, workerHoldRouter, verifyRouter, recoverRouter, recordRouter } from './routes.ts';
+import { WorkerState, type PageSig, type PriceCandidate, type SiteOut, type WorkerStateT, type WorkerUpdate } from './workerState.ts';
+import {
+  WORKER_ROUTE_MAPS,
+  meterRouter,
+  blockedRouter,
+  policyRouter,
+  riskRouter,
+  workerHoldRouter,
+  verifyRouter,
+  recoverRouter,
+  recordRouter
+} from './routes.ts';
 import { defineNode, getRuntime } from '../runner/runtimeRegistry.ts';
 import { interruptWithConfig } from './interrupt.ts';
 import { parseModelReply } from '../agent/parse.ts';
 import { ACTION_VERBS } from '../agent/actions.ts';
-import type { HistoryEntry } from './state.ts';
+import { buildPolicySchema } from '../agent/schemas.ts';
+import { evaluateMeterMode, calculateSlackDraw } from '../agent/budget.ts';
+import { classifyPageType } from '../agent/pageType.ts';
+import { evaluatePageVerdict, executeBlockedLadder } from '../agent/blockedPolicy.ts';
+import { detectStuck } from '../agent/stuck.ts';
+import { recordFailure, isSignatureBanned } from '../agent/failureMemory.ts';
+import { createFinding, deduplicateFindings } from '../agent/findings.ts';
+import { evaluateSiteCriteria } from '../agent/criteria.ts';
+import { buildPolicySystemPrompt, buildPolicyUserMessage } from '../agent/prompts.ts';
+import type { BlockedSource, HistoryEntry, StepFailure } from './state.ts';
 
 export function buildSiteOut(state: WorkerStateT): SiteOut {
   const r = state.siteRun;
@@ -42,6 +63,17 @@ export function buildSiteOut(state: WorkerStateT): SiteOut {
     cdp: r?.cdp ?? { mode: 'off', reason: null, sticky: false },
     activeTabId: r?.tabId ?? null,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Helper: Simple String Hash (FNV-1a 32-bit)
+// ---------------------------------------------------------------------------------------------
+function hashString(str: string): string {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h = Math.imul(h ^ str.charCodeAt(i), 16777619) >>> 0;
+  }
+  return h.toString(16);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -79,38 +111,40 @@ const openNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'open
     }
   }
 
-  const initialSiteRun = {
-    siteId: siteIn.site.id,
-    spec: siteIn.site,
-    tabId,
-    alloc: siteIn.alloc,
-    used: 0,
-    extendedBy: 0,
-    meterMode: 'normal' as const,
-    mode: 'browse' as const,
-    pageSigs: [],
-    actionSigs: [],
-    failureMemory: [],
-    banned: [],
-    blockedHits: 0,
-    ladder: { waits: 0, reloads: 0, searchTried: false, searchEngine: null },
-    stuckLevel: 0 as const,
-    userAnswers: [],
-    findings: [],
-    criteriaMet: false,
-    suppressExtract: [],
-    visited: [],
-    blockedNew: [],
-    approvedNew: [],
-    anomalies: [],
-    lastProgressStep: 0,
-    consecutiveParseErrors: 0,
-    parseErrors: 0,
-    everParsedOk: siteIn.everParsedOk,
-    systemActions: 0,
-    modelCalls: 0,
-    cdp: { mode: cdpRes.mode, reason: cdpRes.reason, sticky: false },
-  };
+  const initialSiteRun = state.siteRun
+    ? { ...state.siteRun, cdp: { mode: cdpRes.mode, reason: cdpRes.reason, sticky: false } }
+    : {
+        siteId: siteIn.site.id,
+        spec: siteIn.site,
+        tabId,
+        alloc: siteIn.alloc,
+        used: 0,
+        extendedBy: 0,
+        meterMode: 'normal' as const,
+        mode: 'browse' as const,
+        pageSigs: [],
+        actionSigs: [],
+        failureMemory: [],
+        banned: [],
+        blockedHits: 0,
+        ladder: { waits: 0, reloads: 0, searchTried: false, searchEngine: null },
+        stuckLevel: 0 as const,
+        userAnswers: [],
+        findings: [],
+        criteriaMet: false,
+        suppressExtract: [],
+        visited: [],
+        blockedNew: [],
+        approvedNew: [],
+        anomalies: [],
+        lastProgressStep: 0,
+        consecutiveParseErrors: 0,
+        parseErrors: 0,
+        everParsedOk: siteIn.everParsedOk,
+        systemActions: 0,
+        modelCalls: 0,
+        cdp: { mode: cdpRes.mode, reason: cdpRes.reason, sticky: false },
+      };
 
   return { siteRun: initialSiteRun };
 });
@@ -120,9 +154,9 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
   const tabId = state.siteRun?.tabId ?? state.siteIn?.tabId;
   if (tabId === undefined) throw new Error('Worker perceive: tabId is required');
 
-  let snapshot: any = null;
+  let rawSnapshot: any = null;
   try {
-    snapshot = await runtime.browser.snapshot(tabId, { showBadges: true, maxElements: 120 });
+    rawSnapshot = await runtime.browser.snapshot(tabId, { showBadges: true, maxElements: 120 });
   } catch (err: any) {
     return {
       perceiveError: {
@@ -133,6 +167,79 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
         tries: (state.perceiveError?.tries ?? 0) + 1,
       },
     };
+  }
+
+  const snapshot = rawSnapshot?.data && typeof rawSnapshot.data === 'object'
+    ? { ...rawSnapshot.data, docId: rawSnapshot.docId ?? rawSnapshot.data.docId }
+    : (rawSnapshot ?? {});
+
+  const pageText = snapshot.pageText ?? snapshot.elementsText ?? (snapshot.rawHtml ? snapshot.rawHtml.replace(/<[^>]+>/g, ' ') : '');
+  const priceMatches = pageText.match(/[€$£¥₹]\s?\d|\d\s?(?:[€$£¥₹]|EUR\b|USD\b|GBP\b)/gi);
+  const priceHits = priceMatches ? priceMatches.length : 0;
+
+  // Extract top price candidate snippets
+  const priceCandidates: PriceCandidate[] = [];
+  if (priceMatches && priceMatches.length > 0) {
+    for (let i = 0; i < Math.min(priceMatches.length, 3); i++) {
+      const match = priceMatches[i];
+      const idx = pageText.indexOf(match);
+      if (idx >= 0) {
+        const snippet = pageText.slice(Math.max(0, idx - 20), Math.min(pageText.length, idx + match.length + 30)).replace(/\s+/g, ' ').trim();
+        const numMatch = match.replace(/[^0-9.,]/g, '').replace(',', '.');
+        const val = parseFloat(numMatch) || 0;
+        const curr = match.match(/[€$£¥₹]|EUR|USD|GBP/i)?.[0] || '$';
+        priceCandidates.push({
+          id: `p${i + 1}`,
+          text: match,
+          value: val,
+          currency: curr,
+          context: snippet
+        });
+      }
+    }
+  }
+
+  // Verdict and page type classification
+  const verdict = evaluatePageVerdict({
+    url: snapshot.url ?? '',
+    title: snapshot.title ?? '',
+    pageText,
+    elementCount: snapshot.elementCount ?? snapshot.refs?.length ?? 0
+  });
+
+  const pageType = classifyPageType({
+    verdict,
+    url: snapshot.url ?? '',
+    title: snapshot.title ?? '',
+    elementInfo: snapshot.elementInfo ?? {},
+    priceHits,
+    elementCount: snapshot.elementCount ?? 0
+  });
+
+  // Compute hashes for PageSig
+  const textHash = hashString((pageText || '').slice(0, 2000));
+  const interactiveHash = hashString((snapshot.elementsText || '').slice(0, 2000));
+
+  const currentSig: PageSig = {
+    url: snapshot.url ?? '',
+    title: snapshot.title ?? '',
+    elementCount: snapshot.elementCount ?? snapshot.refs?.length ?? 0,
+    interactiveHash,
+    textHash,
+    scrollY: snapshot.scrollY ?? 0,
+    pageType
+  };
+
+  // Compute diff line against previous page signature
+  let diffLine: string | null = null;
+  const prevSig = state.page?.sig;
+  if (prevSig) {
+    const urlChanged = prevSig.url !== currentSig.url ? 'URL changed' : 'URL same';
+    const countDiff = currentSig.elementCount - prevSig.elementCount;
+    const elemChange = countDiff !== 0 ? `${Math.abs(countDiff)} ${countDiff > 0 ? 'new' : 'fewer'} elements` : 'same elements';
+    const textChanged = prevSig.textHash !== currentSig.textHash ? 'text changed' : 'text same';
+    const typeChange = prevSig.pageType !== currentSig.pageType ? `${prevSig.pageType} -> ${currentSig.pageType}` : currentSig.pageType;
+    diffLine = `${urlChanged}, ${elemChange}, ${textChanged}, page type ${typeChange}`;
   }
 
   const page = {
@@ -149,24 +256,16 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
     shownRefs: snapshot.shownRefs ?? snapshot.refs ?? [],
     elementsText: snapshot.elementsText ?? '',
     elementInfo: snapshot.elementInfo ?? {},
-    pageText: snapshot.pageText ?? '',
-    verdict: 'ok' as const,
-    verdictReason: null,
-    pageType: 'listing' as const,
-    sig: {
-      url: snapshot.url ?? '',
-      title: snapshot.title ?? '',
-      elementCount: snapshot.elementCount ?? 0,
-      interactiveHash: '',
-      textHash: '',
-      scrollY: snapshot.scrollY ?? 0,
-      pageType: 'listing' as const,
-    },
-    diffLine: null,
-    priceHits: 0,
-    priceCandidates: [],
+    pageText,
+    verdict,
+    verdictReason: verdict !== 'ok' ? `Page classified as ${verdict}` : null,
+    pageType,
+    sig: currentSig,
+    diffLine,
+    priceHits,
+    priceCandidates,
     consentHint: null,
-    hash: 'hash-1',
+    hash: textHash,
     frames: { total: 1, crossOrigin: 0 },
     step: (state.siteRun?.used ?? 0) + 1,
     capturedBootId: runtime.bootId,
@@ -191,96 +290,254 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
 });
 
 const meterNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'meter', (state) => {
-  return {};
+  const siteRun = state.siteRun;
+  if (!siteRun) return {};
+
+  const alloc = siteRun.alloc ?? 10;
+  const used = siteRun.used ?? 0;
+  const rawMode = evaluateMeterMode(used, alloc);
+  const meterMode: 'normal' | 'warn' | 'harvest' = rawMode === 'end' ? 'harvest' : rawMode;
+
+  let newAlloc = alloc;
+  let extendedBy = siteRun.extendedBy ?? 0;
+  let exit = siteRun.exit;
+  let mode = siteRun.mode;
+
+  // Check 95% threshold and slack pool
+  if (alloc > 0 && used >= Math.floor(alloc * 0.95)) {
+    const slackAvailable = state.siteIn?.slackAvailable ?? 0;
+    const draw = calculateSlackDraw(slackAvailable, alloc, siteRun.lastProgressStep, used, extendedBy > 0);
+    if (draw > 0) {
+      newAlloc = alloc + draw;
+      extendedBy = draw;
+    } else if (!exit) {
+      exit = { status: 'partial', reason: 'Step budget exhausted on this site' };
+    }
+  }
+
+  if (rawMode === 'end' && !exit) {
+    exit = { status: 'partial', reason: 'Step budget exhausted on this site' };
+  }
+
+  // Switch mode to harvest if in collect goal and budget warn/harvest
+  if (state.siteIn?.site?.goalKind === 'collect' && (meterMode === 'harvest' || rawMode === 'end')) {
+    mode = 'harvest';
+  }
+
+  return {
+    siteRun: {
+      ...siteRun,
+      alloc: newAlloc,
+      extendedBy,
+      meterMode,
+      mode,
+      exit
+    }
+  };
 });
 
-const blockedNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'blocked', (state) => {
-  const currentHits = state.siteRun?.blockedHits ?? 0;
+const blockedNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'blocked', async (state, config) => {
+  const runtime = getRuntime(config);
+  const siteRun = state.siteRun;
+  if (!siteRun) return {};
+
+  const tabId = siteRun.tabId;
+  const verdict = state.page?.verdict ?? 'challenge';
+  const rungs = state.siteIn?.profile?.blockedLadder ?? ['reload', 'mark'];
+  const hits = (siteRun.blockedHits ?? 0) + 1;
+
+  const res = await executeBlockedLadder(hits, rungs, verdict, {
+    tabId,
+    domain: state.siteIn?.site?.domain ?? 'unknown',
+    searchQuery: state.siteIn?.site?.goal,
+    browser: runtime.browser
+  });
+
+  let exit = siteRun.exit;
+  const blockedNew = [...(siteRun.blockedNew ?? [])];
+  if (res.shouldExitBlocked) {
+    exit = { status: 'blocked', reason: res.reason };
+    const domain = state.siteIn?.site?.domain;
+    if (domain && !blockedNew.some((b) => b.domain === domain)) {
+      blockedNew.push({
+        domain,
+        kind: verdict === 'challenge' ? 'challenge' : 'error_page',
+        reason: res.reason,
+        url: state.page?.url ?? '',
+        step: siteRun.used ?? 0,
+        tries: hits
+      });
+    }
+  }
+
   return {
-    siteRun: state.siteRun
-      ? { ...state.siteRun, blockedHits: currentHits + 1 }
-      : null,
+    siteRun: {
+      ...siteRun,
+      blockedHits: hits,
+      blockedNew,
+      exit
+    }
   };
 });
 
 const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'policy', async (state, config) => {
   const runtime = getRuntime(config);
-  const promptText = `Task: ${state.siteIn?.task}\nPage: ${state.page?.url}\nElements:\n${state.page?.elementsText ?? ''}`;
+  const siteIn = state.siteIn;
+  const siteRun = state.siteRun;
+  const page = state.page;
+  if (!siteIn || !siteRun || !page) throw new Error('Worker policy: missing state context');
 
+  const mode = siteRun.mode ?? 'browse';
+  const tier = siteIn.tier ?? 'small';
+  const columns = siteIn.columns ?? [];
+  const priceLike = siteIn.priceLike ?? false;
+  const goalKind = siteIn.site?.goalKind ?? 'collect';
+
+  const systemPrompt = buildPolicySystemPrompt(mode, tier, columns, priceLike, goalKind);
+  const userMessage = buildPolicyUserMessage({
+    task: siteIn.task,
+    siteIndex: siteIn.index,
+    totalSites: siteIn.total,
+    domain: siteIn.site.domain,
+    role: siteIn.site.role,
+    goal: siteIn.site.goal,
+    columns,
+    usedSteps: siteRun.used,
+    allocSteps: siteRun.alloc,
+    meterMode: siteRun.meterMode,
+    findingsLines: siteIn.findingsLines,
+    failures: siteRun.failureMemory,
+    bannedSignatures: siteRun.banned,
+    diffLine: page.diffLine,
+    pageTitle: page.title,
+    pageUrl: page.url,
+    pageType: page.pageType,
+    scrollY: page.scrollY,
+    pageText: page.pageText,
+    elementsText: page.elementsText,
+    priceCandidates: page.priceCandidates,
+  });
+
+  const schema = buildPolicySchema({ mode, tier, columns, priceLike, goalKind });
   const stepSignal = runtime.control.stepSignal();
   let replyText = '';
+
   try {
     const res = await runtime.llm.complete({
       node: 'policy',
-      mode: state.siteRun?.mode ?? 'browse',
+      mode,
       role: 'policy',
-      system: 'You are a browser automation agent. Choose the next action as JSON.',
-      messages: [{ role: 'user', content: promptText }],
-      schema: null,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMessage }],
+      schema,
       signal: stepSignal,
     });
     replyText = res.text;
   } catch (err: any) {
     if (runtime.control.isUserAbort(err, stepSignal)) {
-      return { lastDecision: { kind: 'aborted', mode: state.siteRun?.mode ?? 'browse' } };
+      return { lastDecision: { kind: 'aborted', mode } };
     }
     return {
       lastDecision: {
         kind: 'llm_failed',
         error: err.message ?? 'LLM request failed',
-        mode: state.siteRun?.mode ?? 'browse',
+        mode,
       },
     };
   }
 
-  const parsed = parseModelReply(replyText, {
-    verbs: ACTION_VERBS,
-    refs: state.page?.refs ? new Set(state.page.refs) : undefined,
-  });
   let decision: any;
+  const stateVerbs = ['record_finding', 'subgoal_done', 'continue_browsing', 'mark_not_found', 'mark_blocked'];
 
-  if (parsed.action) {
-    const action = parsed.action as any;
-    if (action.action === 'ask_user') {
-      decision = {
-        kind: 'ask',
-        question: action.question ?? 'The agent needs more information.',
-        mode: state.siteRun?.mode ?? 'browse',
-      };
-    } else if (['click', 'type', 'scroll', 'navigate', 'go_back', 'go_forward', 'press_key', 'wait'].includes(action.action)) {
-      decision = {
-        kind: 'page',
-        action,
-        thought: parsed.thought ?? '',
-        mode: state.siteRun?.mode ?? 'browse',
-        via: 'json',
-      };
+  // Check if reply matches a graph state action JSON
+  const cleaned = replyText.replace(/<(?:think|thought|reasoning)>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
+  const fenceMatch = cleaned.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/i);
+  let rawJson: any = null;
+  try {
+    if (fenceMatch) {
+      rawJson = JSON.parse(fenceMatch[1]);
+    } else {
+      const objMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (objMatch) {
+        rawJson = JSON.parse(objMatch[0]);
+      }
+    }
+  } catch {}
+
+  let thought = rawJson?.thought ?? '';
+  let action: any = null;
+
+  if (rawJson && stateVerbs.includes(rawJson.action)) {
+    action = rawJson;
+    decision = {
+      kind: 'state',
+      action,
+      thought,
+      mode,
+      via: 'json',
+    };
+  } else {
+    const parsed = parseModelReply(replyText, {
+      verbs: ACTION_VERBS,
+      refs: page.refs ? new Set(page.refs) : undefined,
+    });
+    thought = parsed.thought ?? thought;
+
+    if (parsed.action) {
+      action = parsed.action as any;
+      const sig = `${action.action}|${action.element_id ?? ''}|${action.url ?? ''}`;
+
+      // Enforce banned signatures
+      if (isSignatureBanned(siteRun.banned ?? [], sig)) {
+        decision = {
+          kind: 'parse_error',
+          error: `Action "${sig}" was previously tried and banned. You must choose a different action.`,
+          mode,
+          closeSite: false,
+          modelUnusable: false,
+        };
+      } else if (action.action === 'ask_user') {
+        decision = {
+          kind: 'ask',
+          question: action.question ?? 'The agent needs more information.',
+          mode,
+        };
+      } else if (['click', 'type', 'scroll', 'navigate', 'go_back', 'go_forward', 'press_key', 'wait'].includes(action.action)) {
+        decision = {
+          kind: 'page',
+          action,
+          thought,
+          mode,
+          via: 'json',
+        };
+      } else {
+        // State actions: finish, etc.
+        decision = {
+          kind: 'state',
+          action,
+          thought,
+          mode,
+          via: 'json',
+        };
+      }
     } else {
       decision = {
-        kind: 'state',
-        action,
-        thought: parsed.thought ?? '',
-        mode: state.siteRun?.mode ?? 'browse',
-        via: 'json',
+        kind: 'parse_error',
+        error: parsed.error ?? 'Unrecognized action format',
+        mode,
+        closeSite: false,
+        modelUnusable: false,
       };
     }
-  } else {
-    decision = {
-      kind: 'parse_error',
-      error: parsed.error ?? 'Unrecognized action format',
-      mode: state.siteRun?.mode ?? 'browse',
-      closeSite: false,
-      modelUnusable: false,
-    };
   }
 
   const responseEntry: HistoryEntry = {
     type: 'agent_response',
-    step: (state.siteRun?.used ?? 0) + 1,
-    thought: parsed.thought ?? '',
-    action: parsed.action as any ?? null,
+    step: (siteRun.used ?? 0) + 1,
+    thought,
+    action: action ?? null,
     rawResponse: replyText,
-    mode: state.siteRun?.mode ?? 'browse',
+    mode,
   };
 
   return {
@@ -292,13 +549,22 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
 
 const riskNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'risk', (state) => {
   if (state.lastDecision?.kind !== 'page') return {};
-  const action = state.lastDecision.action;
+  const action = state.lastDecision.action as any;
+  const elementId = action?.element_id;
+  const elementInfo = elementId !== undefined ? state.page?.elementInfo?.[elementId] : null;
+
+  // Sensitive field check
+  const isForbidden = elementInfo?.fieldKind === 'password' || elementInfo?.fieldKind === 'cc' || elementInfo?.fieldKind === 'otp';
+  const riskLevel = isForbidden ? ('forbidden' as const) : ('safe' as const);
 
   const pendingAction = {
     action,
-    signature: `${action.action}|${(action as any).element_id ?? ''}|${(action as any).url ?? ''}`,
+    signature: `${action.action}|${action.element_id ?? ''}|${action.url ?? ''}`,
     journalKey: `${state.siteIn?.runId}:${(state.siteRun?.used ?? 0) + 1}`,
-    risk: { level: 'safe' as const, reason: 'Allowed by default in P4' },
+    risk: {
+      level: riskLevel,
+      reason: isForbidden ? 'Sensitive field entry is restricted to the user.' : 'Safe action'
+    },
   };
 
   return {
@@ -380,57 +646,239 @@ const executeNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'e
 const verifyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'verify', (state) => {
   const exec = state.lastExec;
   const success = exec?.result?.success ?? false;
-  const outcome = success ? 'ok' : 'failed';
+  const action = exec?.action as any;
+  const verb = action?.action ?? '';
+  const effect = exec?.result?.effect ?? 'none';
+
+  // Check expected change per verb
+  let outcome: 'ok' | 'failed' | 'stuck' = success ? 'ok' : 'failed';
+  if (success) {
+    if (['navigate', 'go_back', 'go_forward'].includes(verb)) {
+      if (effect !== 'url_changed') outcome = 'failed';
+    } else if (verb === 'click') {
+      if (effect === 'none') outcome = 'failed';
+    } else if (verb === 'type') {
+      if (effect !== 'value_set' && effect !== 'dom_changed') outcome = 'failed';
+    }
+  }
+
+  // Stuck detection
+  const actionRecords = (state.siteRun?.actionSigs ?? []).map((sig) => ({
+    url: state.page?.url ?? '',
+    signature: sig
+  }));
+  if (exec?.signature) {
+    actionRecords.push({ url: state.page?.url ?? '', signature: exec.signature });
+  }
+
+  const pageSigs = state.siteRun?.pageSigs ?? [];
+  const stuckRes = detectStuck(actionRecords, pageSigs);
+  let stuckLevel = state.siteRun?.stuckLevel ?? 0;
+  if (stuckRes.isStuck) {
+    stuckLevel = (stuckLevel + 1) as any;
+    outcome = 'stuck';
+  }
 
   const used = (state.siteRun?.used ?? 0) + 1;
   const verifyResult = {
-    outcome: outcome as any,
+    outcome,
     goal: 'closer' as const,
-    detail: success ? 'Action succeeded' : 'Action had no effect or failed',
+    detail: outcome === 'ok' ? 'Action succeeded' : (stuckRes.detail || exec?.result?.message || 'Action had no effect or failed'),
   };
+
+  const newActionSigs = exec?.signature ? [...(state.siteRun?.actionSigs ?? []), exec.signature] : (state.siteRun?.actionSigs ?? []);
+  const newPageSigs = state.page?.sig ? [...pageSigs, state.page.sig] : pageSigs;
 
   return {
     verifyResult,
     siteRun: state.siteRun
-      ? { ...state.siteRun, used }
+      ? {
+          ...state.siteRun,
+          used,
+          stuckLevel,
+          actionSigs: newActionSigs,
+          pageSigs: newPageSigs
+        }
       : null,
   };
 });
 
 const recoverNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'recover', (state) => {
-  return {};
+  const siteRun = state.siteRun;
+  if (!siteRun) return {};
+
+  const exec = state.lastExec;
+  const retriesPerAction = state.siteIn?.profile?.retriesPerAction ?? 1;
+  const action = exec?.action as any;
+  const verb = action?.action ?? 'unknown';
+  const target = action?.element_id ? `[${action.element_id}]` : (action?.url || '');
+  const signature = exec?.signature ?? `${verb}|${target}`;
+  const detail = state.verifyResult?.detail ?? 'Action failed';
+
+  const kind: StepFailure['kind'] = state.verifyResult?.outcome === 'stuck' ? 'stale_id' : 'no_effect';
+
+  const rec = recordFailure(siteRun.failureMemory ?? [], {
+    verb,
+    target,
+    signature,
+    kind,
+    detail
+  }, retriesPerAction);
+
+  const banned = [...(siteRun.banned ?? [])];
+  if (rec.shouldBan && !banned.includes(signature)) {
+    banned.push(signature);
+  }
+
+  let exit = siteRun.exit;
+  if (siteRun.stuckLevel >= 3) {
+    exit = { status: 'stuck', reason: 'Site is stuck after repeated failed loops' };
+  } else if (siteRun.stuckLevel >= 2) {
+    exit = { status: 'partial', reason: 'Unchanged page state after repeated actions' };
+  }
+
+  return {
+    siteRun: {
+      ...siteRun,
+      failureMemory: rec.failures,
+      banned,
+      exit
+    }
+  };
 });
 
 const recordNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'record', (state) => {
   if (state.lastDecision?.kind !== 'state') return {};
-  const action = state.lastDecision.action;
+  const action = state.lastDecision.action as any;
+  const siteRun = state.siteRun;
+  const siteIn = state.siteIn;
+  const page = state.page;
+  if (!siteRun || !siteIn || !page) return {};
 
+  // 1. finish
   if (action.action === 'finish') {
     return {
-      siteRun: state.siteRun
-        ? {
-            ...state.siteRun,
-            criteriaMet: true,
-            exit: { status: 'done', reason: action.answer || 'Goal achieved' },
-            finalAnswer: { text: action.answer, unconfirmed: false, table: null, partial: false },
-          }
-        : null,
+      siteRun: {
+        ...siteRun,
+        criteriaMet: true,
+        exit: { status: 'done', reason: action.answer || 'Goal achieved' },
+        finalAnswer: { text: action.answer, unconfirmed: false, table: null, partial: false },
+      },
     };
   }
 
+  // 2. record_finding
+  if (action.action === 'record_finding') {
+    let currentFindings = [...(siteRun.findings ?? [])];
+    const rawObj = action as any;
+    const vals: Record<string, any> = { ...rawObj };
+    if (rawObj.field && rawObj.value !== undefined) {
+      vals[rawObj.field] = rawObj.value;
+    }
+    if (rawObj.values && typeof rawObj.values === 'object') {
+      Object.assign(vals, rawObj.values);
+    }
+
+    const columns = siteIn.columns && siteIn.columns.length > 0 ? siteIn.columns : ['price', 'shipping', 'delivery'];
+    const keysToCheck = Array.from(new Set([...columns, ...Object.keys(vals).filter((k) => k !== 'action' && k !== 'thought' && k !== 'field' && k !== 'value' && k !== 'values')]));
+    let anyRecorded = false;
+
+    for (const col of keysToCheck) {
+      const rawVal = vals[col];
+      if (rawVal && typeof rawVal === 'string' && rawVal.toLowerCase() !== 'not shown') {
+        const finding = createFinding({
+          siteId: siteIn.site.id,
+          field: col,
+          rawValue: rawVal,
+          url: page.url,
+          title: page.title,
+          docId: page.docId,
+          step: (siteRun.used ?? 0) + 1,
+          capturedAt: Date.now(),
+          pageText: page.pageText,
+          domain: siteIn.site.domain
+        });
+        if (finding) {
+          currentFindings = deduplicateFindings(currentFindings, finding);
+          anyRecorded = true;
+        }
+      }
+    }
+
+    const criteriaRes = evaluateSiteCriteria(siteIn.site, currentFindings);
+    const exit = criteriaRes.met ? { status: 'done' as const, reason: criteriaRes.reason } : siteRun.exit;
+
+    return {
+      siteRun: {
+        ...siteRun,
+        used: (siteRun.used ?? 0) + 1,
+        findings: currentFindings,
+        criteriaMet: criteriaRes.met,
+        lastProgressStep: anyRecorded ? (siteRun.used ?? 0) + 1 : siteRun.lastProgressStep,
+        exit
+      }
+    };
+  }
+
+  // 3. subgoal_done
+  if (action.action === 'subgoal_done') {
+    const criteriaRes = evaluateSiteCriteria(siteIn.site, siteRun.findings ?? [], {
+      url: page.url,
+      pageText: page.pageText,
+      elementTexts: [page.elementsText]
+    });
+    return {
+      siteRun: {
+        ...siteRun,
+        used: (siteRun.used ?? 0) + 1,
+        criteriaMet: criteriaRes.met,
+        exit: { status: criteriaRes.status, reason: action.summary || criteriaRes.reason }
+      }
+    };
+  }
+
+  // 4. continue_browsing
+  if (action.action === 'continue_browsing') {
+    return {
+      siteRun: {
+        ...siteRun,
+        used: (siteRun.used ?? 0) + 1,
+        mode: 'browse'
+      }
+    };
+  }
+
+  // 5. mark_not_found
   if (action.action === 'mark_not_found') {
     return {
-      siteRun: state.siteRun
-        ? { ...state.siteRun, exit: { status: 'not_found', reason: action.reason } }
-        : null,
+      siteRun: {
+        ...siteRun,
+        used: (siteRun.used ?? 0) + 1,
+        exit: { status: 'not_found', reason: action.reason }
+      }
     };
   }
 
+  // 6. mark_blocked
   if (action.action === 'mark_blocked') {
+    const blockedNew = [...(siteRun.blockedNew ?? [])];
+    if (siteIn.site.domain && !blockedNew.some((b) => b.domain === siteIn.site.domain)) {
+      blockedNew.push({
+        domain: siteIn.site.domain,
+        kind: 'model_reported',
+        reason: action.reason || 'Blocked',
+        url: page.url,
+        step: (siteRun.used ?? 0) + 1,
+        tries: 1
+      });
+    }
     return {
-      siteRun: state.siteRun
-        ? { ...state.siteRun, exit: { status: 'blocked', reason: action.reason } }
-        : null,
+      siteRun: {
+        ...siteRun,
+        used: (siteRun.used ?? 0) + 1,
+        blockedNew,
+        exit: { status: 'blocked', reason: action.reason }
+      }
     };
   }
 

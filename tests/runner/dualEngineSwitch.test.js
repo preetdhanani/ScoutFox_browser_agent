@@ -63,10 +63,10 @@ function makeMock() {
         }
       },
       tabs: {
-        onRemoved: { addListener: noop },
-        onActivated: { addListener: noop },
-        onCreated: { addListener: noop },
-        onUpdated: { addListener: noop },
+        onRemoved: { addListener: noop, removeListener: noop },
+        onActivated: { addListener: noop, removeListener: noop },
+        onCreated: { addListener: noop, removeListener: noop },
+        onUpdated: { addListener: noop, removeListener: noop },
         query: async () => [tabs.get(100)],
         get: (id, cb) => {
           const tab = tabs.get(id);

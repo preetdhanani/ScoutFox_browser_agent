@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "challenge": {
+    "titlePatterns": [
+      "just a moment",
+      "attention required",
+      "access denied",
+      "verify you are human",
+      "are you a robot",
+      "security check",
+      "pardon our interruption",
+      "request blocked",
+      "robot check",
+      "zugriff verweigert",
+      "sicherheitsüberprüfung"
+    ],
+    "urlPatterns": [
+      "/cdn-cgi/challenge-platform",
+      "__cf_chl",
+      "/sorry/index",
+      "captcha-delivery.com"
+    ],
+    "bodyPatterns": [
+      "checking your browser",
+      "enable javascript and cookies to continue",
+      "cf-chl",
+      "ray id:",
+      "datadome",
+      "px-captcha",
+      "hcaptcha",
+      "recaptcha"
+    ],
+    "maxElementsForBodyMatch": 15
+  },
+  "errorPage": {
+    "urlPrefixes": [
+      "chrome-error://"
+    ],
+    "titlePatterns": [
+      "this site can.t be reached",
+      "\\b(404|410|500|502|503)\\b",
+      "not found",
+      "seite nicht gefunden",
+      "service unavailable",
+      "bad gateway"
+    ],
+    "maxTextLengthForTitleMatch": 600,
+    "maxTextLengthForBlankPage": 120
+  }
+}
