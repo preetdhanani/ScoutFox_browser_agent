@@ -18,7 +18,7 @@ import { runtimeRegistry, type BrowserPort, type ExecResult, type LlmPort, type 
 import { generateCompletion } from '../llm/index.ts';
 import { inputDispatcher } from '../browser/input.ts';
 import { cdp } from '../browser/cdp.ts';
-import type { HistoryEntry, PlanView, RunStatus } from '../graph/state.ts';
+import type { EffortChoice, EffortProfile, HistoryEntry, PlanView, RunStats, RunStatus } from '../graph/state.ts';
 
 function lastRuntimeError(): string | null {
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError) {
@@ -47,6 +47,9 @@ export class AgentRunner {
   public pendingApproval: PlanView | null = null;
   public pendingConfirm: any | null = null;
   public pauseReason: 'user' | 'llm_failure' | 'worker_restart' | null = null;
+  public effort: EffortChoice | null = null;
+  public effortProfile: EffortProfile | null = null;
+  public runStats: RunStats | null = null;
 
   public scoutFoxGroupIds = new Map<number, number>();
   public networkBuffers = new Map<number, any[]>();
@@ -395,12 +398,16 @@ export class AgentRunner {
     this.runtime.control.pauseRequested = false;
 
     try {
+      const userSettings = await this.runtime.settings().catch(() => null);
+      const defaultEffort = userSettings?.effortDefault ?? 'auto';
+      const requested = (requestedEffort as any) ?? defaultEffort;
+
       await this.drive({
         task: this.currentTask,
         effort: {
-          requested: (requestedEffort as any) ?? 'auto',
-          level: 'medium',
-          suggestedBy: 'default',
+          requested,
+          level: requested === 'auto' ? 'medium' : requested,
+          suggestedBy: requestedEffort ? 'user' : 'default',
         },
       });
       return { success: true };
@@ -524,6 +531,8 @@ export class AgentRunner {
       stateVersion: this.stateVersion,
       bootId: this.bootId,
       scoutFoxGroupId: this.scoutFoxGroupId,
+      effort: this.effort,
+      runStats: this.runStats,
     };
   }
 
@@ -603,6 +612,9 @@ export class AgentRunner {
           if (values.task !== undefined) this.currentTask = values.task;
           if (values.stepCount !== undefined) this.stepCount = values.stepCount;
           if (values.history !== undefined) this.history = values.history;
+          if (values.effort !== undefined) this.effort = values.effort;
+          if (values.effortProfile !== undefined) this.effortProfile = values.effortProfile;
+          if (values.runStats !== undefined) this.runStats = values.runStats;
           const plan = values.planMeta ?? values.plan;
           if (plan?.sites) {
             this.planSteps = plan.sites.map((s: any) => ({

@@ -165,8 +165,12 @@ export interface PlanView {              // payload of the approve_plan interrup
   replanDiff: { added: string[]; dropped: string[]; reordered: boolean; reason: string } | null;
 }
 export interface ReflectResult {
-  decision: 'continue' | 'replan' | 'stop_early'; reason: string; changes: string;
+  decision: 'continue' | 'replan' | 'stop_early';
+  reason: string;
+  changes: string;
   by: 'llm' | 'fast_path' | 'code';
+  dropSites?: string[];
+  addSites?: SiteSpec[];
 }
 
 // ---------- findings with provenance ----------
@@ -276,6 +280,7 @@ export const AgentState = Annotation.Root({
   limits: last<Limits>(() => DEFAULT_LIMITS),       // snapshot at turn start
   runStatus: last<RunStatus>(() => 'idle'),         // terminal status written by finalize
   phase: last<'plan' | 'approve' | 'sites' | 'done'>(() => 'done'),
+  turnStartedAt: last<number>(() => 0),
   ctl: last<ControlSnapshot>(() => ({ pauseRequested: false, stopRequested: false })), // transient, see notes
 
   // ---- effort and budget ----
@@ -293,7 +298,7 @@ export const AgentState = Annotation.Root({
   siteIn: last<SiteIn | null>(() => null),          // written by sched: the worker's only input
   siteOut: last<SiteOut | null>(() => null),        // written by the site wrapper, read by summary
   approvedDomains: last<string[]>(() => []),        // from the approved plan; grows only through approval
-  replan: last<{ count: number; lastReason?: string }>(() => ({ count: 0 })),
+  replan: last<{ count: number; lastReason?: string; approvedByUser?: boolean }>(() => ({ count: 0 })),
   reflectResult: last<ReflectResult | null>(() => null),
 
   // ---- long-horizon memory ----

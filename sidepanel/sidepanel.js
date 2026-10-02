@@ -41,6 +41,7 @@ let allFetchedModels = [];
 // default was not already in the list persisted model: '' and then fell back to whatever
 // happened to be first in the hardcoded list. Keep the truth here instead of in the DOM.
 let selectedModel = null;
+let currentEffort = 'auto';
 // Guards the window between clicking send and the background confirming the task started.
 let isSubmittingTask = false;
 // Mirrors the engine status the panel last rendered, so the submit guard knows whether
@@ -232,6 +233,10 @@ async function loadSettings() {
   document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || DEFAULT_SETTINGS.ollamaNumPredict;
   document.getElementById('llmTimeoutInput').value = currentSettings.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
+  const effortSelect = document.getElementById('effortDefaultSelect');
+  if (effortSelect) {
+    effortSelect.value = currentSettings.effortDefault || 'medium';
+  }
 
   // Visibility: Hide Ollama settings if not using Ollama
   const ollamaGroup = document.getElementById('ollamaNumPredictGroup');
@@ -444,7 +449,8 @@ async function autoSaveCurrentForm() {
     // The input's min="5000" is not enforced on read, and the field is in ms - a user typing "1"
     // or "1000" (thinking seconds) would otherwise make every LLM call abort almost immediately.
     llmTimeoutMs: Math.max(5000, parseInt(document.getElementById('llmTimeoutInput').value, 10) || DEFAULT_SETTINGS.llmTimeoutMs),
-    showElementBadges: document.getElementById('badgesToggle').checked
+    showElementBadges: document.getElementById('badgesToggle').checked,
+    effortDefault: document.getElementById('effortDefaultSelect')?.value || currentSettings.effortDefault || 'medium'
   };
 
   currentSettings = await Storage.saveSettings(newSettings);
@@ -802,8 +808,21 @@ function initEventListeners() {
     });
   }
 
+  // Effort selector buttons
+  const effortBar = document.getElementById('effortSelectorBar');
+  if (effortBar) {
+    const buttons = effortBar.querySelectorAll('.effort-btn');
+    buttons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        buttons.forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentEffort = btn.getAttribute('data-effort') || 'auto';
+      });
+    });
+  }
+
   // Auto-save for all number inputs and toggles
-  ['maxStepsInput', 'delayInput', 'ollamaNumPredictInput', 'llmTimeoutInput', 'badgesToggle'].forEach(id => {
+  ['maxStepsInput', 'delayInput', 'ollamaNumPredictInput', 'llmTimeoutInput', 'badgesToggle', 'effortDefaultSelect'].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener('change', autoSaveCurrentForm);
@@ -954,7 +973,7 @@ async function startTaskInner(prompt) {
 
   appendLocalLog('INFO', 'Sidepanel', `[TASK_SUBMIT] Sending task to background worker: "${prompt}"`);
 
-  sendBgMessage({ action: 'START_TASK', payload: { prompt } }, (res) => {
+  sendBgMessage({ action: 'START_TASK', payload: { prompt, effort: currentEffort } }, (res) => {
     // Without this check a failed wake-up leaves res undefined and the whole submission
     // vanishes with no alert, no log and no UI change — the task simply never starts.
     if (chrome.runtime.lastError) {
@@ -1201,6 +1220,21 @@ function renderState(state) {
     if (controlBar) controlBar.style.display = 'none';
     if (taskInput) taskInput.disabled = false;
     if (btnStartTask) btnStartTask.disabled = false;
+  }
+
+  const processingEffortBadge = document.getElementById('processingEffortBadge');
+  if (processingEffortBadge) {
+    if (status === 'running' || status === 'paused') {
+      const activeEffort = state.effort?.level || state.effortProfile?.level || (currentEffort !== 'auto' ? currentEffort : null);
+      if (activeEffort) {
+        processingEffortBadge.textContent = `${activeEffort}`;
+        processingEffortBadge.style.display = 'inline-block';
+      } else {
+        processingEffortBadge.style.display = 'none';
+      }
+    } else {
+      processingEffortBadge.style.display = 'none';
+    }
   }
 
   const timeline = document.getElementById('timeline');

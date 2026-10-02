@@ -486,6 +486,20 @@ a:hover { color: var(--text-main); }
   line-height: 1.2;
 }
 
+.processing-effort-chip {
+  display: inline-block;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
 .progress-bar-track {
   width: 100%;
   height: 3px;
@@ -787,6 +801,53 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
 .control-bar {
   display: flex;
   gap: 8px;
+}
+
+.effort-selector-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.effort-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.effort-segmented-control {
+  display: inline-flex;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.effort-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.effort-btn:hover {
+  color: var(--text-main);
+}
+
+.effort-btn.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
 }
 
 .input-wrapper {

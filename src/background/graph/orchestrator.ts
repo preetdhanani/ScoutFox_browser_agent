@@ -12,8 +12,10 @@ import {
   type FindingsTable,
   type HistoryEntry,
   type Offer,
+  MAX_SITES,
   type PlanMeta,
   type Predicate,
+  type RunStats,
   type SiteSpec,
   type SiteSummary,
 } from './state.ts';
@@ -26,6 +28,9 @@ import { buildGraphPlanSchema } from '../agent/schemas.ts';
 import { computeSiteBase, computeSiteAlloc, computeWorkingTotal, computeUsableBudget } from '../agent/budget.ts';
 import { deduplicateFindings, compileTruthTable, renderTruthTableMarkdown } from '../agent/findings.ts';
 import { buildPlanSystemPrompt, buildPlanUserMessage } from '../agent/prompts.ts';
+import { getEffortProfile, suggestEffortLevel } from '../agent/profile.ts';
+import { buildReflectSystemPrompt, buildReflectUserMessage, parseReflectResponse } from '../agent/reflectPrompt.ts';
+import { Logger } from '../../shared/logger.ts';
 
 // ---------------------------------------------------------------------------------------------
 // Orchestrator Node Definitions
@@ -34,17 +39,19 @@ import { buildPlanSystemPrompt, buildPlanUserMessage } from '../agent/prompts.ts
 const intakeNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'intake', (state, config) => {
   const runtime = getRuntime(config);
   const task = state.task;
+  const now = runtime.clock?.now ? runtime.clock.now() : Date.now();
   const userGoalEntry: HistoryEntry = {
     type: 'user_goal',
     turn: (state.turnIndex ?? 0) + 1,
     prompt: task,
-    timestamp: new Date(runtime.clock.now()).toISOString(),
+    timestamp: new Date(now).toISOString(),
     isNewRun: true,
   };
 
   return {
     turnIndex: (state.turnIndex ?? 0) + 1,
-    runId: `run_${runtime.clock.now()}`,
+    turnStartedAt: now,
+    runId: `run_${now}`,
     tier: 'small',
     limits: state.limits ?? DEFAULT_LIMITS,
     runStatus: 'running',
@@ -58,29 +65,84 @@ const intakeNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator',
 });
 
 const profileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'profile', (state) => {
-  const level = state.effort?.level ?? 'medium';
-  const profile = {
-    level,
-    multiplier: 2,
-    retriesPerAction: 1,
-    altStrategy: false,
-    verifyMode: 'url' as const,
-    blockedLadder: ['reload' as const, 'mark' as const],
-    reflect: 'site_end' as const,
-    maxReplans: 1,
-    evidence: 'snippet' as const,
-    reservePct: 0.15,
-    useModelOverrides: false,
-    softCapAsk: false,
-  };
+  const requested = state.effort?.requested ?? 'auto';
+  let level = state.effort?.level ?? 'medium';
+  let suggestedBy = state.effort?.suggestedBy ?? 'default';
+
+  if (requested === 'auto') {
+    const suggestion = suggestEffortLevel(state.task);
+    level = suggestion.level;
+    suggestedBy = 'heuristic';
+  } else if (requested) {
+    level = requested;
+    suggestedBy = 'user';
+  }
+
+  const profile = getEffortProfile(level);
 
   return {
-    effort: { requested: state.effort?.requested ?? 'auto', level, suggestedBy: 'default' },
+    effort: { requested, level, suggestedBy },
     effortProfile: profile,
   };
 });
 
 const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'plan', async (state, config) => {
+  // Revision Mode (P5c): apply reflection decision without generating plan from scratch
+  if (state.planMeta !== null && state.reflectResult?.decision === 'replan') {
+    const reflect = state.reflectResult;
+    const oldMeta = state.planMeta;
+    const dropSet = new Set(reflect.dropSites || []);
+    const addSites = reflect.addSites || [];
+
+    const sitesMapUpdates: Record<string, any> = {};
+    const revisedSites: SiteSpec[] = [];
+
+    for (const site of oldMeta.sites) {
+      const siteState = state.sites?.[site.id];
+      const isFinished = siteState?.status === 'done' || siteState?.status === 'partial' || siteState?.status === 'blocked';
+
+      if (isFinished) {
+        revisedSites.push(site);
+      } else if (dropSet.has(site.id)) {
+        sitesMapUpdates[site.id] = { status: 'skipped', criteriaMet: false };
+      } else {
+        revisedSites.push(site);
+      }
+    }
+
+    for (const newSite of addSites) {
+      revisedSites.push(newSite);
+      sitesMapUpdates[newSite.id] = { status: 'pending', criteriaMet: false };
+    }
+
+    const newVersion = (oldMeta.version ?? 1) + 1;
+    const newPlanMeta: PlanMeta = {
+      ...oldMeta,
+      version: newVersion,
+      sites: revisedSites,
+      source: 'llm',
+    };
+
+    const nextReplanCount = (state.replan?.count ?? 0) + 1;
+    const noticeEntry: HistoryEntry = {
+      type: 'notice',
+      level: 'info',
+      kind: 'replan',
+      content: `Plan revised: ${reflect.reason}${reflect.changes ? ` (${reflect.changes})` : ''}`,
+    };
+
+    return {
+      planMeta: newPlanMeta,
+      planPrev: oldMeta,
+      replan: {
+        count: nextReplanCount,
+        lastReason: reflect.reason,
+      },
+      sites: { $set: sitesMapUpdates },
+      history: [noticeEntry],
+    };
+  }
+
   const runtime = getRuntime(config);
   const activeTabId = runtime.tabs.activeTabId ?? runtime.ownerTabId;
   const tabInfo = await runtime.browser.tabInfo(activeTabId).catch(() => null);
@@ -252,7 +314,17 @@ const holdNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
   const resume = interruptWithConfig<any, any>(config, state.pendingHold ?? { kind: 'approve_plan' });
 
   if (resume?.kind === 'approve') {
-    return { resumeRoute: 'alloc' };
+    const approved = new Set<string>(state.approvedDomains ?? []);
+    if (state.planMeta?.sites) {
+      for (const s of state.planMeta.sites) {
+        if (s.domain && s.domain !== 'this_page') approved.add(s.domain);
+      }
+    }
+    return {
+      resumeRoute: 'alloc',
+      approvedDomains: Array.from(approved),
+      replan: state.replan ? { ...state.replan, approvedByUser: true } : undefined,
+    };
   }
   if (resume?.kind === 'reject') {
     return { resumeRoute: 'finalize', endReason: 'plan_rejected' };
@@ -269,6 +341,49 @@ const allocNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 
   const multiplier = state.effortProfile?.multiplier ?? (level === 'max' ? 3 : level === 'medium' ? 2 : 1);
   const reservePct = state.effortProfile?.reservePct ?? 0.15;
   const sites = state.planMeta?.sites ?? [];
+
+  // Revision Mode: retain existing budget used, slack, and finished site budgets
+  if (state.planPrev !== null && state.budget) {
+    const existingBudget = state.budget;
+    const existingSitesMap = existingBudget.sites ?? {};
+    const newSiteBudgetMap: Record<string, { base: number; alloc: number; used: number; extended: boolean }> = { ...existingSitesMap };
+
+    let additionalAlloc = 0;
+    for (const s of sites) {
+      if (newSiteBudgetMap[s.id]) {
+        continue;
+      }
+      const base = computeSiteBase(s.kind, s.difficulty);
+      const alloc = Math.max(1, computeSiteAlloc(base, multiplier));
+      additionalAlloc += alloc;
+      newSiteBudgetMap[s.id] = {
+        base,
+        alloc,
+        used: 0,
+        extended: false,
+      };
+    }
+
+    const currentUsed = existingBudget.used ?? 0;
+    const currentSlack = existingBudget.slack ?? 0;
+    const rawReserve = existingBudget.reserve ?? 0;
+    const nextReserve = Math.max(0, rawReserve - additionalAlloc);
+    const nextWorkingTotal = currentUsed + Object.values(newSiteBudgetMap).reduce((sum, b) => sum + (b.used > 0 ? b.used : b.alloc), 0) + nextReserve;
+
+    const budget = {
+      ...existingBudget,
+      workingTotal: Math.min(hardCap, nextWorkingTotal),
+      reserve: nextReserve,
+      slack: currentSlack,
+      used: currentUsed,
+      sites: newSiteBudgetMap,
+    };
+
+    return {
+      budget,
+      phase: 'sites',
+    };
+  }
 
   // Compute base for each site
   const siteBases = sites.map((s) => computeSiteBase(s.kind, s.difficulty));
@@ -296,7 +411,10 @@ const allocNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 
     };
   }
 
-  const { workingTotal, reserve } = computeWorkingTotal(siteAllocs, reservePct);
+  const { workingTotal: rawWorkingTotal, reserve: rawReserve } = computeWorkingTotal(siteAllocs, reservePct);
+  const totalSiteAlloc = siteAllocs.reduce((a, b) => a + b, 0);
+  const reserve = Math.max(0, Math.min(rawReserve, hardCap - totalSiteAlloc));
+  const workingTotal = totalSiteAlloc + reserve;
 
   const budget = {
     hardCap,
@@ -481,20 +599,164 @@ const summaryNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
   };
 });
 
-const reflectNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'reflect', () => {
-  return {
-    reflectResult: {
-      decision: 'continue',
-      reason: 'P4 fast path',
-      changes: '',
-      by: 'fast_path',
-    },
-  };
+const reflectNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'reflect', async (state, config) => {
+  const runtime = getRuntime(config);
+  const profile = state.effortProfile ?? getEffortProfile(state.effort?.level);
+  const reflectMode = profile.reflect ?? 'off';
+
+  // 1. If reflection is off for this effort level, continue immediately
+  if (reflectMode === 'off') {
+    return {
+      reflectResult: {
+        decision: 'continue',
+        reason: 'Reflect off for current effort level',
+        changes: '',
+        by: 'code',
+      },
+    };
+  }
+
+  // 2. Fast-path checks
+  const sitesMap = state.sites ?? {};
+  const pendingSites = (state.planMeta?.sites ?? []).filter((s) => sitesMap[s.id]?.status === 'pending');
+
+  // Fast-path: no pending sites remain
+  if (pendingSites.length === 0) {
+    return {
+      reflectResult: {
+        decision: 'continue',
+        reason: 'All planned sites complete',
+        changes: '',
+        by: 'fast_path',
+      },
+    };
+  }
+
+  // Fast-path: goal completeness check
+  const columns = state.planMeta?.columns ?? [];
+  const findings = state.findings ?? [];
+  const foundFields = new Set(findings.map((f) => f.field));
+  const allColumnsFound = columns.length > 0 && columns.every((col) => foundFields.has(col));
+  const referenceDone = (state.planMeta?.sites ?? []).some((s) => s.role === 'reference' && sitesMap[s.id]?.status === 'done');
+
+  if (allColumnsFound && referenceDone && findings.length >= 2) {
+    const noticeEntry: HistoryEntry = {
+      type: 'notice',
+      level: 'info',
+      kind: 'reflect',
+      content: 'Early completion: All target findings and criteria satisfied early.',
+    };
+    return {
+      reflectResult: {
+        decision: 'stop_early',
+        reason: 'All required criteria and findings collected early',
+        changes: '',
+        by: 'fast_path',
+      },
+      history: [noticeEntry],
+    };
+  }
+
+  // Fast-path: replan limits reached or reserve budget depleted
+  const replanCount = state.replan?.count ?? 0;
+  const maxReplans = profile.maxReplans ?? 0;
+  const reserve = state.budget?.reserve ?? 0;
+
+  if (replanCount >= maxReplans || reserve <= 0) {
+    return {
+      reflectResult: {
+        decision: 'continue',
+        reason: 'Replan limit reached or reserve budget depleted',
+        changes: '',
+        by: 'fast_path',
+      },
+    };
+  }
+
+  // 3. LLM reflection
+  if (!state.planMeta) {
+    return {
+      reflectResult: {
+        decision: 'continue',
+        reason: 'No planMeta found',
+        changes: '',
+        by: 'code',
+      },
+    };
+  }
+
+  const system = buildReflectSystemPrompt();
+  const userMessage = buildReflectUserMessage({
+    task: state.task,
+    planMeta: state.planMeta,
+    siteSummaries: state.siteSummaries ?? [],
+    findings: state.findings ?? [],
+    blocked: state.blocked ?? {},
+    pendingSites,
+    reserveSteps: reserve,
+    replanCount,
+    maxReplans,
+  });
+
+  const stepSignal = runtime.control.stepSignal();
+  try {
+    const res = await runtime.llm.complete({
+      node: 'reflect',
+      mode: 'initial',
+      role: 'planner',
+      system,
+      messages: [{ role: 'user', content: userMessage }],
+      schema: null,
+      signal: stepSignal,
+    });
+
+    const reflectDecision = parseReflectResponse(res.text || '', state.planMeta.sites, MAX_SITES);
+
+    if (reflectDecision.decision === 'replan') {
+      const pendingIds = new Set(pendingSites.map((s) => s.id));
+      reflectDecision.dropSites = (reflectDecision.dropSites || []).filter((id) => pendingIds.has(id));
+      if (reflectDecision.dropSites.length === 0 && (!reflectDecision.addSites || reflectDecision.addSites.length === 0)) {
+        return {
+          reflectResult: {
+            decision: 'continue',
+            reason: reflectDecision.reason || 'No adjustments needed',
+            changes: '',
+            by: 'llm',
+          },
+        };
+      }
+    }
+
+    return {
+      reflectResult: {
+        ...reflectDecision,
+        by: 'llm',
+      },
+    };
+  } catch (err: any) {
+    Logger.warn('Orchestrator', `Reflect LLM call failed: ${err?.message || err}. Continuing existing plan.`);
+    return {
+      lastDecision: {
+        kind: 'llm_failed',
+        error: String(err?.message || err),
+        node: 'reflect',
+      },
+      reflectResult: {
+        decision: 'continue',
+        reason: 'LLM reflection failed, continuing existing plan',
+        changes: '',
+        by: 'llm',
+      },
+    };
+  }
 });
 
-const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'compile', (state) => {
+const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'compile', (state, config) => {
+  const runtime = getRuntime(config);
   const sites = Object.values(state.sites ?? {});
-  const allDone = sites.length > 0 && sites.every((s) => s.status === 'done');
+  const nonSkippedSites = sites.filter((s: any) => s.status !== 'skipped');
+  const allDone = nonSkippedSites.length > 0 && nonSkippedSites.every((s) => s.status === 'done');
+  const isStopEarlySuccess = state.reflectResult?.decision === 'stop_early' && (state.findings?.length ?? 0) > 0;
   const stopped = state.ctl?.stopRequested || state.siteOut?.status === 'stopped';
 
   // Compile truth table if columns and sites exist
@@ -514,6 +776,28 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
     markdownTable = renderTruthTableMarkdown(table);
   }
 
+  const level = state.effort?.level ?? 'medium';
+  const modelCalls = (state.history ?? []).filter((h) => h.type === 'agent_response' || (h as any).type === 'agent_plan').length;
+  const stepsUsed = state.budget?.used ?? 0;
+  const sitesList = Object.values(state.sites ?? {});
+  const sitesDone = sitesList.filter((s) => s.status === 'done').length;
+  const sitesPartial = sitesList.filter((s) => s.status === 'partial' || s.status === 'blocked').length;
+  const now = runtime.clock?.now ? runtime.clock.now() : Date.now();
+  const firstHistoryTs = (state.history?.[0] as any)?.timestamp;
+  const startTs = (state.turnStartedAt && state.turnStartedAt > 0)
+    ? state.turnStartedAt
+    : (firstHistoryTs ? new Date(firstHistoryTs).getTime() : now);
+  const elapsedMs = Math.max(0, now - (Number.isFinite(startTs) && startTs > 0 ? startTs : now));
+
+  const runStats: RunStats = {
+    level,
+    modelCalls,
+    stepsUsed,
+    sitesDone,
+    sitesPartial,
+    elapsedMs,
+  };
+
   let endReason: any = 'stopped_early';
   let historyEntry: HistoryEntry;
 
@@ -524,15 +808,20 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
       answer: markdownTable ? `Task was stopped by user.\n\n${markdownTable}` : 'Task was stopped by user.',
       table,
       reason: 'stopped',
+      runStats,
     };
-  } else if (allDone) {
-    endReason = 'all_subgoals_done';
-    const baseAnswer = state.siteOut?.finalAnswer?.text ?? 'Task completed successfully.';
+  } else if (allDone || isStopEarlySuccess) {
+    endReason = allDone ? 'all_subgoals_done' : 'stopped_early';
+    const defaultMsg = isStopEarlySuccess
+      ? 'Task completed early with required criteria satisfied.'
+      : 'Task completed successfully.';
+    const baseAnswer = state.siteOut?.finalAnswer?.text ?? defaultMsg;
     const answer = markdownTable ? `${baseAnswer}\n\n${markdownTable}` : baseAnswer;
     historyEntry = {
       type: 'finish',
       answer,
       ...(table ? { table } : {}),
+      runStats,
     };
   } else {
     endReason = 'stopped_early';
@@ -544,6 +833,7 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
       answer,
       table,
       reason: 'stopped_early',
+      runStats,
     };
   }
 
@@ -553,8 +843,9 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
       text: historyEntry.type === 'finish' ? historyEntry.answer : (historyEntry as any).answer,
       unconfirmed: false,
       table,
-      partial: !allDone,
+      partial: !(allDone || isStopEarlySuccess),
     },
+    runStats,
     history: [historyEntry],
   };
 });
@@ -578,6 +869,10 @@ const finalizeNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator
   const runtime = getRuntime(config);
   const activeTabId = runtime.tabs.activeTabId ?? runtime.ownerTabId;
   await runtime.browser.clearBadges(activeTabId).catch(() => {});
+
+  if (state.runStats) {
+    Logger.info('Orchestrator', `[RUN_STATS] Task completed: level=${state.runStats.level}, steps=${state.runStats.stepsUsed}, sitesDone=${state.runStats.sitesDone}, sitesPartial=${state.runStats.sitesPartial}, elapsed=${state.runStats.elapsedMs}ms`);
+  }
 
   const runStatus = state.ctl?.stopRequested ? 'stopped' : 'idle';
   return {

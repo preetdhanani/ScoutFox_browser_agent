@@ -810,7 +810,7 @@ function routeMessage(request, sender, sendResponse) {
           agentEngine.releaseTaskClaim();
           throw new Error('No automatable tab found. ScoutFox cannot script Chrome\'s internal pages (chrome://…) — open a normal website such as https://google.com and try again.');
         }
-        agentEngine.startTask(payload.prompt, tab.id).catch((err) => {
+        agentEngine.startTask(payload.prompt, tab.id, payload.effort).catch((err) => {
           Logger.error('Background', '[START_TASK_ERROR] Uncaught exception starting task', err);
         });
         sendResponse({ success: true, tabId: tab.id, tabUrl: tab.url, tabTitle: tab.title });
