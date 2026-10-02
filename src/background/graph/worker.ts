@@ -3,8 +3,8 @@
 // Communicates with orchestrator strictly via SiteIn (input) and SiteOut (output).
 // Erasable TypeScript (no enums, no parameter properties).
 
-import { END, START, StateGraph } from '@langchain/langgraph/web';
-import { WorkerState, type PageSig, type PriceCandidate, type SiteOut, type WorkerStateT, type WorkerUpdate } from './workerState.ts';
+import { END, START, StateGraph, type BaseCheckpointSaver } from '@langchain/langgraph/web';
+import { WorkerState, type PageSig, type PendingAction, type PriceCandidate, type SiteOut, type WorkerHold, type WorkerStateT, type WorkerUpdate } from './workerState.ts';
 import {
   WORKER_ROUTE_MAPS,
   meterRouter,
@@ -29,6 +29,7 @@ import { recordFailure, isSignatureBanned } from '../agent/failureMemory.ts';
 import { createFinding, deduplicateFindings } from '../agent/findings.ts';
 import { evaluateSiteCriteria } from '../agent/criteria.ts';
 import { buildPolicySystemPrompt, buildPolicyUserMessage } from '../agent/prompts.ts';
+import { evaluateActionRisk } from '../agent/risk.ts';
 import type { BlockedSource, HistoryEntry, StepFailure } from './state.ts';
 
 export function buildSiteOut(state: WorkerStateT): SiteOut {
@@ -553,24 +554,63 @@ const riskNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'risk
   const elementId = action?.element_id;
   const elementInfo = elementId !== undefined ? state.page?.elementInfo?.[elementId] : null;
 
-  // Sensitive field check
-  const isForbidden = elementInfo?.fieldKind === 'password' || elementInfo?.fieldKind === 'cc' || elementInfo?.fieldKind === 'otp';
-  const riskLevel = isForbidden ? ('forbidden' as const) : ('safe' as const);
+  const currentDomain = state.page?.domain || state.siteIn?.site?.domain || '';
+  const approvedDomains = [
+    ...(state.siteIn?.approvedDomains ?? []),
+    ...(state.siteRun?.approvedNew ?? []),
+  ];
 
-  const pendingAction = {
+  const evalResult = evaluateActionRisk({
     action,
-    signature: `${action.action}|${action.element_id ?? ''}|${action.url ?? ''}`,
+    elementInfo,
+    pageType: state.page?.pageType,
+    pageUrl: state.page?.url,
+    approvedDomains: [currentDomain, ...approvedDomains],
+  });
+  const signature = `${action.action}|${action.element_id ?? ''}|${action.url ?? ''}`;
+
+  const pendingAction: PendingAction = {
+    action,
+    signature,
     journalKey: `${state.siteIn?.runId}:${(state.siteRun?.used ?? 0) + 1}`,
     risk: {
-      level: riskLevel,
-      reason: isForbidden ? 'Sensitive field entry is restricted to the user.' : 'Safe action'
+      level: evalResult.level,
+      variant: evalResult.variant,
+      reason: evalResult.reason,
+      targetDomain: evalResult.targetDomain,
     },
   };
+
+  const actionSummary = evalResult.actionSummary;
+  const elementLabel = evalResult.elementLabel || (elementInfo?.label || (action.element_id !== undefined ? `#${action.element_id}` : ''));
+  const pageUrl = state.page?.url || '';
+
+  const pendingHold: WorkerHold | null = evalResult.level === 'risky'
+    ? {
+        kind: 'confirm_action',
+        variant: evalResult.variant ?? 'form',
+        actionSummary,
+        elementLabel,
+        pageUrl,
+        reason: evalResult.reason,
+        targetDomain: evalResult.targetDomain,
+      }
+    : null;
+
+  const lastFailure = evalResult.level === 'forbidden'
+    ? {
+        kind: 'policy' as const,
+        reason: evalResult.reason,
+        signature,
+      }
+    : null;
 
   return {
     siteRun: state.siteRun
       ? { ...state.siteRun, pendingAction }
       : null,
+    pendingHold,
+    lastFailure,
   };
 });
 
@@ -578,10 +618,30 @@ const holdNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'hold
   const resume = interruptWithConfig<any, any>(config, state.pendingHold ?? { kind: 'paused', reason: 'user' });
 
   if (resume?.kind === 'approve') {
-    return { resumeRoute: 'execute', pendingHold: null };
+    let siteRun = state.siteRun;
+    if (resume.remember === 'site' && state.pendingHold?.kind === 'confirm_action') {
+      const targetDomain = state.pendingHold.targetDomain;
+      if (targetDomain) {
+        const approvedNew = [...(siteRun?.approvedNew ?? [])];
+        if (!approvedNew.includes(targetDomain)) {
+          approvedNew.push(targetDomain);
+        }
+        siteRun = siteRun ? { ...siteRun, approvedNew } : null;
+      }
+    }
+    return { resumeRoute: 'execute', pendingHold: null, siteRun };
   }
   if (resume?.kind === 'reject') {
-    return { resumeRoute: 'recover', pendingHold: null };
+    const signature = state.siteRun?.pendingAction?.signature;
+    return {
+      resumeRoute: 'recover',
+      pendingHold: null,
+      lastFailure: {
+        kind: 'denied',
+        reason: 'Action was denied by user',
+        signature,
+      },
+    };
   }
   if (resume?.kind === 'stop') {
     return { resumeRoute: 'end', pendingHold: null };
@@ -710,25 +770,45 @@ const recoverNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'r
   if (!siteRun) return {};
 
   const exec = state.lastExec;
+  const pending = siteRun.pendingAction;
+  const lastFailure = state.lastFailure;
   const retriesPerAction = state.siteIn?.profile?.retriesPerAction ?? 1;
-  const action = exec?.action as any;
+
+  // Use exec if available, otherwise fallback to pendingAction
+  const action = (exec?.action ?? pending?.action) as any;
   const verb = action?.action ?? 'unknown';
   const target = action?.element_id ? `[${action.element_id}]` : (action?.url || '');
-  const signature = exec?.signature ?? `${verb}|${target}`;
-  const detail = state.verifyResult?.detail ?? 'Action failed';
+  const signature = exec?.signature ?? pending?.signature ?? `${verb}|${target}`;
 
-  const kind: StepFailure['kind'] = state.verifyResult?.outcome === 'stuck' ? 'stale_id' : 'no_effect';
+  let kind: StepFailure['kind'] = 'no_effect';
+  let detail = 'Action failed';
+  let immediateBan = false;
+
+  if (lastFailure?.kind === 'denied') {
+    kind = 'denied';
+    detail = lastFailure.reason || 'Action denied by user';
+    immediateBan = true;
+  } else if (lastFailure?.kind === 'policy') {
+    kind = 'policy';
+    detail = lastFailure.reason || 'Action forbidden by policy';
+    immediateBan = true;
+  } else if (state.verifyResult?.outcome === 'stuck') {
+    kind = 'stale_id';
+    detail = state.verifyResult.detail || 'Stuck in loop';
+  } else if (state.verifyResult?.detail) {
+    detail = state.verifyResult.detail;
+  }
 
   const rec = recordFailure(siteRun.failureMemory ?? [], {
     verb,
     target,
     signature,
     kind,
-    detail
-  }, retriesPerAction);
+    detail,
+  }, immediateBan ? 0 : retriesPerAction);
 
   const banned = [...(siteRun.banned ?? [])];
-  if (rec.shouldBan && !banned.includes(signature)) {
+  if ((immediateBan || rec.shouldBan) && !banned.includes(signature)) {
     banned.push(signature);
   }
 
@@ -744,8 +824,9 @@ const recoverNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'r
       ...siteRun,
       failureMemory: rec.failures,
       banned,
-      exit
-    }
+      exit,
+    },
+    lastFailure: null,
   };
 });
 
@@ -891,7 +972,7 @@ const recordNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 're
 // Worker Subgraph Builder
 // ---------------------------------------------------------------------------------------------
 
-export function buildWorkerGraph() {
+export function buildWorkerGraph(checkpointer?: BaseCheckpointSaver) {
   return new StateGraph(WorkerState)
     .addNode('open', openNode)
     .addNode('perceive', perceiveNode)
@@ -916,5 +997,5 @@ export function buildWorkerGraph() {
     .addConditionalEdges('verify', verifyRouter, WORKER_ROUTE_MAPS.verify)
     .addConditionalEdges('recover', recoverRouter, WORKER_ROUTE_MAPS.recover)
     .addConditionalEdges('record', recordRouter, WORKER_ROUTE_MAPS.record)
-    .compile();
+    .compile(checkpointer ? { checkpointer } : undefined);
 }

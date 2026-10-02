@@ -149,7 +149,7 @@ export interface PendingAction {         // written by risk
   signature: string;                     // 'verb|target|url', the same key the stuck check and the bans use
   journalKey: string;                    // '<runId>:<step>'
   risk: { level: 'safe' | 'risky' | 'forbidden';
-          variant?: 'submit' | 'purchase' | 'login' | 'form' | 'navigate'; reason: string };
+          variant?: 'submit' | 'purchase' | 'login' | 'form' | 'navigate'; reason: string; targetDomain?: string };
 }
 
 export interface ExecRecord { step: number; action: PageAction; signature: string; sigBefore: PageSig;
@@ -160,7 +160,7 @@ export interface VerifyResult { outcome: 'ok' | 'no_effect' | 'failed' | 'stuck'
 
 export type WorkerHold =                 // worker hold kinds; challenge_help (Max) comes in P7b
   | { kind: 'confirm_action'; variant: 'submit' | 'purchase' | 'login' | 'form' | 'navigate';
-      actionSummary: string; elementLabel: string; pageUrl: string; reason: string }
+      actionSummary: string; elementLabel: string; pageUrl: string; reason: string; targetDomain?: string }
   | { kind: 'ask_user'; question: string }
   | { kind: 'paused'; reason: 'user' | 'llm_failure'; error?: string };
 
@@ -216,6 +216,7 @@ export const WorkerState = Annotation.Root({
   lastDecision: last<Decision | null>(() => null),
   lastExec: last<ExecRecord | null>(() => null),
   verifyResult: last<VerifyResult | null>(() => null),
+  lastFailure: last<{ kind: StepFailure['kind']; reason: string; signature?: string } | null>(() => null),
   pendingHold: last<WorkerHold | null>(() => null),
   resumeRoute: last<'execute' | 'recover' | 'perceive' | 'end' | null>(() => null),
   ctl: last<ControlSnapshot>(() => ({ pauseRequested: false, stopRequested: false })),

@@ -104,6 +104,9 @@
           </div>
         </div>
 
+        <!-- NESTED LIVE GRAPH VIEW CONTAINER -->
+        <div class="live-graph-container" id="liveGraphContainer" style="display: none;"></div>
+
         <div class="input-panel">
           <div class="control-bar" id="controlBar" style="display: none;">
             <button class="btn btn-secondary btn-sm" id="btnPause">
@@ -205,12 +208,24 @@
           <!-- Advanced Tuning -->
           <div class="form-row">
             <div class="form-group half">
-              <label class="form-label" for="maxStepsInput">Max Steps</label>
+              <label class="form-label" for="maxStepsInput">Step limit (hard cap)</label>
               <input type="number" id="maxStepsInput" class="form-input" value="250" min="1" max="1000">
             </div>
             <div class="form-group half">
               <label class="form-label" for="delayInput">Delay (ms)</label>
               <input type="number" id="delayInput" class="form-input" value="1000" min="200" step="100">
+            </div>
+          </div>
+
+          <!-- Model Overrides (Optional) -->
+          <div class="form-row">
+            <div class="form-group half">
+              <label class="form-label" for="plannerModelInput">Planner Model Override</label>
+              <input type="text" id="plannerModelInput" class="form-input" placeholder="Default: main model">
+            </div>
+            <div class="form-group half">
+              <label class="form-label" for="reflectModelInput">Reflect Model Override</label>
+              <input type="text" id="reflectModelInput" class="form-input" placeholder="Default: main model">
             </div>
           </div>
 

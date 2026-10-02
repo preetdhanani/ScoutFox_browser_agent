@@ -7,6 +7,8 @@
 // Must stay the first import: it sets zod's jitless flag before any module that bundles zod runs (see the file).
 import '../src/background/boot/zodJitless.ts';
 import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../src/shared/storage.ts';
+import { renderPlanApprovalCard, renderActionConfirmationCard, renderProvenanceFindingsTable } from './cards.js';
+import { updateLiveGraphView } from './graphStrip.js';
 
 let backgroundPort = null;
 let currentSettings = { ...DEFAULT_SETTINGS };
@@ -237,6 +239,14 @@ async function loadSettings() {
   if (effortSelect) {
     effortSelect.value = currentSettings.effortDefault || 'medium';
   }
+  const plannerInput = document.getElementById('plannerModelInput');
+  if (plannerInput) {
+    plannerInput.value = currentSettings.plannerModel || '';
+  }
+  const reflectInput = document.getElementById('reflectModelInput');
+  if (reflectInput) {
+    reflectInput.value = currentSettings.reflectModel || '';
+  }
 
   // Visibility: Hide Ollama settings if not using Ollama
   const ollamaGroup = document.getElementById('ollamaNumPredictGroup');
@@ -450,7 +460,9 @@ async function autoSaveCurrentForm() {
     // or "1000" (thinking seconds) would otherwise make every LLM call abort almost immediately.
     llmTimeoutMs: Math.max(5000, parseInt(document.getElementById('llmTimeoutInput').value, 10) || DEFAULT_SETTINGS.llmTimeoutMs),
     showElementBadges: document.getElementById('badgesToggle').checked,
-    effortDefault: document.getElementById('effortDefaultSelect')?.value || currentSettings.effortDefault || 'medium'
+    effortDefault: document.getElementById('effortDefaultSelect')?.value || currentSettings.effortDefault || 'medium',
+    plannerModel: (document.getElementById('plannerModelInput')?.value || '').trim(),
+    reflectModel: (document.getElementById('reflectModelInput')?.value || '').trim()
   };
 
   currentSettings = await Storage.saveSettings(newSettings);
@@ -1165,7 +1177,7 @@ function renderState(state) {
     lastRenderedStateVersion = state.stateVersion;
   }
 
-  const { status, stepCount, history, planSteps, currentPhase, pendingQuestion } = state;
+  const { status, stepCount, history, planSteps, currentPhase, pendingQuestion, pendingApproval, pendingConfirm, findings } = state;
   const isDisconnected = backgroundPort === null;
 
   const statusPill = document.getElementById('statusPill');
@@ -1198,8 +1210,10 @@ function renderState(state) {
     if (processingBanner) processingBanner.style.display = 'flex';
     if (processingPhaseText) processingPhaseText.textContent = currentPhase || `Processing step ${stepCount}...`;
     
-    const maxSteps = currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
-    const pct = Math.min(100, Math.round(((stepCount || 1) / maxSteps) * 100));
+    const maxSteps = (state.budget && state.budget.hardCap) || currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
+    const workingSteps = (state.budget && state.budget.workingTotal) || maxSteps;
+    const currentSteps = (state.budget && state.budget.used) || stepCount || 1;
+    const pct = Math.min(100, Math.round((currentSteps / Math.max(1, workingSteps)) * 100));
     if (progressBarFill) progressBarFill.style.width = `${pct}%`;
 
     isTaskActive = true;
@@ -1222,6 +1236,16 @@ function renderState(state) {
     if (btnStartTask) btnStartTask.disabled = false;
   }
 
+  const liveGraphContainer = document.getElementById('liveGraphContainer');
+  if (liveGraphContainer) {
+    if (status === 'running' || status === 'paused') {
+      liveGraphContainer.style.display = 'block';
+      updateLiveGraphView(liveGraphContainer, state.graphLocation, state.runStats, state.effortProfile);
+    } else {
+      liveGraphContainer.style.display = 'none';
+    }
+  }
+
   const processingEffortBadge = document.getElementById('processingEffortBadge');
   if (processingEffortBadge) {
     if (status === 'running' || status === 'paused') {
@@ -1239,7 +1263,7 @@ function renderState(state) {
 
   const timeline = document.getElementById('timeline');
   if (timeline) {
-    if (!history || history.length === 0) {
+    if ((!history || history.length === 0) && !pendingApproval && !pendingConfirm) {
       renderEmptyState();
       return;
     }
@@ -1248,7 +1272,7 @@ function renderState(state) {
     // expanding a row mid-run does not yank the view away from them.
     const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
     const finishArrived = noteFinishCard(status, history);
-    timeline.innerHTML = renderTurns(history, status, planSteps, currentPhase, pendingQuestion);
+    timeline.innerHTML = renderTurns(history, status, planSteps, currentPhase, pendingQuestion, pendingApproval, pendingConfirm, findings, state.effortProfile);
     if (nearBottom) scrollTimelineToLatest(timeline, finishArrived);
   }
 }
@@ -1365,6 +1389,15 @@ function buildTurns(history) {
       // Written by the engine's answer audit (agent/answerAudit.ts). Absent on older runs and on
       // saved sessions from before the audit existed: those render exactly as they always did.
       cur.audit = item.audit || null;
+      cur.table = item.table || null;
+      cur.findings = item.findings || null;
+      cur.runStats = item.runStats || null;
+    } else if (item.type === 'partial_result') {
+      cur.answer = item.answer;
+      cur.partial = true;
+      cur.table = item.table || null;
+      cur.findings = item.findings || null;
+      cur.runStats = item.runStats || null;
     }
   });
   return turns;
@@ -1591,7 +1624,7 @@ function renderAuditDetails(audit, turnNo, mode) {
  * red, and it adds one line saying why. A verified-but-unconfirmed answer keeps the title
  * "Unconfirmed answer": its content was checked, but the model never said it was done.
  */
-function renderFinishCard(turn) {
+function renderFinishCard(turn, findings = null) {
   const audit = normalizeAudit(turn.audit);
   const unconfirmed = !!turn.answerUnconfirmed;
   // With an audit the card already says all of it (title, subtitle, the notes below): the stored answer keeps the
@@ -1599,10 +1632,13 @@ function renderFinishCard(turn) {
   const shown = audit ? withoutEngineNotes(turn.answer) : turn.answer;
   const body = `<div class="finish-body">${formatMarkdownText(shown)}</div>`;
 
+  const allFindings = (findings && findings.length > 0) ? findings : (turn.findings || (turn.table && turn.table.rows ? turn.table.rows : []));
+  const findingsHtml = allFindings && allFindings.length > 0 ? renderProvenanceFindingsTable(allFindings) : '';
+
   if (!audit) {
     return unconfirmed
-      ? `<div class="finish-card unconfirmed"><div class="finish-title">${ICONS.warning} Unconfirmed answer</div>${body}</div>`
-      : `<div class="finish-card"><div class="finish-title">${ICONS.complete} Done</div>${body}</div>`;
+      ? `<div class="finish-card unconfirmed"><div class="finish-title">${ICONS.warning} Unconfirmed answer</div>${body}${findingsHtml}</div>`
+      : `<div class="finish-card"><div class="finish-title">${ICONS.complete} Done</div>${body}${findingsHtml}</div>`;
   }
 
   let title;
@@ -1635,7 +1671,7 @@ function renderFinishCard(turn) {
   const details = renderAuditDetails(audit, turn.turn, attention ? 'attention' : 'verified');
   // The caveat goes above a doubtful answer, so it is seen before the answer is read, and below a
   // checked one, where it is only a receipt.
-  return `<div class="${classes.join(' ')}"><div class="finish-title">${icon} ${title}</div>${subHtml}${attention ? details : ''}${body}${attention ? '' : details}</div>`;
+  return `<div class="${classes.join(' ')}"><div class="finish-title">${icon} ${title}</div>${subHtml}${attention ? details : ''}${body}${findingsHtml}${attention ? '' : details}</div>`;
 }
 
 // What the engine writes into an annotated answer (annotateAnswer in agent/answerAudit.ts): one warning line on top, and a
@@ -1680,9 +1716,13 @@ function renderPlanRows(planSteps) {
   }).join('')}</div>`;
 }
 
-function renderTurns(history, status, planSteps, currentPhase, pendingQuestion) {
+function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, pendingApproval = null, pendingConfirm = null, findings = null, effortProfile = null) {
   const turns = buildTurns(history);
   const busy = status === 'running' || status === 'paused';
+
+  if (turns.length === 0 && (pendingApproval || pendingConfirm)) {
+    turns.push({ turn: 1, goal: null, entries: [], answer: null, audit: null, failed: false, timestamp: null, isNewRun: false });
+  }
 
   return turns.map((turn, ti) => {
     const isLast = ti === turns.length - 1;
@@ -1762,6 +1802,14 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion) 
         </div>`
       : '';
 
+    const approvalPrompt = (isLive && status === 'paused' && pendingApproval)
+      ? renderPlanApprovalCard(pendingApproval, planSteps, effortProfile)
+      : '';
+
+    const confirmPrompt = (isLive && status === 'paused' && pendingConfirm)
+      ? renderActionConfirmationCard(pendingConfirm)
+      : '';
+
     const sessionDivider = (turn.turn > 1 || turn.isNewRun)
       ? `<div class="session-divider">
           <span class="session-tag">⚡ Run #${turn.turn}</span>
@@ -1772,6 +1820,8 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion) 
     return `<div class="turn">
       ${sessionDivider}
       ${turn.goal ? `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(turn.goal)}</div>` : ''}
+      ${approvalPrompt ? approvalPrompt : ''}
+      ${confirmPrompt ? confirmPrompt : ''}
       ${count || turn.entries.length ? `<div class="act-group${open ? ' open' : ''}">
         <button class="act-head" data-turn="${turn.turn}" aria-expanded="${open}">
           <span class="act-chev">${ICONS.chevron}</span>
@@ -1779,7 +1829,7 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion) 
         </button>
         <div class="act-body" ${open ? '' : 'hidden'}>${planDetail}${rows}${phase}${answerPrompt}</div>
       </div>` : ''}
-      ${turn.answer ? renderFinishCard(turn) : ''}
+      ${turn.answer ? renderFinishCard(turn, isLast ? findings : null) : ''}
     </div>`;
   }).join('');
 }
@@ -1841,6 +1891,114 @@ function initTimelineInteraction() {
   timeline.addEventListener('click', (e) => {
     const sendBtn = e.target.closest('.ask-user-send');
     if (sendBtn) { sendAnswer(sendBtn.closest('.ask-user-prompt')); return; }
+
+    const levelChip = e.target.closest('.btn-level-chip');
+    if (levelChip) {
+      const group = levelChip.closest('.level-chips-group');
+      const card = levelChip.closest('.plan-approval-card');
+      if (group) {
+        group.querySelectorAll('.btn-level-chip').forEach(c => c.classList.remove('active'));
+        levelChip.classList.add('active');
+      }
+      const level = levelChip.getAttribute('data-level');
+      const approveBtn = card ? card.querySelector('.btn-approve-plan') : null;
+      if (approveBtn && level) {
+        approveBtn.setAttribute('data-level', level);
+      }
+      return;
+    }
+
+    const approveBtn = e.target.closest('.btn-approve-plan');
+    if (approveBtn) {
+      approveBtn.disabled = true;
+      const level = approveBtn.getAttribute('data-level') || 'medium';
+      sendBgMessage({ action: 'APPROVE_PLAN', payload: { level } }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          approveBtn.disabled = false;
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to approve plan.');
+        }
+      });
+      return;
+    }
+
+    const stopPlanBtn = e.target.closest('.btn-stop-plan');
+    if (stopPlanBtn) {
+      stopPlanBtn.disabled = true;
+      sendBgMessage({ action: 'STOP_TASK' }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          stopPlanBtn.disabled = false;
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to stop task.');
+        }
+      });
+      return;
+    }
+
+    const allowBtn = e.target.closest('.btn-confirm-allow');
+    if (allowBtn) {
+      allowBtn.disabled = true;
+      const card = allowBtn.closest('.action-confirmation-card');
+      const rememberChk = card ? card.querySelector('#chkRememberSite') : null;
+      const remember = rememberChk && rememberChk.checked ? 'site' : undefined;
+      sendBgMessage({ action: 'CONFIRM_ACTION', payload: { decision: 'approve', remember } }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          allowBtn.disabled = false;
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to confirm action.');
+        }
+      });
+      return;
+    }
+
+    const denyBtn = e.target.closest('.btn-confirm-deny');
+    if (denyBtn) {
+      denyBtn.disabled = true;
+      sendBgMessage({ action: 'CONFIRM_ACTION', payload: { decision: 'reject' } }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          denyBtn.disabled = false;
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to reject action.');
+        }
+      });
+      return;
+    }
+
+    const copyBtn = e.target.closest('.btn-copy-findings-table');
+    if (copyBtn) {
+      const container = copyBtn.closest('.provenance-findings-container');
+      const table = container ? container.querySelector('.provenance-table') : null;
+      if (table) {
+        let md = '| Source | Field | Value | Status |\n| --- | --- | --- | --- |\n';
+        const rows = table.querySelectorAll('tbody tr.findings-table-row');
+        rows.forEach(r => {
+          const cells = Array.from(r.querySelectorAll('td')).map(td => td.textContent.trim().replace(/\|/g, '\\|'));
+          if (cells.length >= 4) {
+            md += `| ${cells[0]} | ${cells[1]} | ${cells[2]} | ${cells[3]} |\n`;
+          }
+        });
+        if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(md).then(() => {
+            showToast('Findings copied to clipboard!');
+          }).catch(() => {
+            showToast('Failed to copy findings.');
+          });
+        }
+      }
+      return;
+    }
+
+    const findingRow = e.target.closest('.findings-table-row');
+    if (findingRow && !e.target.closest('a')) {
+      const rowId = findingRow.getAttribute('data-row-id');
+      const detailRow = document.getElementById(`finding-detail-${rowId}`);
+      if (detailRow) {
+        const isVisible = detailRow.style.display !== 'none';
+        detailRow.style.display = isVisible ? 'none' : 'table-row';
+      }
+      return;
+    }
+
     toggle(e.target);
   });
   // A <details> toggle event does not bubble, so listen in the capture phase. The open state is

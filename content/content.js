@@ -172,7 +172,8 @@
         if (payload?.showBadges && window.actionExecutor) {
           window.actionExecutor.renderBadges(snapshot.elements);
         }
-        sendResponse({ success: true, data: snapshot, docId: window.domCompressor.docId });
+        const elementInfo = window.domCompressor.elementInfo || {};
+        sendResponse({ success: true, data: { ...snapshot, elementInfo }, docId: window.domCompressor.docId });
       } catch (err) {
         sendResponse({ success: false, error: err.message });
       }

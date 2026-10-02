@@ -266,9 +266,9 @@ export type HistoryEntry =
   | { type: 'site_end'; siteId: string; site: string; status: SiteStatus; reason: string;
       findings: number; stepsUsed: number }
   | { type: 'finish'; answer: string; unconfirmed?: true; partial?: true; table?: FindingsTable;
-      runStats?: RunStats; offer?: Offer; stoppedEarly?: string }
+      runStats?: RunStats; offer?: Offer; stoppedEarly?: string; findings?: Finding[] }
   | { type: 'partial_result'; answer: string; table: FindingsTable | null; reason: EndReason;
-      runStats?: RunStats; offer?: Offer };  // never a "Done"
+      runStats?: RunStats; offer?: Offer; findings?: Finding[] };  // never a "Done"
 
 export interface Limits {
   maxSteps: number;                  // settings.maxSteps: the "Step limit (hard cap)" for all budget units

@@ -78,3 +78,36 @@ export function suggestEffortLevel(task: string, siteCount?: number): EffortSugg
     reason: 'Standard balanced execution profile.',
   };
 }
+
+export interface PlanEstimate {
+  estimatedSteps: number;
+  estimatedSeconds: number;
+  reserveSteps: number;
+  estimatedStepsPerSite: number;
+}
+
+/**
+ * Calculate step and duration estimates for a plan given an effort profile and site count.
+ */
+export function calculatePlanEstimate(
+  profile: EffortProfile,
+  siteCount: number
+): PlanEstimate {
+  const count = Math.max(1, siteCount);
+  const stepsPerSite = profile.stepBudgetPerSite ?? Math.round(15 * (profile.multiplier || 1));
+  const totalSiteSteps = count * stepsPerSite;
+  const reservePct = profile.reservePct ?? 0.15;
+  const reserveSteps = Math.round(totalSiteSteps * reservePct);
+  const estimatedSteps = totalSiteSteps + reserveSteps;
+
+  const secPerSite = profile.level === 'high' ? 60 : profile.level === 'low' ? 15 : 30;
+  const estimatedSeconds = count * secPerSite;
+
+  return {
+    estimatedSteps,
+    estimatedSeconds,
+    reserveSteps,
+    estimatedStepsPerSite: stepsPerSite,
+  };
+}
+

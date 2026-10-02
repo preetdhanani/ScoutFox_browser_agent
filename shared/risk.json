@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "ScoutFox Risk Gate dictionary and safety rules",
+  "purchaseWords": [
+    "kaufen",
+    "jetzt kaufen",
+    "bestellen",
+    "zahlungspflichtig bestellen",
+    "bezahlen",
+    "zur kasse",
+    "buy",
+    "buy now",
+    "order",
+    "place order",
+    "pay",
+    "checkout"
+  ],
+  "submitWords": [
+    "löschen",
+    "senden",
+    "absenden",
+    "veröffentlichen",
+    "abonnieren",
+    "delete",
+    "send",
+    "publish",
+    "subscribe"
+  ],
+  "forbiddenFieldKinds": [
+    "password",
+    "cc",
+    "otp",
+    "ssn"
+  ],
+  "personalFieldKinds": [
+    "email",
+    "address"
+  ],
+  "safeSearchEngines": [
+    "google.com",
+    "google.de",
+    "duckduckgo.com",
+    "bing.com",
+    "search.brave.com"
+  ]
+}

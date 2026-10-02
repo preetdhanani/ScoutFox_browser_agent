@@ -379,6 +379,7 @@ function summarize(el: ElementSpec, id: number, nth: number, scrollY: number, vi
   if (expanded === true) extraAttrs += ' expanded';
   else if (expanded === false) extraAttrs += ' collapsed';
   if (valuePreview) extraAttrs += ` value="${valuePreview}"`;
+  if (isPasswordLike) extraAttrs += ' (user only)';
 
   const labelText = text || ariaLabel || placeholder || 'element';
   const cssPath = el.cssPath ?? (el.id ? `#${el.id}` : nth > 1 ? `${tagName}:nth-of-type(${nth})` : tagName);
