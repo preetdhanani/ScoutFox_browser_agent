@@ -399,9 +399,16 @@ chrome.runtime.onConnect.addListener((port) => {
           history: session.engine.history,
           planSteps: session.engine.planSteps,
           currentPhase: session.engine.currentPhase,
+          graphLocation: session.engine.graphLocation,
           // Without this a panel that reconnects while the agent is waiting on ask_user shows a
           // paused run with no question and no answer box - a dead end the user cannot clear.
           pendingQuestion: session.engine.pendingQuestion,
+          pendingApproval: session.engine.pendingApproval,
+          pendingConfirm: session.engine.pendingConfirm,
+          effort: session.engine.effort,
+          effortProfile: session.engine.effortProfile,
+          runStats: session.engine.runStats,
+          findings: session.engine.findings,
           stateVersion: session.engine.stateVersion,
           bootId: session.engine.bootId,
           scoutFoxGroupId: session.engine.scoutFoxGroupId
@@ -764,9 +771,15 @@ function routeMessage(request, sender, sendResponse) {
         history: agentEngine.history,
         planSteps: agentEngine.planSteps,
         currentPhase: agentEngine.currentPhase,
+        graphLocation: agentEngine.graphLocation,
         // Same reason as the onConnect path above: a resync landing while the agent is waiting
         // on ask_user must carry the question, or the panel renders a paused run it cannot answer.
         pendingQuestion: agentEngine.pendingQuestion,
+        pendingApproval: agentEngine.pendingApproval,
+        pendingConfirm: agentEngine.pendingConfirm,
+        effort: agentEngine.effort,
+        effortProfile: agentEngine.effortProfile,
+        runStats: agentEngine.runStats,
         logs: Logger.getLogsHistory(),
         stateVersion: agentEngine.stateVersion,
         bootId: agentEngine.bootId,
@@ -810,7 +823,7 @@ function routeMessage(request, sender, sendResponse) {
           agentEngine.releaseTaskClaim();
           throw new Error('No automatable tab found. ScoutFox cannot script Chrome\'s internal pages (chrome://…) — open a normal website such as https://google.com and try again.');
         }
-        agentEngine.startTask(payload.prompt, tab.id, payload.effort).catch((err) => {
+        agentEngine.startTask(payload.prompt, tab.id, payload.effort, payload.autoApprove ?? false).catch((err) => {
           Logger.error('Background', '[START_TASK_ERROR] Uncaught exception starting task', err);
         });
         sendResponse({ success: true, tabId: tab.id, tabUrl: tab.url, tabTitle: tab.title });
@@ -842,6 +855,32 @@ function routeMessage(request, sender, sendResponse) {
 
   if (action === 'ANSWER_QUESTION') {
     sendResponse(agentEngine.answerQuestion(payload && payload.answer));
+    return true;
+  }
+
+  if (action === 'APPROVE_PLAN') {
+    if (typeof agentEngine.approvePlan === 'function') {
+      agentEngine.approvePlan(payload).then(() => {
+        sendResponse({ success: true });
+      }).catch((err) => {
+        sendResponse({ success: false, error: err.message });
+      });
+    } else {
+      sendResponse({ success: false, error: 'approvePlan is not supported on this engine' });
+    }
+    return true;
+  }
+
+  if (action === 'CONFIRM_ACTION') {
+    if (typeof agentEngine.confirmAction === 'function') {
+      agentEngine.confirmAction(payload && payload.decision, payload && payload.remember).then(() => {
+        sendResponse({ success: true });
+      }).catch((err) => {
+        sendResponse({ success: false, error: err.message });
+      });
+    } else {
+      sendResponse({ success: false, error: 'confirmAction is not supported on this engine' });
+    }
     return true;
   }
 

@@ -146,6 +146,7 @@
     getSnapshot(options = {}) {
       const maxElements = options.maxElements || 120;
       this.elementMap.clear();
+      this.elementInfo = {};
       this.counter = 0;
       this.docId = this.docId || this.generateDocId();
 
@@ -183,7 +184,7 @@
       // re-resolution has never actually run; only the live-reference tier ever worked.
       this.elements = formattedElements;
 
-      return {
+      const result = {
         title,
         url,
         scrollState: { scrollY, pageHeight, viewportHeight },
@@ -192,6 +193,10 @@
         elements: formattedElements,
         pageText: this.extractPageText()
       };
+      if (options && options.withElementInfo) {
+        result.elementInfo = this.elementInfo || {};
+      }
+      return result;
     }
 
     /**
@@ -434,6 +439,62 @@
     }
 
     /**
+     * Determine field kind (password, cc, otp, email, address, search, text)
+     */
+    computeFieldKind(el, tagName, type) {
+      if (tagName !== 'input' && tagName !== 'textarea') return undefined;
+      const lowerType = (type || '').toLowerCase();
+      const name = (el.getAttribute('name') || '').toLowerCase();
+      const id = (el.id || '').toLowerCase();
+      const autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
+      const combined = `${name} ${id} ${autocomplete}`;
+
+      if (lowerType === 'password' || combined.includes('password') || combined.includes('passwort')) return 'password';
+      if (lowerType === 'email' || combined.includes('email') || combined.includes('e-mail')) return 'email';
+      if (/card|cc-number|cvv|cvc|cardnumber|kreditkarte/i.test(combined) || (lowerType === 'tel' && combined.includes('cc'))) return 'cc';
+      if (/otp|2fa|one-time|verification|code|mfa|token/i.test(combined)) return 'otp';
+      if (lowerType === 'search' || /search|suche|query/i.test(combined)) return 'search';
+      if (/address|street|city|zip|postcode|plz|strasse|ort/i.test(combined)) return 'address';
+      return 'text';
+    }
+
+    /**
+     * Determine form kind (search, login, checkout, other)
+     */
+    computeFormKind(el) {
+      const form = typeof el.closest === 'function' ? el.closest('form') : null;
+      if (!form) return undefined;
+      const formRole = (form.getAttribute('role') || '').toLowerCase();
+      const formClass = (typeof form.className === 'string' ? form.className : '').toLowerCase();
+      const formId = (form.id || '').toLowerCase();
+      const formAction = (form.getAttribute('action') || '').toLowerCase();
+      const formAria = (form.getAttribute('aria-label') || '').toLowerCase();
+      const combined = `${formRole} ${formClass} ${formId} ${formAction} ${formAria}`;
+
+      if (formRole === 'search' || /search|suche/i.test(combined)) return 'search';
+      if (/login|signin|anmelden|auth|session/i.test(combined)) return 'login';
+      if (/checkout|kasse|payment|order|bestell/i.test(combined)) return 'checkout';
+      return 'other';
+    }
+
+    /**
+     * Extract destination domain for links
+     */
+    computeHrefDomain(el, tagName) {
+      if (tagName !== 'a' && !el.href) return undefined;
+      try {
+        const href = el.href || el.getAttribute('href');
+        if (!href) return undefined;
+        const currentOrigin = (typeof window !== 'undefined' && window.location && window.location.href) || 'https://localhost';
+        const url = new URL(href, currentOrigin);
+        if (url.protocol === 'http:' || url.protocol === 'https:') {
+          return url.hostname.toLowerCase();
+        }
+      } catch (_) {}
+      return undefined;
+    }
+
+    /**
      * Produce concise element string representation with stable locator descriptors
      */
     getElementSummary(el, id) {
@@ -457,6 +518,11 @@
         ? el.value.slice(0, 40)
         : '';
 
+      const fieldKind = this.computeFieldKind(el, tagName, type);
+      const formKind = this.computeFormKind(el);
+      const hrefDomain = this.computeHrefDomain(el, tagName);
+      const isForbidden = fieldKind === 'password' || fieldKind === 'cc' || fieldKind === 'otp';
+
       let inViewport = true;
       try {
         const rect = el.getBoundingClientRect();
@@ -479,6 +545,12 @@
       if (expanded === true) extraAttrs += ' expanded';
       else if (expanded === false) extraAttrs += ' collapsed';
       if (valuePreview) extraAttrs += ` value="${valuePreview}"`;
+      if (hrefDomain && typeof window !== 'undefined' && window.location && window.location.hostname && hrefDomain !== window.location.hostname.toLowerCase()) {
+        extraAttrs += ` domain="${hrefDomain}"`;
+      }
+      if (isForbidden) {
+        extraAttrs += ' (user only)';
+      }
 
       let labelText = text || ariaLabel || placeholder || 'element';
 
@@ -493,6 +565,15 @@
           name: el.getAttribute('name') || '',
           'data-testid': el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('data-cy') || ''
         }
+      };
+
+      this.elementInfo = this.elementInfo || {};
+      this.elementInfo[id] = {
+        role,
+        label: labelText,
+        formKind,
+        fieldKind,
+        hrefDomain
       };
 
       return {

@@ -43,13 +43,20 @@ export class AgentRunner {
   public history: HistoryEntry[] = [];
   public planSteps: any[] = [];
   public currentPhase = '';
+  public graphLocation: {
+    phase: string;
+    orchestratorNode?: string;
+    workerNode?: string;
+    siteDomain?: string;
+  } = { phase: 'Starting' };
   public pendingQuestion: string | null = null;
-  public pendingApproval: PlanView | null = null;
+  public pendingApproval: any | null = null;
   public pendingConfirm: any | null = null;
   public pauseReason: 'user' | 'llm_failure' | 'worker_restart' | null = null;
   public effort: EffortChoice | null = null;
   public effortProfile: EffortProfile | null = null;
   public runStats: RunStats | null = null;
+  public findings: any[] = [];
 
   public scoutFoxGroupIds = new Map<number, number>();
   public networkBuffers = new Map<number, any[]>();
@@ -339,10 +346,23 @@ export class AgentRunner {
       emit: {
         enterNode: (name) => {
           this.currentPhase = name;
+          const orchestratorNodes = ['plan', 'alloc', 'sched', 'site', 'summary', 'reflect', 'compile', 'offer', 'finalize'];
+          const workerNodes = ['open', 'perceive', 'meter', 'blocked', 'policy', 'risk', 'hold', 'execute', 'verify', 'recover', 'record'];
+          if (orchestratorNodes.includes(name)) {
+            this.graphLocation.orchestratorNode = name;
+            this.graphLocation.phase = name;
+            if (name !== 'site') {
+              this.graphLocation.workerNode = undefined;
+            }
+          } else if (workerNodes.includes(name)) {
+            this.graphLocation.workerNode = name;
+            this.graphLocation.phase = `site:${name}`;
+          }
           this.notifyStateChange();
         },
         setPhase: (text) => {
           this.currentPhase = text;
+          this.graphLocation.phase = text;
           this.notifyStateChange();
         },
       },
@@ -379,9 +399,13 @@ export class AgentRunner {
     this.taskClaimed = false;
   }
 
-  async startTask(userPrompt: string, tabId: number, requestedEffort?: string) {
+  async startTask(userPrompt: string, tabId: number, requestedEffort?: string, autoApprove?: boolean) {
     if (!userPrompt || !userPrompt.trim()) {
       return { success: false, error: 'Cannot start empty prompt.' };
+    }
+
+    if (autoApprove !== undefined) {
+      this.autoApprovePlan = autoApprove;
     }
 
     await this.restorePromise;
@@ -508,7 +532,11 @@ export class AgentRunner {
     this.history = [];
     this.currentTask = '';
     this.planSteps = [];
+    this.findings = [];
     this.status = 'idle';
+    this.pendingApproval = null;
+    this.pendingConfirm = null;
+    this.graphLocation = { phase: 'Starting' };
     if (this.saver?.deleteThread) {
       this.clearPromise = this.saver.deleteThread(this.threadId)
         .then(() => {
@@ -527,12 +555,17 @@ export class AgentRunner {
       history: this.history,
       planSteps: this.planSteps,
       currentPhase: this.currentPhase,
+      graphLocation: this.graphLocation,
       pendingQuestion: this.pendingQuestion,
+      pendingApproval: this.pendingApproval,
+      pendingConfirm: this.pendingConfirm,
       stateVersion: this.stateVersion,
       bootId: this.bootId,
       scoutFoxGroupId: this.scoutFoxGroupId,
       effort: this.effort,
+      effortProfile: this.effortProfile,
       runStats: this.runStats,
+      findings: this.findings,
     };
   }
 
@@ -612,6 +645,7 @@ export class AgentRunner {
           if (values.task !== undefined) this.currentTask = values.task;
           if (values.stepCount !== undefined) this.stepCount = values.stepCount;
           if (values.history !== undefined) this.history = values.history;
+          if (values.findings !== undefined) this.findings = values.findings;
           if (values.effort !== undefined) this.effort = values.effort;
           if (values.effortProfile !== undefined) this.effortProfile = values.effortProfile;
           if (values.runStats !== undefined) this.runStats = values.runStats;
@@ -623,8 +657,14 @@ export class AgentRunner {
               status: values.sites?.[s.id]?.status === 'running' ? 'in_progress' : (values.sites?.[s.id]?.status ?? 'pending'),
             }));
           }
+          if (values.siteIn?.site?.domain) {
+            this.graphLocation.siteDomain = values.siteIn.site.domain;
+          }
         } else {
           // Worker values
+          if (values.siteRun?.spec?.domain) {
+            this.graphLocation.siteDomain = values.siteRun.spec.domain;
+          }
           if (values.history && Array.isArray(values.history)) {
             const seen = new Set(this.history.map((h) => `${h.type}_${(h as any).step}`));
             for (const entry of values.history) {
@@ -685,15 +725,29 @@ export class AgentRunner {
 
       if (interrupt?.kind === 'approve_plan') {
         if (this.autoApprovePlan) {
-          // Auto-approve during P4
           this.pendingApproval = null;
           return new Command({ resume: { kind: 'approve' } });
         }
-        this.pendingApproval = interrupt;
+        const rootValues = snapshot.values ?? {};
+        this.pendingApproval = {
+          kind: 'approve_plan',
+          planMeta: interrupt.planMeta ?? rootValues.planMeta ?? rootValues.plan,
+          budget: rootValues.budget,
+          effortProfile: rootValues.effortProfile ?? this.effortProfile,
+          budgetEstimate: interrupt.budgetEstimate,
+        };
       } else if (interrupt?.kind === 'ask_user') {
         this.pendingQuestion = interrupt.question ?? 'The agent needs more information.';
       } else if (interrupt?.kind === 'confirm_action') {
-        this.pendingConfirm = interrupt;
+        this.pendingConfirm = {
+          kind: 'confirm_action',
+          variant: interrupt.variant,
+          actionSummary: interrupt.actionSummary,
+          elementLabel: interrupt.elementLabel,
+          pageUrl: interrupt.pageUrl,
+          reason: interrupt.reason,
+          targetDomain: interrupt.targetDomain,
+        };
       } else if (interrupt?.kind === 'paused') {
         this.pauseReason = interrupt.reason ?? 'user';
       }
@@ -852,6 +906,9 @@ export class AgentRunner {
         this.history = snapshot.values.history ?? [];
         this.stepCount = snapshot.values.stepCount ?? 0;
         this.currentPhase = snapshot.values.phase ?? '';
+        if (snapshot.values.findings) {
+          this.findings = snapshot.values.findings;
+        }
       }
 
       await this.deriveStatus(snapshot);

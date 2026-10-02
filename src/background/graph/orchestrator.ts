@@ -28,7 +28,7 @@ import { buildGraphPlanSchema } from '../agent/schemas.ts';
 import { computeSiteBase, computeSiteAlloc, computeWorkingTotal, computeUsableBudget } from '../agent/budget.ts';
 import { deduplicateFindings, compileTruthTable, renderTruthTableMarkdown } from '../agent/findings.ts';
 import { buildPlanSystemPrompt, buildPlanUserMessage } from '../agent/prompts.ts';
-import { getEffortProfile, suggestEffortLevel } from '../agent/profile.ts';
+import { getEffortProfile, suggestEffortLevel, calculatePlanEstimate } from '../agent/profile.ts';
 import { buildReflectSystemPrompt, buildReflectUserMessage, parseReflectResponse } from '../agent/reflectPrompt.ts';
 import { Logger } from '../../shared/logger.ts';
 
@@ -301,12 +301,19 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
     }
   }
 
+  const profile = state.effortProfile ?? getEffortProfile(state.effort?.level);
+  const budgetEstimate = calculatePlanEstimate(profile, planMeta.sites.length);
+
   return {
     planMeta,
     sites: { $set: siteMap },
     approvedDomains: Array.from(approved),
     phase: 'approve',
-    pendingHold: { kind: 'approve_plan' },
+    pendingHold: {
+      kind: 'approve_plan',
+      planMeta,
+      budgetEstimate,
+    },
   };
 });
 
@@ -583,6 +590,16 @@ const summaryNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
     mergedFindings = deduplicateFindings(mergedFindings, f);
   }
 
+  // Merge newly approved domains from worker
+  const currentApproved = state.approvedDomains ?? [];
+  const newApproved = siteOut.approvedDomains ?? [];
+  const mergedApproved = [...currentApproved];
+  for (const d of newApproved) {
+    if (!mergedApproved.includes(d)) {
+      mergedApproved.push(d);
+    }
+  }
+
   // Merge blocked sources into state.blocked map
   const blockedUpdates: Record<string, BlockedSource> = {};
   for (const b of siteOut.blocked) {
@@ -599,6 +616,7 @@ const summaryNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
         },
       },
     },
+    approvedDomains: mergedApproved,
     findings: mergedFindings,
     blocked: { $set: blockedUpdates },
     siteSummaries: [summary],
@@ -815,6 +833,7 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
       answer: markdownTable ? `Task was stopped by user.\n\n${markdownTable}` : 'Task was stopped by user.',
       table,
       reason: 'stopped',
+      findings: state.findings,
       runStats,
     };
   } else if (allDone || isStopEarlySuccess) {
@@ -828,6 +847,7 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
       type: 'finish',
       answer,
       ...(table ? { table } : {}),
+      findings: state.findings,
       runStats,
     };
   } else {
@@ -840,6 +860,7 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
       answer,
       table,
       reason: 'stopped_early',
+      findings: state.findings,
       runStats,
     };
   }
