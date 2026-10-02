@@ -126,6 +126,14 @@ export class CDPManager {
   }
 
   /**
+   * Detach debugger from all tracked attached tabs.
+   */
+  async detachAll(): Promise<void> {
+    const tabIds = Array.from(this.attachedTabs.keys());
+    await Promise.allSettled(tabIds.map((tabId) => this.detach(tabId)));
+  }
+
+  /**
    * Send a CDP command to the attached tab.
    */
   async sendCommand(tabId: number, method: string, params: Record<string, unknown> = {}): Promise<any> {
