@@ -85,6 +85,27 @@
     if (typeof hit.contains === 'function' && hit.contains(target)) return true;
     if (hit.shadowRoot && typeof hit.shadowRoot.contains === 'function' && hit.shadowRoot.contains(target)) return true;
     if (hit.tagName === 'IFRAME') return true;
+
+    // Both target and hit are inside the same interactive container (e.g. button, anchor, input, label)
+    const interactiveSel = 'a, button, [role="button"], [role="link"], label, select, input, textarea, summary';
+    if (typeof target.closest === 'function' && typeof hit.closest === 'function') {
+      const targetParent = target.closest(interactiveSel);
+      const hitParent = hit.closest(interactiveSel);
+      if (targetParent && hitParent && (targetParent === hitParent || targetParent.contains(hitParent) || hitParent.contains(targetParent))) {
+        return true;
+      }
+    }
+
+    // Ignore overlay element if it has pointer-events: none
+    if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+      try {
+        const style = window.getComputedStyle(hit);
+        if (style && style.pointerEvents === 'none') {
+          return true;
+        }
+      } catch (_) {}
+    }
+
     return false;
   }
 
@@ -160,6 +181,16 @@
             const role = typeof el.getAttribute === 'function' ? (el.getAttribute('role') || el.type || undefined) : undefined;
             const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
 
+            // Animate visual cursor to target and highlight element
+            if (window.actionExecutor) {
+              if (typeof window.actionExecutor.highlightElement === 'function') {
+                window.actionExecutor.highlightElement(el);
+              }
+              if (typeof window.actionExecutor.animateCursor === 'function') {
+                window.actionExecutor.animateCursor(x, y);
+              }
+            }
+
             sendResponse({ success: true, point: { x, y }, tag, role, text });
           } catch (e) {
             sendResponse({ success: false, error: e.message });
@@ -224,6 +255,20 @@
         setTimeout(checkQuiet, 30);
       };
       setTimeout(checkQuiet, 30);
+      return true;
+    }
+
+    if (action === 'SHOW_CLICK_ANIMATION') {
+      try {
+        const x = payload?.x ?? 0;
+        const y = payload?.y ?? 0;
+        if (window.actionExecutor && typeof window.actionExecutor.showClickEffect === 'function') {
+          window.actionExecutor.showClickEffect(x, y);
+        }
+        sendResponse({ success: true });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
       return true;
     }
 

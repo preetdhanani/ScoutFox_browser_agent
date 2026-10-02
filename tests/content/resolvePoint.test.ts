@@ -115,16 +115,37 @@ test('Hit-testing acceptance logic correctly validates target points', () => {
     if (typeof hit.contains === 'function' && hit.contains(target)) return true;
     if (hit.shadowRoot && typeof hit.shadowRoot.contains === 'function' && hit.shadowRoot.contains(target)) return true;
     if (hit.tagName === 'IFRAME') return true;
+
+    const interactiveSel = 'a, button, [role="button"], [role="link"], label, select, input, textarea, summary';
+    if (typeof target.closest === 'function' && typeof hit.closest === 'function') {
+      const targetParent = target.closest(interactiveSel);
+      const hitParent = hit.closest(interactiveSel);
+      if (targetParent && hitParent && (targetParent === hitParent || targetParent.contains(hitParent) || hitParent.contains(targetParent))) {
+        return true;
+      }
+    }
+
+    if (hit.style && hit.style.pointerEvents === 'none') {
+      return true;
+    }
+
     return false;
   }
 
   const targetBtn = {
     tagName: 'BUTTON',
-    contains: (child: any) => child === innerSpan
+    contains: (child: any) => child === innerSpan,
+    closest: (sel: string) => sel.includes('button') ? targetBtn : null
   };
   const innerSpan = {
     tagName: 'SPAN',
-    contains: () => false
+    contains: () => false,
+    closest: (sel: string) => sel.includes('button') ? targetBtn : null
+  };
+  const siblingIcon = {
+    tagName: 'SVG',
+    contains: () => false,
+    closest: (sel: string) => sel.includes('button') ? targetBtn : null
   };
   const parentDiv = {
     tagName: 'DIV',
@@ -133,6 +154,12 @@ test('Hit-testing acceptance logic correctly validates target points', () => {
   const modalBackdrop = {
     tagName: 'DIV',
     className: 'modal-overlay',
+    contains: () => false
+  };
+  const transparentOverlay = {
+    tagName: 'DIV',
+    className: 'click-shield',
+    style: { pointerEvents: 'none' },
     contains: () => false
   };
   const shadowHost = {
@@ -162,4 +189,10 @@ test('Hit-testing acceptance logic correctly validates target points', () => {
 
   // 6. Foreign obscuring element (e.g. cookie modal)
   assert.equal(isAcceptedHit(targetBtn, modalBackdrop), false);
+
+  // 7. Sibling element sharing the same button interactive container
+  assert.equal(isAcceptedHit(innerSpan, siblingIcon), true);
+
+  // 8. Element with pointer-events: none (transparent overlay)
+  assert.equal(isAcceptedHit(targetBtn, transparentOverlay), true);
 });
