@@ -2,6 +2,29 @@
   "version": 1,
   "defaultLevel": "medium",
   "levels": {
+    "auto": {
+      "level": "auto",
+      "multiplier": 2,
+      "retriesPerAction": 1,
+      "altStrategy": false,
+      "verifyMode": "url+dom",
+      "blockedLadder": ["reload", "mark"],
+      "reflect": "site_end",
+      "maxReplans": 1,
+      "evidence": "snippet",
+      "reservePct": 0.15,
+      "useModelOverrides": false,
+      "softCapAsk": false,
+      "searchDepth": 2,
+      "maxSites": 4,
+      "stepBudgetPerSite": 20,
+      "tokenBudgetPerSite": 25000,
+      "reflectMode": "site_end",
+      "workerPlanning": false,
+      "replanBudgetPerSite": 5,
+      "replanMaxRounds": 1,
+      "screenshotMode": "never"
+    },
     "low": {
       "level": "low",
       "multiplier": 1,
@@ -14,7 +37,16 @@
       "evidence": "url",
       "reservePct": 0.10,
       "useModelOverrides": false,
-      "softCapAsk": false
+      "softCapAsk": false,
+      "searchDepth": 1,
+      "maxSites": 2,
+      "stepBudgetPerSite": 10,
+      "tokenBudgetPerSite": 10000,
+      "reflectMode": "off",
+      "workerPlanning": false,
+      "replanBudgetPerSite": 0,
+      "replanMaxRounds": 0,
+      "screenshotMode": "never"
     },
     "medium": {
       "level": "medium",
@@ -28,7 +60,16 @@
       "evidence": "snippet",
       "reservePct": 0.15,
       "useModelOverrides": false,
-      "softCapAsk": false
+      "softCapAsk": false,
+      "searchDepth": 2,
+      "maxSites": 4,
+      "stepBudgetPerSite": 20,
+      "tokenBudgetPerSite": 25000,
+      "reflectMode": "site_end",
+      "workerPlanning": false,
+      "replanBudgetPerSite": 5,
+      "replanMaxRounds": 1,
+      "screenshotMode": "never"
     },
     "high": {
       "level": "high",
@@ -42,7 +83,39 @@
       "evidence": "second_source",
       "reservePct": 0.20,
       "useModelOverrides": true,
-      "softCapAsk": false
+      "softCapAsk": false,
+      "searchDepth": 3,
+      "maxSites": 6,
+      "stepBudgetPerSite": 30,
+      "tokenBudgetPerSite": 50000,
+      "reflectMode": "site_end_and_failure",
+      "workerPlanning": true,
+      "replanBudgetPerSite": 10,
+      "replanMaxRounds": 2,
+      "screenshotMode": "always"
+    },
+    "max": {
+      "level": "max",
+      "multiplier": 8,
+      "retriesPerAction": 3,
+      "altStrategy": true,
+      "verifyMode": "goal",
+      "blockedLadder": ["reload", "search", "alternate_entry", "mark"],
+      "reflect": "mid_site",
+      "maxReplans": 4,
+      "evidence": "cross_check_all",
+      "reservePct": 0.10,
+      "useModelOverrides": true,
+      "softCapAsk": true,
+      "searchDepth": 4,
+      "maxSites": 8,
+      "stepBudgetPerSite": 50,
+      "tokenBudgetPerSite": 100000,
+      "reflectMode": "mid_site",
+      "workerPlanning": true,
+      "replanBudgetPerSite": 15,
+      "replanMaxRounds": 4,
+      "screenshotMode": "always"
     }
   }
 }

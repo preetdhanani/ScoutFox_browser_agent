@@ -366,5 +366,45 @@ test('orchestratorReflect: allocNode retains budget.used and budget.slack across
   assert.ok(step.budget);
   assert.ok(step.budget.used >= 0);
   assert.ok(step.budget.sites?.s1);
+  assert.equal(step.budget.sites?.s2, undefined, 'Dropped site s2 must be pruned from budget.sites');
   assert.ok(step.budget.sites?.s3);
+  assert.ok(step.budget.reserve > 0, 'Reserve budget must not be drained to 0');
 });
+
+test('orchestratorReflect: Reflect LLM failure gracefully continues existing plan without hold loop', async (t) => {
+  const threadId = 'test-reflect-llm-fail';
+
+  createMockRuntime(threadId, {
+    onReflectCall: () => {
+      throw new Error('LLM call timed out');
+    },
+  });
+  t.after(() => runtimeRegistry.delete(threadId));
+
+  const fakeStorage = createFakeStorage();
+  const saver = new SessionStorageSaver(fakeStorage.connect().session as any);
+  const graph = buildOrchestratorGraph(saver);
+  const config = { configurable: { thread_id: threadId } };
+
+  let step = await graph.invoke(
+    {
+      task: 'Compare laptop price',
+      effort: {
+        requested: 'medium',
+        level: 'medium',
+        suggestedBy: 'user',
+      },
+    },
+    config,
+  );
+
+  if (step.pendingHold?.kind === 'approve_plan') {
+    step = await graph.invoke(new Command({ resume: { kind: 'approve' } }), config);
+  }
+
+  assert.equal(step.runStatus, 'idle');
+  assert.equal(step.sites?.s1?.status, 'done');
+  assert.equal(step.sites?.s2?.status, 'done');
+  assert.ok(step.history.some((h: any) => h.type === 'finish'));
+});
+

@@ -112,7 +112,7 @@ export function summaryRouter(state: AgentStateT): keyof typeof ORCHESTRATOR_ROU
 
 export function reflectRouter(state: AgentStateT): keyof typeof ORCHESTRATOR_ROUTE_MAPS.reflect {
   if (state.ctl?.stopRequested) return 'finalize';
-  if (state.ctl?.pauseRequested || state.lastDecision?.kind === 'llm_failed') return 'hold';
+  if (state.ctl?.pauseRequested) return 'hold';
 
   const decision = state.reflectResult?.decision ?? 'continue';
   if (decision === 'replan') {

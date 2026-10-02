@@ -1,23 +1,9 @@
 // src/background/agent/profile.ts
-// Effort profile loader, heuristic level inference, and budget overage calculations.
+// Effort profile loader and heuristic level inference.
 // Erasable TypeScript (no enums, no parameter properties).
 
 import type { Level, EffortProfile } from '../graph/state.ts';
 import EFFORT_MATRIX_DATA from '../../../shared/effort.json' with { type: 'json' };
-
-export interface OverBudgetEvaluation {
-  isOverBudget: boolean;
-  deficit: number;
-  scale: number;
-  choices: Array<'drop_sites' | 'raise_cap' | 'shrink' | 'lower_level'>;
-}
-
-export interface PlanEstimate {
-  estimatedSteps: number;
-  estimatedSeconds: number;
-  reserveSteps: number;
-  estimatedStepsPerSite: number;
-}
 
 export interface EffortSuggestion {
   level: Level;
@@ -35,7 +21,7 @@ export function loadEffortMatrix(): Record<string, EffortProfile> {
 }
 
 /**
- * Get an EffortProfile by level ('low' | 'medium' | 'high').
+ * Get an EffortProfile by level ('auto' | 'low' | 'medium' | 'high' | 'max').
  * Falls back to 'medium' if unspecified, unknown, or not yet activated.
  */
 export function getEffortProfile(level?: Level | string | null): EffortProfile {
@@ -46,13 +32,13 @@ export function getEffortProfile(level?: Level | string | null): EffortProfile {
     return matrix[normalized];
   }
 
-  // Graceful fallback for xhigh / max until P7b
-  if (normalized === 'xhigh' || normalized === 'max') {
+  // Graceful fallback for xhigh until P7b
+  if (normalized === 'xhigh') {
     const high = matrix.high ?? matrix.medium;
     return {
       ...high,
       level: normalized,
-      multiplier: normalized === 'max' ? 8 : 4,
+      multiplier: 4,
       reservePct: 0.10,
     };
   }
@@ -90,52 +76,5 @@ export function suggestEffortLevel(task: string, siteCount?: number): EffortSugg
   return {
     level: 'medium',
     reason: 'Standard balanced execution profile.',
-  };
-}
-
-/**
- * Evaluate whether planned allocations exceed the hard cap limit.
- */
-export function detectOverBudget(hardCap: number, workingTotal: number): OverBudgetEvaluation {
-  const isOverBudget = workingTotal > hardCap && hardCap > 0;
-  const deficit = isOverBudget ? workingTotal - hardCap : 0;
-  const scale = isOverBudget ? hardCap / workingTotal : 1.0;
-  const choices: Array<'drop_sites' | 'raise_cap' | 'shrink' | 'lower_level'> = isOverBudget
-    ? ['drop_sites', 'raise_cap', 'shrink', 'lower_level']
-    : [];
-
-  return {
-    isOverBudget,
-    deficit,
-    scale,
-    choices,
-  };
-}
-
-/**
- * Calculate step and duration estimates for a plan given an effort profile and site count.
- */
-export function calculatePlanEstimate(
-  profile: EffortProfile,
-  siteCount: number,
-  basePerSite = 10
-): PlanEstimate {
-  const validSiteCount = Math.max(1, siteCount);
-  const multiplier = profile.multiplier || 1;
-  const reservePct = profile.reservePct ?? 0.15;
-
-  const estimatedStepsPerSite = Math.round(basePerSite * multiplier);
-  const totalSiteSteps = estimatedStepsPerSite * validSiteCount;
-  const reserveSteps = Math.round(totalSiteSteps * reservePct);
-  const estimatedSteps = totalSiteSteps + reserveSteps;
-
-  const secPerSite = profile.level === 'high' ? 60 : profile.level === 'low' ? 15 : 30;
-  const estimatedSeconds = validSiteCount * secPerSite;
-
-  return {
-    estimatedSteps,
-    estimatedSeconds,
-    reserveSteps,
-    estimatedStepsPerSite,
   };
 }
