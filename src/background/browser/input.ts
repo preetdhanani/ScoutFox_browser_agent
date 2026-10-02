@@ -125,13 +125,16 @@ export class InputDispatcher {
 
     const resolveRes = await this.resolvePoint(tabId, targetId, docId);
     if (!resolveRes.success) {
-      return {
-        success: false,
-        error: resolveRes.error,
-        stale: resolveRes.stale,
-        obscuredBy: resolveRes.obscuredBy,
-        via: 'cdp'
-      };
+      if (resolveRes.obscuredBy) {
+        return {
+          success: false,
+          error: resolveRes.error,
+          stale: resolveRes.stale,
+          obscuredBy: resolveRes.obscuredBy,
+          via: 'cdp'
+        };
+      }
+      return await this.fallbackToSynthetic(tabId, payload);
     }
 
     // Native <select> elements should not receive CDP clicks to prevent native OS popup lock
@@ -144,11 +147,14 @@ export class InputDispatcher {
     try {
       await this.clickCoordinates(tabId, resolveRes.point.x, resolveRes.point.y, signal);
     } catch (err: any) {
-      return {
-        success: false,
-        error: err.message || 'CDP click failed.',
-        via: 'cdp'
-      };
+      if (signal?.aborted) {
+        return {
+          success: false,
+          error: err.message || 'Action aborted',
+          via: 'cdp'
+        };
+      }
+      return await this.fallbackToSynthetic(tabId, payload);
     }
 
     const effect = await this.safeProbeEnd(tabId);
@@ -322,10 +328,19 @@ export class InputDispatcher {
 
   /**
    * Dispatches mouseMoved, mousePressed, and mouseReleased events at {x, y}.
+   * Triggers visual click ripple in content script and holds mouse button briefly
+   * so event listeners in modern frameworks process the interaction reliably.
    * Ensures mouseReleased is dispatched in a finally block if mousePressed succeeded.
    */
   async clickCoordinates(tabId: number, x: number, y: number, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new Error('Action aborted');
+
+    // Trigger visual cursor ripple in content script
+    try {
+      await this.sendToTab(tabId, { action: 'SHOW_CLICK_ANIMATION', payload: { x, y } });
+    } catch (_) {
+      // Non-fatal if content script does not answer
+    }
 
     await this.cdp.sendCommand(tabId, 'Input.dispatchMouseEvent', {
       type: 'mouseMoved',
@@ -333,6 +348,8 @@ export class InputDispatcher {
       y
     });
 
+    // Realistic hover settle delay (30ms)
+    await new Promise((r) => setTimeout(r, 30));
     if (signal?.aborted) throw new Error('Action aborted');
 
     let mousePressed = false;
@@ -346,6 +363,9 @@ export class InputDispatcher {
         y
       });
       mousePressed = true;
+
+      // Realistic press hold duration (50ms) before release
+      await new Promise((r) => setTimeout(r, 50));
       if (signal?.aborted) throw new Error('Action aborted');
     } finally {
       if (mousePressed) {

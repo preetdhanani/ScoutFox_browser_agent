@@ -31,6 +31,10 @@ test('InputDispatcher: click dispatches CDP mouse sequence and returns via cdp',
             text: 'Submit Order'
           };
         },
+        SHOW_CLICK_ANIMATION: (msg: any) => {
+          sentMessages.push(msg);
+          return { success: true };
+        },
         EFFECT_PROBE_BEGIN: () => ({ success: true }),
         EFFECT_PROBE_END: () => ({ success: true, effect: 'dom_changed' })
       }
@@ -51,6 +55,11 @@ test('InputDispatcher: click dispatches CDP mouse sequence and returns via cdp',
   assert.equal(res.label, 'Submit Order');
   assert.equal(res.effect, 'dom_changed');
   assert.match(res.message || '', /Submit Order/);
+
+  // Check visual click animation message was dispatched
+  const animMsg = sentMessages.find((m) => m.action === 'SHOW_CLICK_ANIMATION');
+  assert.ok(animMsg, 'SHOW_CLICK_ANIMATION message must be dispatched');
+  assert.deepEqual(animMsg.payload, { x: 150, y: 250 });
 
   // Check mouse event sequence: move -> press -> release
   assert.equal(cdpCommands.length, 3);
@@ -304,6 +313,50 @@ test('InputDispatcher: falls back to synthetic when user detached debugger', asy
   const res = await dispatcher.dispatchAction(101, {
     action: 'click',
     element_id: 1
+  });
+
+  assert.equal(res.success, true);
+  assert.equal(res.via, 'synthetic');
+  assert.equal(syntheticCalled, true);
+});
+
+test('InputDispatcher: click falls back to synthetic when CDP click throws', async () => {
+  let syntheticCalled = false;
+
+  const fc = fakeChrome({
+    debugger: {
+      commands: {
+        'Emulation.setFocusEmulationEnabled': {},
+        'Input.dispatchMouseEvent': () => {
+          throw new Error('CDP target crashed');
+        }
+      }
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: [{ result: 800 }] },
+    dom: {
+      101: {
+        RESOLVE_ELEMENT_POINT: () => ({
+          success: true,
+          point: { x: 50, y: 50 },
+          tag: 'button',
+          text: 'Fallback Button'
+        }),
+        EXECUTE_ACTION: () => {
+          syntheticCalled = true;
+          return { success: true, message: 'Synthetic executed' };
+        }
+      }
+    }
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  const dispatcher = new InputDispatcher(cdp);
+
+  const res = await dispatcher.dispatchAction(101, {
+    action: 'click',
+    element_id: 10
   });
 
   assert.equal(res.success, true);
