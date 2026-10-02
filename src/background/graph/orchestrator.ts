@@ -13,6 +13,7 @@ import {
   type HistoryEntry,
   type Offer,
   type PlanMeta,
+  type Predicate,
   type SiteSpec,
   type SiteSummary,
 } from './state.ts';
