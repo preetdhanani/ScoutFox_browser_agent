@@ -24,6 +24,7 @@ import { interruptWithConfig } from './interrupt.ts';
 import { buildGraphPlanSchema } from '../agent/schemas.ts';
 import { computeSiteBase, computeSiteAlloc, computeWorkingTotal, computeUsableBudget } from '../agent/budget.ts';
 import { deduplicateFindings, compileTruthTable, renderTruthTableMarkdown } from '../agent/findings.ts';
+import { buildPlanSystemPrompt, buildPlanUserMessage } from '../agent/prompts.ts';
 
 // ---------------------------------------------------------------------------------------------
 // Orchestrator Node Definitions
@@ -91,14 +92,12 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
     } catch {}
   }
 
-  const prompt = [
-    `USER TASK: "${state.task}"`,
-    `CURRENT BROWSER PAGE: ${currentDomain} (${currentUrl})`,
-    `INSTRUCTIONS: Create an execution plan with up to 4 sites.`,
-    `Classify taskKind as 'research', 'action', or 'answer'.`,
-    `Assign role 'reference' to the primary site, and 'compare' or 'other' to subsequent sites.`,
-    `Extract 1 to 5 data columns to collect (e.g. price, shipping).`,
-  ].join('\n');
+  const system = buildPlanSystemPrompt('initial');
+  const userMessage = buildPlanUserMessage({
+    task: state.task,
+    tabTitle: tabInfo?.title,
+    tabUrl: currentUrl,
+  });
 
   const schema = buildGraphPlanSchema({ mode: 'initial' });
   const stepSignal = runtime.control.stepSignal();
@@ -109,8 +108,8 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
       node: 'plan',
       mode: 'initial',
       role: 'planner',
-      system: 'You are an autonomous web research and action planner. Output JSON adhering to the provided schema.',
-      messages: [{ role: 'user', content: prompt }],
+      system,
+      messages: [{ role: 'user', content: userMessage }],
       schema,
       signal: stepSignal,
     });
@@ -128,6 +127,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
 
   let planMeta: PlanMeta;
   if (parsedPlan && Array.isArray(parsedPlan.sites) && parsedPlan.sites.length > 0) {
+    const taskKind = parsedPlan.task_kind || parsedPlan.taskKind || 'research';
     const columns: string[] = Array.isArray(parsedPlan.columns)
       ? parsedPlan.columns.map((c: string) => String(c).toLowerCase().replace(/[^a-z0-9_]/g, '_')).slice(0, 5)
       : ['value'];
@@ -136,31 +136,66 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
     const sites: SiteSpec[] = parsedPlan.sites.slice(0, 4).map((s: any, idx: number) => {
       const id = `s${idx + 1}`;
       const domain = s.domain || currentDomain;
+      const goalKind = s.goalKind || s.goal_kind || (taskKind === 'action' ? 'do' : 'collect');
+      const rawDoneWhen = s.done_when || s.doneWhen || s.criteria?.doneWhen || s.criteria?.done_when || s.criteria?.type;
+      const doneWhen: 'all_required' | 'any' | 'predicate' =
+        rawDoneWhen === 'predicate' || rawDoneWhen === 'any' || rawDoneWhen === 'all_required'
+          ? rawDoneWhen
+          : (goalKind === 'do' ? 'predicate' : 'all_required');
+
+      let predicate: Predicate | undefined = undefined;
+      if (s.predicate?.type && s.predicate?.value) {
+        predicate = s.predicate;
+      } else if (s.criteria?.predicate?.type && s.criteria?.predicate?.value) {
+        predicate = s.criteria.predicate;
+      } else if (s.check && s.check.type && s.check.type !== 'none' && s.check.value) {
+        predicate = { type: s.check.type, value: String(s.check.value) };
+      }
+
+      const rawFields = s.required_fields || s.requiredFields || s.fields || s.criteria?.fields;
+      let fields: Array<{ name: string; required: boolean }>;
+      if (Array.isArray(rawFields) && rawFields.length > 0) {
+        fields = rawFields.map((f: any) => {
+          if (typeof f === 'string') {
+            return { name: f.toLowerCase().replace(/[^a-z0-9_]/g, '_'), required: true };
+          }
+          return {
+            name: String(f.name || 'value').toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+            required: f.required !== false,
+          };
+        });
+      } else if (doneWhen === 'predicate') {
+        fields = [];
+      } else {
+        fields = columns.map((col) => ({ name: col, required: true }));
+      }
+
       return {
         id,
         name: s.name || domain,
         domain,
         goal: s.goal || state.task,
-        goalKind: s.goalKind || (parsedPlan.taskKind === 'action' ? 'do' : 'collect'),
-        startUrl: s.startUrl || (idx === 0 && currentUrl.startsWith('http') ? currentUrl : undefined),
-        searchQuery: s.searchQuery || `${parsedPlan.searchQuery || state.task} site:${domain}`,
+        goalKind,
+        startUrl: s.startUrl || s.url || (idx === 0 && currentUrl.startsWith('http') ? currentUrl : undefined),
+        searchQuery: s.searchQuery || s.search_query || `${parsedPlan.search_query || parsedPlan.searchQuery || state.task} site:${domain}`,
         role: idx === 0 ? 'reference' : (s.role || 'compare'),
         kind: s.kind || 'store',
         difficulty: (s.difficulty === 1 || s.difficulty === 2 || s.difficulty === 3) ? s.difficulty : 1,
         namedByUser: true,
         criteria: {
-          fields: columns.map((col) => ({ name: col, required: true })),
-          doneWhen: 'all_required' as const,
+          fields,
+          doneWhen,
+          ...(predicate ? { predicate } : {}),
         },
       };
     });
 
     planMeta = {
       version: 1,
-      taskKind: parsedPlan.taskKind || 'research',
+      taskKind,
       columns,
       priceLike,
-      searchQuery: parsedPlan.searchQuery || state.task.slice(0, 40),
+      searchQuery: parsedPlan.search_query || parsedPlan.searchQuery || state.task.slice(0, 40),
       compare: parsedPlan.compare,
       sites,
       source: 'llm',
@@ -392,12 +427,14 @@ const summaryNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
   const unused = Math.max(0, siteAlloc - siteOut.used);
   const currentSlack = state.budget?.slack ?? 0;
   const currentUsed = state.budget?.used ?? 0;
+  const extendedBy = siteOut.extendedBy ?? 0;
+  const nextSlack = Math.max(0, currentSlack - extendedBy) + unused;
 
   const newBudget = state.budget
     ? {
         ...state.budget,
         used: currentUsed + siteOut.used,
-        slack: currentSlack + unused,
+        slack: nextSlack,
         sites: {
           ...state.budget.sites,
           [siteId]: {

@@ -165,7 +165,12 @@ test('routes: worker routers route correctly and match route maps', () => {
   // verifyRouter
   assert.equal(verifyRouter({ ...base, verifyResult: { outcome: 'ok' } } as any), 'perceive');
   assert.equal(verifyRouter({ ...base, verifyResult: { outcome: 'failed' } } as any), 'recover');
-  assert.equal(verifyRouter({ ...base, verifyResult: { outcome: 'stuck' }, siteRun: { stuckLevel: 3 } } as any), 'end_stuck');
+  assert.equal(verifyRouter({ ...base, verifyResult: { outcome: 'stuck' }, siteRun: { stuckLevel: 3 } } as any), 'recover');
+
+  // recoverRouter
+  assert.equal(recoverRouter({ ...base, siteRun: { stuckLevel: 3 } } as any), 'end_stuck');
+  assert.equal(recoverRouter({ ...base, siteRun: { stuckLevel: 2 } } as any), 'end_partial');
+  assert.equal(recoverRouter({ ...base, siteRun: { stuckLevel: 1 } } as any), 'perceive');
 
   // recordRouter
   assert.equal(recordRouter({ ...base, siteRun: { criteriaMet: true } } as any), 'end_done');
