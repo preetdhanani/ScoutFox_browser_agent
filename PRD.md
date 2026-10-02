@@ -55,7 +55,7 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
 ## 3. Next version (planned, decided 2026-09-28, revised 2026-09-29): LangGraph rework
 
 > **Status**: Decided by Prit on 2026-09-28, and revised on 2026-09-29 after his design review.
-> Phases P0a, P0, P1, P2, the answer audit provenance gate with honest finish policy, P3 (real input, CDP trusted events, and perception), and P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch) are built.
+> Phases P0a, P0, P1, P2, the answer audit provenance gate with honest finish policy, P3 (real input, CDP trusted events, and perception), P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch), and P5 (Long-Horizon Worker) are built.
 > Everything in section 2 describes the current code.
 > The target audience and the local-first, small-model niche from section 1 stay the same.
 
@@ -169,7 +169,7 @@ Rebuild the whole agent on LangGraph.js.
 - Graph checkpoints of a subgraph with the custom saver (`SessionStorageSaver`) are verified and built (spike S5 in phase P4).
 
 ### 3.6 Next step
-The design is written and phases P0a, P0, P1, P2, the answer audit provenance gate, P3, and P4 are built.
+The design is written and phases P0a, P0, P1, P2, the answer audit provenance gate, P3, P4, and P5 are built.
 - P0a: constrained decoding for Ollama (see 3.3, item 17).
 - P0 (build foundation, no behaviour change): Vite builds today's JS into `dist/` (`npm run build`), you load `dist/` in Chrome, and CI runs on Node 22.x and 24.x and zips the built `dist/`.
   It also added an opt-in browser smoke test (`npm run test:e2e`) and two test helpers (`fakeChrome` and `fakeStorageSession`).
@@ -186,6 +186,15 @@ The design is written and phases P0a, P0, P1, P2, the answer audit provenance ga
 
 - P3 (Perception and real input): `src/background/browser/cdp.ts` and `input.ts` dispatch CDP trusted events with realistic mouse hold delays, pointer events, visual cursor overlay with ripples, element highlighting, and fallback to synthetic DOM events.
 - P4 (Graph runtime foundation and dual-engine runner): Spike S5 subgraph checkpointing with `SessionStorageSaver`, orchestrator graph (`src/background/graph/orchestrator.ts`), worker subgraph (`src/background/graph/worker.ts`), and `AgentRunner` (`src/background/runner/AgentRunner.ts`) at API parity with `AgentEngine`, selectable via `settings.engine` (`'legacy'` vs `'graph'`).
+- P5 (Long-Horizon Worker): multi-site orchestration and dynamic scheduling in the orchestrator graph with offer synthesis and truth table compilation (`src/background/graph/orchestrator.ts`, `src/background/agent/findings.ts`).
+  Multi-mode worker policy execution (browse, extract, answer, harvest).
+  Light page signature hashing (`PageSig`) and DOM state comparison (`src/background/agent/stuck.ts`).
+  Step and token budgeting with slack recycling across sites (`src/background/agent/budget.ts`).
+  Blocked-site escalation ladder handling challenge/error pages (`src/background/agent/blockedPolicy.ts`).
+  Loop and stuck detection across URL/element/text changes.
+  Failure memory with signature banning (`src/background/agent/failureMemory.ts`).
+  Finding provenance snippet extraction (`src/background/agent/planEvidence.ts`).
+  Default `maxSteps` upgrade from 25 to 250 with one-time storage migration and UI input up to 1,000 (`src/shared/storage.ts`, `sidepanel/sidepanel.html`).
 
 Every phase keeps the tests green, and the graph remains selectable behind `settings.engine` while real-site evaluation and remaining graph features continue.
 
@@ -206,7 +215,7 @@ This is a summary of the design, which still waits for Prit's approval.
 - `npm run check` runs `node --check` on the 7 plain JS source files (see `package.json`).
   The TypeScript files are covered by `npm run typecheck`, which runs `tsc --noEmit` on `src/` (`tsconfig.json`) and on the tests with their helpers (`tests/tsconfig.json`).
 - Today the extension is built with Vite (phase P0): `npm run build` writes `dist/`, and you load `dist/` unpacked in Chrome, not the repo folder.
-  The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P4).
+  The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P5).
   The providers run on LangChain behind `ApiClients` (phase P2).
   The background worker supports both legacy `AgentEngine` and graph `AgentRunner` behind `settings.engine`.
   The legacy engine, content scripts, and side panel are still plain JS ES modules.

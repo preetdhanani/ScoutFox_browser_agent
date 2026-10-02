@@ -338,7 +338,7 @@ Before packaging for the Chrome Web Store:
 
 ## 5. Build Foundation and What Comes Next
 
-> Status: phases P0, P1, P2, P3 (CDP input, perception, visual cursor), and P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch) are built, along with the answer audit gate and honest finish policy.
+> Status: phases P0 through P5 (including P5 Long-Horizon Worker) are built, along with the answer audit gate and honest finish policy.
 > See section 3 of [PRD.md](PRD.md) for architecture and roadmap details.
 
 What is true today:
@@ -346,8 +346,8 @@ What is true today:
 - The manifest and the icons live in `public/`, and the build copies them into `dist/`.
 - `public/manifest.json` requests the `debugger` permission for real CDP input events.
   During a task, Chrome shows a yellow "is debugging this browser" bar, which is expected.
-- The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P4).
-- The providers run on LangChain (phase P2) and the graph runtime bundles LangGraph (phase P4), so the worker bundle is about 4.2 MB, see "Worker Bundle and CSP" in section 3.
+- The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P5).
+- The providers run on LangChain (phase P2) and the graph runtime bundles LangGraph (phases P4-P5), so the worker bundle is about 4.3 MB, see "Worker Bundle and CSP" in section 3.
 - Final answers pass through the answer audit provenance gate and honest finish policy before completion.
 - The background worker supports both legacy `AgentEngine` and graph `AgentRunner` behind `settings.engine` (`'legacy'` vs `'graph'`).
 - The legacy engine (`background/`), the content scripts and the side panel are still plain JavaScript ES modules.
