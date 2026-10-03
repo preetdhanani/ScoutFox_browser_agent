@@ -774,11 +774,10 @@ const recoverNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'r
   const lastFailure = state.lastFailure;
   const retriesPerAction = state.siteIn?.profile?.retriesPerAction ?? 1;
 
-  // Use exec if available, otherwise fallback to pendingAction
-  const action = (exec?.action ?? pending?.action) as any;
+  const action = (lastFailure ? (pending?.action ?? exec?.action) : (exec?.action ?? pending?.action)) as any;
   const verb = action?.action ?? 'unknown';
   const target = action?.element_id ? `[${action.element_id}]` : (action?.url || '');
-  const signature = exec?.signature ?? pending?.signature ?? `${verb}|${target}`;
+  const signature = (lastFailure ? (lastFailure.signature ?? pending?.signature ?? exec?.signature) : (exec?.signature ?? pending?.signature)) ?? `${verb}|${target}`;
 
   let kind: StepFailure['kind'] = 'no_effect';
   let detail = 'Action failed';

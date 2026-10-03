@@ -336,3 +336,54 @@ test('worker risk gate - forbidden action routes to recover and bans signature w
   assert.ok(workerState.siteRun.banned.length > 0, 'Forbidden action should be banned');
   assert.equal(workerState.pendingHold, null, 'Forbidden actions should never enter hold');
 });
+
+test('worker risk gate - reject after prior execution bans denied action, not prior executed action', async () => {
+  const threadId = 'test-worker-risk-reject-prior-exec';
+  let callCount = 0;
+  createMockRuntime(threadId, {
+    llm: {
+      complete: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            text: '{"thought": "nav", "action": "navigate", "url": "https://external-pay.com/pay"}',
+            provider: 'mock',
+            model: 'mock-model',
+            meta: {},
+          };
+        }
+        if (callCount === 2) {
+          return {
+            text: '{"thought": "pay", "action": "click", "elementId": 1}',
+            provider: 'mock',
+            model: 'mock-model',
+            meta: {},
+          };
+        }
+        return {
+          text: '{"thought": "done", "action": "subgoal_done", "subgoal": "checkout"}',
+          provider: 'mock',
+          model: 'mock-model',
+          meta: {},
+        };
+      },
+    },
+  });
+
+  const checkpointer = new MemorySaver();
+  const graph = buildWorkerGraph(checkpointer);
+  const siteIn = makeSiteIn();
+
+  const cfg = { configurable: { thread_id: threadId } };
+  await graph.invoke({ siteIn }, cfg);
+
+  await graph.invoke(new Command({ resume: { kind: 'approve' } }), cfg);
+  await graph.invoke(new Command({ resume: { kind: 'reject' } }), cfg);
+
+  const state = await graph.getState(cfg);
+  const workerState = state.values as WorkerStateT;
+
+  assert.ok(workerState.siteRun, 'siteRun should be populated');
+  assert.ok(workerState.siteRun.banned.includes('click|1|'), 'Denied action [1] must be banned');
+  assert.ok(!workerState.siteRun.banned.some(sig => sig.includes('navigate')), 'Prior executed navigate must not be banned');
+});

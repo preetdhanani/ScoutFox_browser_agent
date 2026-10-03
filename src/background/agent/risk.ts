@@ -163,25 +163,29 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
 
   // 4. RISKY: Purchase / Checkout
   const isCheckoutPage = pageType === 'checkout';
+  const isCheckoutForm = formKind === 'checkout';
+  const isCheckoutContext = isCheckoutPage || isCheckoutForm;
   const hasPurchaseWords = containsAnyWord(label, RISK_DATA.purchaseWords || []);
 
-  if (actionVerb === 'click' && (hasPurchaseWords || isCheckoutPage)) {
+  if (actionVerb === 'click' && (hasPurchaseWords || isCheckoutContext)) {
     return {
       level: 'risky',
       variant: 'purchase',
-      reason: isCheckoutPage
-        ? 'Action targets an active checkout or payment page.'
+      reason: isCheckoutContext
+        ? (isCheckoutPage ? 'Action targets an active checkout or payment page.' : 'Action targets a checkout or payment form.')
         : `Element label contains purchase or order words ("${label}").`,
       actionSummary,
       elementLabel: label || undefined,
     };
   }
 
-  if (isCheckoutPage && (actionVerb === 'type' || actionVerb === 'select_option')) {
+  if (isCheckoutContext && (actionVerb === 'type' || actionVerb === 'select_option' || action.submit || (actionVerb === 'press_key' && action.key === 'Enter'))) {
     return {
       level: 'risky',
       variant: 'purchase',
-      reason: 'Modifying form fields on an active checkout page.',
+      reason: isCheckoutPage
+        ? 'Modifying form fields on an active checkout page.'
+        : 'Modifying form fields in a checkout or payment form.',
       actionSummary,
       elementLabel: label || undefined,
     };
