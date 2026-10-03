@@ -780,6 +780,7 @@ function routeMessage(request, sender, sendResponse) {
         effort: agentEngine.effort,
         effortProfile: agentEngine.effortProfile,
         runStats: agentEngine.runStats,
+        findings: agentEngine.findings,
         logs: Logger.getLogsHistory(),
         stateVersion: agentEngine.stateVersion,
         bootId: agentEngine.bootId,

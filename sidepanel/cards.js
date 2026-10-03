@@ -212,10 +212,8 @@ export function renderActionConfirmationCard(confirm) {
 /**
  * Render Provenance Findings Table
  */
-export function renderProvenanceFindingsTable(findings = [], columns = []) {
+export function renderProvenanceFindingsTable(findings = []) {
   if (!Array.isArray(findings) || findings.length === 0) return '';
-
-  const displayColumns = columns.length > 0 ? columns : ['field', 'value'];
 
   const rowsHtml = findings.map((f, idx) => {
     const qualityClass = f.quality === 'verified' ? 'quality-verified' : f.quality === 'single_source' ? 'quality-single' : 'quality-unverified';

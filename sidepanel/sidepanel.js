@@ -834,7 +834,7 @@ function initEventListeners() {
   }
 
   // Auto-save for all number inputs and toggles
-  ['maxStepsInput', 'delayInput', 'ollamaNumPredictInput', 'llmTimeoutInput', 'badgesToggle', 'effortDefaultSelect'].forEach(id => {
+  ['maxStepsInput', 'delayInput', 'ollamaNumPredictInput', 'llmTimeoutInput', 'badgesToggle', 'effortDefaultSelect', 'plannerModelInput', 'reflectModelInput'].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener('change', autoSaveCurrentForm);
@@ -909,6 +909,8 @@ function initEventListeners() {
   document.getElementById('apiKeyInput').addEventListener('change', autoFetchAndSaveOnKeyInput);
   document.getElementById('apiKeyInput').addEventListener('blur', autoSaveCurrentForm);
   document.getElementById('baseUrlInput').addEventListener('blur', autoSaveCurrentForm);
+  document.getElementById('plannerModelInput')?.addEventListener('blur', autoSaveCurrentForm);
+  document.getElementById('reflectModelInput')?.addEventListener('blur', autoSaveCurrentForm);
   document.getElementById('apiKeyInput').addEventListener('paste', () => {
     setTimeout(async () => {
       await autoSaveCurrentForm();

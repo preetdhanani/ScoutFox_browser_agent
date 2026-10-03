@@ -18,7 +18,7 @@ import { runtimeRegistry, type BrowserPort, type ExecResult, type LlmPort, type 
 import { generateCompletion } from '../llm/index.ts';
 import { inputDispatcher } from '../browser/input.ts';
 import { cdp } from '../browser/cdp.ts';
-import type { EffortChoice, EffortProfile, HistoryEntry, PlanView, RunStats, RunStatus } from '../graph/state.ts';
+import type { EffortChoice, EffortProfile, HistoryEntry, Limits, PlanView, RunStats, RunStatus } from '../graph/state.ts';
 
 function lastRuntimeError(): string | null {
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError) {
@@ -426,6 +426,14 @@ export class AgentRunner {
       const defaultEffort = userSettings?.effortDefault ?? 'auto';
       const requested = (requestedEffort as any) ?? defaultEffort;
 
+      const maxSteps = userSettings?.maxSteps ?? 250;
+      const limits: Limits = {
+        maxSteps,
+        maxSystemActions: maxSteps,
+        maxParseErrorsPerTurn: maxSteps,
+        maxConsecutiveParseErrors: 3,
+      };
+
       await this.drive({
         task: this.currentTask,
         effort: {
@@ -433,6 +441,7 @@ export class AgentRunner {
           level: requested === 'auto' ? 'medium' : requested,
           suggestedBy: requestedEffort ? 'user' : 'default',
         },
+        limits,
       });
       return { success: true };
     } finally {

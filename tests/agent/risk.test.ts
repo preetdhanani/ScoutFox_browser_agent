@@ -109,6 +109,15 @@ test('risk: Purchase actions in German and English are risky', () => {
   });
   assert.equal(pageCheckout.level, 'risky');
   assert.equal(pageCheckout.variant, 'purchase');
+
+  // Any click in checkout form on non-checkout page
+  const formCheckout = evaluateActionRisk({
+    action: { action: 'click', element_id: 11 },
+    elementInfo: { role: 'button', label: 'Continue', formKind: 'checkout' },
+    pageType: 'store',
+  });
+  assert.equal(formCheckout.level, 'risky');
+  assert.equal(formCheckout.variant, 'purchase');
 });
 
 test('risk: Login form submission is risky', () => {

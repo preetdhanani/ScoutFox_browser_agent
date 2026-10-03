@@ -130,7 +130,7 @@ test('cards: renderProvenanceFindingsTable renders findings and snippets', () =>
     },
   ];
 
-  const html = renderProvenanceFindingsTable(findings, ['price']);
+  const html = renderProvenanceFindingsTable(findings);
   assert.ok(html.includes('provenance-findings-container'), 'Should contain table container');
   assert.ok(html.includes('frame.work'), 'Should display site domain');
   assert.ok(html.includes('1.599 EUR'), 'Should display price value');
