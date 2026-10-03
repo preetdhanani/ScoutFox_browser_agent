@@ -48,14 +48,14 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
    Hitting the step budget, an unstructured (non-JSON) model reply, and a finish with no answer are now each reported honestly - as an unfinished run, a distinctly labeled "Unconfirmed answer," or an honest no-answer - instead of looking like a normal completion.
    A new `ask_user` action lets the agent pause with a clarifying question the user can actually answer, via a new answer box in the side panel.
 5. **Glassmorphism SidePanel UI (`sidepanel/`)**: Chrome Side Panel interface with Chat timeline, Provider settings (including a configurable LLM timeout), live DOM debug console, an inline answer box for the agent's clarifying questions, and distinct visual treatment for completed, unconfirmed, and failed/incomplete turns.
-   *Planned (decided 2026-09-28, not built yet):* stays vanilla JS with the same messages, plus a new live graph view that shows the node the agent is in right now.
+   Phase P6 enhances the side panel with vanilla JS event-delegated cards (Plan Approval Card, Action Confirmation Card, Provenance Findings Table), nested live graph breadcrumbs showing the current node, Studio Mono styling, and model overrides.
 
 ---
 
 ## 3. Next version (planned, decided 2026-09-28, revised 2026-09-29): LangGraph rework
 
 > **Status**: Decided by Prit on 2026-09-28, and revised on 2026-09-29 after his design review.
-> Phases P0a, P0, P1, P2, the answer audit provenance gate with honest finish policy, P3 (real input, CDP trusted events, and perception), P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch), and P5 (Long-Horizon Worker) are built.
+> Phases P0a, P0, P1, P2, the answer audit provenance gate with honest finish policy, P3 (real input, CDP trusted events, and perception), P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch), P5 (Long-Horizon Worker with P5d Risk Gate backend), and P6 (UI overhaul for LangGraph) are built.
 > Everything in section 2 describes the current code.
 > The target audience and the local-first, small-model niche from section 1 stay the same.
 
@@ -112,14 +112,14 @@ Rebuild the whole agent on LangGraph.js.
    If the debugger cannot attach (for example, DevTools is open), it falls back to synthetic DOM events.
    The `debugger` permission is present in `public/manifest.json`.
    The debugger detaches after 30 minutes of pause.
-8. **Approve plan first**: the agent shows its plan and the sites it will visit.
+8. **Approve plan first** (built in phase P6): the agent shows its plan and the sites it will visit.
    The user approves once, then it runs (LangGraph `interrupt`).
    The plan card also shows the effort level and an estimate of the steps.
    A new task is refused while another one is paused.
 9. **Build** (the Vite part is built in phase P0, 2026-09-29): TypeScript + Vite (needed anyway to bundle LangGraph for MV3).
    `npm run build` writes `dist/`, and CI zips the built `dist/` instead of the raw folders.
    The TypeScript core in `src/` is built in phase P1, and the rest of the code moves in later phases.
-10. **Side panel**: the UI stays vanilla JS with the same messages, plus a new live graph view that shows the node the agent is in right now.
+10. **Side panel** (overhauled in phase P6): the UI stays vanilla JS with the same messages, plus a new live graph view that shows the node the agent is in right now.
 11. **Python runner**: `python_runner/agent.py` also moves to LangGraph (Python) in this iteration.
 12. **LLM calls**: switch to LangChain chat model packages, replacing `background/apiClients.js`.
     AgentRouter has no LangChain connector.
@@ -139,9 +139,9 @@ Rebuild the whole agent on LangGraph.js.
     Failed attempts are kept in a per-site failure memory that the model sees.
 20. **Replan**: after a site ends, a `reflect` step can continue, replan or stop early.
     Finished sites never change, and a new domain needs the user's approval again.
-21. **Risk gate**: submitting a form, logging in, buying, and leaving the approved sites wait for the user's OK.
+21. **Risk gate** (built in phase P5d): submitting a form, logging in, buying, and leaving the approved sites wait for the user's OK.
     The agent never types passwords, card numbers or one-time codes.
-22. **Provenance**: every value in the final table carries its URL, the time and a page snippet that code found, never one written by the model.
+22. **Provenance** (built in phase P6): every value in the final table carries its URL, the time and a page snippet that code found, never one written by the model.
 23. **Effort levels**: Auto, Low, Medium, High, and Max defined in `shared/effort.json`.
     The side panel exposes segmented controls for Auto, Low, Medium, and High, and Settings configures the default effort level.
     Auto infers Low, Medium, or High via task keyword and target site heuristics.
@@ -171,7 +171,7 @@ Rebuild the whole agent on LangGraph.js.
 - Graph checkpoints of a subgraph with the custom saver (`SessionStorageSaver`) are verified and built (spike S5 in phase P4).
 
 ### 3.6 Next step
-The design is written and phases P0a, P0, P1, P2, the answer audit provenance gate, P3, P4, and P5 are built.
+The design is written and phases P0a, P0, P1, P2, the answer audit provenance gate, P3, P4, P5, and P6 are built.
 - P0a: constrained decoding for Ollama (see 3.3, item 17).
 - P0 (build foundation, no behaviour change): Vite builds today's JS into `dist/` (`npm run build`), you load `dist/` in Chrome, and CI runs on Node 22.x and 24.x and zips the built `dist/`.
   It also added an opt-in browser smoke test (`npm run test:e2e`) and two test helpers (`fakeChrome` and `fakeStorageSession`).
@@ -201,6 +201,14 @@ The design is written and phases P0a, P0, P1, P2, the answer audit provenance ga
   Real LLM reflection in `reflectNode`, reflect prompt builder and parser in `src/background/agent/reflectPrompt.ts` (Phase P5c).
   Plan revision support in `planNode` with monotonic site IDs and `planPrev` archiving, budget preservation in `allocNode`, and early finish recognition in `compileNode`.
   Default `maxSteps` upgrade from 25 to 250 with one-time storage migration and UI input up to 1,000 (`src/shared/storage.ts`, `sidepanel/sidepanel.html`).
+- P5d (Risk Gate Backend): keyword-based heuristic risk classification in `shared/risk.json` and `src/background/agent/risk.ts` (`evaluateActionRisk`).
+  DOM compression enrichment for sensitive field kinds and form classification in `content/domCompressor.js` and `content/content.js`.
+  Worker subgraph integration in `src/background/graph/worker.ts` with `riskNode`, `holdNode`, and `recoverNode` failure memory with action signature banning.
+- P6 (UI Overhaul for LangGraph): interactive Plan Approval Card, Action Confirmation Card, and Provenance Findings Table in `sidepanel/cards.js` using vanilla JavaScript and event delegation.
+  Nested live graph breadcrumbs in `sidepanel/graphStrip.js`.
+  Studio Mono styling overhaul in `sidepanel/sidepanel.css` with `--surface` palette variables.
+  Settings overrides for `plannerModel`, `reflectModel`, and configurable `maxSteps` (up to 1,000) in `sidepanel/sidepanel.js` and `AgentRunner.ts`.
+  State extensions for `findings`, `pendingApproval`, `pendingConfirm`, and `graphLocation` with `APPROVE_PLAN` and `CONFIRM_ACTION` message handling in `background/background.js`.
 
 Every phase keeps the tests green, and the graph remains selectable behind `settings.engine` while real-site evaluation and remaining graph features continue.
 
@@ -221,7 +229,7 @@ This is a summary of the design, which still waits for Prit's approval.
 - `npm run check` runs `node --check` on the 7 plain JS source files (see `package.json`).
   The TypeScript files are covered by `npm run typecheck`, which runs `tsc --noEmit` on `src/` (`tsconfig.json`) and on the tests with their helpers (`tests/tsconfig.json`).
 - Today the extension is built with Vite (phase P0): `npm run build` writes `dist/`, and you load `dist/` unpacked in Chrome, not the repo folder.
-  The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P5).
+  The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P5d).
   The providers run on LangChain behind `ApiClients` (phase P2).
   The background worker supports both legacy `AgentEngine` and graph `AgentRunner` behind `settings.engine`.
   The legacy engine, content scripts, and side panel are still plain JS ES modules.

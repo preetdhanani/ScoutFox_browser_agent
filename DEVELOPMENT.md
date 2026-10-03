@@ -50,7 +50,7 @@ To inspect background service worker output:
 The worker is one bundled file, `background/sw.js`, built from `background/background.js` and the modules it imports (`agentEngine.js`, `apiClients.js` and so on).
 DevTools shows `background/sw.js`.
 The code is not minified, so it stays readable, and the `//#region` comments in it name the original source file of most parts (a few small modules, such as the ones in `src/background/agent/`, sit inside a neighbour's region).
-It is about 3.3 MB because the LangChain provider packages and answer audit are in it, see "Worker Bundle and CSP" in section 3.
+It is about 4.3 MB because the LangChain provider packages, answer audit, and LangGraph runtime are in it, see "Worker Bundle and CSP" in section 3.
 The build also writes sourcemaps next to the files (`sourcemap: 'hidden'`), but they are kept only for `npm run evalscan`, which uses them to name the original file and line of a hit.
 The built files have no `sourceMappingURL` line and the zip has no maps, so DevTools does not load them and debugging works on the built code.
 
@@ -66,7 +66,7 @@ Run the full suite with:
 ```bash
 npm test
 ```
-This runs `node --test` on `tests/**/*.test.js` and `tests/**/*.test.ts` (2844 tests as of this writing).
+This runs `node --test` on `tests/**/*.test.js` and `tests/**/*.test.ts` (2942 tests as of this writing).
 None of it needs a real browser.
 
 ### Syntax Check
@@ -127,7 +127,7 @@ The key is never in the options of a model either: AgentRouter's wire image, whi
 The requests are built by LangChain and the SDKs, so provider tests capture them with a fetch spy (`tests/helpers/llmWire.ts`) instead of stubbing a response object.
 
 ### Worker Bundle and CSP
-The worker bundles the LangChain provider packages, answer audit, and LangGraph runtime, so `background/sw.js` is 4,247 KB unminified (941 KB gzip).
+The worker bundles the LangChain provider packages, answer audit, and LangGraph runtime, so `background/sw.js` is 4,339 KB unminified (966 KB gzip).
 The build prints the size of every file, raw and gzip, and CI runs the build, so a jump in the worker shows in the log.
 Minify stays off.
 Minified, the worker would be 1,432 KB (363 KB gzip) and would start about 13 ms faster, and that is not worth an unreadable `dist/` and a rewrite of the zod check below.
@@ -268,6 +268,33 @@ When `replan` is chosen, `planNode` creates revised plans with monotonic site ID
 `allocNode` preserves budget accounting across replans by crediting unspent allocations from dropped sites, funding new candidate sites, and protecting the reserve pool.
 Comprehensive tests cover profiles and reflection in `tests/agent/profile.test.ts`, `tests/agent/reflectPrompt.test.ts`, `tests/graph/orchestratorEffort.test.ts`, and `tests/graph/orchestratorReflect.test.ts`.
 
+### Risk Gate Backend (Phase P5d)
+The risk gate evaluates proposed actions before execution using deterministic keyword heuristics from `shared/risk.json`.
+Heuristic evaluation avoids LLM latency and nondeterminism for safety-critical checks.
+`evaluateActionRisk` in `src/background/agent/risk.ts` assigns actions to one of three levels:
+- `forbidden`: passwords, payment card numbers, and one-time security codes are rejected immediately and routed to recovery without asking the user.
+- `risky`: purchase or checkout actions (clicks on purchase words or on checkout pages or forms, typing or submitting in checkout contexts), login form submissions, sensitive or personal field entry (emails, addresses, phone numbers), form submissions with destructive or submit words, and unapproved external navigations pause execution in `holdNode` for human confirmation (`confirm_action`).
+- `safe`: ordinary browsing and navigation on approved domains proceed directly to `executeNode`.
+
+DOM compression in `content/domCompressor.js` and `content/content.js` annotates element metadata (`fieldKind`, `formKind`, `elementInfo`) to detect sensitive inputs and forms.
+When an action is denied by the user or fails policy, `recoverNode` in `src/background/graph/worker.ts` records the failure in failure memory and permanently bans that action signature (`verb|target|value`) to prevent retry loops.
+Tests in `tests/agent/risk.test.ts` and `tests/graph/workerRisk.test.ts` cover risk classification, checkout forms, and banned action recovery.
+
+### SidePanel UI Overhaul and LangGraph Cards (Phase P6)
+Phase P6 upgrades the side panel with specialized event-delegated cards and live execution visualization:
+- **Plan Approval Card (`sidepanel/cards.js`)**: renders when the orchestrator enters `approve_plan` hold.
+  It displays planned sites, target fields, effort level selection, and estimated steps and duration, with Approve and Cancel buttons.
+- **Action Confirmation Card (`sidepanel/cards.js`)**: renders when a worker action triggers a risk hold.
+  It shows a variant badge (`purchase`, `login`, `form`, `navigate`), action summary, target domain, an optional "Remember domain" checkbox for external navigation, and Confirm/Deny buttons.
+- **Provenance Findings Table (`sidepanel/cards.js`)**: renders extracted findings with source domain, field name, value, verification status badge, and excerpted evidence snippet.
+- **Nested Live Graph View (`sidepanel/graphStrip.js`)**: renders two-tier breadcrumbs for orchestrator phases (Plan, Alloc, Sched, Site Worker, Summary, Reflect, Compile, Finalize) and worker nodes (Open, Perceive, Meter, Policy, Risk Gate, Execute, Verify, Recover, Record), throttled by `requestAnimationFrame`.
+- **Studio Mono Theme (`sidepanel/sidepanel.css`)**: monospace typography and status indicators, using the `--surface` variable for hover and active states.
+- **Model and Step Overrides**: Settings provides inputs for `plannerModel`, `reflectModel`, and `maxSteps` (up to 1,000 steps).
+  Changes auto-save on change and blur.
+  `AgentRunner.ts` applies `plannerModel` to planner calls, `reflectModel` to reflection calls, and `maxSteps` to run limits.
+- **Message Dispatch**: `background/background.js` handles `APPROVE_PLAN` and `CONFIRM_ACTION` messages from the side panel, forwarding resumes into `AgentRunner`.
+Tests in `tests/sidepanel/cards.test.js` and `tests/runner/agentRunnerCards.test.ts` cover card HTML rendering, event handlers, and runner state synchronization.
+
 ### Test Approach
 `chrome.*` APIs are hand-mocked per test file, not a real browser.
 New tests should use the shared fakes described under "Test Helpers" instead of a new hand-made mock.
@@ -352,7 +379,7 @@ Before packaging for the Chrome Web Store:
 
 ## 5. Build Foundation and What Comes Next
 
-> Status: phases P0 through P5 (including P5 Long-Horizon Worker, P5b Effort Profiles, and P5c Reflect and Replan engine) are built, along with the answer audit gate and honest finish policy.
+> Status: phases P0 through P6 (including P5 Long-Horizon Worker, P5b Effort Profiles, P5c Reflect and Replan engine, P5d Risk Gate backend, and P6 UI Overhaul) are built, along with the answer audit gate and honest finish policy.
 > See section 3 of [PRD.md](PRD.md) for architecture and roadmap details.
 
 What is true today:
@@ -360,7 +387,7 @@ What is true today:
 - The manifest and the icons live in `public/`, and the build copies them into `dist/`.
 - `public/manifest.json` requests the `debugger` permission for real CDP input events.
   During a task, Chrome shows a yellow "is debugging this browser" bar, which is expected.
-- The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P5).
+- The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P5d).
 - The providers run on LangChain (phase P2) and the graph runtime bundles LangGraph (phases P4-P5), so the worker bundle is about 4.3 MB, see "Worker Bundle and CSP" in section 3.
 - Final answers pass through the answer audit provenance gate and honest finish policy before completion.
 - The background worker supports both legacy `AgentEngine` and graph `AgentRunner` behind `settings.engine` (`'legacy'` vs `'graph'`).
