@@ -181,16 +181,22 @@ export class AgentRunner {
     const llm: LlmPort = customLlm ?? {
       complete: async (req) => {
         const settings = await Storage.getSettings();
+        let effectiveSettings = settings;
+        if (req.role === 'planner' && settings.plannerModel) {
+          effectiveSettings = { ...settings, model: settings.plannerModel };
+        } else if (req.role === 'reflect' && settings.reflectModel) {
+          effectiveSettings = { ...settings, model: settings.reflectModel };
+        }
         const chatMessages = req.messages.map((m) => ({ role: m.role, content: m.content }));
-        const text = await generateCompletion(settings, chatMessages, req.system, {
+        const text = await generateCompletion(effectiveSettings, chatMessages, req.system, {
           signal: req.signal,
           schema: req.schema ?? undefined,
           callbacks: req.callbacks as any,
         });
         return {
           text,
-          provider: settings.provider,
-          model: settings.model,
+          provider: effectiveSettings.provider,
+          model: effectiveSettings.model,
           meta: {},
         };
       },
