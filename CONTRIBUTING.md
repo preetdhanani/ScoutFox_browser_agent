@@ -38,10 +38,10 @@ Once it's loaded, open any webpage, open the ScoutFox Side Panel, and test your 
 
 A LangGraph + TypeScript + Vite rework of the agent is underway.
 It is decided.
-Phases P0 through P6 (including Long-Horizon Worker, Risk Gate backend, and SidePanel UI overhaul) are built (see section 3 of [PRD.md](PRD.md) for roadmap details).
+Phases P0 through P7b (including Long-Horizon Worker, Risk Gate backend, SidePanel UI overhaul, default graph engine, and interactive holds) are built (see section 3 of [PRD.md](PRD.md) for roadmap details).
 Today the shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P5d), with their tests.
 The legacy engine, content scripts, and side panel are still plain JavaScript ES modules, and the extension is built with Vite (`npm run build`).
-The background worker supports switching between legacy `AgentEngine` and graph `AgentRunner` behind `settings.engine`.
+The background worker defaults to graph `AgentRunner` (phase P7) while preserving legacy `AgentEngine` behind `settings.engine`.
 During the rework, put new agent logic into graph nodes.
 Do not grow `background/agentEngine.js` with new logic.
 The `node --check` guideline above will change once the rest of the code is TypeScript.

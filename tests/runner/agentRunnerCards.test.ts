@@ -143,3 +143,91 @@ test('AgentRunner - confirmAction clears pendingConfirm and drives graph with de
 
   runner.dispose();
 });
+
+test('AgentRunner - resolveChallenge clears pendingChallengeHelp and drives graph with decision', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const runner = new AgentRunner(101, 1);
+  await runner.restorePromise;
+
+  // Test resolved decision
+  runner.status = 'paused';
+  runner.pendingChallengeHelp = {
+    kind: 'challenge_help',
+    domain: 'shop.test',
+    url: 'https://shop.test/captcha',
+    reason: 'Cloudflare challenge',
+  };
+
+  let drivenInput: any = null;
+  (runner as any).drive = async (cmd: any) => {
+    drivenInput = cmd;
+  };
+
+  await runner.resolveChallenge('resolved');
+
+  assert.equal(runner.pendingChallengeHelp, null, 'resolveChallenge should clear pendingChallengeHelp');
+  assert.equal(runner.status, 'running');
+  assert.equal(drivenInput?.resume?.kind, 'resolved');
+
+  // Test skip decision
+  runner.status = 'paused';
+  runner.pendingChallengeHelp = {
+    kind: 'challenge_help',
+    domain: 'shop.test',
+  };
+
+  await runner.resolveChallenge('skip');
+
+  assert.equal(runner.pendingChallengeHelp, null, 'resolveChallenge should clear pendingChallengeHelp on skip');
+  assert.equal(runner.status, 'running');
+  assert.equal(drivenInput?.resume?.kind, 'skip');
+
+  runner.dispose();
+});
+
+test('AgentRunner - continueBudget clears pendingContinueBudget and drives graph with decision', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const runner = new AgentRunner(101, 1);
+  await runner.restorePromise;
+
+  // Test continue decision with additional steps
+  runner.status = 'paused';
+  runner.pendingContinueBudget = {
+    kind: 'continue_budget',
+    domain: 'shop.test',
+    stepsUsed: 25,
+    reserveBudget: 10,
+  };
+
+  let drivenInput: any = null;
+  (runner as any).drive = async (cmd: any) => {
+    drivenInput = cmd;
+  };
+
+  await runner.continueBudget('continue', 10);
+
+  assert.equal(runner.pendingContinueBudget, null, 'continueBudget should clear pendingContinueBudget');
+  assert.equal(runner.status, 'running');
+  assert.equal(drivenInput?.resume?.kind, 'continue');
+  assert.equal(drivenInput?.resume?.additionalSteps, 10);
+
+  // Test finish decision
+  runner.status = 'paused';
+  runner.pendingContinueBudget = {
+    kind: 'continue_budget',
+    domain: 'shop.test',
+    stepsUsed: 25,
+  };
+
+  await runner.continueBudget('finish');
+
+  assert.equal(runner.pendingContinueBudget, null, 'continueBudget should clear pendingContinueBudget on finish');
+  assert.equal(runner.status, 'running');
+  assert.equal(drivenInput?.resume?.kind, 'finish');
+
+  runner.dispose();
+});

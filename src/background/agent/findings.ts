@@ -173,7 +173,8 @@ export type TruthTableRow = FindingsTable['rows'][number];
 
 /**
  * Compiles final truth table from site specifications and findings.
- * Includes provenance URLs and snippets, plus compare flags against the reference site.
+ * Includes provenance URLs and snippets, compare flags against the reference site,
+ * and cross-checking across multi-source findings for XHigh and Max profiles.
  */
 export function compileTruthTable(
   sites: SiteSpec[],

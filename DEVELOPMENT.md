@@ -255,10 +255,10 @@ npm test
 If an existing engine test finishes with a number or a link, the page it runs on must show it, or the gate correctly refuses the answer.
 
 ### Effort Profiles and Reflection (Phases P5b, P5c)
-Effort profiles are defined in `shared/effort.json` (`auto`, `low`, `medium`, `high`, `max`).
+Effort profiles are defined in `shared/effort.json` (`auto`, `low`, `medium`, `high`, `xhigh`, `max`).
 They configure `searchDepth`, `maxSites`, `stepBudgetPerSite`, `tokenBudgetPerSite`, `reflectMode`, `workerPlanning`, `replanBudgetPerSite`, `replanMaxRounds`, and `screenshotMode`.
 `src/background/agent/profile.ts` loads the matrix and provides heuristic level suggestion (`suggestEffortLevel`) when Auto mode is selected.
-The side panel provides segmented effort controls for Auto, Low, Medium, and High, and Settings stores the user default in `effortDefault`.
+The side panel provides segmented effort controls for Auto, Low, Medium, High, XHigh, and Max, and Settings stores the user default in `effortDefault`.
 An active effort badge in the processing banner displays the running task's level.
 
 Reflection and replanning run between sites in `reflectNode` (`src/background/graph/orchestrator.ts`).
@@ -287,6 +287,8 @@ Phase P6 upgrades the side panel with specialized event-delegated cards and live
 - **Action Confirmation Card (`sidepanel/cards.js`)**: renders when a worker action triggers a risk hold.
   It shows a variant badge (`purchase`, `login`, `form`, `navigate`), action summary, target domain, an optional "Remember domain" checkbox for external navigation, and Confirm/Deny buttons.
 - **Provenance Findings Table (`sidepanel/cards.js`)**: renders extracted findings with source domain, field name, value, verification status badge, and excerpted evidence snippet.
+- **Security Challenge Help Card (`sidepanel/cards.js`)**: renders when a worker encounters a bot challenge or verification screen on high or max effort, offering "I've Solved It" and "Skip Site" buttons.
+- **Continue Budget Card (`sidepanel/cards.js`)**: renders when a worker reaches its soft budget cap on max effort, offering to continue with reserve steps or finish the site.
 - **Nested Live Graph View (`sidepanel/graphStrip.js`)**: renders two-tier breadcrumbs for orchestrator phases (Plan, Alloc, Sched, Site Worker, Summary, Reflect, Compile, Finalize) and worker nodes (Open, Perceive, Meter, Policy, Risk Gate, Execute, Verify, Recover, Record), throttled by `requestAnimationFrame`.
 - **Studio Mono Theme (`sidepanel/sidepanel.css`)**: monospace typography and status indicators, using the `--surface` variable for hover and active states.
 - **Model and Step Overrides**: Settings provides inputs for `plannerModel`, `reflectModel`, and `maxSteps` (up to 1,000 steps).
@@ -382,7 +384,7 @@ Before packaging for the Chrome Web Store:
 
 ## 5. Build Foundation and What Comes Next
 
-> Status: phases P0 through P6 (including P5 Long-Horizon Worker, P5b Effort Profiles, P5c Reflect and Replan engine, P5d Risk Gate backend, and P6 UI Overhaul) are built, along with the answer audit gate and honest finish policy.
+> Status: phases P0 through P7b (including P5 Long-Horizon Worker, P5b Effort Profiles, P5c Reflect and Replan engine, P5d Risk Gate backend, P6 UI Overhaul, P7 Default Graph Engine, and P7b XHigh/Max Profiles and Interactive Holds) are built, along with the answer audit gate and honest finish policy.
 > See section 3 of [PRD.md](PRD.md) for architecture and roadmap details.
 
 What is true today:

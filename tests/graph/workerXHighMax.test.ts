@@ -507,7 +507,46 @@ test('worker soft budget cap hold - finishes site when resumed with finish', asy
 
 test('worker challenge help hold - exits site with partial status when resumed with skip', async () => {
   const threadId = 'test-worker-challenge-skip';
-  createMockRuntime(threadId);
+  createMockRuntime(threadId, {
+    browser: {
+      tabInfo: async () => ({
+        url: 'https://shop.test/captcha',
+        title: 'Attention Required! | Cloudflare',
+        windowId: 1,
+        groupId: 0,
+        status: 'complete',
+      }),
+      snapshot: async () => ({
+        docId: 'doc-cf-1',
+        tabId: 101,
+        url: 'https://shop.test/captcha',
+        domain: 'shop.test',
+        title: 'Attention Required! | Cloudflare',
+        scrollY: 0,
+        pageHeight: 600,
+        viewportHeight: 600,
+        elementCount: 1,
+        refs: [1],
+        elementsText: '[1] checkbox "Verify you are human"',
+        elementInfo: { '1': { role: 'checkbox', label: 'Verify you are human' } },
+        pageText: 'Please verify you are a human to continue to shop.test. Cloudflare Ray ID: 12345',
+        capturedAt: Date.now(),
+      }),
+      pageSig: async () => null,
+      execute: async () => ({ success: true, mode: 'synthetic' } as any),
+      navigate: async () => {},
+      reload: async () => {},
+      goBack: async () => {},
+      waitForTabComplete: async () => {},
+      waitDomQuiet: async () => {},
+      cdp: {
+        ensureAttached: async () => ({ mode: 'synthetic', reason: null }),
+        detachAll: async () => {},
+      },
+      clearBadges: async () => {},
+      isTabInScope: async () => true,
+    },
+  });
 
   try {
     const checkpointer = new MemorySaver();
