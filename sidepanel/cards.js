@@ -120,6 +120,8 @@ export function renderPlanApprovalCard(approval, planSteps = [], effortProfile =
             <button type="button" class="btn-level-chip ${activeLevel === 'low' ? 'active' : ''}" data-level="low">Low (1x)</button>
             <button type="button" class="btn-level-chip ${activeLevel === 'medium' ? 'active' : ''}" data-level="medium">Medium (2x)</button>
             <button type="button" class="btn-level-chip ${activeLevel === 'high' ? 'active' : ''}" data-level="high">High (3x)</button>
+            <button type="button" class="btn-level-chip ${activeLevel === 'xhigh' ? 'active' : ''}" data-level="xhigh">XHigh (4x)</button>
+            <button type="button" class="btn-level-chip ${activeLevel === 'max' ? 'active' : ''}" data-level="max">Max (8x)</button>
           </div>
         </div>
 

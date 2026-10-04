@@ -305,6 +305,12 @@ const meterNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'met
   let exit = siteRun.exit;
   let mode = siteRun.mode;
 
+  // Check soft cap hold for Max level
+  const profile = state.siteIn?.profile;
+  const softCapAsk = Boolean(profile?.softCapAsk);
+  let pendingHold = state.pendingHold;
+  let softCapReached = siteRun.softCapReached ?? false;
+
   // Check 95% threshold and slack pool
   if (alloc > 0 && used >= Math.floor(alloc * 0.95)) {
     const slackAvailable = state.siteIn?.slackAvailable ?? 0;
@@ -312,16 +318,10 @@ const meterNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'met
     if (draw > 0) {
       newAlloc = alloc + draw;
       extendedBy = draw;
-    } else if (!exit) {
+    } else if (!exit && (!softCapAsk || softCapReached)) {
       exit = { status: 'partial', reason: 'Step budget exhausted on this site' };
     }
   }
-
-  // Check soft cap hold for Max level
-  const profile = state.siteIn?.profile;
-  const softCapAsk = profile?.softCapAsk || (profile as any)?.softCapHolds || false;
-  let pendingHold = state.pendingHold;
-  let softCapReached = siteRun.softCapReached ?? false;
 
   if (softCapAsk && alloc > 0 && used >= alloc && !softCapReached) {
     const limits = state.siteIn?.limits;
@@ -451,6 +451,7 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
     pageText: page.pageText,
     elementsText: page.elementsText,
     priceCandidates: page.priceCandidates,
+    correction: siteRun.strategyHint,
   });
 
   const schema = buildPolicySchema({ mode, tier, columns, priceLike, goalKind });
@@ -700,8 +701,14 @@ const holdNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'hold
   }
   if (resumeKind === 'skip') {
     return {
-      resumeRoute: 'recover',
+      resumeRoute: 'end',
       pendingHold: null,
+      siteRun: state.siteRun
+        ? {
+            ...state.siteRun,
+            exit: { status: 'partial', reason: 'User skipped security challenge' },
+          }
+        : null,
       lastFailure: {
         kind: 'blocked',
         reason: 'User skipped security challenge',
@@ -714,7 +721,7 @@ const holdNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'hold
     return {
       resumeRoute: 'perceive',
       pendingHold: null,
-      siteRun: state.siteRun ? { ...state.siteRun, alloc: newAlloc, softCapReached: true } : null,
+      siteRun: state.siteRun ? { ...state.siteRun, alloc: newAlloc, softCapReached: true, exit: undefined } : null,
     };
   }
   if (resumeKind === 'finish') {
