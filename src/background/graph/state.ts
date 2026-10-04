@@ -98,8 +98,6 @@ export interface EffortProfile {         // one level of shared/effort.json; fro
   replanBudgetPerSite?: number;
   replanMaxRounds?: number;
   screenshotMode?: 'never' | 'on_failure' | 'always' | string;
-  midSiteReflection?: boolean;
-  softCapHolds?: boolean;
 }
 export interface EffortChoice {
   requested: 'auto' | Level;             // from START_TASK, else settings.effortDefault

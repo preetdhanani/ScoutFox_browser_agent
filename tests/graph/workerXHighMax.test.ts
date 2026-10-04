@@ -138,8 +138,8 @@ function makeSiteIn(overrides: Partial<SiteIn['site']> = {}, profileOverrides: a
     profile: {
       level: 'xhigh',
       multiplier: 4,
-      midSiteReflection: true,
-      softCapHolds: true,
+      reflect: 'mid_site',
+      softCapAsk: true,
       blockedLadder: ['reload', 'wait_short', 'alt_search', 'alternate_entry', 'ask_user'],
       reservePct: 0.1,
       ...profileOverrides,
@@ -166,7 +166,7 @@ function makeSiteIn(overrides: Partial<SiteIn['site']> = {}, profileOverrides: a
   };
 }
 
-test('worker mid-site reflection - triggers at 50% budget when profile has midSiteReflection', async () => {
+test('worker mid-site reflection - triggers at 50% budget when profile has mid_site reflection', async () => {
   const threadId = 'test-worker-midsite-reflect';
   let reflectCalled = false;
   createMockRuntime(threadId, {
@@ -377,7 +377,7 @@ test('worker soft budget cap hold - pauses at budget cap and extends on continue
   try {
     const checkpointer = new MemorySaver();
     const worker = buildWorkerGraph(checkpointer);
-    const siteIn = makeSiteIn({}, { softCapAsk: true, softCapHolds: true });
+    const siteIn = makeSiteIn({}, { softCapAsk: true });
 
     const cfg = { configurable: { thread_id: threadId } };
     // Start with used = 20, alloc = 20, slackAvailable = 0, softCapReached = false
@@ -448,7 +448,7 @@ test('worker soft budget cap hold - finishes site when resumed with finish', asy
   try {
     const checkpointer = new MemorySaver();
     const worker = buildWorkerGraph(checkpointer);
-    const siteIn = makeSiteIn({}, { softCapAsk: true, softCapHolds: true });
+    const siteIn = makeSiteIn({}, { softCapAsk: true });
 
     const cfg = { configurable: { thread_id: threadId } };
     await worker.invoke(
@@ -504,3 +504,93 @@ test('worker soft budget cap hold - finishes site when resumed with finish', asy
     runtimeRegistry.delete(threadId);
   }
 });
+
+test('worker challenge help hold - exits site with partial status when resumed with skip', async () => {
+  const threadId = 'test-worker-challenge-skip';
+  createMockRuntime(threadId);
+
+  try {
+    const checkpointer = new MemorySaver();
+    const worker = buildWorkerGraph(checkpointer);
+    const siteIn = makeSiteIn({}, {
+      blockedLadder: ['ask_user'],
+    });
+
+    const cfg = { configurable: { thread_id: threadId } };
+    await worker.invoke({ siteIn }, cfg);
+
+    const state = await worker.getState(cfg);
+    assert.ok(state.tasks.some(t => t.interrupts && t.interrupts.length > 0));
+    const hold = (state.values as WorkerStateT).pendingHold;
+    assert.equal(hold?.kind, 'challenge_help');
+
+    // Resume with 'skip'
+    const finalState = await worker.invoke(new Command({ resume: { kind: 'skip' } }), cfg) as WorkerStateT;
+    const out = buildSiteOut(finalState);
+    assert.equal(out.status, 'partial');
+    assert.ok(out.reason.includes('skipped'));
+  } finally {
+    runtimeRegistry.delete(threadId);
+  }
+});
+
+test('worker soft budget cap hold - allows reaching alloc at 95% budget when softCapAsk enabled', async () => {
+  const threadId = 'test-worker-budget-95-percent';
+  createMockRuntime(threadId);
+
+  try {
+    const checkpointer = new MemorySaver();
+    const worker = buildWorkerGraph(checkpointer);
+    const siteIn = makeSiteIn({}, { softCapAsk: true });
+
+    const cfg = { configurable: { thread_id: threadId } };
+    // Start with used = 19, alloc = 20 (95% budget)
+    await worker.invoke(
+      {
+        siteIn,
+        siteRun: {
+          siteId: 'site-xhigh-1',
+          spec: siteIn.site,
+          tabId: 101,
+          alloc: 20,
+          used: 19,
+          extendedBy: 0,
+          meterMode: 'normal',
+          mode: 'browse',
+          pageSigs: [],
+          actionSigs: [],
+          failureMemory: [],
+          banned: [],
+          blockedHits: 0,
+          ladder: { waits: 0, reloads: 0, searchTried: false, searchEngine: null },
+          stuckLevel: 0,
+          userAnswers: [],
+          findings: [],
+          criteriaMet: false,
+          suppressExtract: [],
+          visited: [],
+          blockedNew: [],
+          approvedNew: [],
+          anomalies: [],
+          lastProgressStep: 0,
+          consecutiveParseErrors: 0,
+          parseErrors: 0,
+          everParsedOk: true,
+          systemActions: 0,
+          modelCalls: 0,
+          cdp: { attached: false, mode: 'synthetic', cdpUrl: null },
+          midSiteReflected: true,
+          softCapReached: false,
+        } as any,
+      },
+      cfg
+    );
+
+    const state = await worker.getState(cfg);
+    const values = state.values as WorkerStateT;
+    assert.notEqual(values.siteRun?.exit?.status, 'partial');
+  } finally {
+    runtimeRegistry.delete(threadId);
+  }
+});
+

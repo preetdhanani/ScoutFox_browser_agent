@@ -230,14 +230,15 @@ export function meterRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MAPS
 
   const alloc = state.siteRun?.alloc ?? 10;
   const used = state.siteRun?.used ?? 0;
+  const softCapAsk = Boolean(state.siteIn?.profile?.softCapAsk);
+  const softCapReached = Boolean(state.siteRun?.softCapReached);
   if (alloc > 0 && used >= Math.floor(alloc * 0.95)) {
-    return 'end_partial';
+    if (!softCapAsk || softCapReached || used >= alloc) {
+      return 'end_partial';
+    }
   }
 
-  const isMidSite =
-    state.siteIn?.profile?.reflect === 'mid_site' ||
-    state.siteIn?.profile?.reflectMode === 'mid_site' ||
-    Boolean(state.siteIn?.profile?.midSiteReflection);
+  const isMidSite = state.siteIn?.profile?.reflect === 'mid_site';
   if (isMidSite && alloc > 0 && used >= Math.floor(alloc * 0.5) && !state.siteRun?.midSiteReflected) {
     return 'worker_reflect';
   }

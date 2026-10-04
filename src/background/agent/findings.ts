@@ -179,7 +179,7 @@ export function compileTruthTable(
   sites: SiteSpec[],
   findings: Finding[],
   compare?: { reference_domain: string; field: string; threshold_pct: number } | null,
-  crossCheck?: 'none' | 'cross_check_key' | 'cross_check_all' | { mode?: string; varianceThresholdPct?: number }
+  crossCheck?: 'none' | 'cross_check_key' | 'cross_check_all'
 ): FindingsTable {
   const allColumns = new Set<string>();
   for (const s of sites) {
@@ -267,8 +267,8 @@ export function compileTruthTable(
   });
 
   // Cross-checking across sources for XHigh (cross_check_key) and Max (cross_check_all)
-  const checkMode = typeof crossCheck === 'string' ? crossCheck : (crossCheck?.mode ?? 'none');
-  const varianceThreshold = (typeof crossCheck === 'object' && crossCheck?.varianceThresholdPct) ? crossCheck.varianceThresholdPct : 20;
+  const checkMode = crossCheck ?? 'none';
+  const varianceThreshold = 20;
 
   if (checkMode === 'cross_check_key' || checkMode === 'cross_check_all') {
     const colsToCheck = checkMode === 'cross_check_key'
