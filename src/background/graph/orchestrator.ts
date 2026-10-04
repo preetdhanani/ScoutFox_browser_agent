@@ -797,7 +797,8 @@ const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
         }
       : undefined;
 
-    table = compileTruthTable(state.planMeta.sites, state.findings ?? [], compareOpt);
+    const evidenceMode = (state.effortProfile?.evidence ?? (state.effort as any)?.profile?.evidence) as any;
+    table = compileTruthTable(state.planMeta.sites, state.findings ?? [], compareOpt, evidenceMode);
     markdownTable = renderTruthTableMarkdown(table);
   }
 

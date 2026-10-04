@@ -175,10 +175,16 @@ What will change for you:
   A checklist step is marked done only when its goal is really met.
 * **Blocked sites are skipped**: if a site shows a challenge or error page again and again, the agent marks it blocked and moves on.
   The result shows what it found and which sources were blocked, instead of retrying forever.
-* **Effort levels**: you pick Auto, Low, Medium or High before a task (Medium is the default).
+* **Effort levels (updated in phase P7b)**: you pick Auto, Low, Medium, High, XHigh, or Max before a task (Medium is the default).
   Auto selects an effort level from task keywords and target sites.
   You can also set the default effort in Settings, and an active badge shows the current effort during execution.
   A higher level gives each site more steps, more retries and stricter checks, and it takes longer.
+  XHigh adds multi-site key field cross-checking and 4x step budgets.
+  Max adds full-field cross-checking, interactive bot challenge assistance, budget soft-cap holds, and mid-site reflection.
+* **Interactive human assistance (built in phase P7b)**: when encountering bot verification screens or reaching soft budget limits, the agent shows Challenge Help or Continue Budget cards.
+  You can solve the captcha directly in the tab and continue, or skip to other sources.
+* **Cross-checking and dispute flags (built in phase P7b)**: findings across multiple websites are compared for numerical variance (>20%) and textual consistency.
+  Conflicting or deviating findings are marked with dispute notes and downgraded to unverified status.
 * **Reflection and replanning**: after each site finishes, the agent can reflect on findings to continue, stop early when goals are met, or replan alternative sites.
 * **One worker per site**: every website is handled on its own, with its own step budget.
   The result says which sites are done, partial or blocked.
@@ -188,19 +194,21 @@ What will change for you:
   The agent never types passwords, card numbers or one-time codes.
 * **Sources for every number (built in phase P6)**: each value in the Provenance Findings Table links to its page, with verification status and a snippet of the evidence text.
 * **Live graph view (built in phase P6)**: the side panel displays a nested live graph breadcrumb strip that shows which step of the graph the agent is in right now.
+* **Default graph engine (built in phase P7)**: the LangGraph engine is now the default engine for all new tasks.
+  You can switch back to the legacy engine anytime in Settings.
 * **Python runner too**: `python_runner/agent.py` also moves to LangGraph (Python).
 * **LangSmith tracing**: opt-in in Settings, off by default.
 * **Local models keep working**: small local Ollama models stay supported.
-* **Architecture rework (built in phases P0-P6)**: the project now has a Vite build step.
+* **Architecture rework (built in phases P0-P7b)**: the project now has a Vite build step.
   You run `npm run build` and load the `dist/` folder in Chrome, as in the Quick Setup above.
   The shared core is TypeScript (phase P1).
   Providers use LangChain clients behind the API client surface (phase P2).
   Final answers are audited against visited page evidence before completion.
   Real clicks run through Chrome debugger (CDP) trusted events with visual cursor animation and fallback (phase P3).
-  The LangGraph runtime foundation and AgentRunner are available behind `settings.engine` (phase P4).
+  The LangGraph runtime foundation and AgentRunner are the primary engine (phases P4 and P7).
   Long-horizon multi-site orchestration, dynamic scheduling, multi-mode worker policy, budgeting with slack recycling, blocked escalation ladders, loop/stuck detection, effort profiles, and LLM reflection with plan revisions are available in the graph engine (phase P5).
   Deterministic keyword-based risk gating and banned action recovery protect against hazardous executions (phase P5d).
-  The side panel UI features interactive Plan Approval, Action Confirmation, and Provenance Findings cards with Studio Mono styling and live graph breadcrumbs (phase P6).
+  The side panel UI features interactive Plan Approval, Action Confirmation, Security Challenge Help, Continue Budget, and Provenance Findings cards with Studio Mono styling and live graph breadcrumbs (phases P6 and P7b).
   The legacy engine, content scripts, and side panel core are still plain JavaScript, and they move in later phases.
 
 See [PRD.md](PRD.md) for the details.

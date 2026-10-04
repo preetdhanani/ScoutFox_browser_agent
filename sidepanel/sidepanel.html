@@ -126,6 +126,8 @@
               <button type="button" class="effort-btn" data-effort="low" title="Fast single-pass lookup (1x budget, 0 retries)">Low</button>
               <button type="button" class="effort-btn" data-effort="medium" title="Balanced multi-site depth (2x budget, 1 retry)">Medium</button>
               <button type="button" class="effort-btn" data-effort="high" title="Thorough investigation (3x budget, 2 retries)">High</button>
+              <button type="button" class="effort-btn" data-effort="xhigh" title="Deep multi-source research (4x budget, cross-checking)">XHigh</button>
+              <button type="button" class="effort-btn" data-effort="max" title="Maximum effort (8x budget, human escalation)">Max</button>
             </div>
           </div>
 
@@ -254,6 +256,8 @@
               <option value="medium">Medium (2x budget, 1 retry - Recommended)</option>
               <option value="low">Low (1x budget, 0 retries - Fast)</option>
               <option value="high">High (3x budget, 2 retries - Thorough)</option>
+              <option value="xhigh">XHigh (4x budget, cross-checking)</option>
+              <option value="max">Max (8x budget, human escalation)</option>
             </select>
             <span class="subtext-hint">Default effort used when Auto mode resolves or when no level is explicitly chosen.</span>
           </div>

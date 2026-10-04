@@ -14,14 +14,16 @@ test('profile: loadEffortMatrix loads valid profiles from shared/effort.json', (
   assert.ok(matrix.low, 'Should include low profile');
   assert.ok(matrix.medium, 'Should include medium profile');
   assert.ok(matrix.high, 'Should include high profile');
+  assert.ok(matrix.xhigh, 'Should include xhigh profile');
   assert.ok(matrix.max, 'Should include max profile');
 
   assert.equal(matrix.low.multiplier, 1);
   assert.equal(matrix.medium.multiplier, 2);
   assert.equal(matrix.high.multiplier, 3);
+  assert.equal(matrix.xhigh.multiplier, 4);
   assert.equal(matrix.max.multiplier, 8);
 
-  for (const lvl of ['auto', 'low', 'medium', 'high', 'max']) {
+  for (const lvl of ['auto', 'low', 'medium', 'high', 'xhigh', 'max']) {
     const prof = matrix[lvl];
     assert.ok(prof, `Profile ${lvl} must exist`);
     assert.equal(typeof prof.searchDepth, 'number');
@@ -67,26 +69,34 @@ test('profile: getEffortProfile resolves known and unknown levels safely', () =>
   assert.equal(high.searchDepth, 3);
   assert.equal(high.maxSites, 6);
 
+  const xhigh = getEffortProfile('xhigh');
+  assert.equal(xhigh.level, 'xhigh');
+  assert.equal(xhigh.multiplier, 4);
+  assert.deepEqual(xhigh.blockedLadder, ['reload', 'search', 'alternate_entry', 'mark']);
+  assert.equal(xhigh.reservePct, 0.10);
+  assert.equal(xhigh.evidence, 'cross_check_key');
+
   const max = getEffortProfile('max');
   assert.equal(max.level, 'max');
   assert.equal(max.multiplier, 8);
+  assert.deepEqual(max.blockedLadder, ['reload', 'search', 'alternate_entry', 'ask_user', 'mark']);
   assert.equal(max.reservePct, 0.10);
-  assert.equal(max.searchDepth, 4);
-  assert.equal(max.maxSites, 8);
+  assert.equal(max.evidence, 'cross_check_all');
+  assert.equal(max.reflect, 'mid_site');
+  assert.equal(max.softCapAsk, true);
 
   // Fallback for null / undefined / unknown
   const fallback = getEffortProfile(null);
   assert.equal(fallback.level, 'medium');
   const unknown = getEffortProfile('nonexistent' as any);
   assert.equal(unknown.level, 'medium');
-
-  // Extended levels
-  const xhigh = getEffortProfile('xhigh');
-  assert.equal(xhigh.level, 'xhigh');
-  assert.equal(xhigh.multiplier, 4);
 });
 
 test('profile: suggestEffortLevel heuristics identify query intent', () => {
+  const exhaustiveQuery = suggestEffortLevel('Exhaustively search every store for lowest graphics card price');
+  assert.equal(exhaustiveQuery.level, 'max');
+  assert.ok(exhaustiveQuery.reason.includes('exhaustive'));
+
   const compQuery = suggestEffortLevel('Compare the price of Framework Laptop 16 across Amazon and BestBuy');
   assert.equal(compQuery.level, 'high');
   assert.ok(compQuery.reason.includes('comparison'));

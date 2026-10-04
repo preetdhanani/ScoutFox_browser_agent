@@ -11,6 +11,7 @@ export interface EffortSuggestion {
 }
 
 const COMPARISON_KEYWORDS = /\b(compare|cheapest|best price|lowest price|across|all stores|diff|vs|versus|find every|comprehensive|deep search|multi-site)\b/i;
+const EXHAUSTIVE_KEYWORDS = /\b(exhaustive|exhaustively|deepest|maximum effort|every single|all possible|ultra|highest effort)\b/i;
 const SIMPLE_KEYWORDS = /\b(what is|who is|quick|simple|current time|weather in|just find|read page|summarize this page)\b/i;
 
 /**
@@ -21,7 +22,7 @@ export function loadEffortMatrix(): Record<string, EffortProfile> {
 }
 
 /**
- * Get an EffortProfile by level ('auto' | 'low' | 'medium' | 'high' | 'max').
+ * Get an EffortProfile by level ('auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max').
  * Falls back to 'medium' if unspecified, unknown, or not yet activated.
  */
 export function getEffortProfile(level?: Level | string | null): EffortProfile {
@@ -32,17 +33,6 @@ export function getEffortProfile(level?: Level | string | null): EffortProfile {
     return matrix[normalized];
   }
 
-  // Graceful fallback for xhigh until P7b
-  if (normalized === 'xhigh') {
-    const high = matrix.high ?? matrix.medium;
-    return {
-      ...high,
-      level: normalized,
-      multiplier: 4,
-      reservePct: 0.10,
-    };
-  }
-
   return matrix[EFFORT_MATRIX_DATA.defaultLevel as Level] ?? matrix.medium;
 }
 
@@ -51,6 +41,13 @@ export function getEffortProfile(level?: Level | string | null): EffortProfile {
  */
 export function suggestEffortLevel(task: string, siteCount?: number): EffortSuggestion {
   const trimmed = (task || '').trim();
+
+  if (EXHAUSTIVE_KEYWORDS.test(trimmed)) {
+    return {
+      level: 'max',
+      reason: 'Task keywords suggest exhaustive deep research or maximum effort.',
+    };
+  }
 
   if (siteCount !== undefined && siteCount >= 4) {
     return {
@@ -100,7 +97,7 @@ export function calculatePlanEstimate(
   const reserveSteps = Math.round(totalSiteSteps * reservePct);
   const estimatedSteps = totalSiteSteps + reserveSteps;
 
-  const secPerSite = profile.level === 'high' ? 60 : profile.level === 'low' ? 15 : 30;
+  const secPerSite = profile.level === 'max' ? 120 : profile.level === 'xhigh' ? 90 : profile.level === 'high' ? 60 : profile.level === 'low' ? 15 : 30;
   const estimatedSeconds = count * secPerSite;
 
   return {

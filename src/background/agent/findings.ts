@@ -178,7 +178,8 @@ export type TruthTableRow = FindingsTable['rows'][number];
 export function compileTruthTable(
   sites: SiteSpec[],
   findings: Finding[],
-  compare?: { reference_domain: string; field: string; threshold_pct: number } | null
+  compare?: { reference_domain: string; field: string; threshold_pct: number } | null,
+  crossCheck?: 'none' | 'cross_check_key' | 'cross_check_all' | { mode?: string; varianceThresholdPct?: number }
 ): FindingsTable {
   const allColumns = new Set<string>();
   for (const s of sites) {
@@ -264,6 +265,67 @@ export function compileTruthTable(
       flags,
     };
   });
+
+  // Cross-checking across sources for XHigh (cross_check_key) and Max (cross_check_all)
+  const checkMode = typeof crossCheck === 'string' ? crossCheck : (crossCheck?.mode ?? 'none');
+  const varianceThreshold = (typeof crossCheck === 'object' && crossCheck?.varianceThresholdPct) ? crossCheck.varianceThresholdPct : 20;
+
+  if (checkMode === 'cross_check_key' || checkMode === 'cross_check_all') {
+    const colsToCheck = checkMode === 'cross_check_key'
+      ? (columns.includes('price') ? ['price'] : (columns.length > 0 ? [columns[0]] : []))
+      : columns;
+
+    for (const col of colsToCheck) {
+      const validCells: Array<{ row: typeof rows[0]; cell: TableCell; numAmount: number | null; textVal: string }> = [];
+      for (const row of rows) {
+        const cell = row.cells[col];
+        if (cell && cell.value) {
+          const numAmount = parsePrice(cell.value).amount ?? (Number.isFinite(Number(cell.value)) ? Number(cell.value) : null);
+          const textVal = cell.value.trim().toLowerCase();
+          validCells.push({ row, cell, numAmount, textVal });
+        }
+      }
+
+      if (validCells.length >= 2) {
+        const isNumeric = validCells.every((v) => v.numAmount !== null);
+        if (isNumeric) {
+          const refItem = validCells.find((v) => v.row.role === 'reference');
+          let baseline = refItem?.numAmount;
+          if (baseline === undefined || baseline === null || baseline <= 0) {
+            const nums = validCells.map((v) => v.numAmount!).sort((a, b) => a - b);
+            baseline = nums[Math.floor(nums.length / 2)];
+          }
+
+          if (baseline && baseline > 0) {
+            for (const item of validCells) {
+              const diffPct = ((item.numAmount! - baseline) / baseline) * 100;
+              if (Math.abs(diffPct) > varianceThreshold) {
+                const sign = diffPct > 0 ? '+' : '';
+                const disputeFlag = `disputed (${sign}${diffPct.toFixed(1)}% vs baseline)`;
+                item.cell.flag = item.cell.flag ? `${item.cell.flag}, ${disputeFlag}` : disputeFlag;
+                item.cell.quality = 'unverified';
+                if (!item.row.flags.includes(disputeFlag)) {
+                  item.row.flags.push(disputeFlag);
+                }
+              }
+            }
+          }
+        } else {
+          const textSet = new Set(validCells.map((v) => v.textVal));
+          if (textSet.size > 1) {
+            for (const item of validCells) {
+              const disputeFlag = 'disputed (mismatch)';
+              item.cell.flag = item.cell.flag ? `${item.cell.flag}, ${disputeFlag}` : disputeFlag;
+              item.cell.quality = 'unverified';
+              if (!item.row.flags.includes(disputeFlag)) {
+                item.row.flags.push(disputeFlag);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 
   return { columns, rows, cheapest, gaps: [] };
 }

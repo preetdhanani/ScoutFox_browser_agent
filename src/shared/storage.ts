@@ -86,7 +86,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoScroll: true,
   theme: 'system',
   systemInstructions: 'You are ScoutFox, an autonomous web browsing AI agent. Your goal is to help the user complete tasks on the web efficiently and accurately.',
-  engine: 'legacy',
+  engine: 'graph',
   effortDefault: 'medium',
   plannerModel: '',
   reflectModel: ''

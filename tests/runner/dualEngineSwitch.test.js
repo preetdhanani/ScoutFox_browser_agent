@@ -114,6 +114,7 @@ ApiClients.generateCompletion = async (settings, messages, systemPrompt) => {
   return JSON.stringify({ action: 'finish', answer: 'Task complete', reason: 'Done' });
 };
 
+mock.chrome.storage.local.set({ agent_settings: { engine: 'legacy' } });
 await import('../../background/background.js');
 await new Promise((r) => setTimeout(r, 30));
 

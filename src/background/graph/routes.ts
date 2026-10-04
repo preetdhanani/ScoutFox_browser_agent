@@ -155,6 +155,11 @@ export const WORKER_ROUTE_MAPS = {
     perceive: 'perceive',
     blocked: 'blocked',
     end_partial: END,
+    worker_reflect: 'worker_reflect',
+    policy: 'policy',
+  },
+  worker_reflect: {
+    end_stopped: END,
     policy: 'policy',
   },
   blocked: {
@@ -210,7 +215,7 @@ export const WORKER_ROUTE_MAPS = {
 
 export function meterRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MAPS.meter {
   if (state.ctl?.stopRequested) return 'end_stopped';
-  if (state.ctl?.pauseRequested) return 'hold';
+  if (state.ctl?.pauseRequested || state.pendingHold) return 'hold';
 
   if (state.perceiveError) {
     if (state.perceiveError.terminal) return 'end_failed';
@@ -229,15 +234,28 @@ export function meterRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MAPS
     return 'end_partial';
   }
 
+  const isMidSite =
+    state.siteIn?.profile?.reflect === 'mid_site' ||
+    state.siteIn?.profile?.reflectMode === 'mid_site' ||
+    Boolean(state.siteIn?.profile?.midSiteReflection);
+  if (isMidSite && alloc > 0 && used >= Math.floor(alloc * 0.5) && !state.siteRun?.midSiteReflected) {
+    return 'worker_reflect';
+  }
+
   return 'policy';
 }
 
 export function blockedRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MAPS.blocked {
   if (state.ctl?.stopRequested) return 'end_stopped';
-  if (state.ctl?.pauseRequested) return 'hold';
+  if (state.ctl?.pauseRequested || state.pendingHold) return 'hold';
+
+  if (state.siteRun?.exit?.status === 'blocked') {
+    return 'end_blocked';
+  }
 
   const hits = state.siteRun?.blockedHits ?? 0;
-  if (hits >= 3) {
+  const rungs = state.siteIn?.profile?.blockedLadder ?? ['reload', 'mark'];
+  if (hits >= rungs.length) {
     return 'end_blocked';
   }
   return 'perceive';

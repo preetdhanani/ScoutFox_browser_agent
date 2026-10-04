@@ -146,6 +146,38 @@ export async function executeBlockedLadder(
     };
   }
 
+  if (rung === 'alternate_entry') {
+    const rootUrl = ctx.domain.startsWith('http') ? ctx.domain : `https://${ctx.domain}/`;
+    let targetUrl = rootUrl;
+    const current = await ctx.browser.tabInfo(ctx.tabId).catch(() => null);
+    const currentUrl = current?.url || '';
+
+    // If already at root domain or restricted, try duckduckgo site search
+    if (currentUrl === rootUrl || currentUrl === `${rootUrl}` || currentUrl.replace(/\/$/, '') === rootUrl.replace(/\/$/, '')) {
+      const q = `${ctx.searchQuery || 'products'} site:${ctx.domain}`;
+      targetUrl = `https://duckduckgo.com/?q=${encodeURIComponent(q)}`;
+    }
+
+    await ctx.browser.navigate(ctx.tabId, targetUrl).catch(() => {});
+    if (ctx.browser.waitForTabComplete) {
+      await ctx.browser.waitForTabComplete(ctx.tabId, 8000).catch(() => {});
+    }
+
+    return {
+      actionTaken: 'alternate_entry',
+      shouldExitBlocked: false,
+      reason: `Navigated to alternate entry point: ${targetUrl}.`
+    };
+  }
+
+  if (rung === 'ask_user') {
+    return {
+      actionTaken: 'ask_user',
+      shouldExitBlocked: false,
+      reason: `Security challenge detected on ${ctx.domain}. User assistance requested.`
+    };
+  }
+
   // rung === 'mark'
   return {
     actionTaken: 'mark',

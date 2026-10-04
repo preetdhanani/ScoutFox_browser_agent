@@ -113,3 +113,42 @@ test('blockedPolicy: ladder executes search navigation when rung is search', asy
   assert.equal(res.shouldExitBlocked, false);
   assert.ok(navigated[0].includes('google.com/search?q=framework'));
 });
+
+test('blockedPolicy: ladder executes alternate_entry navigation when rung is alternate_entry', async () => {
+  const navigated: string[] = [];
+  const ctx = {
+    tabId: 101,
+    domain: 'shop.example.com',
+    searchQuery: 'framework 16',
+    browser: {
+      navigate: async (tabId: number, url: string) => { navigated.push(url); },
+      tabInfo: async () => ({ title: 'Blocked', url: 'https://shop.example.com/product/123' }),
+      waitForTabComplete: async () => {}
+    },
+    sleep: async () => {}
+  };
+
+  const res = await executeBlockedLadder(3, ['reload', 'search', 'alternate_entry', 'mark'], 'challenge', ctx);
+  assert.equal(res.actionTaken, 'alternate_entry');
+  assert.equal(res.shouldExitBlocked, false);
+  assert.ok(navigated.length > 0);
+  assert.ok(navigated[0].includes('shop.example.com'));
+});
+
+test('blockedPolicy: ladder returns ask_user when rung is ask_user', async () => {
+  const ctx = {
+    tabId: 101,
+    domain: 'cloudflare-protected.com',
+    browser: {
+      navigate: async () => {},
+      tabInfo: async () => ({ title: 'Challenge', url: 'https://cloudflare-protected.com' })
+    },
+    sleep: async () => {}
+  };
+
+  const res = await executeBlockedLadder(4, ['reload', 'search', 'alternate_entry', 'ask_user', 'mark'], 'challenge', ctx);
+  assert.equal(res.actionTaken, 'ask_user');
+  assert.equal(res.shouldExitBlocked, false);
+  assert.ok(res.reason.includes('User assistance requested'));
+});
+

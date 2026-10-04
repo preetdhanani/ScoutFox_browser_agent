@@ -5,6 +5,8 @@ import {
   formatTime,
   renderPlanApprovalCard,
   renderActionConfirmationCard,
+  renderChallengeHelpCard,
+  renderContinueBudgetCard,
   renderProvenanceFindingsTable
 } from '../../sidepanel/cards.js';
 import { renderGraphStrip } from '../../sidepanel/graphStrip.js';
@@ -155,4 +157,39 @@ test('graphStrip: renderGraphStrip renders orchestrator and worker tiers', () =>
   assert.ok(stripWorker.includes('graph-tier-sub'), 'Should render worker sub-tier');
   assert.ok(stripWorker.includes('🌐 shop.test'), 'Should show active site domain');
   assert.ok(stripWorker.includes('class="graph-subchip active" data-subnode="risk"'), 'Risk gate subchip should be active');
+});
+
+test('cards: renderChallengeHelpCard renders challenge details and action buttons', () => {
+  assert.equal(renderChallengeHelpCard(null), '');
+
+  const challenge = {
+    domain: 'cloudflare-protected.test',
+    url: 'https://cloudflare-protected.test/verify',
+    reason: 'Cloudflare captcha challenge detected.',
+  };
+
+  const html = renderChallengeHelpCard(challenge);
+  assert.ok(html.includes('challenge-help-card'), 'Should have challenge-help-card class');
+  assert.ok(html.includes('cloudflare-protected.test'), 'Should display domain');
+  assert.ok(html.includes('tag-challenge'), 'Should have challenge tag');
+  assert.ok(html.includes('btn-challenge-solved'), 'Should have solved button');
+  assert.ok(html.includes('btn-challenge-skip'), 'Should have skip button');
+});
+
+test('cards: renderContinueBudgetCard renders budget steps and action buttons', () => {
+  assert.equal(renderContinueBudgetCard(null), '');
+
+  const budgetInfo = {
+    domain: 'heavy-catalog.test',
+    stepsUsed: 50,
+    reserveBudget: 15,
+  };
+
+  const html = renderContinueBudgetCard(budgetInfo);
+  assert.ok(html.includes('continue-budget-card'), 'Should have continue-budget-card class');
+  assert.ok(html.includes('50 steps'), 'Should display steps used');
+  assert.ok(html.includes('heavy-catalog.test'), 'Should display domain');
+  assert.ok(html.includes('+15 steps'), 'Should display reserve budget');
+  assert.ok(html.includes('btn-budget-continue'), 'Should have continue button');
+  assert.ok(html.includes('btn-budget-finish'), 'Should have finish button');
 });

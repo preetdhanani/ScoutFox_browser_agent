@@ -52,6 +52,8 @@ export class AgentRunner {
   public pendingQuestion: string | null = null;
   public pendingApproval: any | null = null;
   public pendingConfirm: any | null = null;
+  public pendingChallengeHelp: any | null = null;
+  public pendingContinueBudget: any | null = null;
   public pauseReason: 'user' | 'llm_failure' | 'worker_restart' | null = null;
   public effort: EffortChoice | null = null;
   public effortProfile: EffortProfile | null = null;
@@ -542,6 +544,26 @@ export class AgentRunner {
     await this.drive(new Command({ resume: { kind: decision, remember } }));
   }
 
+  async resolveChallenge(action: 'resolved' | 'skip') {
+    this.clearPauseDetachTimer();
+    this.dirty = true;
+    this.pendingChallengeHelp = null;
+    this.status = 'running';
+    this.notifyStateChange();
+
+    await this.drive(new Command({ resume: { kind: action } }));
+  }
+
+  async continueBudget(action: 'continue' | 'finish', additionalSteps?: number) {
+    this.clearPauseDetachTimer();
+    this.dirty = true;
+    this.pendingContinueBudget = null;
+    this.status = 'running';
+    this.notifyStateChange();
+
+    await this.drive(new Command({ resume: { kind: action, additionalSteps } }));
+  }
+
   clearHistory() {
     this.dirty = true;
     this.history = [];
@@ -551,6 +573,8 @@ export class AgentRunner {
     this.status = 'idle';
     this.pendingApproval = null;
     this.pendingConfirm = null;
+    this.pendingChallengeHelp = null;
+    this.pendingContinueBudget = null;
     this.graphLocation = { phase: 'Starting' };
     if (this.saver?.deleteThread) {
       this.clearPromise = this.saver.deleteThread(this.threadId)
@@ -574,6 +598,8 @@ export class AgentRunner {
       pendingQuestion: this.pendingQuestion,
       pendingApproval: this.pendingApproval,
       pendingConfirm: this.pendingConfirm,
+      pendingChallengeHelp: this.pendingChallengeHelp,
+      pendingContinueBudget: this.pendingContinueBudget,
       stateVersion: this.stateVersion,
       bootId: this.bootId,
       scoutFoxGroupId: this.scoutFoxGroupId,
@@ -762,6 +788,20 @@ export class AgentRunner {
           pageUrl: interrupt.pageUrl,
           reason: interrupt.reason,
           targetDomain: interrupt.targetDomain,
+        };
+      } else if (interrupt?.kind === 'challenge_help') {
+        this.pendingChallengeHelp = {
+          kind: 'challenge_help',
+          domain: interrupt.domain,
+          url: interrupt.url,
+          reason: interrupt.reason,
+        };
+      } else if (interrupt?.kind === 'continue_budget') {
+        this.pendingContinueBudget = {
+          kind: 'continue_budget',
+          domain: interrupt.domain,
+          stepsUsed: interrupt.stepsUsed,
+          reserveBudget: interrupt.reserveBudget,
         };
       } else if (interrupt?.kind === 'paused') {
         this.pauseReason = interrupt.reason ?? 'user';
