@@ -41,7 +41,7 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
    Restricted-page navigation (chrome://, the Chrome Web Store, etc.) is now blocked before it happens rather than discovered a step later, and the agent is now shown its own step-by-step plan and remaining step budget when choosing its next action.
    For Ollama, the system prompt is now a compact one (one line per action, no few-shot examples), and a reply that is one bare JSON object is parsed whole.
    The prompt for every other provider is unchanged.
-   A dual-engine switch behind `settings.engine` (`'legacy'` vs `'graph'`, defaulting to `'legacy'`) selects between the legacy `AgentEngine` loop and the new LangGraph-powered `AgentRunner` at full API parity.
+   A dual-engine switch behind `settings.engine` (`'graph'` vs `'legacy'`, defaulting to `'graph'`) selects between the new LangGraph-powered `AgentRunner` and the legacy `AgentEngine` loop at full API parity.
 
    **Reliability & honesty harness** (`src/background/agent/recovery.ts`, `src/background/agent/outcome.ts`):
    A failed LLM call is retried up to 3 attempts with a short backoff before the task is parked in a resumable `paused` state (naming the provider and attempt count) instead of dying as `idle`, so the existing Resume button picks up from the exact failed step.
@@ -55,7 +55,7 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
 ## 3. Next version (planned, decided 2026-09-28, revised 2026-09-29): LangGraph rework
 
 > **Status**: Decided by Prit on 2026-09-28, and revised on 2026-09-29 after his design review.
-> Phases P0a, P0, P1, P2, the answer audit provenance gate with honest finish policy, P3 (real input, CDP trusted events, and perception), P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch), P5 (Long-Horizon Worker with P5d Risk Gate backend), and P6 (UI overhaul for LangGraph) are built.
+> Phases P0a, P0, P1, P2, the answer audit provenance gate with honest finish policy, P3 (real input, CDP trusted events, and perception), P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch), P5 (Long-Horizon Worker with P5d Risk Gate backend), P6 (UI overhaul for LangGraph), and P7/P7b (default graph engine, xhigh/max effort profiles, multi-source cross-checking, mid-site reflection, and interactive challenge/budget holds) are built.
 > Everything in section 2 describes the current code.
 > The target audience and the local-first, small-model niche from section 1 stay the same.
 
@@ -171,7 +171,7 @@ Rebuild the whole agent on LangGraph.js.
 - Graph checkpoints of a subgraph with the custom saver (`SessionStorageSaver`) are verified and built (spike S5 in phase P4).
 
 ### 3.6 Next step
-The design is written and phases P0a, P0, P1, P2, the answer audit provenance gate, P3, P4, P5, and P6 are built.
+The design is written and phases P0a, P0, P1, P2, the answer audit provenance gate, P3, P4, P5, P6, P7, and P7b are built.
 - P0a: constrained decoding for Ollama (see 3.3, item 17).
 - P0 (build foundation, no behaviour change): Vite builds today's JS into `dist/` (`npm run build`), you load `dist/` in Chrome, and CI runs on Node 22.x and 24.x and zips the built `dist/`.
   It also added an opt-in browser smoke test (`npm run test:e2e`) and two test helpers (`fakeChrome` and `fakeStorageSession`).
@@ -209,6 +209,10 @@ The design is written and phases P0a, P0, P1, P2, the answer audit provenance ga
   Studio Mono styling overhaul in `sidepanel/sidepanel.css` with `--surface` palette variables.
   Settings overrides for `plannerModel`, `reflectModel`, and configurable `maxSteps` (up to 1,000) in `sidepanel/sidepanel.js` and `AgentRunner.ts`.
   State extensions for `findings`, `pendingApproval`, `pendingConfirm`, and `graphLocation` with `APPROVE_PLAN` and `CONFIRM_ACTION` message handling in `background/background.js`.
+- P7 (Default Graph Engine): default agent engine switched to graph AgentRunner while maintaining backward compatibility for legacy session tests behind `settings.engine`.
+- P7b (XHigh and Max Effort Profiles & Interactive Holds): xhigh (4x budget, key-field cross-checking) and max (8x budget, mid-site reflection, alternate entry points, ask-user escalation ladder rungs, and full cross-checking in compileTruthTable) profiles in `shared/effort.json`.
+  Interactive bot challenge (Security Challenge Help Card) and soft-cap budget continuation (Continue Budget Card) holds in worker subgraph with resume APIs on AgentRunner and background message handlers.
+  6-tier effort selector in side panel.
 
 Every phase keeps the tests green, and the graph remains selectable behind `settings.engine` while real-site evaluation and remaining graph features continue.
 
@@ -231,7 +235,7 @@ This is a summary of the design, which still waits for Prit's approval.
 - Today the extension is built with Vite (phase P0): `npm run build` writes `dist/`, and you load `dist/` unpacked in Chrome, not the repo folder.
   The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P5d).
   The providers run on LangChain behind `ApiClients` (phase P2).
-  The background worker supports both legacy `AgentEngine` and graph `AgentRunner` behind `settings.engine`.
+  The background worker defaults to graph `AgentRunner` (phase P7) while preserving legacy `AgentEngine` behind `settings.engine` (`'graph'` vs `'legacy'`).
   The legacy engine, content scripts, and side panel are still plain JS ES modules.
 - CI (`.github/workflows/ci.yml`) runs on Node 22.x and 24.x: `npm ci`, check, typecheck, test, build, evalscan and a zip of the built `dist/`.
 - `public/manifest.json` includes the `debugger` permission for real CDP input events.

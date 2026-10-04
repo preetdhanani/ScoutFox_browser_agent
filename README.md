@@ -96,7 +96,8 @@ After you change the code:
 - **Model Overrides**: configure dedicated Planner Model and Reflect Model overrides for the graph engine.
 - **Max Steps** (default 250, up to 1,000), **Delay (ms)**, and **LLM Timeout (ms)**: tune how long a task can run, how long it pauses between actions, and how long it waits for a single LLM reply before retrying.
 - **Show Floating Element Badges**: toggle the numbered `[1]`, `[2]` overlays ScoutFox draws on page elements it can see.
-- **Engine**: configure `settings.engine` (`'legacy'` vs `'graph'`, defaulting to `'legacy'`) to choose between the legacy execution loop and the LangGraph orchestrator/worker engine.
+- **Engine**: configure `settings.engine` (`'graph'` vs `'legacy'`, defaulting to `'graph'`) to choose between the LangGraph orchestrator/worker engine and the legacy execution loop.
+- **Default Effort Level**: select from Medium (default), Low, High, XHigh, or Max as the baseline effort.
 
 ### Everything else
 - **History (top-right)**: browse, reopen, or delete past runs.
@@ -161,7 +162,7 @@ python agent.py --goal "Find top 3 trending python repositories on GitHub and su
 ### Next version (planned, decided 2026-09-28)
 
 The next version is a rework of the agent on [LangGraph.js](https://github.com/langchain-ai/langgraphjs).
-Phases P0 through P6 are built, including real CDP clicks, visual cursor overlay, long-horizon multi-site graph runtime, risk gating, and the side panel UI card overhaul behind an engine switch.
+Phases P0 through P7b are built, including real CDP clicks, visual cursor overlay, long-horizon multi-site graph runtime, risk gating, side panel UI card overhaul, default graph engine switch, xhigh/max effort profiles, and interactive holds.
 Everything above in this README describes the extension as it works today.
 
 What will change for you:

@@ -544,6 +544,10 @@ export class AgentRunner {
     await this.drive(new Command({ resume: { kind: decision, remember } }));
   }
 
+  /**
+   * Resumes the graph after a security challenge / bot protection hold.
+   * Dispatches 'resolved' (if user solved captcha) or 'skip' (to skip site).
+   */
   async resolveChallenge(action: 'resolved' | 'skip') {
     this.clearPauseDetachTimer();
     this.dirty = true;
@@ -554,6 +558,10 @@ export class AgentRunner {
     await this.drive(new Command({ resume: { kind: action } }));
   }
 
+  /**
+   * Resumes the graph after a soft-cap budget continuation hold.
+   * Dispatches 'continue' with optional additional steps or 'finish' to end site exploration.
+   */
   async continueBudget(action: 'continue' | 'finish', additionalSteps?: number) {
     this.clearPauseDetachTimer();
     this.dirty = true;
