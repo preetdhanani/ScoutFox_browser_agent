@@ -26,7 +26,7 @@ export type OrchestratorNode =
   | 'summary' | 'reflect' | 'compile' | 'offer' | 'finalize';
 export type WorkerNode =
   | 'open' | 'perceive' | 'meter' | 'blocked' | 'policy' | 'risk' | 'hold'
-  | 'execute' | 'verify' | 'recover' | 'record';
+  | 'execute' | 'verify' | 'recover' | 'record' | 'worker_reflect';
 export type NodeName = OrchestratorNode | WorkerNode;
 export type LlmNode = 'plan' | 'policy' | 'reflect';
 export type PolicyMode = 'browse' | 'extract' | 'answer' | 'harvest';
@@ -98,6 +98,8 @@ export interface EffortProfile {         // one level of shared/effort.json; fro
   replanBudgetPerSite?: number;
   replanMaxRounds?: number;
   screenshotMode?: 'never' | 'on_failure' | 'always' | string;
+  midSiteReflection?: boolean;
+  softCapHolds?: boolean;
 }
 export interface EffortChoice {
   requested: 'auto' | Level;             // from START_TASK, else settings.effortDefault

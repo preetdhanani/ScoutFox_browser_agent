@@ -158,11 +158,13 @@ export interface ExecRecord { step: number; action: PageAction; signature: strin
 export interface VerifyResult { outcome: 'ok' | 'no_effect' | 'failed' | 'stuck';
   goal: 'closer' | 'same' | 'away' | null; detail: string }
 
-export type WorkerHold =                 // worker hold kinds; challenge_help (Max) comes in P7b
+export type WorkerHold =                 // worker hold kinds; challenge_help and continue_budget added in P7b
   | { kind: 'confirm_action'; variant: 'submit' | 'purchase' | 'login' | 'form' | 'navigate';
       actionSummary: string; elementLabel: string; pageUrl: string; reason: string; targetDomain?: string }
   | { kind: 'ask_user'; question: string }
-  | { kind: 'paused'; reason: 'user' | 'llm_failure'; error?: string };
+  | { kind: 'paused'; reason: 'user' | 'llm_failure'; error?: string }
+  | { kind: 'challenge_help'; reason: string; domain: string; url: string }
+  | { kind: 'continue_budget'; domain: string; stepsUsed: number; reserveBudget: number };
 
 // ---------- the private site slice ----------
 export interface SiteRun {               // Revision 2's siteRun; its step records are the channel 'steps'
@@ -193,6 +195,8 @@ export interface SiteRun {               // Revision 2's siteRun; its step recor
   cdp: CdpState;
   finalAnswer?: FinalAnswer;             // answer sites
   exit?: { status: SiteStatus; reason: string; fatal?: 'model_unusable' | 'dom_error' | 'hard_cap' };
+  midSiteReflected?: boolean;
+  softCapReached?: boolean;
 }
 
 export interface SiteOut {               // built by the site wrapper from the worker's final state

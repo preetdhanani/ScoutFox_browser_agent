@@ -17,6 +17,7 @@ import {
   recordRouter
 } from './routes.ts';
 import { defineNode, getRuntime } from '../runner/runtimeRegistry.ts';
+import { Logger } from '../../shared/logger.ts';
 import { interruptWithConfig } from './interrupt.ts';
 import { parseModelReply } from '../agent/parse.ts';
 import { ACTION_VERBS } from '../agent/actions.ts';
@@ -316,7 +317,28 @@ const meterNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'met
     }
   }
 
-  if (rawMode === 'end' && !exit) {
+  // Check soft cap hold for Max level
+  const profile = state.siteIn?.profile;
+  const softCapAsk = profile?.softCapAsk || (profile as any)?.softCapHolds || false;
+  let pendingHold = state.pendingHold;
+  let softCapReached = siteRun.softCapReached ?? false;
+
+  if (softCapAsk && alloc > 0 && used >= alloc && !softCapReached) {
+    const limits = state.siteIn?.limits;
+    const maxSteps = limits?.maxSteps ?? 250;
+    if (used < maxSteps) {
+      pendingHold = {
+        kind: 'continue_budget',
+        domain: state.siteIn?.site?.domain ?? 'unknown',
+        stepsUsed: used,
+        reserveBudget: Math.max(10, Math.round((state.siteIn?.alloc ?? 20) * (state.siteIn?.profile?.reservePct ?? 0.15))),
+      };
+      softCapReached = true;
+      exit = undefined;
+    }
+  }
+
+  if (rawMode === 'end' && !exit && !pendingHold) {
     exit = { status: 'partial', reason: 'Step budget exhausted on this site' };
   }
 
@@ -332,8 +354,10 @@ const meterNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'met
       extendedBy,
       meterMode,
       mode,
+      softCapReached,
       exit
-    }
+    },
+    pendingHold
   };
 });
 
@@ -355,8 +379,17 @@ const blockedNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'b
   });
 
   let exit = siteRun.exit;
+  let pendingHold = state.pendingHold;
   const blockedNew = [...(siteRun.blockedNew ?? [])];
-  if (res.shouldExitBlocked) {
+
+  if (res.actionTaken === 'ask_user') {
+    pendingHold = {
+      kind: 'challenge_help',
+      domain: state.siteIn?.site?.domain ?? 'unknown',
+      url: state.page?.url ?? '',
+      reason: res.reason,
+    };
+  } else if (res.shouldExitBlocked) {
     exit = { status: 'blocked', reason: res.reason };
     const domain = state.siteIn?.site?.domain;
     if (domain && !blockedNew.some((b) => b.domain === domain)) {
@@ -377,7 +410,8 @@ const blockedNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'b
       blockedHits: hits,
       blockedNew,
       exit
-    }
+    },
+    pendingHold
   };
 });
 
@@ -616,8 +650,9 @@ const riskNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'risk
 
 const holdNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'hold', (state, config) => {
   const resume = interruptWithConfig<any, any>(config, state.pendingHold ?? { kind: 'paused', reason: 'user' });
+  const resumeKind = resume?.kind || resume?.action;
 
-  if (resume?.kind === 'approve') {
+  if (resumeKind === 'approve') {
     let siteRun = state.siteRun;
     if (resume.remember === 'site' && state.pendingHold?.kind === 'confirm_action') {
       const targetDomain = state.pendingHold.targetDomain;
@@ -631,7 +666,7 @@ const holdNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'hold
     }
     return { resumeRoute: 'execute', pendingHold: null, siteRun };
   }
-  if (resume?.kind === 'reject') {
+  if (resumeKind === 'reject') {
     const signature = state.siteRun?.pendingAction?.signature;
     return {
       resumeRoute: 'recover',
@@ -643,10 +678,10 @@ const holdNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'hold
       },
     };
   }
-  if (resume?.kind === 'stop') {
+  if (resumeKind === 'stop') {
     return { resumeRoute: 'end', pendingHold: null };
   }
-  if (resume?.kind === 'answer') {
+  if (resumeKind === 'answer') {
     const text = resume.text ?? '';
     const userAnswers = state.siteRun ? [...(state.siteRun.userAnswers ?? []), text] : [text];
     const answerEntry: HistoryEntry = {
@@ -658,6 +693,40 @@ const holdNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'hold
       siteRun: state.siteRun ? { ...state.siteRun, userAnswers } : null,
       history: [answerEntry],
       pendingHold: null,
+    };
+  }
+  if (resumeKind === 'resolved') {
+    return { resumeRoute: 'perceive', pendingHold: null };
+  }
+  if (resumeKind === 'skip') {
+    return {
+      resumeRoute: 'recover',
+      pendingHold: null,
+      lastFailure: {
+        kind: 'blocked',
+        reason: 'User skipped security challenge',
+      },
+    };
+  }
+  if (resumeKind === 'continue') {
+    const extra = resume?.additionalSteps ?? (state.pendingHold?.kind === 'continue_budget' ? state.pendingHold.reserveBudget : 10);
+    const newAlloc = (state.siteRun?.alloc ?? 0) + extra;
+    return {
+      resumeRoute: 'perceive',
+      pendingHold: null,
+      siteRun: state.siteRun ? { ...state.siteRun, alloc: newAlloc, softCapReached: true } : null,
+    };
+  }
+  if (resumeKind === 'finish') {
+    return {
+      resumeRoute: 'end',
+      pendingHold: null,
+      siteRun: state.siteRun
+        ? {
+            ...state.siteRun,
+            exit: { status: 'partial', reason: 'Finished site at soft cap upon user request' },
+          }
+        : null,
     };
   }
   return { resumeRoute: 'perceive', pendingHold: null };
@@ -765,6 +834,55 @@ const verifyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 've
   };
 });
 
+const workerReflectNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'worker_reflect', async (state, config) => {
+  const runtime = getRuntime(config);
+  const siteRun = state.siteRun;
+  if (!siteRun) return {};
+
+  const site = state.siteIn?.site;
+  const goal = site?.goal ?? 'Extract information';
+  const pageTitle = state.page?.title ?? '';
+  const pageUrl = state.page?.url ?? '';
+  const findingsCount = siteRun.findings?.length ?? 0;
+
+  let strategyHint = siteRun.strategyHint;
+  try {
+    const prompt = `You are a web agent reflecting on mid-site progress.
+Goal: ${goal}
+Site: ${site?.domain} (${pageTitle}, ${pageUrl})
+Steps used: ${siteRun.used} of ${siteRun.alloc}
+Findings captured so far: ${findingsCount}
+Failures encountered: ${siteRun.failureMemory?.length ?? 0}
+
+Evaluate in 1-2 sentences: Has the current approach been effective? If not, suggest a concrete pivot (e.g., search box instead of navigation, alternative filter, or direct listing lookup).
+Reply with plain text strategy guidance.`;
+
+    const stepSignal = runtime.control.stepSignal();
+    const res = await runtime.llm.complete({
+      node: 'reflect',
+      role: 'reflect',
+      system: 'You are an autonomous web agent strategy supervisor.',
+      messages: [{ role: 'user', content: prompt }],
+      schema: null,
+      signal: stepSignal,
+    });
+
+    if (res?.text) {
+      strategyHint = res.text.trim().slice(0, 200);
+    }
+  } catch (err: any) {
+    Logger.warn('Worker', `Worker mid-site reflect failed: ${err?.message || err}. Continuing.`);
+  }
+
+  return {
+    siteRun: {
+      ...siteRun,
+      midSiteReflected: true,
+      strategyHint: strategyHint || siteRun.strategyHint,
+    }
+  };
+});
+
 const recoverNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'recover', (state) => {
   const siteRun = state.siteRun;
   if (!siteRun) return {};
@@ -811,6 +929,11 @@ const recoverNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'r
     banned.push(signature);
   }
 
+  let strategyHint = siteRun.strategyHint;
+  if (state.siteIn?.profile?.altStrategy === true && (rec.shouldBan || siteRun.stuckLevel >= 1)) {
+    strategyHint = 'Prior action failed repeatedly. Try an alternate element, search box, or category navigation.';
+  }
+
   let exit = siteRun.exit;
   if (siteRun.stuckLevel >= 3) {
     exit = { status: 'stuck', reason: 'Site is stuck after repeated failed loops' };
@@ -823,6 +946,7 @@ const recoverNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'r
       ...siteRun,
       failureMemory: rec.failures,
       banned,
+      strategyHint,
       exit,
     },
     lastFailure: null,
@@ -976,6 +1100,7 @@ export function buildWorkerGraph(checkpointer?: BaseCheckpointSaver) {
     .addNode('open', openNode)
     .addNode('perceive', perceiveNode)
     .addNode('meter', meterNode)
+    .addNode('worker_reflect', workerReflectNode)
     .addNode('blocked', blockedNode)
     .addNode('policy', policyNode)
     .addNode('risk', riskNode)
@@ -988,6 +1113,7 @@ export function buildWorkerGraph(checkpointer?: BaseCheckpointSaver) {
     .addEdge('open', 'perceive')
     .addEdge('perceive', 'meter')
     .addConditionalEdges('meter', meterRouter, WORKER_ROUTE_MAPS.meter)
+    .addEdge('worker_reflect', 'policy')
     .addConditionalEdges('blocked', blockedRouter, WORKER_ROUTE_MAPS.blocked)
     .addConditionalEdges('policy', policyRouter, WORKER_ROUTE_MAPS.policy)
     .addConditionalEdges('risk', riskRouter, WORKER_ROUTE_MAPS.risk)

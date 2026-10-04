@@ -33,6 +33,7 @@ const STALE_HISTORY = [
 function makeMock() {
   const tabs = new Map([[100, { id: 100, url: 'https://example.com/a', groupId: -1, windowId: 1 }]]);
   const storage = {
+    agent_settings: { engine: 'legacy' },
     // Keyed by TAB id now - sessions are per tab, so this is the persisted session belonging to
     // tab 100, the tab this file clicks the icon on.
     agent_sessions: {

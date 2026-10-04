@@ -825,6 +825,8 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
 
 .effort-segmented-control {
   display: inline-flex;
+  flex: 1;
+  min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -834,14 +836,20 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
 
 .effort-btn {
   border: none;
+  flex: 1 1 0;
+  min-width: 0;
   background: transparent;
   color: var(--text-muted);
   font-family: var(--font-body);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 500;
-  padding: 3px 10px;
+  padding: 3px 2px;
   border-radius: 4px;
   cursor: pointer;
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
@@ -1775,6 +1783,12 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .action-confirmation-card.variant-navigate {
   border-left-color: #0284c7;
 }
+.challenge-help-card {
+  border-left: 3px solid #8b5cf6;
+}
+.continue-budget-card {
+  border-left: 3px solid #f59e0b;
+}
 
 .approval-card .card-header {
   display: flex;
@@ -1810,6 +1824,15 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .variant-tag.tag-purchase { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
 .variant-tag.tag-navigate { background: rgba(2, 132, 199, 0.15); color: #0284c7; }
 .variant-tag.tag-login, .variant-tag.tag-submit { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
+.variant-tag.tag-challenge { background: rgba(139, 92, 246, 0.15); color: #8b5cf6; }
+.variant-tag.tag-budget { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+
+.budget-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  margin: 0;
+}
 
 .card-body {
   display: flex;

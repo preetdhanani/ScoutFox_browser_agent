@@ -279,3 +279,88 @@ export function renderProvenanceFindingsTable(findings = []) {
     </div>
   `;
 }
+
+/**
+ * Render Challenge Help Card (HITL interrupt: challenge_help)
+ */
+export function renderChallengeHelpCard(challenge) {
+  if (!challenge) return '';
+
+  const domain = challenge.domain || 'Target Site';
+  const url = challenge.url || '';
+  const reason = challenge.reason || 'Bot protection or security challenge encountered.';
+
+  return `
+    <div class="approval-card challenge-help-card">
+      <div class="card-header">
+        <div class="card-title-group">
+          <span class="card-icon">🧩</span>
+          <span class="card-title">Security Challenge</span>
+        </div>
+        <span class="variant-tag tag-challenge">Bot Verification</span>
+      </div>
+
+      <div class="card-body">
+        <p class="plan-summary-lead">The agent encountered a verification screen on <strong>${escapeHtml(domain)}</strong>:</p>
+
+        <div class="action-summary-box">
+          <div class="action-highlight">
+            <span>Please complete the captcha or verification challenge in the browser tab.</span>
+          </div>
+          ${url ? `<div class="action-target-domain">URL: <code>${escapeHtml(url)}</code></div>` : ''}
+        </div>
+
+        <div class="risk-reason-box">
+          <span class="reason-label">Status:</span>
+          <span class="reason-text">${escapeHtml(reason)}</span>
+        </div>
+      </div>
+
+      <div class="card-actions">
+        <button type="button" class="btn btn-primary btn-sm btn-challenge-solved">
+          I've Solved It
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm btn-challenge-skip">
+          Skip Site
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Render Continue Budget Card (HITL interrupt: continue_budget)
+ */
+export function renderContinueBudgetCard(budgetInfo) {
+  if (!budgetInfo) return '';
+
+  const domain = budgetInfo.domain || 'this site';
+  const stepsUsed = budgetInfo.stepsUsed || 0;
+  const reserveBudget = budgetInfo.reserveBudget || 10;
+
+  return `
+    <div class="approval-card continue-budget-card">
+      <div class="card-header">
+        <div class="card-title-group">
+          <span class="card-icon">⏱️</span>
+          <span class="card-title">Budget Soft Cap Reached</span>
+        </div>
+        <span class="variant-tag tag-budget">${stepsUsed} Steps</span>
+      </div>
+
+      <div class="card-body">
+        <p class="plan-summary-lead">The agent has spent <strong>${stepsUsed} steps</strong> on <strong>${escapeHtml(domain)}</strong>.</p>
+        <p class="budget-desc">Would you like the agent to continue exploring using reserve budget (+${reserveBudget} steps) or wrap up and proceed with gathered findings?</p>
+      </div>
+
+      <div class="card-actions">
+        <button type="button" class="btn btn-primary btn-sm btn-budget-continue" data-reserve="${reserveBudget}">
+          Continue (+${reserveBudget} steps)
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm btn-budget-finish">
+          Finish Site
+        </button>
+      </div>
+    </div>
+  `;
+}

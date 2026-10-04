@@ -7,7 +7,13 @@
 // Must stay the first import: it sets zod's jitless flag before any module that bundles zod runs (see the file).
 import '../src/background/boot/zodJitless.ts';
 import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../src/shared/storage.ts';
-import { renderPlanApprovalCard, renderActionConfirmationCard, renderProvenanceFindingsTable } from './cards.js';
+import {
+  renderPlanApprovalCard,
+  renderActionConfirmationCard,
+  renderChallengeHelpCard,
+  renderContinueBudgetCard,
+  renderProvenanceFindingsTable
+} from './cards.js';
 import { updateLiveGraphView } from './graphStrip.js';
 
 let backgroundPort = null;
@@ -1179,7 +1185,7 @@ function renderState(state) {
     lastRenderedStateVersion = state.stateVersion;
   }
 
-  const { status, stepCount, history, planSteps, currentPhase, pendingQuestion, pendingApproval, pendingConfirm, findings } = state;
+  const { status, stepCount, history, planSteps, currentPhase, pendingQuestion, pendingApproval, pendingConfirm, pendingChallengeHelp, pendingContinueBudget, findings } = state;
   const isDisconnected = backgroundPort === null;
 
   const statusPill = document.getElementById('statusPill');
@@ -1265,7 +1271,7 @@ function renderState(state) {
 
   const timeline = document.getElementById('timeline');
   if (timeline) {
-    if ((!history || history.length === 0) && !pendingApproval && !pendingConfirm) {
+    if ((!history || history.length === 0) && !pendingApproval && !pendingConfirm && !pendingChallengeHelp && !pendingContinueBudget) {
       renderEmptyState();
       return;
     }
@@ -1274,7 +1280,7 @@ function renderState(state) {
     // expanding a row mid-run does not yank the view away from them.
     const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
     const finishArrived = noteFinishCard(status, history);
-    timeline.innerHTML = renderTurns(history, status, planSteps, currentPhase, pendingQuestion, pendingApproval, pendingConfirm, findings, state.effortProfile);
+    timeline.innerHTML = renderTurns(history, status, planSteps, currentPhase, pendingQuestion, pendingApproval, pendingConfirm, pendingChallengeHelp, pendingContinueBudget, findings, state.effortProfile);
     if (nearBottom) scrollTimelineToLatest(timeline, finishArrived);
   }
 }
@@ -1718,11 +1724,11 @@ function renderPlanRows(planSteps) {
   }).join('')}</div>`;
 }
 
-function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, pendingApproval = null, pendingConfirm = null, findings = null, effortProfile = null) {
+function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, pendingApproval = null, pendingConfirm = null, pendingChallengeHelp = null, pendingContinueBudget = null, findings = null, effortProfile = null) {
   const turns = buildTurns(history);
   const busy = status === 'running' || status === 'paused';
 
-  if (turns.length === 0 && (pendingApproval || pendingConfirm)) {
+  if (turns.length === 0 && (pendingApproval || pendingConfirm || pendingChallengeHelp || pendingContinueBudget)) {
     turns.push({ turn: 1, goal: null, entries: [], answer: null, audit: null, failed: false, timestamp: null, isNewRun: false });
   }
 
@@ -1812,6 +1818,14 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
       ? renderActionConfirmationCard(pendingConfirm)
       : '';
 
+    const challengePrompt = (isLive && status === 'paused' && pendingChallengeHelp)
+      ? renderChallengeHelpCard(pendingChallengeHelp)
+      : '';
+
+    const budgetPrompt = (isLive && status === 'paused' && pendingContinueBudget)
+      ? renderContinueBudgetCard(pendingContinueBudget)
+      : '';
+
     const sessionDivider = (turn.turn > 1 || turn.isNewRun)
       ? `<div class="session-divider">
           <span class="session-tag">⚡ Run #${turn.turn}</span>
@@ -1824,6 +1838,8 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
       ${turn.goal ? `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(turn.goal)}</div>` : ''}
       ${approvalPrompt ? approvalPrompt : ''}
       ${confirmPrompt ? confirmPrompt : ''}
+      ${challengePrompt ? challengePrompt : ''}
+      ${budgetPrompt ? budgetPrompt : ''}
       ${count || turn.entries.length ? `<div class="act-group${open ? ' open' : ''}">
         <button class="act-head" data-turn="${turn.turn}" aria-expanded="${open}">
           <span class="act-chev">${ICONS.chevron}</span>
@@ -1961,6 +1977,59 @@ function initTimelineInteraction() {
           denyBtn.disabled = false;
           const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
           showTaskError(errMsg || 'Failed to reject action.');
+        }
+      });
+      return;
+    }
+
+    const solvedBtn = e.target.closest('.btn-challenge-solved');
+    if (solvedBtn) {
+      solvedBtn.disabled = true;
+      sendBgMessage({ action: 'RESOLVE_CHALLENGE', payload: { action: 'resolved' } }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          solvedBtn.disabled = false;
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to resolve challenge.');
+        }
+      });
+      return;
+    }
+
+    const skipChallengeBtn = e.target.closest('.btn-challenge-skip');
+    if (skipChallengeBtn) {
+      skipChallengeBtn.disabled = true;
+      sendBgMessage({ action: 'RESOLVE_CHALLENGE', payload: { action: 'skip' } }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          skipChallengeBtn.disabled = false;
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to skip challenge.');
+        }
+      });
+      return;
+    }
+
+    const continueBtn = e.target.closest('.btn-budget-continue');
+    if (continueBtn) {
+      continueBtn.disabled = true;
+      const additionalSteps = parseInt(continueBtn.getAttribute('data-reserve'), 10) || 10;
+      sendBgMessage({ action: 'CONTINUE_BUDGET', payload: { action: 'continue', additionalSteps } }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          continueBtn.disabled = false;
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to continue budget.');
+        }
+      });
+      return;
+    }
+
+    const finishBudgetBtn = e.target.closest('.btn-budget-finish');
+    if (finishBudgetBtn) {
+      finishBudgetBtn.disabled = true;
+      sendBgMessage({ action: 'CONTINUE_BUDGET', payload: { action: 'finish' } }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          finishBudgetBtn.disabled = false;
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to finish site.');
         }
       });
       return;

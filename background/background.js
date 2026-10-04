@@ -66,7 +66,7 @@ self.addEventListener('unhandledrejection', (event) => {
  */
 const sessions = new Map();
 
-let activeEngineKind = 'legacy';
+let activeEngineKind = 'graph';
 
 Storage.getSettings().then((s) => {
   if (s && s.engine) {
@@ -881,6 +881,32 @@ function routeMessage(request, sender, sendResponse) {
       });
     } else {
       sendResponse({ success: false, error: 'confirmAction is not supported on this engine' });
+    }
+    return true;
+  }
+
+  if (action === 'RESOLVE_CHALLENGE') {
+    if (typeof agentEngine.resolveChallenge === 'function') {
+      agentEngine.resolveChallenge(payload && payload.action).then(() => {
+        sendResponse({ success: true });
+      }).catch((err) => {
+        sendResponse({ success: false, error: err.message });
+      });
+    } else {
+      sendResponse({ success: false, error: 'resolveChallenge is not supported on this engine' });
+    }
+    return true;
+  }
+
+  if (action === 'CONTINUE_BUDGET') {
+    if (typeof agentEngine.continueBudget === 'function') {
+      agentEngine.continueBudget(payload && payload.action, payload && payload.additionalSteps).then(() => {
+        sendResponse({ success: true });
+      }).catch((err) => {
+        sendResponse({ success: false, error: err.message });
+      });
+    } else {
+      sendResponse({ success: false, error: 'continueBudget is not supported on this engine' });
     }
     return true;
   }

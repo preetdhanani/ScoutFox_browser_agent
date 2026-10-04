@@ -292,7 +292,10 @@ Phase P6 upgrades the side panel with specialized event-delegated cards and live
 - **Model and Step Overrides**: Settings provides inputs for `plannerModel`, `reflectModel`, and `maxSteps` (up to 1,000 steps).
   Changes auto-save on change and blur.
   `AgentRunner.ts` applies `plannerModel` to planner calls, `reflectModel` to reflection calls, and `maxSteps` to run limits.
-- **Message Dispatch**: `background/background.js` handles `APPROVE_PLAN` and `CONFIRM_ACTION` messages from the side panel, forwarding resumes into `AgentRunner`.
+- **Message Dispatch**: `background/background.js` handles `APPROVE_PLAN`, `CONFIRM_ACTION`, `RESOLVE_CHALLENGE`, and `CONTINUE_BUDGET` messages from the side panel, forwarding resumes into `AgentRunner`.
+- **Effort Levels & Profiles (Phases P5b, P7b)**: supports 6 effort levels (`Auto`, `Low`, `Medium`, `High`, `XHigh`, `Max`) defined in `shared/effort.json`.
+  `XHigh` applies a 4x budget with key-field cross-checking.
+  `Max` applies an 8x budget with mid-site worker reflection, alternate entry points, full cross-checking, interactive challenge assistance, and soft-cap budget holds.
 Tests in `tests/sidepanel/cards.test.js` and `tests/runner/agentRunnerCards.test.ts` cover card HTML rendering, event handlers, and runner state synchronization.
 
 ### Test Approach
@@ -390,7 +393,7 @@ What is true today:
 - The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P5d).
 - The providers run on LangChain (phase P2) and the graph runtime bundles LangGraph (phases P4-P5), so the worker bundle is about 4.3 MB, see "Worker Bundle and CSP" in section 3.
 - Final answers pass through the answer audit provenance gate and honest finish policy before completion.
-- The background worker supports both legacy `AgentEngine` and graph `AgentRunner` behind `settings.engine` (`'legacy'` vs `'graph'`).
+- The background worker defaults to graph `AgentRunner` (phase P7) while preserving legacy `AgentEngine` behind `settings.engine` (`'graph'` vs `'legacy'`).
 - The legacy engine (`background/`), the content scripts and the side panel are still plain JavaScript ES modules.
 - CI zips the built `dist/`, not the raw source folders.
 
