@@ -108,7 +108,8 @@ When a reply holds several JSON objects, the first one with an `action` key wins
 ### LLM Providers
 The engine still calls `ApiClients.generateCompletion` in `background/apiClients.js`, which is now a thin shim over `src/background/llm/`.
 Every provider runs on a LangChain chat model, and a model is built for every call with `maxRetries: 0`, so `callWithRetry` stays the only retry layer.
-OpenRouter, OpenAI, OpenAI-compatible servers (Groq, LM Studio, vLLM), Anthropic and Gemini are in `factory.ts`.
+OpenRouter, OpenAI, OpenAI-compatible servers (Groq, LM Studio, vLLM), Anthropic, Gemini, and NVIDIA NIM (`build.nvidia.com`) are in `factory.ts`.
+NVIDIA NIM routes through `openaiFamilyCall` to `https://integrate.api.nvidia.com/v1/chat/completions` using Bearer `nvapi-...` tokens.
 Ollama is `ollama.ts` (`ChatOllama`): the action or plan schema goes out as `format`, with `think:false`, `num_ctx` and `num_predict`.
 It keeps the two fallbacks, a model that rejects `think` and a server older than 0.5 that rejects a schema, and each is remembered for the life of the worker.
 `ChatOllama` always streams, and its own abort is broken, so its fetch is wrapped to carry the call's signal, and a model is built per call.

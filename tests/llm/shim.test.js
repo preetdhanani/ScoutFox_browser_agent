@@ -19,7 +19,7 @@ const { ApiClients } = await import('../../background/apiClients.js');
 const MESSAGES = [{ role: 'user', content: 'hi' }];
 
 test('the shim keeps every member of the old ApiClients', () => {
-  for (const member of ['generateCompletion', 'fetchAvailableModels', 'getFallbackModels', 'callOpenRouter', 'callOpenAI', 'callAnthropic', 'callGemini', 'callAgentRouter', 'callOllama']) {
+  for (const member of ['generateCompletion', 'fetchAvailableModels', 'getFallbackModels', 'callOpenRouter', 'callOpenAI', 'callAnthropic', 'callGemini', 'callAgentRouter', 'callOllama', 'callNvidia']) {
     assert.equal(typeof ApiClients[member], 'function', member);
   }
 });
@@ -35,15 +35,23 @@ test('callOllama and callAgentRouter reach their own providers, with the caller\
   assert.equal(sent[1].url, 'https://agentrouter.org/v1/messages');
 });
 
+test('callNvidia dispatches to nvidia provider', async (t) => {
+  const sent = spyFetch(t);
+  assert.equal(await ApiClients.callNvidia({ apiKey: 'nvapi-123', model: 'meta/llama-3.3-70b-instruct' }, MESSAGES, 'sys'), '{"action":"done"}');
+  assert.equal(sent[0].url, 'https://integrate.api.nvidia.com/v1/chat/completions');
+});
+
 test('generateCompletion dispatches by settings.provider, ollama and agent_router included', async (t) => {
   const sent = spyFetch(t);
   await ApiClients.generateCompletion({ provider: 'ollama', model: 'qwen2.5:14b' }, MESSAGES, 'sys');
   await ApiClients.generateCompletion({ provider: 'agent_router', apiKey: 'sk-test-123' }, MESSAGES, 'sys');
   await ApiClients.generateCompletion({ provider: 'openai', apiKey: 'sk-test-123' }, MESSAGES, 'sys');
+  await ApiClients.generateCompletion({ provider: 'nvidia', apiKey: 'nvapi-123' }, MESSAGES, 'sys');
   assert.deepEqual(sent.map((request) => request.url), [
     'http://localhost:11434/api/chat',
     'https://agentrouter.org/v1/messages',
-    'https://api.openai.com/v1/chat/completions'
+    'https://api.openai.com/v1/chat/completions',
+    'https://integrate.api.nvidia.com/v1/chat/completions'
   ]);
 });
 

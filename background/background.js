@@ -740,7 +740,10 @@ function routeMessage(request, sender, sendResponse) {
     const forceRefresh = !!payload?.forceRefresh;
     ApiClients.fetchAvailableModels(payload, forceRefresh)
       .then(models => sendResponse({ success: true, models }))
-      .catch(err => sendResponse({ success: false, error: err.message }));
+      .catch(err => {
+        const fallbacks = ApiClients.getFallbackModels ? ApiClients.getFallbackModels(payload?.provider) : [];
+        sendResponse({ success: false, error: err.message, models: fallbacks });
+      });
     return true;
   }
 

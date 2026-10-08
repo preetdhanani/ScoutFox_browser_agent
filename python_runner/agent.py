@@ -13,7 +13,10 @@ import os
 import argparse
 import urllib.request
 import urllib.parse
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
 
 SYSTEM_PROMPT = """You are an autonomous web browsing AI agent.
 You are provided with a goal and a compressed list of interactive web page elements labeled with numerical IDs like [1], [2], [3].
@@ -45,24 +48,43 @@ Your objective is to choose the single best action to move closer to the goal.
 - ONLY select element_id numbers that exist in the provided Interactive Elements list.
 """
 
-def list_available_models(provider, base_url, api_key=""):
+# Mirrors normalizeNvidiaBaseUrl in src/background/llm/settings.ts.
+# Strips /chat/completions, /models, and /v1; maps build.nvidia.com to integrate.api.nvidia.com.
+def clean_base_url(url: str) -> str:
+    url = url.strip().rstrip('/')
+    if "build.nvidia.com" in url:
+        url = "https://integrate.api.nvidia.com"
+    for suffix in ['/chat/completions', '/models', '/v1']:
+        if url.endswith(suffix):
+            url = url[:-len(suffix)].rstrip('/')
+    return url
+
+def list_available_models(provider, base_url, api_key="", timeout=30):
     """Dynamically fetch available models from provider API"""
-    base_url = base_url.rstrip('/')
+    base_url = clean_base_url(base_url)
+    api_key = (api_key or "").strip()
+    if api_key.lower().startswith("bearer "):
+        api_key = api_key[7:].strip()
+    api_key = api_key.strip('"\'')
     try:
         if provider == "ollama":
             url = f"{base_url}/api/tags"
-            with urllib.request.urlopen(url) as resp:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
                 return [m['name'] for m in data.get('models', [])]
-        elif provider in ["openai", "openai_compatible"]:
+        elif provider in ["openai", "openai_compatible", "nvidia"]:
             url = f"{base_url}/v1/models"
             headers = {}
             if api_key:
                 headers['Authorization'] = f"Bearer {api_key}"
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
-                return [m['id'] for m in data.get('data', [])]
+                raw_models = [m['id'] for m in data.get('data', []) if isinstance(m, dict) and isinstance(m.get('id'), str)]
+                if provider == "nvidia":
+                    non_chat = re.compile(r'embed|rerank|guard|safety|clip', re.IGNORECASE)
+                    raw_models = [m for m in raw_models if not non_chat.search(m)]
+                return sorted(raw_models)
     except Exception as e:
         print(f"⚠️ Could not fetch dynamic models: {e}")
         return []
@@ -157,7 +179,7 @@ def extract_dom_elements(page, max_elements=120):
     """
     return page.evaluate(js_script, max_elements)
 
-def call_ollama(base_url, model, messages):
+def call_ollama(base_url, model, messages, timeout=120):
     url = f"{base_url.rstrip('/')}/api/chat"
     payload = {
         "model": model,
@@ -171,15 +193,15 @@ def call_ollama(base_url, model, messages):
         headers={'Content-Type': 'application/json'}
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode('utf-8'))
             return data.get('message', {}).get('content', '')
     except Exception as e:
         print(f"❌ Error connecting to Ollama: {e}")
         sys.exit(1)
 
-def call_openai_compatible(base_url, api_key, model, messages):
-    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+def call_openai_compatible(base_url, api_key, model, messages, timeout=120):
+    url = f"{clean_base_url(base_url)}/v1/chat/completions"
     payload = {
         "model": model,
         "messages": messages,
@@ -195,7 +217,7 @@ def call_openai_compatible(base_url, api_key, model, messages):
         headers=headers
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode('utf-8'))
             return data['choices'][0]['message']['content']
     except Exception as e:
@@ -226,7 +248,11 @@ def parse_action(text):
     except Exception as e:
         return thought, None, f"JSON parse error: {e}"
 
-def run_agent(goal, start_url, provider, base_url, api_key, model, max_steps, headless):
+def run_agent(goal, start_url, provider, base_url, api_key, model, max_steps, headless, timeout=None):
+    if sync_playwright is None:
+        print("❌ Playwright is not installed. Install it with: pip install playwright && playwright install chromium")
+        sys.exit(1)
+
     print(f"\n🦊 Launching ScoutFox Standalone Agent...")
     print(f"🎯 Goal: {goal}")
     print(f"🌐 Start URL: {start_url}")
@@ -257,10 +283,11 @@ Choose your next action:"""
 
             current_messages = messages + [{"role": "user", "content": step_msg}]
 
+            effective_timeout = timeout if timeout is not None else (300 if provider == "nvidia" else 120)
             if provider == "ollama":
-                response_text = call_ollama(base_url, model, current_messages)
+                response_text = call_ollama(base_url, model, current_messages, timeout=effective_timeout)
             else:
-                response_text = call_openai_compatible(base_url, api_key, model, current_messages)
+                response_text = call_openai_compatible(base_url, api_key, model, current_messages, timeout=effective_timeout)
 
             thought, action, err = parse_action(response_text)
 
@@ -321,38 +348,75 @@ Choose your next action:"""
         print("\n⚠️ Reached maximum step limit.")
         browser.close()
 
-if __name__ == "__main__":
+def build_arg_parser():
     parser = argparse.ArgumentParser(description="ScoutFox Standalone AI Agentic Browser")
     parser.add_argument("--goal", type=str, default="Search Google for open source AI agents", help="User task goal")
     parser.add_argument("--url", type=str, default="https://google.com", help="Initial webpage URL")
-    parser.add_argument("--provider", type=str, default="ollama", choices=["ollama", "openai"], help="LLM Provider")
-    # No single default can be right for both providers. A fixed Ollama default meant
+    parser.add_argument("--provider", type=str, default="ollama", choices=["ollama", "openai", "nvidia"], help="LLM Provider")
+    # No single default can be right for all providers. A fixed Ollama default meant
     # `--provider openai` sent the user's OpenAI key to http://localhost:11434, so the key
     # went to whatever was listening on that port and the error gave no hint why.
     parser.add_argument("--base-url", type=str, default=None,
-                        help="API Base URL (defaults per provider: Ollama localhost, OpenAI api.openai.com)")
-    parser.add_argument("--api-key", type=str, default=os.environ.get("OPENAI_API_KEY", ""),
-                        help="API key. Defaults to $OPENAI_API_KEY so it need not appear in shell history.")
+                        help="API Base URL (defaults per provider: Ollama localhost, OpenAI api.openai.com, NVIDIA integrate.api.nvidia.com/v1)")
+    parser.add_argument("--api-key", type=str, default=None,
+                        help="API key. Defaults to $OPENAI_API_KEY or $NVIDIA_API_KEY so it need not appear in shell history.")
     parser.add_argument("--model", type=str, default=None,
-                        help="Model name (defaults per provider: qwen2.5:14b for Ollama, gpt-4o-mini for OpenAI)")
+                        help="Model name (defaults per provider: qwen3.5:9b for Ollama, gpt-5.4 for OpenAI, meta/llama-3.3-70b-instruct for NVIDIA)")
+    parser.add_argument("--timeout", type=int, default=None,
+                        help="LLM request timeout in seconds (default: 300 for nvidia, 120 for openai/others)")
     parser.add_argument("--list-models", action="store_true", help="List all available models dynamically from provider API")
     parser.add_argument("--max-steps", type=int, default=20, help="Max execution steps")
     parser.add_argument("--headless", action="store_true", help="Run browser in background headless mode")
+    return parser
 
-    args = parser.parse_args()
+def resolve_args(args, environ=None):
+    if environ is None:
+        environ = os.environ
+
+    if not args.api_key:
+        if args.provider == "nvidia":
+            args.api_key = environ.get("NVIDIA_API_KEY", "")
+        elif args.provider == "openai":
+            args.api_key = environ.get("OPENAI_API_KEY", "")
+        else:
+            args.api_key = ""
 
     PROVIDER_DEFAULT_BASE_URL = {
         "ollama": "http://localhost:11434",
         "openai": "https://api.openai.com/v1",
+        "nvidia": "https://integrate.api.nvidia.com/v1",
     }
     PROVIDER_DEFAULT_MODEL = {
         "ollama": "qwen3.5:9b",
         "openai": "gpt-5.4",
+        "nvidia": "meta/llama-3.3-70b-instruct",
+    }
+    PROVIDER_DEFAULT_TIMEOUT = {
+        "nvidia": 300,
+        "openai": 120,
+        "ollama": 120,
     }
     if args.base_url is None:
         args.base_url = PROVIDER_DEFAULT_BASE_URL[args.provider]
     if args.model is None:
         args.model = PROVIDER_DEFAULT_MODEL[args.provider]
+    if args.timeout is None:
+        args.timeout = PROVIDER_DEFAULT_TIMEOUT.get(args.provider, 120)
+
+    return args
+
+if __name__ == "__main__":
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    args = resolve_args(args)
+
+    # Fail early with a clear message when a non-Ollama provider has no API key
+    if args.provider != "ollama" and not args.api_key:
+        env_var = "NVIDIA_API_KEY" if args.provider == "nvidia" else "OPENAI_API_KEY"
+        parser.error(
+            f"Provider '{args.provider}' requires an API key. "
+            f"Pass --api-key or set ${env_var} in your environment."
+        )
 
     # Refuse the mistake outright rather than leaking the key to a local port and failing
     # with a confusing error the user is likely to retry.
@@ -383,5 +447,6 @@ if __name__ == "__main__":
         api_key=args.api_key,
         model=args.model,
         max_steps=args.max_steps,
-        headless=args.headless
+        headless=args.headless,
+        timeout=args.timeout
     )

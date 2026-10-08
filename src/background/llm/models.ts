@@ -7,7 +7,7 @@
  */
 import { Storage } from '../../shared/storage.ts';
 import { Logger } from '../../shared/logger.ts';
-import { getApiKey, providerOf, withV1 } from './settings.ts';
+import { baseUrlOf, getApiKey, normalizeNvidiaBaseUrl, providerOf, withV1 } from './settings.ts';
 import type { LlmSettings } from './types.ts';
 
 /** Wire-image headers AgentRouter expects on every request (Content-Type added by POST callers). */
@@ -64,6 +64,16 @@ export function getFallbackModels(provider: string): string[] {
     case 'openai':
     case 'openai_compatible':
       return ['gpt-4o', 'gpt-4o-mini', 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
+    case 'nvidia':
+      return [
+        'meta/llama-3.3-70b-instruct',
+        'deepseek-ai/deepseek-r1',
+        'nvidia/llama-3.1-nemotron-70b-instruct',
+        'meta/llama-3.1-405b-instruct',
+        'mistralai/mixtral-8x22b-instruct',
+        'qwen/qwen2.5-72b-instruct',
+        'nvidia/nemotron-4-340b-instruct'
+      ];
     default:
       return ['gemini-2.0-flash', 'gemini-1.5-flash', 'qwen2.5:14b', 'gpt-4o-mini'];
   }
@@ -76,7 +86,7 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
   const provider = providerOf(settings);
   const apiKey = getApiKey(settings, provider);
   const apiKeyTag = apiKey ? apiKey.slice(-6) : 'none';
-  const cacheKey = `${provider}_${settings.baseUrl || 'default'}_${apiKeyTag}`;
+  const cacheKey = `${provider}_${baseUrlOf(settings) || 'default'}_${apiKeyTag}`;
 
   if (!forceRefresh) {
     const cached = await Storage.getCachedModels(cacheKey);
@@ -171,6 +181,35 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
       if (models.length === 0) {
         models = getFallbackModels('gemini');
       }
+    } else if (provider === 'nvidia') {
+      const baseUrl = normalizeNvidiaBaseUrl(baseUrlOf(settings));
+      const url = `${baseUrl}/models`;
+      const headers: Record<string, string> = {};
+      if (apiKey) {
+        headers['Authorization'] = `Bearer ${apiKey}`;
+      }
+
+      const res = await fetch(url, { headers });
+      const elapsed = Date.now() - startTime;
+      if (!res.ok) {
+        let errDetail = '';
+        try {
+          const errJson = await res.json();
+          errDetail = errJson?.error?.message || errJson?.detail || '';
+        } catch {
+          try { errDetail = (await res.text()).slice(0, 200); } catch {}
+        }
+        throw new Error(`API returned HTTP ${res.status}${errDetail ? `: ${errDetail}` : ''}`);
+      }
+
+      const data: ModelListPayload = await res.json();
+      const nonChatPattern = /embed|rerank|guard|safety|clip/i;
+      models = (data.data || [])
+        .map(m => (typeof m?.id === 'string' ? m.id.trim() : ''))
+        .filter(id => Boolean(id) && !nonChatPattern.test(id))
+        .sort();
+      if (models.length === 0) models = getFallbackModels('nvidia');
+      Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from NVIDIA NIM endpoint`);
     } else if (provider === 'anthropic') {
       models = getFallbackModels('anthropic');
     }

@@ -29,6 +29,7 @@ const PROVIDERS: Array<[string, LlmSettings, Reply?]> = [
   ['openrouter', { provider: 'openrouter', apiKey: 'sk-or-test-123' }],
   ['anthropic', { provider: 'anthropic', apiKey: 'sk-ant-test-123' }],
   ['agent_router', { provider: 'agent_router', apiKey: 'sk-ar-test-123' }],
+  ['nvidia', { provider: 'nvidia', apiKey: 'nvapi-test-123' }],
   // The Messages endpoint answers at once, and the slow one is the fallback, which is a second client with its own SDK timeout.
   ['agent_router (the fallback request)', { provider: 'agent_router', apiKey: 'sk-ar-test-123' },
     (request) => (request.url.endsWith('/messages') ? new Response('overloaded', { status: 529 }) : hangUntilAborted(request))]

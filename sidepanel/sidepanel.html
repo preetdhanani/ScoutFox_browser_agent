@@ -155,6 +155,7 @@
               <option value="openai_compatible">OpenAI-Compatible (Groq, vLLM, LM Studio, Llama API)</option>
               <option value="openai">OpenAI Official</option>
               <option value="anthropic">Anthropic (Claude)</option>
+              <option value="nvidia">NVIDIA NIM (build.nvidia.com)</option>
             </select>
           </div>
 
@@ -166,9 +167,9 @@
 
           <!-- API Key -->
           <div class="form-group">
-            <label class="form-label" for="apiKeyInput">API Key (Required for OpenRouter / Gemini / OpenAI / Claude)</label>
+            <label class="form-label" for="apiKeyInput">API Key (Required for OpenRouter / NVIDIA / Gemini / OpenAI / Claude)</label>
             <div class="input-with-toggle">
-              <input type="password" id="apiKeyInput" class="form-input" placeholder="sk-or-v1-... or AIzaSy...">
+              <input type="password" id="apiKeyInput" class="form-input" placeholder="nvapi-... or sk-or-v1-... or AIzaSy...">
               <button class="btn-toggle-visibility" id="btnToggleKey" title="Show/Hide API Key">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
               </button>

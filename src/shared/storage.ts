@@ -2,11 +2,13 @@
  * Storage utility for ScoutFox Agentic Browser Extension
  * Manages settings, per-provider API configuration memory, multi-session history, and model caching.
  */
+import { DEFAULT_NVIDIA_LLM_TIMEOUT_MS } from '../background/llm/settings.ts';
 
 export interface ProviderConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  llmTimeoutMs?: number;
 }
 
 /** Keyed by provider id. A stored value can hold ids this build does not know, so the key is a plain string. */
@@ -58,7 +60,8 @@ export const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
   ollama: { baseUrl: 'http://localhost:11434', apiKey: '', model: 'qwen2.5:14b' },
   openai: { baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o-mini' },
   openai_compatible: { baseUrl: 'https://api.groq.com/openai/v1', apiKey: '', model: 'llama-3.3-70b-versatile' },
-  anthropic: { baseUrl: 'https://api.anthropic.com', apiKey: '', model: 'claude-3-5-sonnet-20241022' }
+  anthropic: { baseUrl: 'https://api.anthropic.com', apiKey: '', model: 'claude-3-5-sonnet-20241022' },
+  nvidia: { baseUrl: 'https://integrate.api.nvidia.com/v1', apiKey: '', model: 'meta/llama-3.3-70b-instruct', llmTimeoutMs: DEFAULT_NVIDIA_LLM_TIMEOUT_MS }
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -110,6 +113,14 @@ export const Storage = {
         }
         const mergedConfigs: ProviderConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...(loaded.providerConfigs || {}) };
         const provider = loaded.provider || DEFAULT_SETTINGS.provider;
+        // One-time migration: if stored provider is nvidia and has no per-provider llmTimeoutMs,
+        // write the NVIDIA default timeout so existing settings get the new default.
+        if (provider === 'nvidia' && !mergedConfigs.nvidia?.llmTimeoutMs) {
+          if (!mergedConfigs.nvidia) {
+            mergedConfigs.nvidia = { ...DEFAULT_PROVIDER_CONFIGS.nvidia };
+          }
+          mergedConfigs.nvidia.llmTimeoutMs = DEFAULT_NVIDIA_LLM_TIMEOUT_MS;
+        }
         const activeCfg: Partial<ProviderConfig> = mergedConfigs[provider] || {};
 
         const apiKey = (loaded.apiKey !== undefined && loaded.apiKey !== '')
@@ -149,11 +160,23 @@ export const Storage = {
 
     // Store settings under the active provider key
     if (newSettings.apiKey !== undefined || newSettings.baseUrl !== undefined || newSettings.model !== undefined) {
+      const existingTimeout = updatedProviderConfigs[activeProvider]?.llmTimeoutMs;
       updatedProviderConfigs[activeProvider] = {
         baseUrl: newSettings.baseUrl !== undefined ? newSettings.baseUrl : (updatedProviderConfigs[activeProvider]?.baseUrl || ''),
         apiKey: newSettings.apiKey !== undefined ? newSettings.apiKey : (updatedProviderConfigs[activeProvider]?.apiKey || ''),
         model: newSettings.model !== undefined ? newSettings.model : (updatedProviderConfigs[activeProvider]?.model || '')
       };
+      if (existingTimeout !== undefined) {
+        updatedProviderConfigs[activeProvider].llmTimeoutMs = existingTimeout;
+      }
+    }
+
+    // Only update per-provider timeout for nvidia; other providers use top-level llmTimeoutMs
+    if (newSettings.llmTimeoutMs !== undefined && activeProvider === 'nvidia') {
+      if (!updatedProviderConfigs.nvidia) {
+        updatedProviderConfigs.nvidia = { ...DEFAULT_PROVIDER_CONFIGS.nvidia };
+      }
+      updatedProviderConfigs.nvidia.llmTimeoutMs = newSettings.llmTimeoutMs;
     }
 
     // Ensure active provider keys are synchronized top-level.
@@ -174,6 +197,11 @@ export const Storage = {
       model,
       providerConfigs: updatedProviderConfigs
     };
+
+    if (activeProvider === 'nvidia' && newSettings.llmTimeoutMs !== undefined) {
+      // Retain top-level global timeout so NVIDIA's provider-specific timeout does not pollute global settings
+      updated.llmTimeoutMs = current.llmTimeoutMs !== undefined ? current.llmTimeoutMs : DEFAULT_SETTINGS.llmTimeoutMs;
+    }
 
     return new Promise((resolve) => {
       if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {

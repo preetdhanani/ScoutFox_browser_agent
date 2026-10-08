@@ -234,12 +234,14 @@ async function loadSettings() {
   const providerCfg = (currentSettings.providerConfigs && currentSettings.providerConfigs[activeProvider]) || DEFAULT_PROVIDER_CONFIGS[activeProvider] || {};
 
   document.getElementById('providerSelect').value = activeProvider;
-  document.getElementById('baseUrlInput').value = providerCfg.baseUrl || currentSettings.baseUrl || '';
+  document.getElementById('baseUrlInput').placeholder = DEFAULT_PROVIDER_CONFIGS[activeProvider]?.baseUrl || 'https://openrouter.ai/api/v1';
+  document.getElementById('baseUrlInput').value = providerCfg.baseUrl || currentSettings.baseUrl || (DEFAULT_PROVIDER_CONFIGS[activeProvider]?.baseUrl || '');
   document.getElementById('apiKeyInput').value = providerCfg.apiKey || currentSettings.apiKey || '';
   document.getElementById('maxStepsInput').value = currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
   document.getElementById('delayInput').value = currentSettings.actionDelayMs || DEFAULT_SETTINGS.actionDelayMs;
   document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || DEFAULT_SETTINGS.ollamaNumPredict;
-  document.getElementById('llmTimeoutInput').value = currentSettings.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
+  const defaultTimeout = DEFAULT_PROVIDER_CONFIGS[activeProvider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
+  document.getElementById('llmTimeoutInput').value = providerCfg.llmTimeoutMs || currentSettings.llmTimeoutMs || defaultTimeout;
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
   const effortSelect = document.getElementById('effortDefaultSelect');
   if (effortSelect) {
@@ -421,6 +423,9 @@ function openComboboxMenu() {
 
     menu.style.display = 'flex';
     combobox.classList.add('open');
+    if (!allFetchedModels || allFetchedModels.length === 0) {
+      fetchDynamicModels(false);
+    }
     if (searchInput) {
       searchInput.value = '';
       renderModelOptions(allFetchedModels);
@@ -464,7 +469,7 @@ async function autoSaveCurrentForm() {
     ollamaNumPredict: parseInt(document.getElementById('ollamaNumPredictInput').value, 10) || DEFAULT_SETTINGS.ollamaNumPredict,
     // The input's min="5000" is not enforced on read, and the field is in ms - a user typing "1"
     // or "1000" (thinking seconds) would otherwise make every LLM call abort almost immediately.
-    llmTimeoutMs: Math.max(5000, parseInt(document.getElementById('llmTimeoutInput').value, 10) || DEFAULT_SETTINGS.llmTimeoutMs),
+    llmTimeoutMs: Math.max(5000, parseInt(document.getElementById('llmTimeoutInput').value, 10) || (DEFAULT_PROVIDER_CONFIGS[provider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs)),
     showElementBadges: document.getElementById('badgesToggle').checked,
     effortDefault: document.getElementById('effortDefaultSelect')?.value || currentSettings.effortDefault || 'medium',
     plannerModel: (document.getElementById('plannerModelInput')?.value || '').trim(),
@@ -513,7 +518,9 @@ async function fetchDynamicModels(forceRefresh = false) {
         resolve(res.models);
       } else {
         if (statusEl) statusEl.textContent = `Could not fetch models (${res?.error || 'Unreachable'}). Using fallbacks.`;
-        allFetchedModels = ['anthropic/claude-3.5-sonnet', 'meta-llama/llama-3.3-70b-instruct', 'google/gemini-2.0-flash-001', 'deepseek/deepseek-r1', 'qwen2.5:14b', 'gpt-4o-mini'];
+        allFetchedModels = (res && res.models && res.models.length > 0)
+          ? res.models
+          : (DEFAULT_PROVIDER_CONFIGS[tempSettings.provider]?.model ? [DEFAULT_PROVIDER_CONFIGS[tempSettings.provider].model] : []);
         renderModelOptions(allFetchedModels);
         resolve(allFetchedModels);
       }
@@ -900,27 +907,66 @@ function initEventListeners() {
   });
 
   // Auto-fetch models & auto-save settings on API Key input / paste / blur
-  const autoFetchAndSaveOnKeyInput = async () => {
-    const key = document.getElementById('apiKeyInput').value.trim();
-    await autoSaveCurrentForm();
-    if (key.length >= 8) {
-      if (apiKeyFetchDebounce) clearTimeout(apiKeyFetchDebounce);
-      apiKeyFetchDebounce = setTimeout(() => {
+  let apiKeyInputDebounce = null;
+  let isPastingKey = false;
+  const onApiKeyInput = () => {
+    if (isPastingKey) return;
+    if (apiKeyInputDebounce) clearTimeout(apiKeyInputDebounce);
+    apiKeyInputDebounce = setTimeout(async () => {
+      await autoSaveCurrentForm();
+      const key = document.getElementById('apiKeyInput').value.trim();
+      if (key.length >= 8) {
         fetchDynamicModels(true);
-      }, 500);
+      }
+    }, 400);
+  };
+
+  const onApiKeyChange = async () => {
+    if (apiKeyInputDebounce) clearTimeout(apiKeyInputDebounce);
+    await autoSaveCurrentForm();
+    const key = document.getElementById('apiKeyInput').value.trim();
+    if (key.length >= 8) {
+      fetchDynamicModels(true);
     }
   };
 
-  document.getElementById('apiKeyInput').addEventListener('input', autoFetchAndSaveOnKeyInput);
-  document.getElementById('apiKeyInput').addEventListener('change', autoFetchAndSaveOnKeyInput);
-  document.getElementById('apiKeyInput').addEventListener('blur', autoSaveCurrentForm);
-  document.getElementById('baseUrlInput').addEventListener('blur', autoSaveCurrentForm);
+  const onApiKeyBlur = () => {
+    if (apiKeyInputDebounce) clearTimeout(apiKeyInputDebounce);
+    autoSaveCurrentForm();
+  };
+
+  document.getElementById('apiKeyInput').addEventListener('input', onApiKeyInput);
+  document.getElementById('apiKeyInput').addEventListener('change', onApiKeyChange);
+  document.getElementById('apiKeyInput').addEventListener('blur', onApiKeyBlur);
+
+  let baseUrlDebounce = null;
+  const debouncedAutoSaveBaseUrl = () => {
+    if (baseUrlDebounce) clearTimeout(baseUrlDebounce);
+    baseUrlDebounce = setTimeout(() => {
+      autoSaveCurrentForm();
+    }, 400);
+  };
+  const immediateAutoSaveBaseUrl = () => {
+    if (baseUrlDebounce) clearTimeout(baseUrlDebounce);
+    autoSaveCurrentForm();
+  };
+  document.getElementById('baseUrlInput').addEventListener('input', debouncedAutoSaveBaseUrl);
+  document.getElementById('baseUrlInput').addEventListener('change', immediateAutoSaveBaseUrl);
+  document.getElementById('baseUrlInput').addEventListener('blur', immediateAutoSaveBaseUrl);
   document.getElementById('plannerModelInput')?.addEventListener('blur', autoSaveCurrentForm);
   document.getElementById('reflectModelInput')?.addEventListener('blur', autoSaveCurrentForm);
+  document.getElementById('llmTimeoutInput')?.addEventListener('change', autoSaveCurrentForm);
+  document.getElementById('llmTimeoutInput')?.addEventListener('blur', autoSaveCurrentForm);
   document.getElementById('apiKeyInput').addEventListener('paste', () => {
-    setTimeout(async () => {
+    isPastingKey = true;
+    if (apiKeyInputDebounce) clearTimeout(apiKeyInputDebounce);
+    apiKeyInputDebounce = setTimeout(async () => {
+      isPastingKey = false;
       await autoSaveCurrentForm();
-      fetchDynamicModels(true);
+      const key = document.getElementById('apiKeyInput').value.trim();
+      if (key.length >= 8) {
+        fetchDynamicModels(true);
+      }
     }, 200);
   });
 
@@ -930,22 +976,36 @@ function initEventListeners() {
     const providerConfigs = currentSettings.providerConfigs || DEFAULT_PROVIDER_CONFIGS;
     const savedCfg = providerConfigs[provider] || DEFAULT_PROVIDER_CONFIGS[provider] || {};
 
-    document.getElementById('baseUrlInput').value = savedCfg.baseUrl || '';
+    const ollamaGroup = document.getElementById('ollamaNumPredictGroup');
+    if (ollamaGroup) {
+      ollamaGroup.style.display = provider === 'ollama' ? 'flex' : 'none';
+    }
+
+    const baseUrlToSet = savedCfg.baseUrl || (DEFAULT_PROVIDER_CONFIGS[provider] ? DEFAULT_PROVIDER_CONFIGS[provider].baseUrl : '');
+    document.getElementById('baseUrlInput').placeholder = DEFAULT_PROVIDER_CONFIGS[provider]?.baseUrl || 'https://openrouter.ai/api/v1';
+    document.getElementById('baseUrlInput').value = baseUrlToSet;
     document.getElementById('apiKeyInput').value = savedCfg.apiKey || '';
 
     const modelToSet = savedCfg.model || (DEFAULT_PROVIDER_CONFIGS[provider] ? DEFAULT_PROVIDER_CONFIGS[provider].model : currentSettings.model);
     updateSelectedModel(modelToSet);
 
+    const defaultTimeout = DEFAULT_PROVIDER_CONFIGS[provider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
+    const timeoutToSet = savedCfg.llmTimeoutMs || currentSettings.llmTimeoutMs || defaultTimeout;
+    document.getElementById('llmTimeoutInput').value = timeoutToSet;
+
     // Update settings object
     currentSettings.provider = provider;
-    currentSettings.baseUrl = savedCfg.baseUrl || '';
+    currentSettings.baseUrl = baseUrlToSet;
     currentSettings.apiKey = savedCfg.apiKey || '';
     currentSettings.model = modelToSet;
+    if (provider !== 'nvidia') {
+      currentSettings.llmTimeoutMs = timeoutToSet;
+    }
 
     await autoSaveCurrentForm();
 
-    const hasKeyOrOllama = provider === 'ollama' || (savedCfg.apiKey && savedCfg.apiKey.length > 5);
-    await fetchDynamicModels(hasKeyOrOllama);
+    const shouldRefresh = provider === 'ollama' || provider === 'nvidia' || (savedCfg.apiKey && savedCfg.apiKey.length > 5);
+    await fetchDynamicModels(shouldRefresh);
   });
 
   document.getElementById('btnSaveSettings').addEventListener('click', async () => {
@@ -2496,5 +2556,7 @@ export {
   buildTurns, renderTurns, renderFinishCard, renderAuditDetails, renderPlanRows, normalizeAudit,
   planCounts, escapeHtml, initTimelineInteraction, openAuditDetails, closedAuditDetails, describeAction, firstSentence, withoutEngineNotes,
   partialSubtitle, renderState, finishLandingTop, finishCardKey, noteFinishCard, scrollTimelineToLatest,
-  formatMarkdownText, hasMarkdownBlocks, legacyBullets, splitTableRow
+  formatMarkdownText, hasMarkdownBlocks, legacyBullets, splitTableRow,
+  loadSettings, autoSaveCurrentForm, openComboboxMenu, closeComboboxMenu, updateSelectedModel,
+  initEventListeners
 };

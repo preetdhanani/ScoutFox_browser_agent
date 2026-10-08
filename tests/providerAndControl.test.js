@@ -64,7 +64,8 @@ const SIGNAL_CASES = [
   ['callGemini', { model: 'gemini-1.5-flash', apiKey: 'k' }],
   ['callOpenRouter', { model: 'x/y', apiKey: 'k', baseUrl: 'https://openrouter.ai/api/v1' }],
   ['callOllama', { model: 'qwen2.5:14b', baseUrl: 'http://localhost:11434' }],
-  ['callAgentRouter', { model: 'claude-3-5-sonnet', apiKey: 'k', baseUrl: 'https://agentrouter.org/v1' }]
+  ['callAgentRouter', { model: 'claude-3-5-sonnet', apiKey: 'k', baseUrl: 'https://agentrouter.org/v1' }],
+  ['callNvidia', { model: 'meta/llama-3.3-70b-instruct', apiKey: 'nvapi-123', baseUrl: 'https://integrate.api.nvidia.com/v1' }]
 ];
 
 for (const [method, settings] of SIGNAL_CASES) {
@@ -170,4 +171,11 @@ test('#16 every provider default model is a non-empty string', () => {
     assert.equal(typeof cfg.model, 'string', `${provider} has no default model`);
     assert.ok(cfg.model.length > 0, `${provider} default model is empty`);
   }
+});
+
+test('DEFAULT_PROVIDER_CONFIGS.nvidia exists with default model and baseUrl', () => {
+  const nvidia = DEFAULT_PROVIDER_CONFIGS.nvidia;
+  assert.ok(nvidia, 'nvidia config exists');
+  assert.equal(nvidia.model, 'meta/llama-3.3-70b-instruct');
+  assert.equal(nvidia.baseUrl, 'https://integrate.api.nvidia.com/v1');
 });

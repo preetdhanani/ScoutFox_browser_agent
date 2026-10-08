@@ -27,6 +27,9 @@ test('Storage - DEFAULT_SETTINGS sanity check', () => {
   assert.equal(DEFAULT_SETTINGS.maxSteps, 250);
   assert.equal(DEFAULT_SETTINGS.effortDefault, 'medium');
   assert.ok(DEFAULT_SETTINGS.providerConfigs);
+  assert.equal(DEFAULT_PROVIDER_CONFIGS.nvidia.baseUrl, 'https://integrate.api.nvidia.com/v1');
+  assert.equal(DEFAULT_PROVIDER_CONFIGS.nvidia.model, 'meta/llama-3.3-70b-instruct');
+  assert.equal(DEFAULT_PROVIDER_CONFIGS.nvidia.llmTimeoutMs, 300000);
 });
 
 test('Storage - getSettings & saveSettings roundtrip', async () => {
@@ -64,11 +67,21 @@ test('Storage - Per-Provider API Key Isolation', async () => {
     model: 'gemini-1.5-flash'
   });
 
+  // Switch to NVIDIA and set NVIDIA Key
+  await Storage.saveSettings({
+    provider: 'nvidia',
+    apiKey: 'nvapi-nvidia-test-key-54321',
+    baseUrl: 'https://integrate.api.nvidia.com/v1',
+    model: 'meta/llama-3.3-70b-instruct'
+  });
+
   const settings = await Storage.getSettings();
   assert.equal(settings.providerConfigs.openrouter.apiKey, 'sk-or-v1-openrouter-test-key-12345');
   assert.equal(settings.providerConfigs.gemini.apiKey, 'AIzaSyGeminiTestKey67890');
+  assert.equal(settings.providerConfigs.nvidia.apiKey, 'nvapi-nvidia-test-key-54321');
   assert.equal(settings.providerConfigs.openrouter.model, 'anthropic/claude-3.5-sonnet');
   assert.equal(settings.providerConfigs.gemini.model, 'gemini-1.5-flash');
+  assert.equal(settings.providerConfigs.nvidia.model, 'meta/llama-3.3-70b-instruct');
 });
 
 test('Storage - Model Caching per provider cacheKey', async () => {
@@ -96,4 +109,34 @@ test('Storage - Multi-Session History Management', async () => {
   sessions = await Storage.getSessions();
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].id, 's2');
+});
+
+test('Storage - one-time migration for nvidia default timeout', async () => {
+  mockStorageData['agent_settings'] = {
+    provider: 'nvidia',
+    providerConfigs: {
+      nvidia: { baseUrl: 'https://integrate.api.nvidia.com/v1', apiKey: '', model: 'meta/llama-3.3-70b-instruct' }
+    }
+  };
+  const settings = await Storage.getSettings();
+  assert.equal(settings.providerConfigs.nvidia.llmTimeoutMs, 300000);
+});
+
+test('Storage - saveSettings does not leak per-provider llmTimeoutMs to non-nvidia providers (BUG-06)', async () => {
+  // Saving global llmTimeoutMs under openai should NOT write llmTimeoutMs into openai providerConfig
+  await Storage.saveSettings({ provider: 'openai', llmTimeoutMs: 65000 });
+  const settings = await Storage.getSettings();
+  assert.equal(settings.llmTimeoutMs, 65000);
+  assert.equal(settings.providerConfigs.openai.llmTimeoutMs, undefined);
+
+  // Saving for nvidia updates nvidia providerConfig, but does NOT pollute top-level global llmTimeoutMs
+  await Storage.saveSettings({ provider: 'nvidia', llmTimeoutMs: 250000 });
+  const nvidiaSettings = await Storage.getSettings();
+  assert.equal(nvidiaSettings.providerConfigs.nvidia.llmTimeoutMs, 250000);
+  assert.equal(nvidiaSettings.llmTimeoutMs, 65000, 'saving nvidia provider timeout must not overwrite global timeout');
+
+  // Switching back to openai preserves the 65000 global timeout
+  await Storage.saveSettings({ provider: 'openai' });
+  const restoredSettings = await Storage.getSettings();
+  assert.equal(restoredSettings.llmTimeoutMs, 65000, 'global timeout is preserved when switching back');
 });
