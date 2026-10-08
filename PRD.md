@@ -142,9 +142,9 @@ Rebuild the whole agent on LangGraph.js.
 21. **Risk gate** (built in phase P5d): submitting a form, logging in, buying, and leaving the approved sites wait for the user's OK.
     The agent never types passwords, card numbers or one-time codes.
 22. **Provenance** (built in phase P6): every value in the final table carries its URL, the time and a page snippet that code found, never one written by the model.
-23. **Effort levels**: Auto, Low, Medium, High, and Max defined in `shared/effort.json`.
-    The side panel exposes segmented controls for Auto, Low, Medium, and High, and Settings configures the default effort level.
-    Auto infers Low, Medium, or High via task keyword and target site heuristics.
+23. **Effort levels**: Auto, Low, Medium, High, XHigh, and Max defined in `shared/effort.json`.
+    The side panel exposes segmented controls for Auto, Low, Medium, High, XHigh, and Max, and Settings configures the default effort level.
+    Auto infers Low, Medium, High, or Max via task keyword and target site heuristics.
     A level sets search depth, max sites, step and token budgets per site, retries, verification mode, blocked ladders, reflection mode, replan budget and rounds, and screenshot mode.
     The default is Medium.
 24. **Step limit**: `settings.maxSteps` becomes a hard safety cap with a default of 250, and the effort level and the site budgets limit each task.
