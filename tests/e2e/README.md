@@ -53,6 +53,7 @@ If the sources are newer than `dist/`, it prints a warning to build again (or to
 | `--panel-screenshots=dir` | Saves the side panel in light and dark for every task, for a pixel review (the file kinds are listed below). |
 | `--dump-snapshots` | Writes what the content script sees on each fixture page to `tests/fixtures/snapshots/`, and needs no model. The page of a task that runs under another host name (`shop-a.html`) goes to `tests/e2e/lib/snapshots/`. `--dump-snapshots=shop-a` writes only the pages you name. |
 | `--tamper=name` | Breaks the temp copy on purpose (see "Negative controls"). |
+| `--engine=name` | The agent engine under test: `legacy` (default in smoke harness) or `graph`. |
 
 | Environment variable | Default |
 | --- | --- |

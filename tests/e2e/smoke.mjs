@@ -72,7 +72,7 @@ const SNAPSHOT_DIR = path.join(REPO, 'tests', 'fixtures', 'snapshots');
 // read, so these go into the e2e folder, where the mock's self-test reads them.
 const E2E_SNAPSHOT_DIR = path.join(HERE, 'lib', 'snapshots');
 
-const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'mock', 'tamper']);
+const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'mock', 'tamper', 'engine']);
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)(?:=(.*))?$/);
   return m ? [m[1], m[2] === undefined ? true : m[2]] : [a, true];
@@ -83,6 +83,7 @@ const CHROMIUM = process.env.CHROMIUM_PATH || '/Applications/Chromium.app/Conten
 const CHROMIUM_ARGS = (process.env.CHROMIUM_ARGS || '').split(/\s+/).filter(Boolean);
 const OLLAMA = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
 const MODEL = args.model || (MOCK ? 'mock-agent' : 'qwen3.5:9b');
+const ENGINE = args.engine || 'legacy';
 const FIXTURE_PORT = Number(process.env.FIXTURE_PORT || 8765);
 const PROXY_PORT = Number(process.env.PROXY_PORT || 11435);
 // A mock task takes a few seconds, so a run that hangs should fail early.
@@ -669,6 +670,7 @@ async function saveSettings(ctx, llm, model) {
   await ctx.driver.evaluate(async (settings) => {
     await chrome.storage.local.set({ agent_settings: settings });
   }, {
+    engine: ENGINE,
     provider: 'ollama', baseUrl: llm.url, apiKey: '', model, maxSteps: MAX_STEPS,
     providerConfigs: { ollama: { baseUrl: llm.url, apiKey: '', model } }
   });
