@@ -405,28 +405,31 @@ def resolve_args(args, environ=None):
 
     return args
 
+def validate_args(args):
+    if not args.list_models and args.provider != "ollama" and not args.api_key:
+        env_var = "NVIDIA_API_KEY" if args.provider == "nvidia" else "OPENAI_API_KEY"
+        raise ValueError(
+            f"Provider '{args.provider}' requires an API key. "
+            f"Pass --api-key or set ${env_var} in your environment."
+        )
+
+    if args.provider != "ollama" and args.api_key:
+        host = urllib.parse.urlparse(args.base_url).hostname or ""
+        if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            raise ValueError(
+                f"Refusing to send a {args.provider} API key to {args.base_url}. "
+                f"Pass --base-url for your provider, or drop --api-key if you meant to use Ollama."
+            )
+
 if __name__ == "__main__":
     parser = build_arg_parser()
     args = parser.parse_args()
     args = resolve_args(args)
 
-    # Fail early with a clear message when a non-Ollama provider has no API key
-    if args.provider != "ollama" and not args.api_key:
-        env_var = "NVIDIA_API_KEY" if args.provider == "nvidia" else "OPENAI_API_KEY"
-        parser.error(
-            f"Provider '{args.provider}' requires an API key. "
-            f"Pass --api-key or set ${env_var} in your environment."
-        )
-
-    # Refuse the mistake outright rather than leaking the key to a local port and failing
-    # with a confusing error the user is likely to retry.
-    if args.provider != "ollama" and args.api_key:
-        host = urllib.parse.urlparse(args.base_url).hostname or ""
-        if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
-            parser.error(
-                f"Refusing to send a {args.provider} API key to {args.base_url}. "
-                f"Pass --base-url for your provider, or drop --api-key if you meant to use Ollama."
-            )
+    try:
+        validate_args(args)
+    except ValueError as e:
+        parser.error(str(e))
 
     if args.list_models:
         print(f"\n🔍 Fetching dynamic models from {args.provider} at {args.base_url}...")
