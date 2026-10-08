@@ -9,7 +9,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from agent import clean_base_url, build_arg_parser, resolve_args
+from agent import clean_base_url, build_arg_parser, resolve_args, validate_args
 
 class TestPythonRunner(unittest.TestCase):
     def test_clean_base_url_table(self):
@@ -65,6 +65,23 @@ class TestPythonRunner(unittest.TestCase):
         # Explicit --api-key takes precedence over environ
         args_override = resolve_args(parser.parse_args(["--provider", "nvidia", "--api-key", "explicit-key"]), environ=env)
         self.assertEqual(args_override.api_key, "explicit-key")
+
+    def test_validate_args(self):
+        parser = build_arg_parser()
+
+        args_list = resolve_args(parser.parse_args(["--provider", "nvidia", "--list-models"]), environ={})
+        validate_args(args_list)
+
+        args_no_key = resolve_args(parser.parse_args(["--provider", "nvidia"]), environ={})
+        with self.assertRaises(ValueError):
+            validate_args(args_no_key)
+
+        args_ollama = resolve_args(parser.parse_args(["--provider", "ollama"]), environ={})
+        validate_args(args_ollama)
+
+        args_leak = resolve_args(parser.parse_args(["--provider", "nvidia", "--api-key", "key", "--base-url", "http://localhost:11434"]), environ={})
+        with self.assertRaises(ValueError):
+            validate_args(args_leak)
 
 if __name__ == "__main__":
     unittest.main()
