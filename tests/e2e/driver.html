@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ScoutFox E2E driver</title>
+</head>
+<body>
+  <!-- An empty extension page for tests/e2e/smoke.mjs. The smoke run copies dist/ into a temp
+       folder, adds this file to the copy as driver.html (the only extra file) and loads the copy
+       as the unpacked extension. This page then runs at chrome-extension://<id>/driver.html with
+       the extension's own chrome.* APIs, so the smoke run can send the same START_TASK message
+       the side panel sends. It is never inside dist/ or the shipped zip, so users never get it. -->
+  <p>ScoutFox E2E driver page.</p>
+</body>
+</html>

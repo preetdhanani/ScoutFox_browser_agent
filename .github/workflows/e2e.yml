@@ -1,0 +1,87 @@
+name: ScoutFox E2E Smoke
+
+# Browser smoke test: loads the built extension (dist/) into Chromium and runs the fixture tasks
+# against the offline mock model. See tests/e2e/README.md.
+#
+# It stays off the normal PR path. It runs only:
+#   - by hand (Actions tab, "Run workflow"), or
+#   - when a pull request gets the label "e2e".
+# To run it again on the same PR after a new push, remove the label and add it again.
+# A nightly schedule (cron) is added after the first green run on GitHub.
+#
+# NOT YET VERIFIED ON GITHUB. The smoke test has only run on macOS so far.
+# Expect to tune these first:
+#   - CHROMIUM_ARGS: --no-sandbox is a first guess. If Chromium still does not start, look at
+#     the "Install Chromium" step output, and try adding --disable-dev-shm-usage.
+#   - Chromium install: "latest" is the newest Chromium snapshot, so one bad snapshot can break
+#     this job. If that happens, pin a build id (chromium@<buildId>).
+#   - System libraries: the ubuntu-latest image should have what Chromium needs. If the
+#     "--version" check in the install step fails on a missing library, install it there.
+#   - The 20 minute limit covers the download and the run. The run alone takes about 15 seconds.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-smoke:
+    name: Browser Smoke Test (mock model)
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'e2e'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            tests/e2e/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Install E2E Dependencies
+        working-directory: tests/e2e
+        run: npm ci
+
+      - name: Install Chromium
+        # From tests/e2e, so the copy of @puppeteer/browsers that `npm ci` installed from the
+        # lockfile runs. The local bin is used on purpose: no `npx --yes`, no unpinned package.
+        working-directory: tests/e2e
+        run: |
+          ./node_modules/.bin/browsers install chromium@latest --path "$RUNNER_TEMP/chromium"
+          chromium_bin="$(find "$RUNNER_TEMP/chromium" -type f -name chrome -print -quit)"
+          if [ -z "$chromium_bin" ]; then
+            echo "::error::No chrome binary found under $RUNNER_TEMP/chromium"
+            find "$RUNNER_TEMP/chromium" -maxdepth 4
+            exit 1
+          fi
+          echo "Chromium binary: $chromium_bin"
+          "$chromium_bin" --version
+          echo "CHROMIUM_PATH=$chromium_bin" >> "$GITHUB_ENV"
+
+      - name: Run the Browser Smoke Test
+        env:
+          CHROMIUM_ARGS: --no-sandbox
+        run: |
+          out="$RUNNER_TEMP/e2e-out"
+          mkdir -p "$out"
+          npm run test:e2e -- --out="$out/report.json" --panel-screenshots="$out/panel"
+
+      - name: Upload the Report and the Side Panel Screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-smoke
+          path: ${{ runner.temp }}/e2e-out
+          if-no-files-found: ignore

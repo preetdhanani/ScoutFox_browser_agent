@@ -35,7 +35,7 @@ function makeMock() {
   let groupCounter = 9000;
   const noop = () => {};
   const listeners = {};
-  const storage = {};
+  const storage = { agent_settings: { engine: 'legacy' } };
 
   return {
     __tabs: tabs,

@@ -30,7 +30,7 @@ function makeBackgroundChromeMock() {
   let lastRelevantTabId = null; // most recently created/grouped tab, for the onUpdated stub below
   let winCounter = 200;
   let groupCounter = 8000;
-  const storage = {};
+  const storage = { agent_settings: { engine: 'legacy' } };
   const listeners = {};
   const noop = () => {};
   const listener = () => ({ addListener: noop });

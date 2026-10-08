@@ -1,0 +1,12 @@
+{
+  "title": "Seite nicht verfügbar | PreisFuchs",
+  "url": "http://127.0.0.1:8765/error.html",
+  "scrollState": {
+    "scrollY": 0,
+    "pageHeight": 779,
+    "viewportHeight": 779
+  },
+  "elementCount": 3,
+  "elementsText": "[1] a \"PreisFuchs\"\n[2] button[button] \"Neu laden\"\n[3] a \"Zur Startseite\"",
+  "pageText": "\n### Diese Seite ist gerade nicht verfügbar\n\nFehler 503: Der Dienst ist vorübergehend überlastet. Bitte versuche es in ein paar Minuten noch einmal.\nFehler-ID: 7f3a-91c2\nNeu laden\nZur Startseite"
+}

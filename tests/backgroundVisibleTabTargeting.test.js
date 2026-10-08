@@ -29,7 +29,7 @@ function makeMock() {
   let lastNavigatedTabId = null;
   const noop = () => {};
   const listeners = {};
-  const storage = {};
+  const storage = { agent_settings: { engine: 'legacy' } };
 
   const matches = (tab, q = {}) => {
     if (q.windowId !== undefined && tab.windowId !== q.windowId) return false;

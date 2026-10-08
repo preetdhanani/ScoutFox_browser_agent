@@ -1,0 +1,20 @@
+{
+  // The extension itself (src/). It runs in the MV3 service worker, so it has the WebWorker lib and
+  // the chrome types, and nothing from Node or from a page (Buffer, process, document) compiles here.
+  // tests/tsconfig.json extends this file and adds the node types for the tests.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "WebWorker"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["chrome"]
+  },
+  "include": ["src"],
+  "exclude": ["**/node_modules", "dist"]
+}

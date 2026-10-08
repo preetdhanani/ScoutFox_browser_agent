@@ -9,9 +9,10 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ollamaReply } from './helpers/llmWire.ts';
 
 // The engine reads its provider config through Storage, so the stub has to describe a real
-// local-model setup — otherwise the loop tests silently exercise the cloud defaults.
+// local-model setup - otherwise the loop tests silently exercise the cloud defaults.
 const STORED = {
   agent_settings: {
     provider: 'ollama',
@@ -36,6 +37,7 @@ global.chrome = {
 
 const { ApiClients } = await import('../background/apiClients.js');
 const { AgentEngine } = await import('../background/agentEngine.js');
+const { buildActionSchema } = await import('../src/background/agent/schemas.ts');
 
 const OLLAMA_SETTINGS = {
   provider: 'ollama',
@@ -46,7 +48,12 @@ const OLLAMA_SETTINGS = {
   ollamaNumPredict: 1024
 };
 
-/** Replace global.fetch with a recorder returning `payload`; returns the captured requests. */
+/**
+ * Replace global.fetch with a recorder that answers from a queue (the last entry repeats). An entry is either
+ * { content, thinking, doneReason }, which becomes what Ollama streams for /api/chat, or { status, text } for an
+ * HTTP error. ChatOllama is the client now: it asks for a stream and needs real Response objects. Returns the
+ * captured requests.
+ */
 function stubFetch(responses) {
   const calls = [];
   const queue = Array.isArray(responses) ? [...responses] : [responses];
@@ -54,51 +61,91 @@ function stubFetch(responses) {
     const body = JSON.parse(init.body);
     calls.push({ url, body });
     const next = queue.length > 1 ? queue.shift() : queue[0];
-    return {
-      ok: next.ok !== false,
-      status: next.status || 200,
-      clone: () => ({ text: async () => next.text || '' }),
-      text: async () => next.text || '',
-      json: async () => next.json
-    };
+    return next.status ? new Response(next.text || '', { status: next.status }) : ollamaReply(next);
   };
   return calls;
 }
 
 test('Ollama - extracts text from /api/chat message.content', async () => {
-  stubFetch({ json: { message: { role: 'assistant', content: '{"action":"finish","answer":"done"}' }, done: true, done_reason: 'stop' } });
+  stubFetch({ content: '{"action":"finish","answer":"done"}' });
   const out = await ApiClients.callOllama(OLLAMA_SETTINGS, [{ role: 'user', content: 'go' }], 'sys', { json: true });
   // Before the fix this returned '' because data.message is an object, not a string.
   assert.equal(out, '{"action":"finish","answer":"done"}');
 });
 
 test('Ollama - falls back to message.thinking when content is empty', async () => {
-  stubFetch({ json: { message: { role: 'assistant', content: '', thinking: '{"action":"click","element_id":3}' }, done: true, done_reason: 'length' } });
+  stubFetch({ content: '', thinking: '{"action":"click","element_id":3}', doneReason: 'length' });
   const out = await ApiClients.callOllama(OLLAMA_SETTINGS, [{ role: 'user', content: 'go' }], 'sys', {});
   // A reasoning model cut off mid-thought still has recoverable JSON in `thinking`.
   assert.match(out, /"action":"click"/);
 });
 
-test('Ollama - request disables native thinking and pins the context window', async () => {
-  const calls = stubFetch({ json: { message: { role: 'assistant', content: 'ok' } } });
-  await ApiClients.callOllama(OLLAMA_SETTINGS, [{ role: 'user', content: 'go' }], 'sys', { json: true });
+test('Ollama - request disables native thinking, pins the context window and sends the action schema', async () => {
+  // The options the engine passes for its main action call (see runLoopBody).
+  const schema = buildActionSchema();
+  const calls = stubFetch({ content: 'ok' });
+  await ApiClients.callOllama(OLLAMA_SETTINGS, [{ role: 'user', content: 'go' }], 'sys', { json: true, schema });
 
-  assert.equal(calls[0].body.think, false, 'think must be false — local reasoning models leave content empty until they finish');
+  assert.equal(calls[0].body.think, false, 'think must be false - local reasoning models leave content empty until they finish');
   assert.equal(calls[0].body.options.num_ctx, 8192, 'num_ctx must be explicit; Ollama defaults to 4096 and truncates from the front');
   assert.equal(calls[0].body.options.num_predict, 1024);
-  assert.equal(calls[0].body.format, 'json', 'JSON mode constrains decoding so a small model cannot emit prose around the action');
+  // Changed on purpose from format:'json'. The schema constrains decoding further: the model
+  // can only produce a known action with its required fields, not just any JSON object.
+  assert.deepEqual(calls[0].body.format, schema, 'the action schema, not "json", constrains the main action call');
+});
+
+test('Ollama - JSON mode without a schema still sends format "json"', async () => {
+  // verifyStep and other side calls ask for plain JSON and must keep getting exactly that.
+  const calls = stubFetch({ content: '{"success":true}' });
+  await ApiClients.callOllama(OLLAMA_SETTINGS, [{ role: 'user', content: 'go' }], 'sys', { json: true });
+  assert.equal(calls[0].body.format, 'json');
+  assert.equal(calls[0].body.think, false);
+});
+
+test('Ollama - a server that rejects a schema format gets format "json" instead, and remembers it', async () => {
+  // Ollama before 0.5 only knows format:"json" and answers a schema with this 400.
+  const oldServer = { ...OLLAMA_SETTINGS, baseUrl: 'http://old-ollama.test:11434' };
+  const schema = buildActionSchema();
+  const calls = stubFetch([
+    { status: 400, text: '{"error":"json: cannot unmarshal object into Go struct field ChatRequest.format of type string"}' },
+    { content: '{"action":"scroll","direction":"down"}' }
+  ]);
+  const out = await ApiClients.callOllama(oldServer, [{ role: 'user', content: 'go' }], 'sys', { json: true, schema });
+  assert.equal(out, '{"action":"scroll","direction":"down"}');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].body.format, schema);
+  assert.equal(calls[1].body.format, 'json', 'the retry falls back to plain JSON mode');
+  assert.equal(calls[1].body.think, false, 'the retry keeps think:false');
+
+  const later = stubFetch({ content: 'ok' });
+  await ApiClients.callOllama(oldServer, [{ role: 'user', content: 'go' }], 'sys', { json: true, schema });
+  assert.equal(later.length, 1, 'the next call does not pay for the retry again');
+  assert.equal(later[0].body.format, 'json');
+});
+
+test('Ollama - the think retry keeps the schema', async () => {
+  const schema = buildActionSchema();
+  const calls = stubFetch([
+    { status: 400, text: 'model does not support think' },
+    { content: '{"action":"go_back"}' }
+  ]);
+  const out = await ApiClients.callOllama({ ...OLLAMA_SETTINGS, model: 'no-think-schema-model' }, [{ role: 'user', content: 'go' }], 'sys', { json: true, schema });
+  assert.equal(out, '{"action":"go_back"}');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].body.think, undefined);
+  assert.deepEqual(calls[1].body.format, schema, 'dropping think must not drop the schema');
 });
 
 test('Ollama - omits format when JSON mode is not requested', async () => {
-  const calls = stubFetch({ json: { message: { role: 'assistant', content: 'ok' } } });
+  const calls = stubFetch({ content: 'ok' });
   await ApiClients.callOllama(OLLAMA_SETTINGS, [{ role: 'user', content: 'go' }], 'sys', {});
   assert.equal(calls[0].body.format, undefined);
 });
 
 test('Ollama - retries without think when the model rejects the flag', async () => {
   const calls = stubFetch([
-    { ok: false, status: 400, text: 'model does not support think' },
-    { json: { message: { role: 'assistant', content: 'recovered' } } }
+    { status: 400, text: 'model does not support think' },
+    { content: 'recovered' }
   ]);
   const out = await ApiClients.callOllama(
     { ...OLLAMA_SETTINGS, model: 'no-think-model' },
@@ -111,10 +158,10 @@ test('Ollama - retries without think when the model rejects the flag', async () 
 });
 
 test('Ollama - surfaces a real HTTP error instead of a generic connection message', async () => {
-  stubFetch({ ok: false, status: 500, text: 'internal boom' });
+  stubFetch({ status: 500, text: 'internal boom' });
   await assert.rejects(
     () => ApiClients.callOllama(OLLAMA_SETTINGS, [{ role: 'user', content: 'go' }], 'sys', {}),
-    /Ollama API error \(500\)/
+    { message: 'Ollama API error (500): internal boom' }
   );
 });
 

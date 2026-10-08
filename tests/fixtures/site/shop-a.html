@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Framework Laptop 16 DIY Edition - Shop A</title>
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <!-- Fixture: "shop-a.test", the ONE shop of the two-sources tasks (tests/e2e/lib/tasks.mjs) that
+       exists. The smoke run maps the host name shop-a.test to the fixture server, so the tab really
+       stands on http://shop-a.test:<port>/shop-a.html and the engine counts the site as opened.
+       The second shop of those tasks, shop-b.test, has no page on purpose: the run must not be able
+       to read a price there, so every price, link, shipping and delivery claim for it is invented.
+       The page shows price, shipping and delivery in plain text and links to no other shop. -->
+  <header class="bar">
+    <a class="logo" href="index.html">Shop A</a>
+    <nav>
+      <a href="#laptops">Laptops</a>
+      <a href="#zubehoer">Zubehör</a>
+      <a href="#service">Service</a>
+    </nav>
+    <button type="button">Warenkorb (0)</button>
+  </header>
+
+  <main>
+    <h1>Framework Laptop 16 DIY Edition (AMD Ryzen 7040 Series)</h1>
+    <p>Der modulare 16-Zoll-Laptop zum Selbstzusammenbauen, bei Shop A sofort bestellbar.</p>
+    <p class="price">1.389,00 EUR</p>
+    <p class="note">inkl. MwSt.</p>
+    <p>Versand: 6,90 EUR</p>
+    <p>Lieferung in 3-4 Werktagen.</p>
+
+    <h2>Ausstattung</h2>
+    <div class="options">
+      <button type="button">AMD Ryzen 7 7840HS</button>
+      <button type="button">Ohne Grafikmodul</button>
+    </div>
+
+    <p><button type="button" class="primary">In den Warenkorb</button></p>
+
+    <h2 id="specs">Technische Daten</h2>
+    <ul>
+      <li>Display: 16 Zoll, 2560 x 1600, 165 Hz</li>
+      <li>Speicher: bis 96 GB DDR5</li>
+      <li>14 Tage Rückgaberecht, 1 Jahr Garantie</li>
+    </ul>
+  </main>
+</body>
+</html>

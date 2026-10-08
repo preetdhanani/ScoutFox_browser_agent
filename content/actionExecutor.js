@@ -10,6 +10,9 @@
   class ActionExecutor {
     constructor() {
       this.badgeContainer = null;
+      this.cursorContainer = null;
+      this.cursorEl = null;
+      this.cursorFadeTimer = null;
     }
 
     /**
@@ -65,6 +68,153 @@
       if (this.badgeContainer) {
         this.badgeContainer.remove();
         this.badgeContainer = null;
+      }
+    }
+
+    /**
+     * Ensure cursor overlay elements are injected into page
+     */
+    ensureCursorOverlay() {
+      if (typeof document === 'undefined' || !document.createElement) return;
+      if (this.cursorContainer && document.contains && document.contains(this.cursorContainer) && this.cursorEl) {
+        return;
+      }
+      let container = document.getElementById ? document.getElementById('scoutfox-cursor-container') : null;
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'scoutfox-cursor-container';
+        if (container.style) {
+          container.style.position = 'fixed';
+          container.style.top = '0';
+          container.style.left = '0';
+          container.style.width = '0';
+          container.style.height = '0';
+          container.style.pointerEvents = 'none';
+          container.style.zIndex = '2147483647';
+          container.style.overflow = 'visible';
+        }
+        const parent = document.body || document.documentElement;
+        if (parent && parent.appendChild) {
+          parent.appendChild(container);
+        }
+      }
+      this.cursorContainer = container;
+
+      let pointer = document.getElementById ? document.getElementById('scoutfox-cursor-pointer') : null;
+      if (!pointer) {
+        pointer = document.createElement('div');
+        pointer.id = 'scoutfox-cursor-pointer';
+        if (pointer.style) {
+          pointer.style.position = 'fixed';
+          pointer.style.top = '0';
+          pointer.style.left = '0';
+          pointer.style.width = '24px';
+          pointer.style.height = '24px';
+          pointer.style.pointerEvents = 'none';
+          pointer.style.zIndex = '2147483647';
+          pointer.style.opacity = '0';
+          pointer.style.transform = 'translate(-100px, -100px)';
+          pointer.style.transition = 'transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease';
+        }
+        pointer.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:block;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.35));"><path d="M0 0L6.5 17L9.5 10.5L16 7.5L0 0Z" fill="#ff7a00" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+        if (this.cursorContainer && this.cursorContainer.appendChild) {
+          this.cursorContainer.appendChild(pointer);
+        }
+      }
+      this.cursorEl = pointer;
+    }
+
+    /**
+     * Animate cursor to target (x, y) coordinates
+     */
+    animateCursor(x, y) {
+      if (typeof x !== 'number' || typeof y !== 'number') return;
+      this.ensureCursorOverlay();
+      if (!this.cursorEl || !this.cursorEl.style) return;
+
+      this.cursorEl.style.opacity = '1';
+      this.cursorEl.style.transform = `translate(${x}px, ${y}px) scale(1)`;
+
+      if (this.cursorFadeTimer) clearTimeout(this.cursorFadeTimer);
+      this.cursorFadeTimer = setTimeout(() => {
+        if (this.cursorEl && this.cursorEl.style) {
+          this.cursorEl.style.opacity = '0';
+        }
+      }, 2500);
+    }
+
+    /**
+     * Trigger visual click pulse and ripple ring at (x, y) coordinates
+     */
+    showClickEffect(x, y) {
+      if (typeof x !== 'number' || typeof y !== 'number') return;
+      this.ensureCursorOverlay();
+      this.animateCursor(x, y);
+
+      if (typeof document === 'undefined' || !document.createElement) return;
+      const ripple = document.createElement('div');
+      ripple.className = 'scoutfox-click-ripple';
+      if (ripple.style) {
+        ripple.style.position = 'fixed';
+        ripple.style.left = `${x}px`;
+        ripple.style.top = `${y}px`;
+        ripple.style.width = '24px';
+        ripple.style.height = '24px';
+        ripple.style.marginLeft = '-12px';
+        ripple.style.marginTop = '-12px';
+        ripple.style.borderRadius = '50%';
+        ripple.style.border = '2.5px solid #ff7a00';
+        ripple.style.backgroundColor = 'rgba(255, 122, 0, 0.25)';
+        ripple.style.pointerEvents = 'none';
+        ripple.style.zIndex = '2147483647';
+        ripple.style.transform = 'scale(0.2)';
+        ripple.style.opacity = '1';
+        ripple.style.transition = 'transform 0.4s cubic-bezier(0.1, 0.8, 0.3, 1), opacity 0.4s ease-out';
+      }
+
+      if (this.cursorContainer && this.cursorContainer.appendChild) {
+        this.cursorContainer.appendChild(ripple);
+      }
+
+      if (typeof requestAnimationFrame !== 'undefined') {
+        requestAnimationFrame(() => {
+          if (ripple.style) {
+            ripple.style.transform = 'scale(2.2)';
+            ripple.style.opacity = '0';
+          }
+        });
+      }
+
+      if (this.cursorEl && this.cursorEl.style) {
+        this.cursorEl.style.transform = `translate(${x}px, ${y}px) scale(0.82)`;
+        setTimeout(() => {
+          if (this.cursorEl && this.cursorEl.style) {
+            this.cursorEl.style.transform = `translate(${x}px, ${y}px) scale(1)`;
+          }
+        }, 120);
+      }
+
+      setTimeout(() => {
+        if (ripple.remove) {
+          ripple.remove();
+        } else if (ripple.parentNode && ripple.parentNode.removeChild) {
+          ripple.parentNode.removeChild(ripple);
+        }
+      }, 450);
+    }
+
+    /**
+     * Remove cursor overlay elements
+     */
+    removeCursorOverlay() {
+      if (this.cursorFadeTimer) {
+        clearTimeout(this.cursorFadeTimer);
+        this.cursorFadeTimer = null;
+      }
+      if (this.cursorContainer) {
+        this.cursorContainer.remove();
+        this.cursorContainer = null;
+        this.cursorEl = null;
       }
     }
 
@@ -320,29 +470,67 @@
         return { success: false, error: `Element [${elementId}] no longer resolvable in DOM.` };
       }
 
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (typeof el.scrollIntoView === 'function') {
+        try {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } catch (_) {
+          el.scrollIntoView();
+        }
+      }
       this.highlightElement(el);
 
-      // Dispatch the realistic hover/press sequence a real pointer produces before the click
-      // itself - some listeners (tooltips, CSS :hover-driven state, press effects) key off
-      // these specifically. 'click' is deliberately NOT in this list: el.click() below already
-      // fires a proper click event on its own (and handles native defaults like toggling a
-      // checkbox or submitting a form), so dispatching a synthetic 'click' here too fired TWO
-      // click events per action - visibly flipping a checkbox on and back off, or double-
-      // submitting a form, in immediate succession.
+      const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+      const width = rect.width || (rect.right - rect.left) || 0;
+      const height = rect.height || (rect.bottom - rect.top) || 0;
+      const x = Math.round(rect.left + width / 2);
+      const y = Math.round(rect.top + height / 2);
+      this.showClickEffect(x, y);
+
+      if (typeof el.focus === 'function') {
+        try { el.focus(); } catch (_) {}
+      }
+
+      // Dispatch realistic hover/press sequence including PointerEvents for modern frameworks
+      const win = typeof window !== 'undefined' ? window : null;
+      const eventCoords = {
+        bubbles: true,
+        cancelable: true,
+        view: win,
+        clientX: x,
+        clientY: y,
+        screenX: x,
+        screenY: y,
+        button: 0,
+        buttons: 1,
+        isPrimary: true
+      };
+
+      if (typeof PointerEvent !== 'undefined') {
+        try {
+          el.dispatchEvent(new PointerEvent('pointerenter', { ...eventCoords, buttons: 0 }));
+          el.dispatchEvent(new PointerEvent('pointerover', { ...eventCoords, buttons: 0 }));
+          el.dispatchEvent(new PointerEvent('pointerdown', eventCoords));
+          el.dispatchEvent(new PointerEvent('pointerup', { ...eventCoords, buttons: 0 }));
+        } catch (_) {}
+      }
+
       ['mouseenter', 'mouseover', 'mousedown', 'mouseup'].forEach(eventType => {
-        const event = new MouseEvent(eventType, {
-          view: window,
-          bubbles: true,
-          cancelable: true
-        });
-        el.dispatchEvent(event);
+        if (typeof MouseEvent !== 'undefined') {
+          const event = new MouseEvent(eventType, {
+            view: win,
+            bubbles: true,
+            cancelable: true,
+            clientX: x,
+            clientY: y
+          });
+          el.dispatchEvent(event);
+        }
       });
 
       if (typeof el.click === 'function') {
         el.click();
-      } else {
-        el.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true }));
+      } else if (typeof MouseEvent !== 'undefined') {
+        el.dispatchEvent(new MouseEvent('click', { view: win, bubbles: true, cancelable: true, clientX: x, clientY: y }));
       }
 
       const clickLabel = this.describeElement(el);
@@ -358,8 +546,21 @@
         return { success: false, error: `Element [${elementId}] no longer resolvable in DOM.` };
       }
 
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (typeof el.scrollIntoView === 'function') {
+        try {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } catch (_) {
+          el.scrollIntoView();
+        }
+      }
       this.highlightElement(el);
+
+      const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+      const width = rect.width || (rect.right - rect.left) || 0;
+      const height = rect.height || (rect.bottom - rect.top) || 0;
+      const x = Math.round(rect.left + width / 2);
+      const y = Math.round(rect.top + height / 2);
+      this.animateCursor(x, y);
 
       el.focus();
 
@@ -472,16 +673,20 @@
      * Temporary visual highlight ring around target element
      */
     highlightElement(el) {
+      if (!el || !el.style) return;
       const origOutline = el.style.outline;
+      const origOutlineOffset = el.style.outlineOffset;
       const origTransition = el.style.transition;
 
-      el.style.transition = 'outline 0.2s ease';
-      el.style.outline = `3px solid ${ACCENT_COLOR}`;
+      el.style.transition = 'outline 0.15s ease, outline-offset 0.15s ease';
+      el.style.outline = '3px solid #ff7a00';
+      el.style.outlineOffset = '2px';
 
       setTimeout(() => {
         el.style.outline = origOutline;
+        el.style.outlineOffset = origOutlineOffset;
         el.style.transition = origTransition;
-      }, 1000);
+      }, 1200);
     }
   }
 

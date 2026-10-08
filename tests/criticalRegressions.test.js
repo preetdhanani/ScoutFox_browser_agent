@@ -136,6 +136,39 @@ test('#6 isUserAbort does NOT misread the LLM timeout as a user abort', () => {
     'a timeout must still be reported to the user as a real failure');
 });
 
+test('#6 isUserAbort does NOT read the wording of an error: a provider failure that says "aborted" is a failure', () => {
+  const engine = new AgentEngine();
+  engine.status = 'running';
+  engine.abortController = new AbortController();   // never aborted
+
+  // Ollama's runner crash is the real case. Taken for a Stop, it ended the step with no retry and no error,
+  // while the status stayed 'running', so the task hung with no Resume.
+  for (const text of [
+    'Ollama API error (500): {"error":"llama runner process has terminated: signal: aborted (core dumped)"}',
+    'connection aborted by the software in your host machine',
+    'The operation was aborted due to timeout',
+    'Request was aborted.'
+  ]) {
+    assert.equal(engine.isUserAbort(new Error(text)), false, text);
+  }
+});
+
+test('#6 pause() and stop() abort the request with a reason tagged as the user\'s, which the llm layer reads', async () => {
+  // The llm layer tells a Pause or Stop from a provider timeout by this tag on the signal, never by an error text.
+  const { isUserAbort } = await import('../src/background/llm/deadline.ts');
+  for (const action of ['pause', 'stop']) {
+    const engine = new AgentEngine();
+    engine.status = 'running';
+    engine.abortController = new AbortController();
+
+    engine[action]();
+
+    assert.equal(engine.abortController.signal.aborted, true, `${action} aborts the in-flight request`);
+    assert.equal(isUserAbort(engine.abortController.signal), true, `${action}: the reason is tagged { scoutfox: 'user' }`);
+    assert.equal(engine.abortController.signal.reason.name, 'AbortError', `${action}: still an AbortError for code that checks the name`);
+  }
+});
+
 test('#6 pause() keeps status paused so the run stays resumable', () => {
   const engine = new AgentEngine();
   engine.status = 'running';

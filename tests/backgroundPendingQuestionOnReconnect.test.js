@@ -23,7 +23,7 @@ const QUESTION = 'Which of your two accounts should I sign in with?';
 
 function makeMock() {
   const tabs = new Map([[100, { id: 100, url: 'https://example.com/a', groupId: -1, windowId: 1, active: true }]]);
-  const storage = {};
+  const storage = { agent_settings: { engine: 'legacy' } };
   const noop = () => {};
   const listeners = {};
   let groupCounter = 5000;

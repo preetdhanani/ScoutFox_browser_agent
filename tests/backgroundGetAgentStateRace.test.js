@@ -56,8 +56,8 @@ function makeBackgroundChromeMock() {
 global.self = { addEventListener: () => {} };
 global.chrome = makeBackgroundChromeMock();
 
-// Importing background.js triggers its static `import { Logger } from '../utils/logger.js'`,
-// which runs logger.js's top-level restore IIFE - the one this test's mock storage.get controls.
+// Importing background.js triggers its static `import { Logger } from '../src/shared/logger.ts'`,
+// which runs logger.ts's top-level restore IIFE - the one this test's mock storage.get controls.
 await import('../background/background.js');
 
 test('GET_AGENT_STATE does not answer while the log restore is still in flight', async () => {
