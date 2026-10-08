@@ -65,7 +65,8 @@ test('openNewWindow creates a new window, groups its tab separately, and keeps t
   const mock = makeEngineChromeMock();
   global.chrome = mock.chrome;
 
-  const engine = new AgentEngine(1);
+  // Session owned by tab 101, which lives in window 1.
+  const engine = new AgentEngine(101, 1);
   await engine.restorePromise;
   engine.history = [{ type: 'user_goal', prompt: 'existing task' }];
   engine.currentTask = 'existing task';
@@ -73,15 +74,18 @@ test('openNewWindow creates a new window, groups its tab separately, and keeps t
   mock.__addTab(101, 1, 'https://example.com/original');
   await engine.ensureScoutFoxGroup(101); // window 1's own group, as startTask would establish
 
+  // The callback now reports the new TAB (and its window), because background.js keys sessions
+  // by tab - it needs the tab id to register against this same session.
   let calledBackWith = null;
-  engine.setWindowOpenedCallback((newWindowId) => { calledBackWith = newWindowId; });
+  engine.setTabAdoptedCallback((newTabId, newWindowId) => { calledBackWith = { newTabId, newWindowId }; });
 
   const result = await engine.openNewWindow('https://example.com/compare');
 
   assert.equal(result.success, true);
   assert.ok(result.windowId, 'must report the new window id');
   assert.ok(result.tabId, 'must report the new tab id');
-  assert.equal(calledBackWith, result.windowId, 'onWindowOpenedCallback must fire with the new window id');
+  assert.deepEqual(calledBackWith, { newTabId: result.tabId, newWindowId: result.windowId },
+    'onTabAdoptedCallback must fire with the new tab and its window, so the tab-keyed session map can register it');
 
   assert.equal(engine.activeTabId, result.tabId, 'the engine now drives the new window\'s tab');
   assert.equal(engine.history.length, 1, 'existing history must be untouched - this is still the same session');
@@ -98,7 +102,7 @@ test('a tab created later in the new window joins ITS OWN group, not the origina
   const mock = makeEngineChromeMock();
   global.chrome = mock.chrome;
 
-  const engine = new AgentEngine(1);
+  const engine = new AgentEngine(101, 1);
   await engine.restorePromise;
   mock.__addTab(101, 1, 'https://example.com/original');
   await engine.ensureScoutFoxGroup(101);

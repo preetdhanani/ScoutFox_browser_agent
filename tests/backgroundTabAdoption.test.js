@@ -30,17 +30,19 @@ function makeMock() {
   const tabs = new Map();
   const groupCalls = [];
   const getCalls = [];
+  const ungroupCalls = [];
   const onUpdatedListeners = [];
   let groupCounter = 9000;
   const noop = () => {};
   const listeners = {};
-  const storage = {};
+  const storage = { agent_settings: { engine: 'legacy' } };
 
   return {
     __tabs: tabs,
     __listeners: listeners,
     __groupCalls: groupCalls,
     __getCalls: getCalls,
+    __ungroupCalls: ungroupCalls,
     __addTab: (t) => { tabs.set(t.id, { groupId: -1, windowId: 1, active: false, ...t }); },
     chrome: {
       runtime: {
@@ -100,6 +102,16 @@ function makeMock() {
           if (cb) cb(gid);
           return Promise.resolve(gid);
         },
+        ungroup: (tabIds, cb) => {
+          const ids = Array.isArray(tabIds) ? tabIds : [tabIds];
+          ids.forEach((id) => {
+            ungroupCalls.push(id);
+            const t = tabs.get(id);
+            if (t) t.groupId = -1;
+          });
+          if (cb) cb();
+          return Promise.resolve();
+        },
         sendMessage: (tabId, msg, cb) => cb({
           success: true,
           data: {
@@ -149,19 +161,19 @@ after(async () => {
   // The stub never resolves, so the loop is stuck awaiting it and the KEEPALIVE_ON interval
   // would keep this process alive forever. STOP_TASK moves status off running, which is all
   // syncKeepaliveAlarm() checks.
-  await sendMessage(mock.__listeners, { action: 'STOP_TASK', windowId: 1 });
+  await sendMessage(mock.__listeners, { action: 'STOP_TASK', tabId: 100 });
 });
 
 // One real run, started once, left running for every test below.
 const started = await sendMessage(mock.__listeners, {
-  action: 'START_TASK', windowId: 1, payload: { prompt: 'do a thing' }
+  action: 'START_TASK', tabId: 100, payload: { prompt: 'do a thing' }
 });
 await new Promise((r) => setTimeout(r, 40));
 
 test('the run is genuinely live on the expected tab (setup sanity check)', async () => {
   assert.equal(started.success, true, 'the task must have started');
   assert.equal(started.tabId, AUTOMATED_TAB, 'it must be driving the focused, scriptable tab');
-  const state = await sendMessage(mock.__listeners, { action: 'GET_AGENT_STATE', windowId: 1 });
+  const state = await sendMessage(mock.__listeners, { action: 'GET_AGENT_STATE', tabId: 100 });
   assert.equal(state.status, 'running', 'the adoption gate reads activeTabId on a running session');
   assert.ok(mock.__tabs.get(AUTOMATED_TAB).groupId > 0, 'the automated tab must be in the ScoutFox group');
 });
@@ -223,4 +235,55 @@ test('a window with no ScoutFox session at all is untouched', async () => {
 
   assert.equal(mock.__groupCalls.length, 0,
     'window 42 never opened ScoutFox, so nothing there is any of this session\'s business');
+});
+
+/**
+ * The second half of the same user report: "the new opened tab should not be added by default
+ * into the group ScoutFox already created."
+ *
+ * Leaving a tab alone is not the same as keeping it out. Chrome ITSELF adds a new tab to
+ * whatever group its opener belongs to - ctrl+click a link inside a grouped tab and the result
+ * joins that group, with no extension involvement at all. So the ScoutFox group grew on its own
+ * as soon as the user started browsing from the agent's tab, which is the opposite of what the
+ * group is for: it is meant to show at a glance exactly which tabs the agent may touch.
+ */
+test('a user tab Chrome auto-added to the ScoutFox group is pulled back out', async () => {
+  mock.__ungroupCalls.length = 0;
+  const scoutFoxGroupId = mock.__tabs.get(AUTOMATED_TAB).groupId;
+  assert.ok(scoutFoxGroupId > 0, 'sanity check: the session really does have a group to be added to');
+
+  // The user ctrl+clicks a link in the agent's tab for their own reasons. Chrome has already
+  // placed it in the ScoutFox group by the time onCreated runs, which is why the tab arrives
+  // carrying that groupId rather than -1.
+  const userTabAutoGrouped = {
+    id: 1100, windowId: 1, url: 'https://news.example.com/their-own-reading',
+    groupId: scoutFoxGroupId, openerTabId: AUTOMATED_TAB
+  };
+  mock.__addTab(userTabAutoGrouped);
+  // Not a running-agent action: the session is idle as far as tab-opening goes, so this is the
+  // user's click, not the agent's. Stop the run first so the distinction is real.
+  await sendMessage(mock.__listeners, { action: 'PAUSE_TASK', tabId: 100 });
+  mock.__listeners.onCreated(userTabAutoGrouped);
+  await new Promise((r) => setTimeout(r, 100));
+
+  assert.ok(mock.__ungroupCalls.includes(1100),
+    'Chrome auto-grouped the user\'s tab, so ScoutFox must actively remove it again - merely declining to group it does nothing');
+  assert.equal(mock.__tabs.get(1100).groupId, -1, 'the user\'s tab must end up outside the group');
+});
+
+test('a user tab in a group of their OWN is never touched', async () => {
+  mock.__ungroupCalls.length = 0;
+
+  // The user keeps their own tab group. A new tab landing in it is none of ScoutFox's business,
+  // and ungrouping it would be ScoutFox reorganising the user's tab strip for them.
+  const inUsersOwnGroup = {
+    id: 1200, windowId: 1, url: 'https://news.example.com/other', groupId: 4242, openerTabId: UNRELATED_TAB
+  };
+  mock.__addTab(inUsersOwnGroup);
+  mock.__listeners.onCreated(inUsersOwnGroup);
+  await new Promise((r) => setTimeout(r, 100));
+
+  assert.equal(mock.__ungroupCalls.includes(1200), false,
+    'only tabs that landed in OUR group are released - a group the user built themselves is left exactly as it is');
+  assert.equal(mock.__tabs.get(1200).groupId, 4242, 'their own group membership must survive untouched');
 });

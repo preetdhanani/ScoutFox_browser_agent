@@ -33,8 +33,11 @@ const STALE_HISTORY = [
 function makeMock() {
   const tabs = new Map([[100, { id: 100, url: 'https://example.com/a', groupId: -1, windowId: 1 }]]);
   const storage = {
+    agent_settings: { engine: 'legacy' },
+    // Keyed by TAB id now - sessions are per tab, so this is the persisted session belonging to
+    // tab 100, the tab this file clicks the icon on.
     agent_sessions: {
-      1: {
+      100: {
         history: STALE_HISTORY,
         planSteps: [],
         task: 'an old, unrelated finished task',
@@ -61,6 +64,7 @@ function makeMock() {
         onMessage: { addListener: (fn) => { listeners.onMessage = fn; } }
       },
       storage: {
+        get session() { return this.local; }, // agent_sessions lives in storage.session; one backing store keeps seeds simple
         local: {
           get: (keys, cb) => {
             const result = {};
@@ -92,12 +96,18 @@ function makeMock() {
             elements: [], elementsText: '', elementCount: 0, pageText: ''
           }
         }),
+        // Honours opts.groupId, like the real API: joining an EXISTING group must put the tab
+        // in that group, not mint a new one. A double that always minted a new id made a tab
+        // joining its own restored group land somewhere else, and the engine's own scope check
+        // (isTabInScope, which compares tab.groupId against the recorded group) then refused to
+        // touch the very tab it had just grouped.
         group: (opts, cb) => {
-          const gid = groupCounter++;
+          const gid = opts.groupId || groupCounter++;
           const ids = Array.isArray(opts.tabIds) ? opts.tabIds : [opts.tabIds];
           ids.forEach((id) => { const t = tabs.get(id); if (t) t.groupId = gid; });
           cb(gid);
-        }
+        },
+        ungroup: (ids, cb) => cb && cb()
       },
       tabGroups: { onRemoved: { addListener: noop }, get: (id, cb) => cb({ id, title: 'ScoutFox' }), update: (id, opts, cb) => cb && cb() },
       alarms: { create: noop, clear: noop, get: (n, cb) => cb(null), onAlarm: { addListener: noop } },
@@ -120,7 +130,7 @@ await import('../background/background.js');
 await new Promise((r) => setTimeout(r, 20));
 
 test('clicking the icon on an idle session with stale history starts fresh', async () => {
-  const port = makeFakePort('scoutfox_sidepanel_fresh:1');
+  const port = makeFakePort('scoutfox_sidepanel_fresh:100');
   mock.__listeners.onConnect(port);
   await new Promise((r) => setTimeout(r, 20));
 
@@ -156,16 +166,16 @@ after(async () => {
   // would otherwise keep this file's process alive forever. STOP_TASK moves status off both,
   // which is all syncKeepaliveAlarm() checks - clearing the interval regardless of the
   // abandoned promise still technically pending underneath.
-  await sendMessage(mock.__listeners, { action: 'STOP_TASK', windowId: 1 });
+  await sendMessage(mock.__listeners, { action: 'STOP_TASK', tabId: 100 });
 });
 
 test('clicking the icon while a task is genuinely running leaves it completely untouched', async () => {
-  const port = makeFakePort('scoutfox_sidepanel_fresh:1');
+  const port = makeFakePort('scoutfox_sidepanel_fresh:100');
   mock.__listeners.onConnect(port);
   await new Promise((r) => setTimeout(r, 20));
 
   // Real START_TASK, through the real message router - not a hand-set status flag.
-  await sendMessage(mock.__listeners, { action: 'START_TASK', windowId: 1, payload: { prompt: 'a brand new real task' } });
+  await sendMessage(mock.__listeners, { action: 'START_TASK', tabId: 100, payload: { prompt: 'a brand new real task' } });
   await new Promise((r) => setTimeout(r, 40));
 
   const running = lastStateUpdate(port);
@@ -182,11 +192,11 @@ test('clicking the icon while a task is genuinely running leaves it completely u
 });
 
 test('clicking the icon while a task is paused leaves it completely untouched', async () => {
-  const port = makeFakePort('scoutfox_sidepanel_fresh:1');
+  const port = makeFakePort('scoutfox_sidepanel_fresh:100');
   mock.__listeners.onConnect(port);
   await new Promise((r) => setTimeout(r, 20));
 
-  await sendMessage(mock.__listeners, { action: 'PAUSE_TASK', windowId: 1 });
+  await sendMessage(mock.__listeners, { action: 'PAUSE_TASK', tabId: 100 });
   await new Promise((r) => setTimeout(r, 20));
 
   const paused = lastStateUpdate(port);

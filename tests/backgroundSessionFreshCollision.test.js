@@ -39,6 +39,7 @@ function makeBackgroundChromeMock() {
   // not 'scoutfox_sidepanel:42'), and background.js's onConnect routes any port name it can't
   // parse a windowId out of into a single shared 'legacy' session bucket.
   const storage = {
+    agent_settings: { engine: 'legacy' },
     agent_sessions: {
       legacy: {
         history: REAL_HISTORY,
@@ -62,6 +63,7 @@ function makeBackgroundChromeMock() {
       onMessage: { addListener: noop }
     },
     storage: {
+      get session() { return this.local; }, // agent_sessions lives in storage.session; one backing store keeps seeds simple
       local: {
         get: (keys, cb) => {
           const result = {};

@@ -7,10 +7,37 @@
  */
 
 import { ApiClients } from './apiClients.js';
-import { Storage } from '../utils/storage.js';
-import { Logger } from '../utils/logger.js';
-import { callWithRetry, LLM_MAX_ATTEMPTS } from './harness/recovery.js';
-import { buildFinishEntry, buildMaxStepsEntry } from './harness/outcome.js';
+import { Storage } from '../src/shared/storage.ts';
+import { Logger } from '../src/shared/logger.ts';
+import { callWithRetry, LLM_MAX_ATTEMPTS } from '../src/background/agent/recovery.ts';
+import { userAbortReason } from '../src/background/llm/deadline.ts';
+import { buildFinishEntry, buildMaxStepsEntry } from '../src/background/agent/outcome.ts';
+import { ACTION_VERBS, buildActionPromptLines } from '../src/background/agent/actions.ts';
+import { buildActionSchema, buildPlanSchema, PLAN_MAX_STEPS } from '../src/background/agent/schemas.ts';
+import { parsePartialOrTruncatedJson } from '../src/background/agent/repairJson.ts';
+import { parseModelReply, planTextsFromStepsObject } from '../src/background/agent/parse.ts';
+import { refsFromCount, sanitizeAction } from '../src/background/agent/sanitize.ts';
+import { EvidenceLedger, siteOf } from '../src/background/agent/evidence.ts';
+import { annotateAnswer, auditAnswer, buildEvidenceReport, describeEvidenceForPrompt, formatSendBack, goalSources, namedSources, prepareAnswer } from '../src/background/agent/answerAudit.ts';
+import { decideOnFailedAudit } from '../src/background/agent/finishPolicy.ts';
+import {
+  NO_SEND_BACK_ACKNOWLEDGED,
+  NO_SEND_BACK_OUT_OF_STEPS,
+  NO_SEND_BACK_PLAIN_TEXT,
+  answerAcknowledgesEveryGap,
+  auditRecordOf,
+  compactLedgerSnapshot,
+  evidenceFromActionResult,
+  finishedPlanStatuses,
+  gateClampLog,
+  gateContextOf,
+  honestPlanStatuses,
+  planNamesSites,
+  resolveGateDecision,
+  withoutAcknowledgedGaps
+} from '../src/background/agent/planEvidence.ts';
+import { inputDispatcher } from '../src/background/browser/input.ts';
+import { cdp } from '../src/background/browser/cdp.ts';
 
 // Sessions are multi-turn and would otherwise grow without bound, and the whole array is
 // serialised to chrome.storage on every state change.
@@ -18,16 +45,19 @@ const MAX_HISTORY = 400;
 // How many completed-turn recaps previousTurnsSummary() keeps for a follow-up prompt.
 const PREVIOUS_TURNS_LIMIT = 4;
 
-// Every verb the system can actually dispatch (sanitizeActionSchema's aliases already resolve
+// Every verb the system can actually dispatch (the aliases of shared/actions.json already resolve
 // onto these), whether or not the current system prompt happens to declare it. An unrecognised
 // verb used to sail straight through parsing, get pushed to history, and only fail one layer
 // past the page boundary at actionExecutor.js's default `throw new Error('Unknown action')` -
 // a wasted step with a generic failure instead of a correctable parse error naming the problem.
-const KNOWN_ACTIONS = new Set([
-  'click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward',
-  'read_page_text', 'execute_js', 'read_network_requests', 'browser_batch', 'wait',
-  'finish', 'ask_user', 'open_window'
-]);
+//
+// It is the verb list of the registry (shared/actions.json), so a verb the engine dispatches but
+// Ollama's grammar cannot produce, or the other way round, cannot exist.
+export const KNOWN_ACTIONS = new Set(ACTION_VERBS);
+
+// The pure parser modules (src/background/agent/) report a rejection through this, so their
+// [GUARDRAIL_REJECTED] and [UNIVERSAL_GUARDRAIL] lines stay in the same log as before.
+const engineLog = (level, message) => Logger[level]('AgentEngine', message);
 
 /**
  * Safely read chrome.runtime.lastError. It MUST be read inside every chrome.* callback or
@@ -44,19 +74,23 @@ export function lastRuntimeError() {
 }
 
 /**
- * Read-modify-write chrome.storage.local's agent_sessions key. It's one key shared across
- * every window's engine, so a blind overwrite would silently erase every OTHER window's
- * persisted session on whichever engine happens to write last - mutate() is handed the whole
- * map and decides what this call changes for just its own window. Return `false` from mutate
- * to skip the write entirely (nothing changed).
+ * Read-modify-write the agent_sessions key in chrome.storage.session. It's one key shared across
+ * every tab's engine, so a blind overwrite would silently erase every OTHER tab's persisted
+ * session on whichever engine happens to write last - mutate() is handed the whole map and
+ * decides what this call changes for just its own tab. Return `false` from mutate to skip the
+ * write entirely (nothing changed).
+ *
+ * storage.session, not storage.local: it survives the MV3 worker being recycled mid-task, and
+ * Chrome clears it on browser restart. Sessions are keyed by tab id and Chrome reuses tab ids
+ * across restarts, so anything longer-lived would hand yesterday's run to today's first tab.
  */
 function updateAgentSessions(mutate, onError) {
-  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
-  chrome.storage.local.get(['agent_sessions'], (res) => {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.session) return;
+  chrome.storage.session.get(['agent_sessions'], (res) => {
     lastRuntimeError();
     const all = (res && res.agent_sessions) || {};
     if (mutate(all) === false) return;
-    chrome.storage.local.set({ agent_sessions: all }, () => {
+    chrome.storage.session.set({ agent_sessions: all }, () => {
       const err = lastRuntimeError();
       if (err && onError) onError(err);
     });
@@ -89,94 +123,21 @@ export function describeRestrictedUrl(url) {
   return null;
 }
 
-/**
- * Robust Truncated & Partial JSON Repair Engine
- * Salvages unclosed strings, missing braces, or raw unescaped newlines in JSON action payloads.
- */
-function parsePartialOrTruncatedJson(str) {
-  if (!str || typeof str !== 'string') return null;
-  const trimmed = str.trim();
-
-  // 1. Standard JSON parse
-  try {
-    return JSON.parse(trimmed);
-  } catch (_) {}
-
-  // 2. Fix unescaped control characters & raw newlines inside JSON string values
-  try {
-    const escapedNewlines = trimmed.replace(/[\r\n]+/g, '\\n');
-    return JSON.parse(escapedNewlines);
-  } catch (_) {}
-
-  // 3. Balance unclosed string quotes and closing braces/brackets
-  try {
-    let repaired = trimmed.replace(/[\r\n]+/g, '\\n');
-    const quoteCount = (repaired.match(/(?<!\\)"/g) || []).length;
-    if (quoteCount % 2 !== 0) {
-      repaired += '"';
-    }
-
-    const openBraces = (repaired.match(/\{/g) || []).length;
-    const closeBraces = (repaired.match(/\}/g) || []).length;
-    for (let i = 0; i < openBraces - closeBraces; i++) {
-      repaired += '}';
-    }
-
-    const openBrackets = (repaired.match(/\[/g) || []).length;
-    const closeBrackets = (repaired.match(/\]/g) || []).length;
-    for (let i = 0; i < openBrackets - closeBrackets; i++) {
-      repaired += ']';
-    }
-
-    return JSON.parse(repaired);
-  } catch (_) {}
-
-  // 4. Regex extraction fallback for truncated execute_js / browser_batch payloads
-  try {
-    const actionMatch = trimmed.match(/"action"\s*:\s*"([^"]+)"/i);
-    if (actionMatch) {
-      const actName = actionMatch[1];
-      
-      if (actName === 'execute_js' || actName === 'eval_js') {
-        const codeMatch = trimmed.match(/"code"\s*:\s*"([\s\S]*)/i);
-        if (codeMatch) {
-          let codeStr = codeMatch[1].replace(/"\s*\}?\s*\]?\s*$/, '').trim();
-          codeStr = codeStr.replace(/\\"/g, '"').replace(/\\n/g, '\n');
-          return {
-            action: 'execute_js',
-            code: codeStr,
-            world: 'MAIN',
-            reason: 'Recovered from truncated model output'
-          };
-        }
-      }
-
-      if (actName === 'click' || actName === 'type') {
-        const idMatch = trimmed.match(/"element_id"\s*:\s*(\d+)/i) || trimmed.match(/"click"\s*:\s*(\d+)/i);
-        const textMatch = trimmed.match(/"text"\s*:\s*"([^"]+)"/i);
-        return {
-          action: actName,
-          element_id: idMatch ? parseInt(idMatch[1], 10) : undefined,
-          text: textMatch ? textMatch[1] : undefined,
-          reason: 'Recovered from truncated model output'
-        };
-      }
-    }
-  } catch (_) {}
-
-  return null;
-}
-
 export class AgentEngine {
   /**
-   * @param {number|string} [windowId] Which browser window this engine belongs to. One
-   *   engine exists per window (see background.js's session map) so that each window runs a
-   *   fully independent automation: its own tab group, its own history, its own Stop/Pause,
-   *   never able to see or touch a tab outside its own group. Optional and defaults to
-   *   'default' so every existing test and any non-windowed context (the standalone Python
-   *   runner analog, direct unit tests) keeps working unchanged with a single implicit session.
+   * @param {number|string} [sessionId] Which TAB this engine belongs to. One engine exists per
+   *   tab (see background.js's session map) so that each tab runs a fully independent
+   *   automation: its own tab group, its own history, its own Stop/Pause, never able to see or
+   *   touch a tab outside its own group. Two tabs side by side in the same window can run
+   *   different tasks at the same time without ever noticing each other. Optional and defaults
+   *   to 'default' so every existing test and any non-tabbed context (direct unit tests) keeps
+   *   working unchanged with a single implicit session.
+   * @param {number|string} [windowId] Which window that tab currently sits in. This is a
+   *   SEPARATE concern from identity: a Chrome tab group cannot span windows, so group
+   *   bookkeeping is keyed by window even though the session itself is keyed by tab.
    */
-  constructor(windowId) {
+  constructor(sessionId, windowId) {
+    this.sessionId = sessionId !== undefined && sessionId !== null ? sessionId : 'default';
     this.windowId = windowId !== undefined && windowId !== null ? windowId : 'default';
     this.status = 'idle'; // 'idle' | 'running' | 'paused' | 'stopped'
     this.currentTask = null;
@@ -192,15 +153,39 @@ export class AgentEngine {
     // paused run is waiting on a question, not just paused by the user or by a failed LLM call.
     this.pendingQuestion = null;
     this.onStateChangeCallback = null;
-    // Fired when this session opens a brand-new browser window (see openNewWindow()), so
-    // background.js can register that window's id against THIS session instead of creating a
-    // second, disconnected one the moment a panel is opened there. AgentEngine has no direct
-    // access to background.js's own window->session registry; this callback is the seam.
-    this.onWindowOpenedCallback = null;
+    // Fired when this session takes on a tab it did not start with - the tab inside a window
+    // it opened (see openNewWindow()), for instance - so background.js can register that TAB
+    // against THIS session instead of creating a second, disconnected one the moment a panel
+    // appears there. AgentEngine has no direct access to background.js's own tab->session
+    // registry; this callback is the seam between them.
+    this.onTabAdoptedCallback = null;
     this.stateVersion = 0;
     this.recentActionSignatures = [];
     this.currentPlanIndex = 0;
+    this.currentDocId = null;
     this.networkBuffers = new Map(); // tabId -> Array of Network Requests (capped at 100)
+
+    // What the ENGINE read from pages (see agent/evidence.ts), never what the model said. It is kept for
+    // the whole session, so a follow-up turn can still rely on a page an earlier turn read, and it is
+    // only emptied when the session is cleared (clearHistory). The final answer of every turn is checked
+    // against it (see gateFinish).
+    this.evidence = new EvidenceLedger();
+    // What the engine does with an answer that failed the audit: 'send_back' | 'annotate' | 'replace'
+    // (agent/finishPolicy.ts). A field so a test can swap in a policy to force one branch. The engine
+    // clamps whatever it returns (resolveGateDecision), and there is no way to accept such an answer as it is.
+    this.finishPolicy = decideOnFailedAudit;
+    // How many times this turn's finish was sent back to the model. Reset by startTask.
+    this.finishSendBacks = 0;
+    // The finish that was sent back last, kept so that a run that ends before the model can fix it still shows
+    // the answer, checked and marked, and not nothing (see runLoopBody). Reset by startTask.
+    this.lastRefusedFinish = null;
+    // The strings the model typed into pages. A page that echoes one back (a search box that keeps its value, a
+    // results page that repeats the query) must not turn the model's own words into something the engine "read".
+    this.typedTexts = [];
+    // The site a navigate action was sent to ({ site, before }: `before` is the site the tab was on), until the next
+    // action: if the tab then landed on another site, that is a redirect, and the site the model asked for was
+    // opened through it.
+    this.navigatedFrom = null;
 
     // Sandboxed Chrome Tab Group ID(s). A Chrome tab group is intrinsically single-window, but
     // one session can span MORE than one window (an agent-opened new window stays part of the
@@ -296,15 +281,15 @@ export class AgentEngine {
 
   async restoreState() {
     try {
-      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.session) {
         Logger.info('AgentEngine', '[STATE_RESTORE] chrome.storage unavailable — starting from a clean engine state.');
         return;
       }
 
-      // Keyed by windowId, not a single global slot - one engine exists per window, and each
-      // must restore only ITS OWN session, never another window's.
+      // Keyed by the owning TAB, not a single global slot - one engine exists per tab, and
+      // each must restore only ITS OWN session, never a neighbouring tab's.
       const stored = await new Promise((resolve) => {
-        chrome.storage.local.get(['agent_sessions'], (res) => {
+        chrome.storage.session.get(['agent_sessions'], (res) => {
           const err = lastRuntimeError();
           if (err) {
             Logger.warn('AgentEngine', '[STATE_RESTORE_FAILED] Could not read persisted session', err.message);
@@ -312,7 +297,7 @@ export class AgentEngine {
             return;
           }
           const all = res && res.agent_sessions;
-          resolve(all && all[String(this.windowId)] ? all[String(this.windowId)] : null);
+          resolve(all && all[String(this.sessionId)] ? all[String(this.sessionId)] : null);
         });
       });
 
@@ -337,6 +322,8 @@ export class AgentEngine {
       this.currentPlanIndex = stored.currentPlanIndex || 0;
       this.activeTabId = stored.activeTabId || null;
       this.scoutFoxGroupId = stored.scoutFoxGroupId || null;
+      // Sessions stored before the audit existed have no ledger: an empty one is the honest reading.
+      this.evidence = EvidenceLedger.fromSnapshot(stored.evidence);
 
       // Keep the version counter monotonic across worker restarts so the sidepanel's
       // out-of-order guard still holds even within a single boot.
@@ -365,7 +352,7 @@ export class AgentEngine {
   async persistState() {
     try {
       updateAgentSessions((all) => {
-        all[String(this.windowId)] = {
+        const session = {
           history: this.history,
           planSteps: this.planSteps,
           task: this.currentTask,
@@ -376,6 +363,10 @@ export class AgentEngine {
           stateVersion: this.stateVersion,
           scoutFoxGroupId: this.scoutFoxGroupId
         };
+        // Only when something was read: a session that read nothing is stored as it always was.
+        const evidence = this.storedEvidence();
+        if (evidence) session.evidence = evidence;
+        all[String(this.sessionId)] = session;
       }, (err) => {
         Logger.warn('AgentEngine', '[STATE_PERSIST_FAILED] Could not write session to storage', err.message);
       });
@@ -384,15 +375,15 @@ export class AgentEngine {
     }
   }
 
-  /** Remove this window's persisted session entirely - called when its window closes. */
-  static forgetWindow(windowId) {
+  /** Remove this session's persisted state entirely - called when its owning tab closes. */
+  static forgetSession(sessionId) {
     try {
       updateAgentSessions((all) => {
-        if (!(String(windowId) in all)) return false; // nothing to remove, skip the write
-        delete all[String(windowId)];
+        if (!(String(sessionId) in all)) return false; // nothing to remove, skip the write
+        delete all[String(sessionId)];
       });
     } catch (e) {
-      Logger.warn('AgentEngine', '[STATE_FORGET_ERROR] Could not remove closed window\'s persisted session', e);
+      Logger.warn('AgentEngine', '[STATE_FORGET_ERROR] Could not remove closed tab\'s persisted session', e);
     }
   }
 
@@ -404,8 +395,13 @@ export class AgentEngine {
     this.stepCount = 0;
     this.currentPlanIndex = 0;
     this.currentTask = null;
+    this.evidence.clear();
+    this.typedTexts = [];
+    this.navigatedFrom = null;
+    this.lastRefusedFinish = null;
+    this.finishSendBacks = 0;
     this.notifyStateChange();
-    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history and plan cleared for fresh session.');
+    Logger.info('AgentEngine', '[CLEAR_HISTORY] Task history, plan and evidence cleared for fresh session.');
   }
 
   /**
@@ -438,7 +434,9 @@ export class AgentEngine {
         goal = item.prompt;
       } else if (item.type === 'finish' && goal) {
         const answer = String(item.answer || '').replace(/\s+/g, ' ').slice(0, 280);
-        lines.push(`- Asked: "${goal}"\n  Result: ${answer}`);
+        // An answer the audit did not verify is not handed to a later turn as plain fact.
+        const verdict = item.audit && item.audit.verdict && item.audit.verdict !== 'verified' ? ` (${item.audit.verdict}: not everything in it was checked against pages that were read)` : '';
+        lines.push(`- Asked: "${goal}"\n  Result${verdict}: ${answer}`);
         goal = null;
       }
     }
@@ -449,8 +447,8 @@ export class AgentEngine {
     this.onStateChangeCallback = cb;
   }
 
-  setWindowOpenedCallback(cb) {
-    this.onWindowOpenedCallback = cb;
+  setTabAdoptedCallback(cb) {
+    this.onTabAdoptedCallback = cb;
   }
 
   notifyStateChange(extraData = {}) {
@@ -501,7 +499,7 @@ export class AgentEngine {
    *   group cannot span windows, so a session spanning more than one tracks one group PER
    *   window it touches, in scoutFoxGroupIds.
    */
-  async ensureScoutFoxGroup(tabId, windowId = this.windowId) {
+  async ensureScoutFoxGroup(tabId, explicitWindowId) {
     if (!tabId || typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.group) return null;
 
     try {
@@ -513,6 +511,14 @@ export class AgentEngine {
       });
 
       if (!tab) return null;
+
+      // Which window's group does this tab belong in? The TAB's own, always - a Chrome tab group
+      // cannot span windows, so grouping a tab into any other window's group simply fails. Not
+      // this.windowId: that is only where the owner tab was when the session was created, and
+      // it goes stale once a tab is dragged to another window. isTabInScope keys on tab.windowId.
+      const windowId = explicitWindowId !== undefined && explicitWindowId !== null
+        ? explicitWindowId
+        : (tab.windowId !== undefined ? tab.windowId : this.windowId);
 
       const TAB_GROUP_ID_NONE = (typeof chrome.tabGroups !== 'undefined' && chrome.tabGroups.TAB_GROUP_ID_NONE !== undefined)
         ? chrome.tabGroups.TAB_GROUP_ID_NONE
@@ -573,9 +579,11 @@ export class AgentEngine {
         }
       }
 
-      // 4. Create fresh 'ScoutFox' tab group
+      // 4. Create fresh 'ScoutFox' tab group, in the tab's OWN window. Without createProperties
+      // Chrome creates the group in the last-focused window and MOVES the tab there - so a user
+      // who clicked into another window while a task was starting lost the agent's tab to it.
       const newGroupId = await new Promise((resolve) => {
-        chrome.tabs.group({ tabIds: tabId }, (gid) => {
+        chrome.tabs.group({ tabIds: tabId, createProperties: { windowId: tab.windowId } }, (gid) => {
           lastRuntimeError();
           resolve(gid);
         });
@@ -609,7 +617,7 @@ export class AgentEngine {
    * A Chrome tab group cannot span windows, so the new window's tab gets its OWN ScoutFox
    * group - tracked in scoutFoxGroupIds under the new window's id, alongside this engine's
    * other window(s) - while history, status, and everything else stay the ONE shared session.
-   * background.js learns about the new window via onWindowOpenedCallback, so a panel opened
+   * background.js learns about the new window's tab via onTabAdoptedCallback, so a panel opened
    * there finds this same session instead of creating a second one.
    */
   async openNewWindow(url) {
@@ -633,9 +641,9 @@ export class AgentEngine {
         return { success: false, error: 'The new window was created, but no tab was found in it.' };
       }
 
-      if (this.onWindowOpenedCallback) {
-        try { this.onWindowOpenedCallback(win.id); } catch (err) {
-          Logger.warn('AgentEngine', '[WINDOW_OPENED_CALLBACK_ERROR] onWindowOpenedCallback threw', err);
+      if (this.onTabAdoptedCallback) {
+        try { this.onTabAdoptedCallback(newTab.id, win.id); } catch (err) {
+          Logger.warn('AgentEngine', '[TAB_ADOPTED_CALLBACK_ERROR] onTabAdoptedCallback threw', err);
         }
       }
 
@@ -939,7 +947,7 @@ export class AgentEngine {
         timeoutHandle = setTimeout(() => reject(new Error('execute_js timed out after 5000ms')), timeoutMs);
       });
 
-      // Same shape of bug fixed in harness/recovery.js for the LLM call: a Promise.race with no
+      // Same shape of bug fixed in agent/recovery.ts for the LLM call: a Promise.race with no
       // cancellation of the losing side leaves this timer pending for the full 5s regardless of
       // how fast resultPromise actually settled - and execute_js is called potentially every
       // step, so those pile up. Cleared unconditionally in `finally` below.
@@ -1011,6 +1019,9 @@ export class AgentEngine {
     this.stepCount = 0;
     this.currentPlanIndex = 0;
     this.planSteps = [];
+    this.finishSendBacks = 0;
+    this.lastRefusedFinish = null;
+    this.navigatedFrom = null;
     this.activeTabId = tabId;
     this.isLoopActive = true;
     this.abortController = new AbortController();
@@ -1048,7 +1059,18 @@ export class AgentEngine {
   async generatePlan(userPrompt, settings) {
     const isSummarizeTask = /summarize|summary|readme|overview|describe|explain|read/i.test(userPrompt);
 
-    const planPrompt = `Task: "${userPrompt}"
+    // Ollama gets an object schema in `format`. The old request asked for a bare JSON array,
+    // which format:"json" cannot produce (it always yields an object), so the plan only
+    // worked when the model happened to wrap an array of strings in an object and the regex
+    // below fished it out. Cloud providers keep the array request unchanged.
+    const useSchema = !!settings && settings.provider === 'ollama';
+
+    const planPrompt = useSchema ? `Task: "${userPrompt}"
+Make a short plan for this web browsing task, in the order the steps must happen.
+Reply with ONE JSON object: {"steps": [{"source": "...", "goal": "..."}]} with 1 to ${PLAN_MAX_STEPS} steps.
+- source: the website for this step as a domain like "idealo.de", or "current page".
+- goal: one short sentence that says what to do or find there.
+Give every website the user names its own step.${isSummarizeTask ? '\nFor reading or summarizing tasks, use 1 or 2 steps.' : ''}` : `Task: "${userPrompt}"
 Generate a concise, efficient execution plan tailored specifically for this web browsing task.
 Output ONLY a raw JSON array of short sub-goal action strings.
 
@@ -1060,15 +1082,21 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       // Previously passed no signal at all, so Pause/Stop pressed during plan generation could
       // not cancel it - the in-flight request just ran to completion (or the full timeout)
       // regardless. Same abortController startTask() already created for the main loop.
-      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.', {
+      const options = {
         json: true,
         signal: this.abortController ? this.abortController.signal : null
-      });
+      };
+      if (useSchema) options.schema = buildPlanSchema();
+      const resp = await ApiClients.generateCompletion(settings, [{ role: 'user', content: planPrompt }], 'You are a web task planner.', options);
 
       let planArray = [];
-      const match = resp.match(/\[[\s\S]*\]/);
-      if (match) {
-        planArray = JSON.parse(match[0]);
+      if (useSchema) {
+        planArray = planTextsFromStepsObject(resp);
+      } else {
+        const match = resp.match(/\[[\s\S]*\]/);
+        if (match) {
+          planArray = JSON.parse(match[0]);
+        }
       }
 
       if (Array.isArray(planArray) && planArray.length > 0) {
@@ -1087,18 +1115,27 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         { id: 1, text: 'Analyze visible documentation text on page', status: 'in_progress' },
         { id: 2, text: 'Synthesize concise summary', status: 'pending' }
       ] : [
-        { id: 1, text: `Analyze page state for "${this.currentTask}"`, status: 'in_progress' },
+        { id: 1, text: 'Analyze the page state for the task', status: 'in_progress' },
         { id: 2, text: 'Execute targeted web actions & navigate', status: 'pending' },
         { id: 3, text: 'Extract relevant information & synthesize answer', status: 'pending' }
       ];
     }
   }
 
+  /**
+   * Plan checklist progress. The position moves by action counts, as it always did (navigate, type, a
+   * click after the first step). What changed is what the position is allowed to SHOW: a step that
+   * names a site is never completed before a page of that site was read (agent/planEvidence.ts), and
+   * when the run finishes the steps of sites that were never opened become 'skipped' instead of the
+   * old blanket "everything completed" - which is what showed a green checklist for two sites the
+   * model never visited.
+   */
   updatePlanProgress(lastActionObj = null, isFinished = false) {
     if (!this.planSteps || this.planSteps.length === 0) return;
 
     if (isFinished) {
-      this.planSteps.forEach(step => step.status = 'completed');
+      const finished = finishedPlanStatuses(this.planSteps.map(step => step.text), this.evidence, goalSources(this.currentTask));
+      this.planSteps.forEach((step, idx) => { step.status = finished[idx]; });
       this.currentPlanIndex = this.planSteps.length;
       this.notifyStateChange();
       return;
@@ -1114,17 +1151,223 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       }
     }
 
-    this.planSteps.forEach((step, idx) => {
-      if (idx < this.currentPlanIndex) {
-        step.status = 'completed';
-      } else if (idx === this.currentPlanIndex) {
-        step.status = 'in_progress';
-      } else {
-        step.status = 'pending';
-      }
-    });
+    this.applyPlanStatuses();
 
     this.notifyStateChange();
+  }
+
+  /** Sets every step's status from the position and the evidence (see honestPlanStatuses). Does not notify. */
+  applyPlanStatuses() {
+    const statuses = honestPlanStatuses(this.planSteps.map(step => step.text), this.currentPlanIndex, this.evidence, goalSources(this.currentTask));
+    this.planSteps.forEach((step, idx) => { step.status = statuses[idx]; });
+  }
+
+  /**
+   * Re-derives the checklist after a page was read, so the model sees the marks that match what it has
+   * read NOW, not as of the last action. A plan that names no site is left exactly as it is: its
+   * statuses depend only on the position, which did not move.
+   */
+  refreshPlanStatuses() {
+    try {
+      if (!this.planSteps || this.planSteps.length === 0) return;
+      if (!planNamesSites(this.planSteps.map(step => step.text), goalSources(this.currentTask))) return;
+      this.applyPlanStatuses();
+    } catch (err) {
+      Logger.warn('AgentEngine', '[PLAN_REFRESH_ERROR] Could not refresh the plan checklist', err);
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Evidence and the finish gate (agent/evidence.ts, agent/answerAudit.ts, agent/planEvidence.ts)
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * The ledger as it is stored with the session, cut down to a few dozen pages (compactLedgerSnapshot),
+   * or null when nothing was read. persistState runs on every state change, so this stays cheap: at most
+   * 60 entries are copied and their text is sliced, not rebuilt.
+   */
+  storedEvidence() {
+    return this.evidence.size === 0 ? null : compactLedgerSnapshot(this.evidence.toSnapshot());
+  }
+
+  /**
+   * Puts one read into the ledger. The URL is where the tab really was, the text is what the page
+   * returned, never a word the model wrote. "[EVIDENCE_RECORDED]" is logged the first time a URL is seen.
+   */
+  recordEvidence(input) {
+    const firstTime = !this.evidence.wasVisited(input.url);
+    const entry = this.evidence.record({ step: this.stepCount, ...input, text: this.withoutTypedText(input.text) });
+    if (!entry) return;
+    if (firstTime) {
+      Logger.info('AgentEngine', `[EVIDENCE_RECORDED] ${entry.kind} read on ${entry.host || '(no site)'}: ${entry.url}`);
+    }
+  }
+
+  /**
+   * A DOM snapshot the engine read: what the model is shown of that page (its text and its element labels). The
+   * current value of an input is not part of the page: it is whatever was typed there, and the model may have
+   * typed it (a price in a search box would otherwise be a price "seen" on that site). And when the tab landed on
+   * another site than the one the last navigate action asked for, the site asked for was opened through a redirect.
+   */
+  recordPageEvidence(snapshot) {
+    try {
+      if (!snapshot || typeof snapshot.url !== 'string') return;
+      const elements = typeof snapshot.elementsText === 'string' ? snapshot.elementsText.replace(/ value="[\s\S]*?"\)/g, ')') : '';
+      const text = [snapshot.pageText, elements].filter(t => typeof t === 'string' && t !== '').join('\n');
+      const via = [];
+      if (this.navigatedFrom) {
+        const landed = siteOf(snapshot.url);
+        const { site, before } = this.navigatedFrom;
+        // A snapshot of the site the tab was on before is the old page (the new one has not loaded yet): keep waiting for it.
+        if (!(landed === before && landed !== site)) {
+          if (landed !== '' && landed !== site) via.push(site);
+          this.navigatedFrom = null;
+        }
+      }
+      this.recordEvidence({ kind: 'page', url: snapshot.url, title: snapshot.title, text, via });
+    } catch (err) {
+      Logger.warn('AgentEngine', '[EVIDENCE_ERROR] Could not record a page read', err);
+    }
+  }
+
+  /**
+   * The text result of read_page_text, execute_js or read_network_requests. It belongs to the URL the
+   * tab is on NOW, not to the page of the last snapshot, which a click or a script may have left.
+   */
+  async recordActionEvidence(actionObj, execResult, snapshot) {
+    try {
+      const read = evidenceFromActionResult(actionObj, execResult);
+      if (!read) return;
+      const snapshotUrl = snapshot && typeof snapshot.url === 'string' ? snapshot.url : '';
+      const url = await this.liveTabUrl(this.activeTabId, snapshotUrl);
+      this.recordEvidence({ kind: read.kind, url, title: url === snapshotUrl && snapshot ? snapshot.title : '', text: read.text });
+    } catch (err) {
+      Logger.warn('AgentEngine', '[EVIDENCE_ERROR] Could not record an action result', err);
+    }
+  }
+
+  /**
+   * Remembers what a type action (also inside a browser_batch) is about to type, when it could launder a fact: a string
+   * with a digit or a link in it. Plain words cannot turn into a price or a page, and cutting them out of every page text
+   * read later would only damage the text.
+   */
+  noteTypedText(actionObj) {
+    try {
+      const steps = actionObj && actionObj.action === 'browser_batch' && Array.isArray(actionObj.steps) ? actionObj.steps : [actionObj];
+      for (const step of steps) {
+        if (step && step.action === 'type' && typeof step.text === 'string') {
+          const typed = step.text.trim().slice(0, 300);
+          if (typed.length >= 3 && /\d|https?:|www\./i.test(typed)) this.typedTexts.push(typed);
+        }
+      }
+      if (this.typedTexts.length > 50) this.typedTexts.splice(0, this.typedTexts.length - 50);
+    } catch (_) { /* a note that could not be taken only leaves a page text as it was */ }
+  }
+
+  /** The text of a page without the strings the model typed, each replaced by a space (case does not matter). */
+  withoutTypedText(text) {
+    if (typeof text !== 'string' || text === '' || this.typedTexts.length === 0) return text;
+    let out = text;
+    for (const typed of this.typedTexts) {
+      out = out.replace(new RegExp(typed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
+    }
+    return out;
+  }
+
+  /** The URL a tab is on right now, or `fallback` when the browser cannot say. */
+  async liveTabUrl(tabId, fallback) {
+    try {
+      if (!tabId || typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.get) return fallback;
+      // Both call styles, as in isTabInScope: some test doubles are promise-only.
+      const tab = await new Promise((resolve, reject) => {
+        const maybePromise = chrome.tabs.get(tabId, (t) => { lastRuntimeError(); resolve(t); });
+        if (maybePromise && typeof maybePromise.then === 'function') maybePromise.then(resolve, reject);
+      });
+      return tab && typeof tab.url === 'string' && tab.url !== '' ? tab.url : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  /**
+   * The finish gate: checks the model's final answer against what the engine really read, then decides
+   * what happens to it. Returns either { sendBack: true, message } (the run goes on) or
+   * { sendBack: false, entry, finishedLog } (the run ends with that history entry).
+   *
+   *   verified  the answer is accepted as it is, with the audit attached.
+   *   otherwise the policy (this.finishPolicy) picks send_back, annotate or replace. There is no way to
+   *             accept such an answer unchanged and green: the audit is on the entry either way, the panel
+   *             shows the verdict, and only a verified run logs "[TASK_FINISHED] Task completed successfully.".
+   *
+   * It audits the text that would be stored, so a finish with no answer is checked as what it is, and an answer that
+   * is a list or an object is the text the panel will show (prepareAnswer). A plain text reply the engine wrapped
+   * into a finish (autoWrapped) is gated too, but never sent back: a model that cannot produce an action will not
+   * do better when asked again. `options.final` says the run is out of steps: nothing can be sent back then.
+   */
+  gateFinish(actionObj, maxSteps, options = {}) {
+    const base = buildFinishEntry(actionObj);
+    base.answer = prepareAnswer(base.answer);
+    const audit = auditAnswer({
+      goal: this.currentTask || '',
+      answer: base.answer,
+      ledger: this.evidence,
+      planTexts: this.planSteps.map(step => step.text)
+    });
+    const sendBacks = this.finishSendBacks;
+    const record = auditRecordOf(audit, sendBacks);
+    Logger.info('AgentEngine', `[FINISH_AUDIT] verdict=${audit.verdict} lies=${audit.lies} gaps=${audit.gaps} softs=${audit.softs}`, record.notes.length > 0 ? record.notes.map(n => ({ code: n.code, severity: n.severity, text: n.text })) : null);
+
+    if (audit.verdict === 'verified') {
+      this.lastRefusedFinish = null;
+      return {
+        sendBack: false,
+        entry: { ...base, audit: record },
+        finishedLog: base.unconfirmed
+          ? '[TASK_FINISHED] Model gave a direct text answer instead of a finish action - accepted, but flagged unconfirmed.'
+          : '[TASK_FINISHED] Task completed successfully.'
+      };
+    }
+
+    const ctx = gateContextOf(audit, sendBacks, maxSteps - this.stepCount);
+    // Two finishes that a send-back cannot improve: a plain-text reply (a model that cannot produce an action
+    // will not do better when asked again), and an honest answer that already says which sites it did not
+    // check, after the model was told once to open them or to say so.
+    let noSendBack;
+    if (options.final) noSendBack = NO_SEND_BACK_OUT_OF_STEPS;
+    else if (base.unconfirmed) noSendBack = NO_SEND_BACK_PLAIN_TEXT;
+    else if (sendBacks >= 1 && answerAcknowledgesEveryGap(base.answer, audit)) noSendBack = NO_SEND_BACK_ACKNOWLEDGED;
+    const resolved = resolveGateDecision(this.finishPolicy, ctx, { noSendBack });
+    const { decision } = resolved;
+    // A real clamp (no step left, the hard cap, a policy that threw or answered nonsense) is a WARN. The honest answer that is
+    // accepted as it is after a send-back is not a problem: INFO, with its own tag (see gateClampLog).
+    const clampLog = gateClampLog(resolved, { sendBacks, verdict: audit.verdict });
+    if (clampLog && clampLog.level === 'info') Logger.info('AgentEngine', clampLog.message);
+    else if (clampLog) Logger.warn('AgentEngine', clampLog.message);
+
+    if (decision === 'send_back') {
+      this.finishSendBacks++;
+      this.lastRefusedFinish = actionObj;
+      Logger.info('AgentEngine', `[FINISH_SENT_BACK] The finish was refused (send-back ${this.finishSendBacks} of this turn, ${ctx.stepsLeft} steps left): ${audit.lies} lies, ${audit.gaps} gaps. The model was told what is wrong and the run goes on.`);
+      return { sendBack: true, message: formatSendBack(audit) };
+    }
+
+    let answer;
+    if (decision === 'replace') {
+      answer = buildEvidenceReport(audit);
+      Logger.info('AgentEngine', `[FINISH_REPLACED] The model's answer was dropped. The answer is a report of the pages that were read (verdict ${audit.verdict}).`);
+    } else {
+      answer = annotateAnswer(base.answer, withoutAcknowledgedGaps(base.answer, audit));
+      const cutLinks = audit.notes.some(n => n.code === 'fabricated_url');
+      Logger.info('AgentEngine', `[FINISH_ANNOTATED] Finished with the model's answer marked ${audit.verdict}. ${answer === base.answer ? 'The text is unchanged: it already says which sites were not checked.' : `${cutLinks ? 'Links that were never opened were cut out. ' : ''}A warning line and a verification section were added.`}`);
+    }
+    this.lastRefusedFinish = null;
+    return {
+      sendBack: false,
+      entry: { ...base, answer, audit: record },
+      finishedLog: audit.verdict === 'partial'
+        ? `[TASK_FINISHED_PARTIAL] The task ended with a partial answer: ${audit.notOpened.length} named site(s) were not opened.`
+        : `[TASK_FINISHED_UNVERIFIED] The task ended with an unverified answer: ${audit.lies} statement(s) are not backed by any page that was read.`
+    };
   }
 
   /**
@@ -1135,7 +1378,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
   abortInFlight(reason) {
     if (this.abortController && !this.abortController.signal.aborted) {
       try {
-        this.abortController.abort();
+        // The reason is tagged { scoutfox: 'user' }: the llm layer tells a Pause or Stop from a
+        // provider timeout by that tag on the signal, never by the text of an error.
+        this.abortController.abort(userAbortReason(reason));
         Logger.info('AgentEngine', `[ABORT_IN_FLIGHT] Cancelled the in-flight request (${reason}).`);
       } catch (err) {
         Logger.warn('AgentEngine', '[ABORT_FAILED] Could not abort the in-flight request', err);
@@ -1149,9 +1394,14 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
    * Checks three independent signals because not every provider surfaces an abort the same
    * way: a genuine DOMException AbortError, the controller's own aborted flag, and the
    * engine status the user's action already set. Any one of them is enough.
+   *
+   * The text of the error is never read. A provider failure can say "aborted" in its own words
+   * (Ollama's "llama runner process has terminated: signal: aborted (core dumped)"), and taking
+   * that for a Stop ended the step without a retry and without an error, with status still
+   * 'running', so the task hung with no Resume. A real Pause or Stop is told by the three signals.
    */
   isUserAbort(err) {
-    if (err && (err.name === 'AbortError' || /abort/i.test(err.message || ''))) return true;
+    if (err && err.name === 'AbortError') return true;
     if (this.abortController && this.abortController.signal.aborted) return true;
     return this.status === 'paused' || this.status === 'stopped';
   }
@@ -1159,10 +1409,13 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
   pause() {
     this.dirty = true;
     if (this.status !== 'running') {
-      Logger.warn('AgentEngine', `[PAUSE_IGNORED] Pause requested while status is "${this.status}" — nothing to pause.`);
+      Logger.warn('AgentEngine', `[PAUSE_IGNORED] Pause requested while status is "${this.status}" - nothing to pause.`);
       return { success: false, error: `Cannot pause: the agent is ${this.status}, not running.` };
     }
     this.status = 'paused';
+    if (this.activeTabId) {
+      cdp.startPauseTimer(this.activeTabId);
+    }
     this.abortInFlight('paused by user');
     this.setPhase('Task paused by user');
     Logger.info('AgentEngine', '[PAUSED] Task paused by user.');
@@ -1176,9 +1429,12 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       // restart, so Resume can legitimately find nothing to resume. Say so instead of
       // answering success and doing nothing.
       Logger.warn('AgentEngine', `[RESUME_IGNORED] Resume requested while status is "${this.status}". The paused task did not survive; re-run it to continue.`);
-      return { success: false, error: `Cannot resume: the agent is ${this.status}. The paused task did not survive a background restart — please re-run it.` };
+      return { success: false, error: `Cannot resume: the agent is ${this.status}. The paused task did not survive a background restart - please re-run it.` };
     }
     this.status = 'running';
+    if (this.activeTabId) {
+      cdp.clearPauseTimer(this.activeTabId);
+    }
     // A plain Resume (not answering) is a legitimate way to unstick an ask_user pause too - the
     // model just gets no answer and has to proceed without one. Either way, the question is no
     // longer pending once the loop is moving again.
@@ -1196,7 +1452,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
    * Answers a pending ask_user question and continues the run - the recourse that did not
    * exist before: notifyStateChange({question}) had zero consumers anywhere in the repo, so
    * an agent honest enough to ask for help had no way to actually hear back. Pushes the answer
-   * as a visible history entry (see harness/outcome.js's sibling module, formatMessagesForLLM
+   * as a visible history entry (see agent/outcome.ts's sibling module, formatMessagesForLLM
    * below feeds it back to the model) and resumes exactly like the plain Resume button does.
    */
   answerQuestion(answerText) {
@@ -1226,6 +1482,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     this.status = 'stopped';
     this.isLoopActive = false;
     this.currentPhase = '';
+    if (this.activeTabId) {
+      cdp.detach(this.activeTabId).catch(() => {});
+    }
     this.abortInFlight('stopped by user');
     Logger.info('AgentEngine', '[STOPPED] Task stopped by user.');
     this.notifyStateChange({ message: 'Task stopped.' });
@@ -1266,6 +1525,11 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     let consecutiveParseErrors = 0;
     const MAX_PARSE_ERRORS = 3;
 
+    // Constrained decoding for Ollama: its sampler can only produce one well-formed action
+    // (see agent/schemas.ts). Only this main action call gets it - verifyStep and other JSON
+    // side calls keep plain format:"json" - and cloud providers get nothing new on the wire.
+    const actionSchema = settings.provider === 'ollama' ? buildActionSchema() : null;
+
     while (this.status === 'running' && this.stepCount < maxSteps) {
       this.stepCount++;
       Logger.info('AgentEngine', `---------------- STEP ${this.stepCount}/${maxSteps} ----------------`);
@@ -1280,6 +1544,8 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         Logger.info('AgentEngine', `[DOM_SNAPSHOT_INPUT] Title: "${domSnapshot.title}" | URL: ${domSnapshot.url} | Elements: ${domSnapshot.elementCount} | PageTextLen: ${domSnapshot.pageText ? domSnapshot.pageText.length : 0}`);
       } catch (err) {
         consecutiveDomErrors++;
+        // No page was read after the navigation, so nothing says where it led.
+        this.navigatedFrom = null;
         Logger.error('AgentEngine', `[DOM_ERROR] Failed to read page state (attempt ${consecutiveDomErrors}/3)`, err);
 
         const isErrorPage = err.message.includes('error page') || err.message.includes('Restricted') || err.message.includes('cannot read');
@@ -1320,7 +1586,12 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         break;
       }
 
-      const systemPrompt = this.buildSystemPrompt(settings.systemInstructions);
+      // The engine read this page: that is the fact the audit of the final answer rests on. Outside the try
+      // above on purpose: a bug in here must never be taken for a failed page read and start the self-heal.
+      this.recordPageEvidence(domSnapshot);
+      this.refreshPlanStatuses();
+
+      const systemPrompt = this.buildSystemPrompt(settings.systemInstructions, settings.provider);
       let userMessage = this.buildStepMessage(domSnapshot, maxSteps);
 
       // Universal Guardrail: Anti-Stuck Loop Detection & Auto-Inject Network Errors
@@ -1356,10 +1627,15 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       try {
         const messages = this.formatMessagesForLLM(userMessage);
         responseText = await callWithRetry(
-          () => ApiClients.generateCompletion(settings, messages, systemPrompt, {
-            signal: this.abortController ? this.abortController.signal : null,
-            json: true
-          }),
+          () => {
+            // Built per attempt, so each retry reads the abort controller that is current then.
+            const llmOptions = {
+              signal: this.abortController ? this.abortController.signal : null,
+              json: true
+            };
+            if (actionSchema) llmOptions.schema = actionSchema;
+            return ApiClients.generateCompletion(settings, messages, systemPrompt, llmOptions);
+          },
           {
             isAbort: (err) => this.isUserAbort(err),
             shouldContinue: () => this.status === 'running',
@@ -1418,7 +1694,11 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           step: this.stepCount,
           type: 'execution_result',
           success: false,
-          error: `${actionResult.error} Reply with a single JSON object containing an "action" key and nothing else.`
+          // A tool-call reply is an unusable reply like any other (it counts toward the circuit
+          // breaker below), and its error already says what to reply with, so it is not repeated.
+          error: actionResult.kind === 'tool_call_markup'
+            ? actionResult.error
+            : `${actionResult.error} Reply with a single JSON object containing an "action" key and nothing else.`
         });
 
         if (consecutiveParseErrors >= MAX_PARSE_ERRORS) {
@@ -1453,17 +1733,35 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       if (this.recentActionSignatures.length > 5) this.recentActionSignatures.shift();
 
       Logger.info('AgentEngine', `[ACTION_DISPATCH] Executing [${actionObj.action}]`, actionObj);
+      this.navigatedFrom = null;
+      this.noteTypedText(actionObj);
 
       if (actionObj.action === 'finish') {
+        // The finish gate. Every final answer is checked against what the engine really read before it
+        // is accepted. A verified answer goes through untouched; any other one is sent back to the
+        // model, marked as unverified, or replaced by a report written by code (gateFinish).
+        const gate = this.gateFinish(actionObj, maxSteps);
+
+        if (gate.sendBack) {
+          // Not a finish: no finish entry, the run goes on, the step is used up. The model reads the
+          // refusal as the result of its last action, like any other failed action.
+          this.history.push({
+            step: this.stepCount,
+            type: 'execution_result',
+            success: false,
+            error: gate.message,
+            finishRefused: true
+          });
+          this.notifyStateChange();
+          continue;
+        }
+
         this.status = 'idle';
         this.isLoopActive = false;
         this.currentPhase = '';
         this.updatePlanProgress(null, true);
-        const finishEntry = buildFinishEntry(actionObj);
-        this.history.push(finishEntry);
-        Logger.info('AgentEngine', finishEntry.unconfirmed
-          ? '[TASK_FINISHED] Model gave a direct text answer instead of a finish action - accepted, but flagged unconfirmed.'
-          : '[TASK_FINISHED] Task completed successfully.');
+        this.history.push(gate.entry);
+        Logger.info('AgentEngine', gate.finishedLog);
         this.notifyStateChange();
         break;
       }
@@ -1500,6 +1798,14 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         const execResult = await this.executeActionOnTab(this.activeTabId, actionObj);
         Logger.info('AgentEngine', `[ACTION_RESULT] ${execResult.success ? 'Success' : 'Failed'}: ${execResult.message || execResult.error}`);
 
+        // The text that read_page_text, execute_js and read_network_requests returned is something the
+        // engine read too.
+        await this.recordActionEvidence(actionObj, execResult, domSnapshot);
+        // A navigation that worked: the next page read says where it led (a redirect to another site included).
+        if (actionObj.action === 'navigate' && execResult.success !== false && typeof actionObj.url === 'string' && siteOf(actionObj.url) !== '') {
+          this.navigatedFrom = { site: siteOf(actionObj.url), before: siteOf(domSnapshot.url) };
+        }
+
         // RAV Verification: If the action technically succeeded, verify it achieved the expected outcome
         let finalSuccess = execResult.success !== false;
         let finalMessage = execResult.message;
@@ -1508,6 +1814,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
         if (finalSuccess && actionResult.expectedOutcome) {
           this.setPhase(`🔍 Step ${this.stepCount}/${maxSteps}: Verifying expected outcome...`);
           const postActionDom = await this.getTabDOMWithAutoInject(this.activeTabId, settings.showElementBadges);
+          this.recordPageEvidence(postActionDom);
           const verification = await this.verifyStep(actionResult.expectedOutcome, postActionDom, settings);
 
           if (!verification.success) {
@@ -1528,7 +1835,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           error: finalError,
           label: execResult.label || null,
           submitted: execResult.submitted || false,
-          resultData: execResult.result || execResult.results || null
+          resultData: execResult.result || execResult.results || null,
+          via: execResult.via || 'synthetic',
+          effect: execResult.effect || null
         });
 
         if (finalSuccess) {
@@ -1558,9 +1867,25 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       this.status = 'idle';
       this.isLoopActive = false;
       this.currentPhase = '';
-      // Pushed as an 'error', never 'finish' - see harness/outcome.js. This run did not
+      // The last finish was sent back and the model ran out of steps before it could fix it. The answer it gave is
+      // still worth showing: the part the pages back is real. It goes through the gate one more time, with no
+      // send-back left, so what the user gets is that answer with its verdict, then the reason the run stopped.
+      let answerKept = false;
+      if (this.lastRefusedFinish) {
+        try {
+          const gate = this.gateFinish(this.lastRefusedFinish, maxSteps, { final: true });
+          this.updatePlanProgress(null, true);
+          this.history.push(gate.entry);
+          answerKept = true;
+          Logger.info('AgentEngine', `[FINISH_AT_STEP_CAP] The run ran out of steps after a send-back. The model's last answer is shown, marked ${gate.entry.audit ? gate.entry.audit.verdict : 'unchecked'}.`);
+        } catch (err) {
+          Logger.warn('AgentEngine', '[FINISH_AT_STEP_CAP_ERROR] Could not keep the last refused answer', err);
+        }
+        this.lastRefusedFinish = null;
+      }
+      // Pushed as an 'error', never 'finish' - see agent/outcome.ts. This run did not
       // complete, and must never render or be recapped as though it did.
-      this.history.push(buildMaxStepsEntry(maxSteps));
+      this.history.push(buildMaxStepsEntry(maxSteps, { answerKept }));
       this.notifyStateChange();
     }
   }
@@ -1682,6 +2007,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           return reject(new Error(chrome.runtime.lastError.message));
         }
         if (response && response.success) {
+          if (response.docId) {
+            this.currentDocId = response.docId;
+          }
           resolve(response.data);
         } else {
           reject(new Error(response?.error || 'Failed to communicate with page script'));
@@ -1699,7 +2027,7 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     if ((actionPayload.action === 'navigate' || actionPayload.action === 'open_window') && actionPayload.url) {
       const restriction = describeRestrictedUrl(actionPayload.url);
       if (restriction) {
-        return { success: false, error: restriction };
+        return { success: false, error: restriction, via: 'background' };
       }
     }
 
@@ -1707,28 +2035,26 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
       // `world` is no longer accepted: ISOLATED can never run dynamic code (its own content-
       // script CSP blocks eval unconditionally), so execute_js always runs in MAIN now - see
       // executeJs()'s doc comment for why. Any `world` the model still sends is simply ignored.
-      return this.executeJs(tabId, actionPayload.code);
+      const res = await this.executeJs(tabId, actionPayload.code);
+      return { ...res, via: 'background' };
     }
 
     if (actionPayload.action === 'open_window') {
       // A background-only browser API, not a content-script action - dispatched here directly
       // rather than via chrome.tabs.sendMessage(tabId, ...) below, which targets a page's own
       // content script and has nothing to do with creating a new window.
-      return this.openNewWindow(actionPayload.url);
+      const res = await this.openNewWindow(actionPayload.url);
+      return { ...res, via: 'background' };
     }
 
     if (actionPayload.action === 'read_network_requests') {
       const netFormatted = this.readNetworkRequests(tabId, actionPayload.filter, actionPayload.includeBody !== false, actionPayload.limit || 10);
-      return { success: true, message: `Recent Network Activity:\n${netFormatted}` };
+      return { success: true, message: `Recent Network Activity:\n${netFormatted}`, via: 'background' };
     }
 
-    return new Promise((resolve, reject) => {
-      chrome.tabs.sendMessage(tabId, { action: 'EXECUTE_ACTION', payload: actionPayload }, (response) => {
-        if (chrome.runtime.lastError) {
-          return reject(new Error(chrome.runtime.lastError.message));
-        }
-        resolve(response || { success: true });
-      });
+    return await inputDispatcher.dispatchAction(tabId, actionPayload, {
+      docId: this.currentDocId,
+      signal: this.abortController?.signal
     });
   }
 
@@ -1758,7 +2084,9 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
           role: 'user',
           content: item.success
             ? `Action Executed Successfully: ${item.message}`
-            : `Action Failed: ${item.error}. Choose a different element or action.`
+            // A refused finish is not a failed click: its text says what to do, and "choose a different
+            // element" would only confuse the model.
+            : item.finishRefused ? item.error : `Action Failed: ${item.error}. Choose a different element or action.`
         });
       } else if (item.type === 'user_answer') {
         messages.push({ role: 'user', content: `You asked a question and the user answered: "${item.content}". Continue the task using this answer.` });
@@ -1770,7 +2098,17 @@ ${isSummarizeTask ? `For reading/summarization tasks, keep the plan short (2 ste
     return messages;
   }
 
-  buildSystemPrompt(customInstructions) {
+  /**
+   * The system prompt for the main action call, chosen by PROVIDER (never by model name).
+   *
+   * Ollama gets the compact prompt, because its reply is shaped by the action schema in
+   * `format`. Every other provider gets the legacy prompt below, byte for byte as before: their
+   * replies are free text, and the few-shot examples and output rules are what keep them in
+   * shape.
+   */
+  buildSystemPrompt(customInstructions, provider) {
+    if (provider === 'ollama') return this.buildCompactSystemPrompt(customInstructions);
+
     return `${customInstructions || 'You are ScoutFox, an autonomous web browsing AI agent.'}
 
 You are provided with a user goal, visible webpage text content, and a compressed list of interactive web page elements labeled with numerical IDs like [1], [2], [3].
@@ -1933,18 +2271,57 @@ The visible documentation text provides the project title, key features, and arc
 3. Only select element_id numbers that exist in the provided Interactive Elements list.`;
   }
 
+  /**
+   * The system prompt for Ollama: one line per action from the schema registry and a few
+   * rules, and nothing else.
+   *
+   * The legacy prompt asked for <thought> tags and a fenced block while the request forced
+   * JSON, so the model got two conflicting output formats; the reply shape now comes from the
+   * schema alone. There are no few-shot examples: with the schema the models were just as
+   * accurate without them, and they cost well over a thousand prompt tokens on every step.
+   * The schema itself is never shown to the model (Ollama does not inject it), so the action
+   * list stays.
+   *
+   * Rule 3 names the exact reply on purpose. With only "never click" (in several wordings),
+   * qwen3.5:9b still clicked "Verify you are human" in every eval run; naming the action to use
+   * instead made both models wait.
+   */
+  buildCompactSystemPrompt(customInstructions) {
+    return `${customInstructions || 'You are ScoutFox, an autonomous web browsing AI agent.'}
+You control one browser tab. Each turn you get the user's goal, the current page (its text and a numbered list of interactive elements) and the results of your earlier actions.
+Reply with ONE JSON object: the single next action.
+Actions:
+${buildActionPromptLines().join('\n')}
+Rules:
+1. If the page already shows what the goal asks for, finish now with the full answer.
+2. Use only element_id numbers from the current element list.
+3. Never click CAPTCHA or "verify you are human" boxes. On such a bot-check page reply {"action":"wait","amount":3}; if the check is still there after that, finish and say that the site blocked you.
+4. Do not guess web addresses. If you do not know the exact URL, search with https://www.google.com/search?q=...
+5. If an action did not change the page, try a different one.`;
+  }
+
   buildStepMessage(snapshot, maxSteps) {
     // planSteps has always been computed (generatePlan) and shown in the side panel's own
     // progress bar - but buildStepMessage never included it, so the model choosing the actual
     // next action never saw the plan it was supposedly following, or how many steps remained.
+    // "[-]" (skipped) is only a safety net here: a step becomes skipped when the run ends, so the model never
+    // sees one in a step message of a run that goes on.
     const planText = (this.planSteps && this.planSteps.length)
-      ? `\nPlan (step ${this.stepCount}${maxSteps ? `/${maxSteps}` : ''} overall):\n${this.planSteps.map((s, i) => `${i + 1}. [${s.status === 'completed' ? 'x' : s.status === 'in_progress' ? '>' : ' '}] ${s.text}`).join('\n')}\n`
+      ? `\nPlan (step ${this.stepCount}${maxSteps ? `/${maxSteps}` : ''} overall):\n${this.planSteps.map((s, i) => `${i + 1}. [${s.status === 'completed' ? 'x' : s.status === 'in_progress' ? '>' : s.status === 'skipped' ? '-' : ' '}] ${s.text}`).join('\n')}\n`
       : '';
+
+    // Which pages the engine has really read, and which sites the task names that it has not opened yet,
+    // with one rule about it. Without this a model never learns that two of its three sources are
+    // still unvisited, nor that "not checked" is an acceptable thing to report. Empty when there is
+    // nothing to say, which leaves the message exactly as it was.
+    const planTexts = (this.planSteps || []).map(s => s.text);
+    const evidenceBlock = describeEvidenceForPrompt(this.evidence, namedSources(this.currentTask, planTexts));
+    const evidenceText = evidenceBlock ? `\n${evidenceBlock}\n` : '';
 
     return `Current Page Title: "${snapshot.title}"
 Current URL: ${snapshot.url}
 Scroll Position: Y=${snapshot.scrollState.scrollY} / ${snapshot.scrollState.pageHeight}px
-${planText}
+${planText}${evidenceText}
 Webpage Visible Text Content (Use this to read content or summarize):
 """
 ${snapshot.pageText || '(No visible text extracted)'}
@@ -1957,184 +2334,30 @@ Choose your next action based on the goal: "${this.currentTask}"`;
   }
 
   /**
-   * Universal Multi-Stage Guardrail Action Parser
+   * Universal Multi-Stage Guardrail Action Parser (agent/parse.ts holds the stages).
+   *
+   * The engine has no policy modes yet, so every verb is allowed. Element ids are 1..maxElementCount,
+   * as the snapshot numbers them; a count of 0 leaves the ids unbounded. A rejected element_id keeps
+   * the wording this engine always used (the graph engine uses the design text).
    */
   parseResponse(text, maxElementCount = 999) {
-    if (!text || typeof text !== 'string') {
-      return { thought: '', error: 'Empty output from model.' };
-    }
-
-    let thought = '';
-    
-    // 1. Extract <think> or <thought> or <reasoning>
-    const thinkMatch = text.match(/<(?:think|thought|reasoning)>([\s\S]*?)<\/(?:think|thought|reasoning)>/i);
-    if (thinkMatch) {
-      thought = thinkMatch[1].trim();
-    }
-
-    let cleanText = text.replace(/<(?:think|thought|reasoning)>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
-
-    let actionObj = null;
-
-    // 2. Extract JSON from ```json ... ``` or ``` ... ```
-    const codeBlockMatch = cleanText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (codeBlockMatch) {
-      actionObj = parsePartialOrTruncatedJson(codeBlockMatch[1].trim());
-    }
-
-    // 3. Extract JSON object containing "action" key
-    if (!actionObj) {
-      const braceMatch = cleanText.match(/\{[\s\S]*?"action"\s*:[\s\S]*?\}/i);
-      if (braceMatch) {
-        actionObj = parsePartialOrTruncatedJson(braceMatch[0].trim());
-      }
-    }
-
-    // 4. Reverse SCAN all { ... } blocks in text for valid action JSON
-    if (!actionObj) {
-      const matches = cleanText.match(/\{[\s\S]*?\}/g) || [];
-      for (let i = matches.length - 1; i >= 0; i--) {
-        const parsed = parsePartialOrTruncatedJson(matches[i]);
-        if (parsed && (parsed.action || parsed.click || parsed.type || parsed.finish || parsed.execute_js || parsed.browser_batch || parsed.read_network_requests)) {
-          actionObj = parsed;
-          break;
-        }
-      }
-    }
-
-    // 5. REGEX Intent Extractor for Dumber / Smaller LLMs outputting plain text
-    if (!actionObj) {
-      const clickMatch = cleanText.match(/(?:action:?\s*)?(?:click|press|tap)\s+(?:on\s+)?(?:element\s+)?\[?(\d+)\]?/i);
-      if (clickMatch) {
-        actionObj = { action: 'click', element_id: parseInt(clickMatch[1], 10), reason: 'Extracted via text intent' };
-      }
-
-      if (!actionObj) {
-        const typeMatch = cleanText.match(/(?:action:?\s*)?(?:type|enter|write|input)\s+["']([^"']+)["']\s+(?:in|into|on)\s+(?:element\s+)?\[?(\d+)\]?/i);
-        if (typeMatch) {
-          actionObj = { action: 'type', text: typeMatch[1], element_id: parseInt(typeMatch[2], 10), submit: true, reason: 'Extracted via text intent' };
-        }
-      }
-
-      if (!actionObj) {
-        const navMatch = cleanText.match(/(?:action:?\s*)?(?:navigate|go\s+to|open)\s+(https?:\/\/[^\s]+)/i);
-        if (navMatch) {
-          actionObj = { action: 'navigate', url: navMatch[1], reason: 'Extracted via text intent' };
-        }
-      }
-
-      if (!actionObj) {
-        const scrollMatch = cleanText.match(/(?:action:?\s*)?(?:scroll)\s+(down|up)/i);
-        if (scrollMatch) {
-          actionObj = { action: 'scroll', direction: scrollMatch[1].toLowerCase(), amount: 500, reason: 'Extracted via text intent' };
-        }
-      }
-
-      if (!actionObj && /read.*page.*text|extract.*text|get.*page.*content/i.test(cleanText)) {
-        actionObj = { action: 'read_page_text', reason: 'Extracted via text intent' };
-      }
-    }
-
-    // 6. Freeform Text Auto-Wrapping Guardrail (PROTECTED AGAINST TRUNCATED JSON PAYLOADS)
-    const looksLikeActionJson = /"action"\s*:|"execute_js"|"browser_batch"|```json/i.test(cleanText);
-
-    if (!actionObj && cleanText.length > 5 && !looksLikeActionJson) {
-      Logger.info('AgentEngine', '[UNIVERSAL_GUARDRAIL] Model provided direct text response. Auto-wrapping into finish action.');
-      actionObj = {
-        action: 'finish',
-        answer: cleanText,
-        reason: 'Direct text output from model',
-        // The model never actually emitted {"action":"finish"} - it just replied in prose and
-        // this guardrail inferred an ending so the run has somewhere to go. buildFinishEntry
-        // (harness/outcome.js) turns this into an `unconfirmed` flag so it is shown as inferred,
-        // not declared. See harness/outcome.js for why that distinction matters.
-        autoWrapped: true
-      };
-    }
-
-    if (!actionObj) {
-      return { thought, error: 'Model output contained a truncated or malformed action JSON. Retrying with simpler prompt.', raw: text };
-    }
-
-    // 7. Action Schema & Element ID Sanitizer
-    actionObj = this.sanitizeActionSchema(actionObj, maxElementCount);
-
-    if (actionObj.invalidAction) {
-      return {
-        thought,
-        error: `Unknown action "${actionObj.invalidAction}". Valid actions are: ${[...KNOWN_ACTIONS].join(', ')}.`
-      };
-    }
-
-    if (actionObj.invalidElementId) {
-      // A hallucinated or out-of-range element_id used to be silently clamped/coerced onto a
-      // DIFFERENT, real element - the agent then confidently acted on the wrong thing instead
-      // of visibly failing. Routing it through the same parse-error/retry path as malformed
-      // JSON (consecutiveParseErrors, corrective feedback, the 3-strike circuit breaker) gives
-      // the model a chance to look at the element list again instead of clicking blind.
-      return {
-        thought,
-        error: `Selected element_id ${actionObj.invalidElementId} does not exist on this page (valid range: 1-${maxElementCount}). Re-check the numbered element list and choose a real one.`
-      };
-    }
-
-    return { thought, action: actionObj, expectedOutcome: actionObj.expected_outcome || actionObj.expectedOutcome || null };
+    return parseModelReply(text, {
+      verbs: ACTION_VERBS,
+      refs: maxElementCount > 0 ? refsFromCount(maxElementCount) : undefined,
+      log: engineLog,
+      legacyElementIdError: true
+    });
   }
 
   /**
-   * Action Schema Normalizer & Element ID Bounds Validator
+   * Action Schema Normalizer & Element ID Validator (agent/sanitize.ts holds the rules).
    */
   sanitizeActionSchema(actionObj, maxElementCount = 999) {
-    const act = { ...actionObj };
-    
-    if (act.click !== undefined && !act.action) { act.action = 'click'; act.element_id = act.click; }
-    if (act.type !== undefined && !act.action) { act.action = 'type'; }
-    if (act.action === 'click_element' || act.action === 'press') act.action = 'click';
-    if (act.action === 'type_text' || act.action === 'input') act.action = 'type';
-    if (act.action === 'done' || act.action === 'complete' || act.action === 'finished') act.action = 'finish';
-    if (act.action === 'scroll_page') act.action = 'scroll';
-    if (act.action === 'extract_text' || act.action === 'read_text' || act.action === 'extract_page_text') act.action = 'read_page_text';
-    if (act.action === 'eval_js' || act.action === 'run_js' || act.action === 'javascript') act.action = 'execute_js';
-    if (act.action === 'read_network' || act.action === 'network_requests' || act.action === 'get_network') act.action = 'read_network_requests';
-    if (act.action === 'batch' || act.action === 'batch_actions') act.action = 'browser_batch';
-    if (act.action === 'new_window' || act.action === 'open_new_window' || act.action === 'create_window') act.action = 'open_window';
-
-    // After alias normalization, anything still not a real verb is a hallucination the executor
-    // would only catch one layer later (actionExecutor.js's default `throw new Error('Unknown
-    // action')`) after this action had already been pushed to history. invalidAction is read by
-    // parseResponse (the caller), which turns it into a correctable parse error instead.
-    if (!KNOWN_ACTIONS.has(act.action)) {
-      Logger.warn('AgentEngine', `[GUARDRAIL_REJECTED] Model requested an unrecognised action "${act.action}".`);
-      act.invalidAction = act.action;
-    }
-
-    if (act.element_id === undefined) {
-      if (act.element !== undefined) act.element_id = act.element;
-      else if (act.id !== undefined) act.element_id = act.id;
-      else if (act.elementId !== undefined) act.element_id = act.elementId;
-    }
-
-    // Parsed unconditionally, NOT only when the value already happens to be a number. Gating
-    // on `typeof === 'number'` let a string element_id through untouched, and page content is
-    // attacker-controlled input to the model, so a prompt-injected reply could put arbitrary
-    // markup in this field.
-    //
-    // A non-numeric or out-of-range id is REJECTED, not clamped/coerced. Clamping to
-    // maxElementCount or coercing to 1 used to silently redirect the action onto a different,
-    // REAL element the model never chose - a hallucinated click landed somewhere else on the
-    // page with no visible failure. invalidElementId is read by parseResponse (the caller),
-    // which turns it into a correctable parse error instead of returning this action at all.
-    if (act.element_id !== undefined) {
-      const parsed = parseInt(act.element_id, 10);
-      if (!Number.isFinite(parsed) || parsed < 1 || (maxElementCount > 0 && parsed > maxElementCount)) {
-        Logger.warn('AgentEngine', `[GUARDRAIL_REJECTED] Model selected an invalid element_id (${JSON.stringify(act.element_id)}, valid range 1-${maxElementCount}). Rejecting instead of guessing a different element.`);
-        act.invalidElementId = JSON.stringify(act.element_id);
-      } else {
-        act.element_id = parsed;
-      }
-    }
-
-    return act;
+    return sanitizeAction(actionObj, {
+      verbs: ACTION_VERBS,
+      refs: maxElementCount > 0 ? refsFromCount(maxElementCount) : undefined,
+      log: engineLog
+    });
   }
 }
 

@@ -100,17 +100,17 @@ test('chrome.sidePanel.open() is invoked synchronously by the click handler, not
   assert.ok(mock.__callOrder.length >= 1);
 });
 
-test('the tab is still enabled and grouped, just not blocking open()', async () => {
+test('the tab is still enabled for the panel, just not on open()\'s critical path', async () => {
   mock.__callOrder.length = 0;
   mock.__tabs.get(100).groupId = -1;
 
   mock.__listeners.onClicked(mock.__tabs.get(100));
-  // ensureScoutFoxGroup chains several of this mock's deliberately-delayed (5ms) async calls
-  // (tabs.get, storage.get, tabs.group, storage.set) sequentially - give it enough room to
-  // actually finish, not just enough to prove open() didn't wait for it.
+  // This mock delays its async calls by 5ms each - give the handler enough room to finish
+  // everything, not just enough to prove open() didn't wait for it.
   await new Promise((r) => setTimeout(r, 100));
 
   const enableCall = mock.__callOrder.find((c) => c.call === 'setOptions' && c.opts.tabId === 100 && c.opts.enabled === true);
   assert.ok(enableCall, 'the tab must still be enabled for the panel, just not on open()\'s critical path');
-  assert.equal(mock.__tabs.get(100).groupId >= 5000, true, 'the tab must still join the ScoutFox group');
+  assert.equal(mock.__tabs.get(100).groupId, -1,
+    'and no group is created on click at all any more - which also means nothing async is left that could tempt someone to await it before open()');
 });

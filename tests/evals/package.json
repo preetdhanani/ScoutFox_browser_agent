@@ -1,0 +1,13 @@
+{
+  "name": "scoutfox-evals",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Opt-in evals of the Ollama action and plan schemas against a local Ollama. Not part of npm test.",
+  "type": "module",
+  "scripts": {
+    "eval": "node ollamaNodes.mjs"
+  },
+  "dependencies": {
+    "ajv": "8.20.0"
+  }
+}

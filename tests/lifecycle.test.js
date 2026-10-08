@@ -20,6 +20,7 @@ let storageReadDelayMs = 0;
 global.chrome = {
   runtime: { lastError: null },
   storage: {
+    get session() { return this.local; }, // agent_sessions lives in storage.session; one backing store keeps seeds simple
     local: {
       get: (keys, cb) => {
         const snapshot = { ...storageBacking };

@@ -30,7 +30,7 @@ function makeBackgroundChromeMock() {
   let lastRelevantTabId = null; // most recently created/grouped tab, for the onUpdated stub below
   let winCounter = 200;
   let groupCounter = 8000;
-  const storage = {};
+  const storage = { agent_settings: { engine: 'legacy' } };
   const listeners = {};
   const noop = () => {};
   const listener = () => ({ addListener: noop });
@@ -64,7 +64,7 @@ function makeBackgroundChromeMock() {
         }
       },
       tabs: {
-        onRemoved: listener(),
+        onRemoved: { addListener: (fn) => { listeners.onTabRemoved = fn; } },
         onActivated: listener(),
         onCreated: listener(),
         // waitForTabComplete registers a listener AFTER the tab is created and waits (real
@@ -136,14 +136,14 @@ function makeBackgroundChromeMock() {
  * START_TASK could genuinely race it - not a product bug, but exactly what real async
  * completion polling avoids.
  */
-async function waitUntilIdle(listeners, windowId, timeoutMs = 3000) {
+async function waitUntilIdle(listeners, tabId, timeoutMs = 3000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const state = await sendMessage(listeners, { action: 'GET_AGENT_STATE', windowId });
+    const state = await sendMessage(listeners, { action: 'GET_AGENT_STATE', tabId });
     if (state.status === 'idle') return state;
     await new Promise((r) => setTimeout(r, 15));
   }
-  throw new Error(`Task in window [${windowId}] did not reach idle within ${timeoutMs}ms`);
+  throw new Error(`Task in tab [${tabId}] did not reach idle within ${timeoutMs}ms`);
 }
 
 global.self = { addEventListener: () => {} };
@@ -180,10 +180,10 @@ ApiClients.generateCompletion = async (settings, messages, systemPrompt) => {
 after(() => { ApiClients.generateCompletion = realGenerateCompletion; });
 
 test('a real task opening a window keeps it in the SAME session, observable end-to-end', async () => {
-  const WIN_A = 1;
-  bgMock.__addWindow(WIN_A, 101, 'https://example.com/original');
+  const WIN_A = 1, TAB_A = 101;
+  bgMock.__addWindow(WIN_A, TAB_A, 'https://example.com/original');
 
-  const portA = makeFakePort('scoutfox_sidepanel_fresh:1');
+  const portA = makeFakePort('scoutfox_sidepanel_fresh:101');
   bgMock.__listeners.onConnect(portA);
   await new Promise((r) => setTimeout(r, 20));
 
@@ -193,30 +193,30 @@ test('a real task opening a window keeps it in the SAME session, observable end-
   // exactly one new window in the whole mock or matching by a URL the other test could share.
   const windowIdsBefore = new Set(Array.from(bgMock.__tabs.values()).map((t) => t.windowId));
 
-  const startRes = await sendMessage(bgMock.__listeners, { action: 'START_TASK', windowId: WIN_A, payload: { prompt: 'compare two pages side by side' } });
+  const startRes = await sendMessage(bgMock.__listeners, { action: 'START_TASK', tabId: TAB_A, payload: { prompt: 'compare two pages side by side' } });
   assert.equal(startRes.success, true);
 
   // Poll for genuine completion (open_window, then finish) rather than a fixed sleep - a
   // guessed delay risks leaving this task still running when the NEXT test starts, since they
   // share the same module-level sessions Map.
-  const stateA = await waitUntilIdle(bgMock.__listeners, WIN_A);
+  const stateA = await waitUntilIdle(bgMock.__listeners, TAB_A);
   assert.equal(stateA.task, 'compare two pages side by side');
   assert.ok(stateA.history.some((h) => h.type === 'finish'), 'the task must have actually completed');
   assert.ok(stateA.history.some((h) => h.action && h.action.action === 'open_window'),
     'the open_window step must be recorded in this SAME session\'s history');
 
-  const newWindowId = Array.from(bgMock.__tabs.values()).map((t) => t.windowId).find((id) => !windowIdsBefore.has(id));
-  assert.ok(newWindowId, 'openNewWindow must have actually created a new window');
+  const newWindowTab = Array.from(bgMock.__tabs.values()).find((t) => !windowIdsBefore.has(t.windowId));
+  assert.ok(newWindowTab, 'openNewWindow must have actually created a new window with a tab in it');
 
-  // A panel opening in the NEW window - a completely fresh connection, from that document's
-  // own honest point of view - must reflect the SAME session, not start a blank one.
-  const portB = makeFakePort(`scoutfox_sidepanel_fresh:${newWindowId}`);
+  // A panel opening on the NEW window's tab - a completely fresh connection, from that
+  // document's own honest point of view - must reflect the SAME session, not start a blank one.
+  const portB = makeFakePort(`scoutfox_sidepanel_fresh:${newWindowTab.id}`);
   bgMock.__listeners.onConnect(portB);
   await new Promise((r) => setTimeout(r, 20));
 
   const reflected = lastStateUpdate(portB);
   assert.equal(reflected.payload.task, 'compare two pages side by side',
-    'the new window\'s own panel must show the SAME session\'s task, not a blank one');
+    'the new window\'s own panel must show the SAME session\'s task, not a blank one - the tab the run moved into was adopted into this session, which is what keeps one run one run');
   assert.ok(reflected.payload.history.some((h) => h.type === 'finish'),
     'and the same completed history - this is what "stays part of the same session" means observably');
 
@@ -224,30 +224,32 @@ test('a real task opening a window keeps it in the SAME session, observable end-
   portB._disconnect();
 });
 
-test('closing only the newly-opened window does not end the session while the original stays open', async () => {
-  const WIN_A = 2;
-  bgMock.__addWindow(WIN_A, 201, 'https://example.com/original2');
+test('closing only the tab the run moved into does not end the session while its owner tab stays open', async () => {
+  const WIN_A = 2, TAB_A = 201;
+  bgMock.__addWindow(WIN_A, TAB_A, 'https://example.com/original2');
   step = 0;
 
-  const portA = makeFakePort('scoutfox_sidepanel_fresh:2');
+  const portA = makeFakePort('scoutfox_sidepanel_fresh:201');
   bgMock.__listeners.onConnect(portA);
   await new Promise((r) => setTimeout(r, 20));
 
   const windowIdsBefore = new Set(Array.from(bgMock.__tabs.values()).map((t) => t.windowId));
 
-  await sendMessage(bgMock.__listeners, { action: 'START_TASK', windowId: WIN_A, payload: { prompt: 'another comparison task' } });
-  await waitUntilIdle(bgMock.__listeners, WIN_A);
+  await sendMessage(bgMock.__listeners, { action: 'START_TASK', tabId: TAB_A, payload: { prompt: 'another comparison task' } });
+  await waitUntilIdle(bgMock.__listeners, TAB_A);
 
-  const newWindowId = Array.from(bgMock.__tabs.values()).map((t) => t.windowId).find((id) => !windowIdsBefore.has(id));
-  assert.ok(newWindowId);
+  const newWindowTab = Array.from(bgMock.__tabs.values()).find((t) => !windowIdsBefore.has(t.windowId));
+  assert.ok(newWindowTab);
 
-  bgMock.__listeners.onWindowRemoved(newWindowId);
+  // The session is OWNED by tab 201. The tab in the window the run opened is one it merely
+  // moved into, so closing that one must only unmap it - not end the run's session.
+  bgMock.__listeners.onTabRemoved(newWindowTab.id);
   await new Promise((r) => setTimeout(r, 20));
 
-  // The session must still be alive and answer for the ORIGINAL window.
-  const state = await sendMessage(bgMock.__listeners, { action: 'GET_AGENT_STATE', windowId: WIN_A });
+  // The session must still be alive and answer for its OWNER tab.
+  const state = await sendMessage(bgMock.__listeners, { action: 'GET_AGENT_STATE', tabId: TAB_A });
   assert.equal(state.task, 'another comparison task',
-    'closing the secondary window must not tear down the session while the original window is still open');
+    'closing a tab the run merely visited must not tear down the session that owns it');
 
   portA._disconnect();
 });

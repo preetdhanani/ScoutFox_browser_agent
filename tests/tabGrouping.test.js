@@ -35,6 +35,7 @@ function createMockChromeEnv() {
       }
     },
     storage: {
+      get session() { return this.local; }, // agent_sessions lives in storage.session; one backing store keeps seeds simple
       local: {
         get: (keys, cb) => {
           const result = {};
@@ -99,15 +100,20 @@ function createMockChromeEnv() {
         const targetTabIds = Array.isArray(opts.tabIds) ? opts.tabIds : [opts.tabIds];
         let gid = opts.groupId;
 
+        // Like Chrome: a NEW group lands in createProperties.windowId, or else the last-focused
+        // window - and the tab moves there with it.
+        let moveToWindow;
         if (!gid) {
           gid = ++groupCounter;
           tabGroups.set(gid, { id: gid, title: '', color: '' });
+          moveToWindow = opts.createProperties?.windowId ?? LAST_FOCUSED_WINDOW_ID;
         }
 
         for (const tid of targetTabIds) {
           const tab = tabs.get(tid);
           if (tab) {
             tab.groupId = gid;
+            if (moveToWindow !== undefined && tab.windowId !== undefined) tab.windowId = moveToWindow;
           }
         }
 
@@ -184,6 +190,8 @@ function createMockChromeEnv() {
   };
 }
 
+const LAST_FOCUSED_WINDOW_ID = 99;
+
 // Initial default chrome mock for top-level module evaluation
 global.chrome = createMockChromeEnv().mockChrome;
 
@@ -213,6 +221,19 @@ test('1.1 ensureScoutFoxGroup - Creates a ScoutFox group with title "ScoutFox" a
   assert.equal(groupInfo.title, 'ScoutFox', 'Tab group title must be set to "ScoutFox"');
   assert.equal(groupInfo.color, 'orange', 'Tab group color must be set to "orange"');
   assert.equal(env.tabs.get(101).groupId, groupId, 'Target tab must be assigned to the new group');
+});
+
+test('1.1b ensureScoutFoxGroup - Creates the group in the tab\'s own window, never the last-focused one', async () => {
+  const env = createMockChromeEnv();
+  global.chrome = env.mockChrome;
+  // The user clicked into window 99 while a task was starting in window 7.
+  env.tabs.set(102, { id: 102, groupId: -1, windowId: 7, url: 'https://google.com' });
+
+  const engine = new AgentEngine();
+  await engine.restorePromise;
+  await engine.ensureScoutFoxGroup(102);
+
+  assert.equal(env.tabs.get(102).windowId, 7, 'grouping must not drag the agent\'s tab into another window');
 });
 
 test('1.2 ensureScoutFoxGroup - Returns null safely when passed invalid tabId', async () => {
@@ -333,7 +354,7 @@ test('3.2 ensureScoutFoxGroup - Adopts existing titled ScoutFox group if tab is 
 // ============================================================================
 // SCENARIO 4: scoutFoxGroupId Persistence Across Service Worker Restarts
 // ============================================================================
-test('4.1 scoutFoxGroupId Persistence - persistState writes scoutFoxGroupId to chrome.storage.local', async () => {
+test('4.1 scoutFoxGroupId Persistence - persistState writes scoutFoxGroupId to chrome.storage.session', async () => {
   const env = createMockChromeEnv();
   global.chrome = env.mockChrome;
 

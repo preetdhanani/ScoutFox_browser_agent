@@ -49,19 +49,24 @@ function loadCompressor({ scrollY, innerHeight, nodes, containerInnerText }) {
   return fn(fakeWindow, fakeDocument);
 }
 
+// A name for number i made of letters only (0 is "q", 10 is "a"...). The paragraphs below must not
+// differ only by a digit: extractPageText() collapses four or more lines in a row that do (see
+// tests/domCompressorRepeatedRuns.test.js), which would hide which of them the fallback picked.
+const letters = (i) => i.toString(26).replace(/\d/g, (d) => 'qrstuvwxyz'[d]);
+
 test('the scrolled-viewport fallback centers on the current scroll position, not the end of the document', () => {
   // 5 nodes genuinely near the current scroll position (scrollY=5000, innerHeight=800, so the
   // viewport spans roughly y=5000-5800 in page coordinates; getBoundingClientRect() is
   // viewport-relative, so a node actually on screen has a small rect.top near 0).
   const nearNodes = Array.from({ length: 5 }, (_, i) =>
-    makeNode(`NEAR-VIEWPORT-CONTENT-PARAGRAPH-NUMBER-${i}-with-enough-text-to-not-be-filtered-out`, 50 + i * 10));
+    makeNode(`NEAR-VIEWPORT-CONTENT-PARAGRAPH-NUMBER-${letters(i)}-with-enough-text-to-not-be-filtered-out`, 50 + i * 10));
 
   // 55 nodes far from the current scroll position in EITHER direction - enough that fewer
   // than 10 of the 60 total fall inside the generous viewport window, triggering the fallback,
   // and enough (>50 total) that a naive slice(-50) or slice(0,50) could plausibly miss the
   // near ones depending on where they sit in the array.
   const farNodes = Array.from({ length: 55 }, (_, i) =>
-    makeNode(`FAR-AWAY-FOOTER-CONTENT-PARAGRAPH-NUMBER-${i}-should-not-be-picked-here`, i % 2 === 0 ? -9000 - i : 9000 + i));
+    makeNode(`FAR-AWAY-FOOTER-CONTENT-PARAGRAPH-NUMBER-${letters(i)}-should-not-be-picked-here`, i % 2 === 0 ? -9000 - i : 9000 + i));
 
   // Near nodes placed FIRST in document order, far ones after - so slice(-50) (the old,
   // buggy fallback) would grab indices [10..59], excluding the near nodes entirely, while
@@ -83,16 +88,17 @@ test('the scrolled-viewport fallback centers on the current scroll position, not
   // in favour of it; the old allTextNodes.slice(-50) could and did exclude it outright, since
   // it picked purely by array position (document order) with no regard for distance at all.
   for (let i = 0; i < nearNodes.length; i++) {
-    assert.ok(text.includes(`NEAR-VIEWPORT-CONTENT-PARAGRAPH-NUMBER-${i}`),
+    assert.ok(text.includes(`NEAR-VIEWPORT-CONTENT-PARAGRAPH-NUMBER-${letters(i)}-`),
       `paragraph ${i}, genuinely near the current scroll position, must survive the fallback`);
   }
 });
 
 test('a page with enough nodes directly in the viewport never needs the fallback at all', () => {
-  const nodes = Array.from({ length: 35 }, (_, i) => makeNode(`ORDINARY-VISIBLE-PARAGRAPH-${i}`, 50 + i * 5));
+  const nodes = Array.from({ length: 35 }, (_, i) => makeNode(`ORDINARY-VISIBLE-PARAGRAPH-${letters(i)}`, 50 + i * 5));
 
   const compressor = loadCompressor({ scrollY: 500, innerHeight: 800, nodes, containerInnerText: '' });
   const text = compressor.extractPageText();
 
-  assert.ok(text.includes('ORDINARY-VISIBLE-PARAGRAPH-0'));
+  assert.ok(text.includes(`ORDINARY-VISIBLE-PARAGRAPH-${letters(0)}`));
+  assert.ok(text.includes(`ORDINARY-VISIBLE-PARAGRAPH-${letters(34)}`), 'and so does the last one in the viewport');
 });

@@ -87,18 +87,36 @@ test('clicking the icon on a restricted tab (chrome://newtab) still opens the pa
     'chrome.sidePanel.open() must still be called for a restricted tab, or clicking the icon on a fresh browser tab does nothing at all');
 });
 
-test('a restricted tab is not added to the ScoutFox automation group', async () => {
+// Clicking the icon attaches a SESSION to the tab and shows the panel. It deliberately does
+// NOT create a tab group - opening the panel is not the same as asking for work.
+//
+// These tests have now been inverted twice, so the history is worth stating plainly. Originally
+// they asserted no grouping, but for the wrong reason: grouping was gated on isValidWebTab, i.e.
+// "can this page be scripted", which also meant a brand-new window (sitting on chrome://newtab)
+// had no group at all - and side-panel visibility was keyed off the group, so the panel died on
+// the first tab switch of every session. The first fix made grouping unconditional on click,
+// which kept the panel alive but reorganised the user's tab strip the instant they so much as
+// looked at the extension.
+//
+// Per-tab sessions removed the need for either. "Does this tab have a session" answers the
+// panel-visibility question directly, from the moment the icon is clicked, so the group is free
+// to go back to being what it should always have been: a sandbox marker for a running task,
+// created by startTask/getActiveTab when work actually begins.
+
+test('clicking the icon on chrome://newtab opens the panel and creates NO group', async () => {
   mock.__callOrder.length = 0;
   mock.__tabs.get(100).groupId = -1;
 
   mock.__listeners.onClicked(mock.__tabs.get(100));
   await new Promise((r) => setTimeout(r, 30));
 
+  const enableCall = mock.__callOrder.find((c) => c.call === 'setOptions' && c.opts.tabId === 100 && c.opts.enabled === true);
+  assert.ok(enableCall, 'the panel must be enabled for the clicked tab');
   assert.equal(mock.__tabs.get(100).groupId, -1,
-    'a tab that cannot be scripted should not be grouped for automation - isValidWebTab should still gate THIS, just not panel visibility');
+    'opening the panel must not box the user\'s tab into a group - the group belongs to a task, and no task has been given yet');
 });
 
-test('a Chrome Web Store tab is recognised as restricted, not grouped for automation', async () => {
+test('clicking the icon on a Chrome Web Store tab opens the panel and creates NO group', async () => {
   mock.__callOrder.length = 0;
   mock.__tabs.get(300).groupId = -1;
 
@@ -107,11 +125,10 @@ test('a Chrome Web Store tab is recognised as restricted, not grouped for automa
 
   const openCall = mock.__callOrder.find((c) => c.call === 'open' && c.opts.tabId === 300);
   assert.ok(openCall, 'the panel must still open on a Web Store tab');
-  assert.equal(mock.__tabs.get(300).groupId, -1,
-    'a Web Store tab must not be grouped for automation - it used to slip through isValidWebTab\'s narrower, separate URL list as "valid"');
+  assert.equal(mock.__tabs.get(300).groupId, -1, 'and still no group, for the same reason');
 });
 
-test('a file:// tab is recognised as restricted, not grouped for automation', async () => {
+test('clicking the icon on a file:// tab opens the panel and creates NO group', async () => {
   mock.__callOrder.length = 0;
   mock.__tabs.get(400).groupId = -1;
 
@@ -120,11 +137,10 @@ test('a file:// tab is recognised as restricted, not grouped for automation', as
 
   const openCall = mock.__callOrder.find((c) => c.call === 'open' && c.opts.tabId === 400);
   assert.ok(openCall, 'the panel must still open on a file:// tab');
-  assert.equal(mock.__tabs.get(400).groupId, -1,
-    'a file:// tab must not be grouped for automation - also previously missed by isValidWebTab\'s narrower, separate URL list');
+  assert.equal(mock.__tabs.get(400).groupId, -1, 'and still no group, for the same reason');
 });
 
-test('clicking the icon on a normal, scriptable tab still opens the panel AND groups it', async () => {
+test('a normal, scriptable tab is treated exactly the same - panel yes, group no', async () => {
   mock.__callOrder.length = 0;
   mock.__tabs.get(200).groupId = -1;
 
@@ -133,5 +149,6 @@ test('clicking the icon on a normal, scriptable tab still opens the panel AND gr
 
   const openCall = mock.__callOrder.find((c) => c.call === 'open' && c.opts.tabId === 200);
   assert.ok(openCall, 'a normal tab must still open the panel');
-  assert.equal(mock.__tabs.get(200).groupId >= 5000, true, 'a normal, scriptable tab must still join the ScoutFox group');
+  assert.equal(mock.__tabs.get(200).groupId, -1,
+    'whether a page can be scripted has no bearing on this - clicking the icon never groups anything, so a scriptable tab is left alone too');
 });
