@@ -18,7 +18,7 @@ import { makeFakePort, lastStateUpdate, sendMessage } from './helpers/fakePort.j
 
 function makeMultiWindowMock() {
   const tabs = new Map();
-  const storage = {};
+  const storage = { agent_settings: { engine: 'legacy' } };
   let groupCounter = 9000;
   const groupTitles = new Map(); // groupId -> title, so ensureScoutFoxGroup's own-title check works
   const listeners = {};

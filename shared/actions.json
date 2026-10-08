@@ -1,0 +1,223 @@
+{
+  "version": 1,
+  "notes": [
+    "The action registry: every verb the agent can dispatch is defined once here.",
+    "It is language neutral. The TypeScript code (src/background/agent/actions.ts and schemas.ts) reads it with an import, and the Python runner will read the same file.",
+    "verbs is in prompt order. A verb is a page verb (the content script or the background runs it on the page) or a state verb (it changes the run, not the page).",
+    "tiers says which model tiers may use the verb. modes says which policy modes offer it, as listed in the design (docs/langgraph-design.md, Policy modes). State verbs that arrive later (record_finding, mark_blocked, ...) are added to this list with their modes.",
+    "prompt is the exact line of the compact Ollama prompt, the field list included. A test keeps the field list equal to schema.properties.",
+    "schema is the decoding branch of the verb. The builder adds the const action, additionalProperties:false, and an optional reason string (unless it is switched off). required lists the fields the model must always send, because small models fill required fields and drop optional ones.",
+    "In a property, {\"$ref\": \"#/$defs/name\"} is replaced by that entry of $defs, and {\"$batchSteps\": true} by the browser_batch steps array, built from the batch block below.",
+    "Element ids are bounded integers and never an enum. No string has a maxLength. A pattern uses explicit character ranges only, because Ollama reads \".\" as any character.",
+    "aliases are the other names a model uses for the verb. An alias must be unique, and it must not be the name of a verb."
+  ],
+  "tiers": ["small", "large"],
+  "modes": ["browse", "extract", "answer", "harvest"],
+  "$defs": {
+    "elementId": { "type": "integer", "minimum": 1, "maximum": 999999 },
+    "httpUrl": { "type": "string", "pattern": "^https?://[!#-\\[\\]-~¡-퟿]+$" }
+  },
+  "batch": {
+    "maxSteps": 8,
+    "stepVerbs": ["click", "type", "scroll", "press_key", "wait"]
+  },
+  "verbs": [
+    {
+      "name": "click",
+      "category": "page",
+      "tiers": ["small", "large"],
+      "modes": ["browse"],
+      "prompt": "click {element_id} - click element [element_id]",
+      "schema": {
+        "required": ["element_id"],
+        "properties": { "element_id": { "$ref": "#/$defs/elementId" } }
+      },
+      "aliases": ["click_element", "press"]
+    },
+    {
+      "name": "type",
+      "category": "page",
+      "tiers": ["small", "large"],
+      "modes": ["browse"],
+      "prompt": "type {element_id, text, submit} - replace the text in field [element_id]; submit true presses Enter after typing",
+      "schema": {
+        "required": ["element_id", "text", "submit"],
+        "properties": {
+          "element_id": { "$ref": "#/$defs/elementId" },
+          "text": { "type": "string" },
+          "submit": { "type": "boolean" }
+        }
+      },
+      "aliases": ["type_text", "input"]
+    },
+    {
+      "name": "scroll",
+      "category": "page",
+      "tiers": ["small", "large"],
+      "modes": ["browse", "extract", "answer", "harvest"],
+      "prompt": "scroll {direction} - \"down\" or \"up\"",
+      "schema": {
+        "required": ["direction"],
+        "properties": { "direction": { "enum": ["down", "up"] } }
+      },
+      "aliases": ["scroll_page"]
+    },
+    {
+      "name": "press_key",
+      "category": "page",
+      "tiers": ["small", "large"],
+      "modes": ["browse"],
+      "prompt": "press_key {key} - press one key: Enter, Escape, Tab, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, PageDown, PageUp, Home, End, Backspace, Delete",
+      "schema": {
+        "required": ["key"],
+        "properties": {
+          "key": {
+            "enum": [
+              "Enter", "Escape", "Tab", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight",
+              "PageDown", "PageUp", "Home", "End", "Backspace", "Delete"
+            ]
+          }
+        }
+      },
+      "aliases": []
+    },
+    {
+      "name": "navigate",
+      "category": "page",
+      "tiers": ["small", "large"],
+      "modes": ["browse"],
+      "prompt": "navigate {url} - open a full https:// URL in this tab",
+      "schema": {
+        "required": ["url"],
+        "properties": { "url": { "$ref": "#/$defs/httpUrl" } }
+      },
+      "aliases": []
+    },
+    {
+      "name": "go_back",
+      "category": "page",
+      "tiers": ["small", "large"],
+      "modes": ["browse"],
+      "prompt": "go_back {} - go back in the browser history",
+      "schema": { "required": [], "properties": {} },
+      "aliases": []
+    },
+    {
+      "name": "go_forward",
+      "category": "page",
+      "tiers": ["small", "large"],
+      "modes": ["browse"],
+      "prompt": "go_forward {} - go forward in the browser history",
+      "schema": { "required": [], "properties": {} },
+      "aliases": []
+    },
+    {
+      "name": "read_page_text",
+      "category": "page",
+      "tiers": ["small", "large"],
+      "modes": ["browse", "extract", "answer", "harvest"],
+      "prompt": "read_page_text {} - read more text of this page",
+      "schema": { "required": [], "properties": {} },
+      "aliases": ["extract_text", "read_text", "extract_page_text"]
+    },
+    {
+      "name": "execute_js",
+      "category": "page",
+      "tiers": ["large"],
+      "modes": ["browse"],
+      "prompt": "execute_js {code} - run JavaScript in the page and get the value it returns",
+      "schema": {
+        "required": ["code"],
+        "properties": { "code": { "type": "string" } }
+      },
+      "aliases": ["eval_js", "run_js", "javascript"]
+    },
+    {
+      "name": "read_network_requests",
+      "category": "page",
+      "tiers": ["large"],
+      "modes": ["browse"],
+      "prompt": "read_network_requests {filter, includeBody, limit} - see the recent network requests of this page; every field is optional",
+      "schema": {
+        "required": [],
+        "properties": {
+          "filter": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "status": { "enum": ["error", "success", "all"] },
+              "since": { "enum": ["last_action"] },
+              "urlContains": { "type": "string" }
+            }
+          },
+          "includeBody": { "type": "boolean" },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+        }
+      },
+      "aliases": ["read_network", "network_requests", "get_network"]
+    },
+    {
+      "name": "browser_batch",
+      "category": "page",
+      "tiers": ["large"],
+      "modes": ["browse"],
+      "prompt": "browser_batch {steps, stopOnError} - run up to 8 steps on this page in one reply; each step is a click, type, scroll, press_key or wait action with its own fields",
+      "schema": {
+        "required": ["steps"],
+        "properties": {
+          "steps": { "$batchSteps": true },
+          "stopOnError": { "type": "boolean" }
+        }
+      },
+      "aliases": ["batch", "batch_actions"]
+    },
+    {
+      "name": "wait",
+      "category": "page",
+      "tiers": ["small", "large"],
+      "modes": ["browse"],
+      "prompt": "wait {amount} - wait 1 to 5 seconds, only while the page is still loading",
+      "schema": {
+        "required": ["amount"],
+        "properties": { "amount": { "type": "integer", "minimum": 1, "maximum": 5 } }
+      },
+      "aliases": []
+    },
+    {
+      "name": "finish",
+      "category": "state",
+      "tiers": ["small", "large"],
+      "modes": ["answer"],
+      "prompt": "finish {answer} - the task is done; answer is the full answer for the user",
+      "schema": {
+        "required": ["answer"],
+        "properties": { "answer": { "type": "string" } }
+      },
+      "aliases": ["done", "complete", "finished"]
+    },
+    {
+      "name": "ask_user",
+      "category": "state",
+      "tiers": ["small", "large"],
+      "modes": ["browse", "extract", "answer", "harvest"],
+      "prompt": "ask_user {question} - ask the user, only if you cannot go on without them",
+      "schema": {
+        "required": ["question"],
+        "properties": { "question": { "type": "string" } }
+      },
+      "aliases": []
+    },
+    {
+      "name": "open_window",
+      "category": "page",
+      "tiers": ["large"],
+      "modes": ["browse"],
+      "prompt": "open_window {url} - open a new browser window (rare; use navigate for a new page)",
+      "schema": {
+        "required": ["url"],
+        "properties": { "url": { "$ref": "#/$defs/httpUrl" } }
+      },
+      "aliases": ["new_window", "open_new_window", "create_window"]
+    }
+  ]
+}

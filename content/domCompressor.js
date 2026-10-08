@@ -5,10 +5,139 @@
  */
 
 (function() {
+  // ---------------------------------------------------------------------------------------------
+  // Repeated text
+  //
+  // extractPageText() reads textContent, which also holds hidden markup, so a page can hand it the
+  // same few words again and again. On frame.work's laptop configurator every option <li> was about
+  // 5000 characters of "Batch 1 Shipped Batch 2 Shipped Batch 3 Ships December - Sold Out ..." (the
+  // list once where people see it, then in several hidden copies). That filled the whole cap, so the
+  // price, the shipping and the delivery text never reached the model, and read_page_text returns the
+  // same text, so the model could not get past it. collapseRepeatedRuns() shortens such runs before
+  // the cap is applied.
+  // ---------------------------------------------------------------------------------------------
+  const PAGE_TEXT_CAP = 4500;
+  // How much text is searched for repeats. Bounds the work on a page with megabytes of text.
+  const PAGE_TEXT_SCAN_LIMIT = 1000000;
+  // A run needs this many identical units in a row. Fewer are a short list, and stay as they are.
+  const REPEAT_MIN_RUN = 4;
+  // The longest unit, in words. A cycle of runs ("9 shipped, 7 sold out, 1 Q1") is one unit on the
+  // second pass, after its runs are short.
+  const REPEAT_MAX_UNIT_WORDS = 64;
+  // Each pass shortens the text or stops, this only bounds the work.
+  const REPEAT_MAX_PASSES = 4;
+  // A unit that holds no letter ("1 2 3 4", "- - - -") is numbers or a separator, not an entry.
+  const HAS_LETTER = /\p{L}/u;
+  // When the digits of a run carry a price or a lead time, dropping the middle of the run would
+  // drop information, so such a run is kept whole. "Ships" and "Shipped" are deliberately not
+  // here: "Batch 3 Ships December - Sold Out" is a batch status, not a shipping cost or lead time,
+  // and it is exactly the noise this exists for.
+  const PRICE_LIKE = /[€$£¥₹]\s?\d|\d\s?(?:[€$£¥₹]|EUR\b|USD\b|GBP\b|CHF\b|CAD\b|AUD\b|Euro\b)/i;
+  const DELIVERY_LIKE = /\b(?:shipping|shipment\w*|deliver\w*|arriv\w*|versand\w*|liefer\w*|werktag\w*|business days?|working days?|porto)\b/i;
+
+  /**
+   * One pass: finds runs of REPEAT_MIN_RUN or more identical units (the same words after masking
+   * digits, each unit 1 to REPEAT_MAX_UNIT_WORDS words, line breaks ignored) and replaces each run by
+   *   - "unit (repeated N times)" when every unit is word for word the same, which loses nothing,
+   *   - "first ... last (N similar entries)" when only digits differ,
+   *   - nothing at all (the run stays) when the digits differ and carry a price or a delivery time,
+   *     or when the replacement would not be shorter than the run.
+   * Everything outside the runs keeps its words and its white space.
+   */
+  function collapseRepeatedRunsOnce(text) {
+    const lead = text.match(/^\s*/)[0];
+    const words = [];
+    const gaps = []; // gaps[i] is the white space after words[i]
+    for (const [, word, gap] of text.matchAll(/(\S+)(\s*)/g)) {
+      words.push(word);
+      gaps.push(gap);
+    }
+    const n = words.length;
+    if (n < REPEAT_MIN_RUN) return text;
+    const shapes = words.map((word) => word.replace(/\d+/g, '#'));
+
+    const sameShape = (a, b, size) => {
+      for (let t = 0; t < size; t++) {
+        if (shapes[a + t] !== shapes[b + t]) return false;
+      }
+      return true;
+    };
+    // The unit of `size` words that starts at word `start`, without the white space after it.
+    const unitText = (start, size) => {
+      let out = '';
+      for (let t = 0; t < size; t++) out += words[start + t] + (t < size - 1 ? gaps[start + t] : '');
+      return out;
+    };
+    // The run at word `i` that covers the most words, the smaller unit when two cover the same (so
+    // "Batch 1 Shipped" x 8 is one run of 8, not two of 4). Taking the first unit that repeats would
+    // take the inner run of a repeated cycle and leave the cycle itself cut at the wrong place.
+    // `skip` is how many words a run without letters covers there, so that a long "1 2 3 4 ..." is
+    // passed once and not searched again from every word of it.
+    const runAt = (i) => {
+      let best = { size: 0, count: 0 };
+      let skip = 0;
+      const longest = Math.min(REPEAT_MAX_UNIT_WORDS, Math.floor((n - i) / REPEAT_MIN_RUN));
+      for (let size = 1; size <= longest; size++) {
+        let count = 1;
+        while (i + (count + 1) * size <= n && sameShape(i, i + count * size, size)) count++;
+        if (count < REPEAT_MIN_RUN) continue;
+        if (!HAS_LETTER.test(unitText(i, size))) {
+          skip = Math.max(skip, size * count);
+        } else if (size * count > best.size * best.count) {
+          best = { size, count };
+        }
+      }
+      return { ...best, skip };
+    };
+
+    const out = [lead];
+    let i = 0;
+    while (i < n) {
+      const { size, count, skip } = runAt(i);
+      if (size === 0) {
+        const stay = Math.max(1, skip);
+        for (let t = 0; t < stay; t++) out.push(words[i + t], gaps[i + t]);
+        i += stay;
+        continue;
+      }
+
+      const end = i + size * count; // the word after the run
+      const first = unitText(i, size);
+      let identical = true;
+      for (let u = 1; u < count && identical; u++) identical = unitText(i + u * size, size) === first;
+
+      let summary = null;
+      if (identical) summary = `${first} (repeated ${count} times)`;
+      else if (!PRICE_LIKE.test(first) && !DELIVERY_LIKE.test(first)) summary = `${first} ... ${unitText(end - size, size)} (${count} similar entries)`;
+
+      let runLength = words[end - 1].length;
+      for (let t = i; t < end - 1; t++) runLength += words[t].length + gaps[t].length;
+      if (summary !== null && summary.length < runLength) {
+        out.push(summary, gaps[end - 1]);
+      } else {
+        for (let t = i; t < end; t++) out.push(words[t], gaps[t]);
+      }
+      i = end;
+    }
+    return out.join('');
+  }
+
   class DOMCompressor {
     constructor() {
-      this.elementMap = new Map(); // Maps numeric ID to DOM Element reference
+      this.elementMap = new Map(); // Maps numeric ID to DOM Element reference (WeakRef if supported)
       this.counter = 0;
+      this.docId = this.generateDocId();
+    }
+
+    generateDocId() {
+      try {
+        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+          const buf = new Uint32Array(2);
+          crypto.getRandomValues(buf);
+          return `${buf[0].toString(36)}-${buf[1].toString(36)}`;
+        }
+      } catch (_) {}
+      return Math.random().toString(36).slice(2);
     }
 
     /**
@@ -17,7 +146,9 @@
     getSnapshot(options = {}) {
       const maxElements = options.maxElements || 120;
       this.elementMap.clear();
+      this.elementInfo = {};
       this.counter = 0;
+      this.docId = this.docId || this.generateDocId();
 
       const interactiveElements = this.findInteractiveElements();
       const formattedElements = [];
@@ -27,7 +158,11 @@
 
         this.counter++;
         const id = this.counter;
-        this.elementMap.set(id, el);
+        if (typeof WeakRef !== 'undefined') {
+          this.elementMap.set(id, new WeakRef(el));
+        } else {
+          this.elementMap.set(id, el);
+        }
 
         // Store ID on element attribute for visual highlighting
         el.setAttribute('data-agent-id', id);
@@ -49,7 +184,7 @@
       // re-resolution has never actually run; only the live-reference tier ever worked.
       this.elements = formattedElements;
 
-      return {
+      const result = {
         title,
         url,
         scrollState: { scrollY, pageHeight, viewportHeight },
@@ -58,6 +193,10 @@
         elements: formattedElements,
         pageText: this.extractPageText()
       };
+      if (options && options.withElementInfo) {
+        result.elementInfo = this.elementInfo || {};
+      }
+      return result;
     }
 
     /**
@@ -80,7 +219,9 @@
           && document.contentType !== 'text/html' && document.contentType !== 'text/xml';
         if (window.location.hostname.includes('raw.githubusercontent.com') || rawContentType) {
           const rawText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-          return rawText.trim().slice(0, 4500);
+          // The text of a raw markdown or plain text file IS the content (a log, a table, source), so
+          // it is capped and marked but never collapsed.
+          return this.capPageText(rawText.trim());
         }
 
         // 2. Targeted Article / README / Documentation Containers
@@ -139,17 +280,74 @@
           extractedText = (container.innerText || container.textContent || '').trim();
         }
 
-        return extractedText.slice(0, 4500);
+        return this.finishPageText(extractedText);
       } catch (_) {
-        return (document.body ? (document.body.innerText || document.body.textContent || '') : '').slice(0, 3000);
+        return this.capPageText(document.body ? (document.body.innerText || document.body.textContent || '') : '', 3000);
       }
+    }
+
+    /**
+     * Collapses the repeated text of a rendered page, then applies the cap (see the notes above
+     * collapseRepeatedRunsOnce). Only the first PAGE_TEXT_SCAN_LIMIT characters are searched.
+     */
+    finishPageText(text) {
+      const scanned = text.length > PAGE_TEXT_SCAN_LIMIT ? text.slice(0, PAGE_TEXT_SCAN_LIMIT) : text;
+      return this.capPageText(this.collapseRepeatedRuns(scanned), PAGE_TEXT_CAP, scanned.length < text.length);
+    }
+
+    /**
+     * Runs of repeated units (REPEAT_MIN_RUN or more, the same after masking digits) become
+     * "first ... last (N similar entries)", or "unit (repeated N times)" when they are word for word
+     * the same. A second pass collapses a cycle of such runs, which is what a page that repeats a
+     * list several times leaves after the first. Runs whose digits carry a price or a delivery time
+     * are kept. See collapseRepeatedRunsOnce.
+     */
+    collapseRepeatedRuns(text) {
+      let current = text;
+      for (let pass = 0; pass < REPEAT_MAX_PASSES; pass++) {
+        const next = collapseRepeatedRunsOnce(current);
+        if (next === current) break;
+        current = next;
+      }
+      return current;
+    }
+
+    /**
+     * Cuts the text at the cap. A text that is cut ends with a marker line, so the model knows it
+     * saw part of the page and can scroll or read on. `cutEarlier` says the page was already cut
+     * before this (the scan limit) even though what is left fits.
+     */
+    capPageText(text, cap = PAGE_TEXT_CAP, cutEarlier = false) {
+      if (text.length > cap) return `${text.slice(0, cap)}\n[page text truncated at ${cap} characters]`;
+      return cutEarlier ? `${text}\n[page text truncated]` : text;
     }
 
     /**
      * Retrieve element by assigned ID
      */
     getElement(id) {
-      return this.elementMap.get(Number(id));
+      const entry = this.elementMap.get(Number(id));
+      if (!entry) return null;
+      const el = (typeof WeakRef !== 'undefined' && entry instanceof WeakRef) ? entry.deref() : entry;
+      if (!el) return null;
+      if (typeof document !== 'undefined' && typeof document.contains === 'function' && !document.contains(el)) {
+        return null;
+      }
+      return el;
+    }
+
+    /**
+     * Resolve element with docId check and status
+     */
+    resolveElementWithStatus(id, expectedDocId) {
+      if (expectedDocId && this.docId && expectedDocId !== this.docId) {
+        return { success: false, stale: true, error: `Document navigated (expected ${expectedDocId}, got ${this.docId}).` };
+      }
+      const el = this.getElement(id);
+      if (!el) {
+        return { success: false, stale: true, error: `Element [${id}] is no longer attached to the document.` };
+      }
+      return { success: true, element: el };
     }
 
     /**
@@ -241,6 +439,62 @@
     }
 
     /**
+     * Determine field kind (password, cc, otp, email, address, search, text)
+     */
+    computeFieldKind(el, tagName, type) {
+      if (tagName !== 'input' && tagName !== 'textarea') return undefined;
+      const lowerType = (type || '').toLowerCase();
+      const name = (el.getAttribute('name') || '').toLowerCase();
+      const id = (el.id || '').toLowerCase();
+      const autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
+      const combined = `${name} ${id} ${autocomplete}`;
+
+      if (lowerType === 'password' || combined.includes('password') || combined.includes('passwort')) return 'password';
+      if (lowerType === 'email' || combined.includes('email') || combined.includes('e-mail')) return 'email';
+      if (/card|cc-number|cvv|cvc|cardnumber|kreditkarte/i.test(combined) || (lowerType === 'tel' && combined.includes('cc'))) return 'cc';
+      if (/otp|2fa|one-time|verification|code|mfa|token/i.test(combined)) return 'otp';
+      if (lowerType === 'search' || /search|suche|query/i.test(combined)) return 'search';
+      if (/address|street|city|zip|postcode|plz|strasse|ort/i.test(combined)) return 'address';
+      return 'text';
+    }
+
+    /**
+     * Determine form kind (search, login, checkout, other)
+     */
+    computeFormKind(el) {
+      const form = typeof el.closest === 'function' ? el.closest('form') : null;
+      if (!form) return undefined;
+      const formRole = (form.getAttribute('role') || '').toLowerCase();
+      const formClass = (typeof form.className === 'string' ? form.className : '').toLowerCase();
+      const formId = (form.id || '').toLowerCase();
+      const formAction = (form.getAttribute('action') || '').toLowerCase();
+      const formAria = (form.getAttribute('aria-label') || '').toLowerCase();
+      const combined = `${formRole} ${formClass} ${formId} ${formAction} ${formAria}`;
+
+      if (formRole === 'search' || /search|suche/i.test(combined)) return 'search';
+      if (/login|signin|anmelden|auth|session/i.test(combined)) return 'login';
+      if (/checkout|kasse|payment|order|bestell/i.test(combined)) return 'checkout';
+      return 'other';
+    }
+
+    /**
+     * Extract destination domain for links
+     */
+    computeHrefDomain(el, tagName) {
+      if (tagName !== 'a' && !el.href) return undefined;
+      try {
+        const href = el.href || el.getAttribute('href');
+        if (!href) return undefined;
+        const currentOrigin = (typeof window !== 'undefined' && window.location && window.location.href) || 'https://localhost';
+        const url = new URL(href, currentOrigin);
+        if (url.protocol === 'http:' || url.protocol === 'https:') {
+          return url.hostname.toLowerCase();
+        }
+      } catch (_) {}
+      return undefined;
+    }
+
+    /**
      * Produce concise element string representation with stable locator descriptors
      */
     getElementSummary(el, id) {
@@ -264,6 +518,11 @@
         ? el.value.slice(0, 40)
         : '';
 
+      const fieldKind = this.computeFieldKind(el, tagName, type);
+      const formKind = this.computeFormKind(el);
+      const hrefDomain = this.computeHrefDomain(el, tagName);
+      const isForbidden = fieldKind === 'password' || fieldKind === 'cc' || fieldKind === 'otp';
+
       let inViewport = true;
       try {
         const rect = el.getBoundingClientRect();
@@ -286,6 +545,12 @@
       if (expanded === true) extraAttrs += ' expanded';
       else if (expanded === false) extraAttrs += ' collapsed';
       if (valuePreview) extraAttrs += ` value="${valuePreview}"`;
+      if (hrefDomain && typeof window !== 'undefined' && window.location && window.location.hostname && hrefDomain !== window.location.hostname.toLowerCase()) {
+        extraAttrs += ` domain="${hrefDomain}"`;
+      }
+      if (isForbidden) {
+        extraAttrs += ' (user only)';
+      }
 
       let labelText = text || ariaLabel || placeholder || 'element';
 
@@ -300,6 +565,15 @@
           name: el.getAttribute('name') || '',
           'data-testid': el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('data-cy') || ''
         }
+      };
+
+      this.elementInfo = this.elementInfo || {};
+      this.elementInfo[id] = {
+        role,
+        label: labelText,
+        formKind,
+        fieldKind,
+        hrefDomain
       };
 
       return {

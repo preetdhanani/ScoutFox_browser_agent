@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 /* ---------------------------- ollama-token-cap-active ---------------------------- */
 
 test('ollamaNumPredict default is no longer the inert 1024', async () => {
-  const { DEFAULT_SETTINGS } = await import('../utils/storage.js');
+  const { DEFAULT_SETTINGS } = await import('../src/shared/storage.ts');
 
   assert.notEqual(DEFAULT_SETTINGS.ollamaNumPredict, 1024,
     'this was the value that made the token-cap fix a no-op with no UI control to change it');
@@ -37,7 +37,7 @@ test('a settings object with no ollamaNumPredict still resolves to a generous ca
       }
     }
   };
-  const { Storage } = await import('../utils/storage.js?case=ollamaNumPredict');
+  const { Storage } = await import('../src/shared/storage.ts?case=ollamaNumPredict');
 
   const settings = await Storage.getSettings();
   assert.equal(settings.ollamaNumPredict, 8192);
@@ -69,7 +69,7 @@ function makeChromeStorageMock(initial = {}) {
 
 test('clear-logs-not-propagated: Logger.clearLogs() empties the in-memory history immediately', async () => {
   global.chrome = makeChromeStorageMock();
-  const { Logger } = await import('../utils/logger.js?case=clearLogs');
+  const { Logger } = await import('../src/shared/logger.ts?case=clearLogs');
 
   Logger.info('Test', 'entry one');
   Logger.info('Test', 'entry two');
@@ -84,7 +84,7 @@ test('simplify-duplicate-log-restore: logsRestored() resolves even when chrome.s
   // No chrome.storage at all - matches a non-extension context, and exercises the
   // early-resolve branch that previously had nothing to make it awaitable.
   delete global.chrome;
-  const { Logger } = await import('../utils/logger.js?case=noStorage');
+  const { Logger } = await import('../src/shared/logger.ts?case=noStorage');
 
   await assert.doesNotReject(Logger.logsRestored());
 });
@@ -103,7 +103,7 @@ test('simplify-duplicate-log-restore: logsRestored() only resolves after the sto
       }
     }
   };
-  const { Logger } = await import('../utils/logger.js?case=raceTiming');
+  const { Logger } = await import('../src/shared/logger.ts?case=raceTiming');
 
   let resolved = false;
   Logger.logsRestored().then(() => { resolved = true; });
@@ -121,9 +121,9 @@ test('simplify-duplicate-log-restore: logsRestored() only resolves after the sto
 // The two background.js scenarios (CLEAR_LOGS, GET_AGENT_STATE race) live in their own
 // dedicated files: tests/backgroundClearLogs.test.js and tests/backgroundGetAgentStateRace.test.js.
 //
-// background.js imports Logger via the plain specifier '../utils/logger.js', with no query
+// background.js imports Logger via the plain specifier '../src/shared/logger.ts', with no query
 // string, and module-level state only runs its restore IIFE once per process. Testing it
-// alongside other logger.js scenarios in this file (which deliberately use ?case=... query
+// alongside other logger.ts scenarios in this file (which deliberately use ?case=... query
 // suffixes to force fresh instances per test) would either observe a DIFFERENT Logger instance
 // than the one background.js actually uses, or share a Logger instance whose restore already
 // resolved in an earlier test - node --test isolates by FILE, not by individual test(), so a

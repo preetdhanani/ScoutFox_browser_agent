@@ -11,8 +11,8 @@
  *   3. An explicit `finish` with no answer field was reported as "Task completed successfully."
  *      - a claim the model never actually made.
  *
- * See harness/outcome.js and tests/harnessOutcome.test.js for the isolated unit tests of the
- * classification logic; this file drives the real engine loop the way the panel does.
+ * See src/background/agent/outcome.ts and tests/agent/outcome.test.ts for the isolated unit tests of
+ * the classification logic; this file drives the real engine loop the way the panel does.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -40,7 +40,9 @@ function freshEngine(maxSteps = 2) {
   engine.getTabDOMWithAutoInject = async () => ({
     elementCount: 3,
     elements: '[1] <button> Go',
-    pageText: 'hello',
+    // The page shows what the scripted finish answer of 'finish with a real answer' states. The finish gate
+    // (agent/answerAudit.ts) accepts a number only when a page the engine read showed it.
+    pageText: 'The price is $120.',
     title: 'Test',
     url: 'https://example.com',
     scrollState: { scrollY: 0, pageHeight: 1000, viewportHeight: 800 }

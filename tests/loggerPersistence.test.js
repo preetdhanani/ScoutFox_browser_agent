@@ -33,7 +33,7 @@ global.chrome = {
   }
 };
 
-const { Logger } = await import('../utils/logger.js');
+const { Logger } = await import('../src/shared/logger.ts');
 const { AgentEngine } = await import('../background/agentEngine.js');
 
 test('Logger - restores prior logs from storage on startup', () => {

@@ -94,12 +94,18 @@
         <div class="processing-banner" id="processingBanner" style="display: none;">
           <div class="spinner-ring"></div>
           <div class="processing-text-wrapper">
-            <span class="processing-phase" id="processingPhaseText">Agent is processing...</span>
+            <div class="processing-phase-row">
+              <span class="processing-phase" id="processingPhaseText">Agent is processing...</span>
+              <span class="processing-effort-chip" id="processingEffortBadge" style="display: none;"></span>
+            </div>
             <div class="progress-bar-track">
               <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
             </div>
           </div>
         </div>
+
+        <!-- NESTED LIVE GRAPH VIEW CONTAINER -->
+        <div class="live-graph-container" id="liveGraphContainer" style="display: none;"></div>
 
         <div class="input-panel">
           <div class="control-bar" id="controlBar" style="display: none;">
@@ -111,6 +117,18 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16"/></svg>
               Stop Task
             </button>
+          </div>
+
+          <div class="effort-selector-bar" id="effortSelectorBar">
+            <span class="effort-label">Effort</span>
+            <div class="effort-segmented-control" role="radiogroup" aria-label="Task Effort Level">
+              <button type="button" class="effort-btn active" data-effort="auto" title="Automatic heuristic based on task">Auto</button>
+              <button type="button" class="effort-btn" data-effort="low" title="Fast single-pass lookup (1x budget, 0 retries)">Low</button>
+              <button type="button" class="effort-btn" data-effort="medium" title="Balanced multi-site depth (2x budget, 1 retry)">Medium</button>
+              <button type="button" class="effort-btn" data-effort="high" title="Thorough investigation (3x budget, 2 retries)">High</button>
+              <button type="button" class="effort-btn" data-effort="xhigh" title="Deep multi-source research (4x budget, cross-checking)">XHigh</button>
+              <button type="button" class="effort-btn" data-effort="max" title="Maximum effort (8x budget, human escalation)">Max</button>
+            </div>
           </div>
 
           <div class="input-wrapper">
@@ -137,6 +155,7 @@
               <option value="openai_compatible">OpenAI-Compatible (Groq, vLLM, LM Studio, Llama API)</option>
               <option value="openai">OpenAI Official</option>
               <option value="anthropic">Anthropic (Claude)</option>
+              <option value="nvidia">NVIDIA NIM (build.nvidia.com)</option>
             </select>
           </div>
 
@@ -148,9 +167,9 @@
 
           <!-- API Key -->
           <div class="form-group">
-            <label class="form-label" for="apiKeyInput">API Key (Required for OpenRouter / Gemini / OpenAI / Claude)</label>
+            <label class="form-label" for="apiKeyInput">API Key (Required for OpenRouter / NVIDIA / Gemini / OpenAI / Claude)</label>
             <div class="input-with-toggle">
-              <input type="password" id="apiKeyInput" class="form-input" placeholder="sk-or-v1-... or AIzaSy...">
+              <input type="password" id="apiKeyInput" class="form-input" placeholder="nvapi-... or sk-or-v1-... or AIzaSy...">
               <button class="btn-toggle-visibility" id="btnToggleKey" title="Show/Hide API Key">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
               </button>
@@ -192,12 +211,24 @@
           <!-- Advanced Tuning -->
           <div class="form-row">
             <div class="form-group half">
-              <label class="form-label" for="maxStepsInput">Max Steps</label>
-              <input type="number" id="maxStepsInput" class="form-input" value="25" min="1" max="100">
+              <label class="form-label" for="maxStepsInput">Step limit (hard cap)</label>
+              <input type="number" id="maxStepsInput" class="form-input" value="250" min="1" max="1000">
             </div>
             <div class="form-group half">
               <label class="form-label" for="delayInput">Delay (ms)</label>
               <input type="number" id="delayInput" class="form-input" value="1000" min="200" step="100">
+            </div>
+          </div>
+
+          <!-- Model Overrides (Optional) -->
+          <div class="form-row">
+            <div class="form-group half">
+              <label class="form-label" for="plannerModelInput">Planner Model Override</label>
+              <input type="text" id="plannerModelInput" class="form-input" placeholder="Default: main model">
+            </div>
+            <div class="form-group half">
+              <label class="form-label" for="reflectModelInput">Reflect Model Override</label>
+              <input type="text" id="reflectModelInput" class="form-input" placeholder="Default: main model">
             </div>
           </div>
 
@@ -217,6 +248,19 @@
             <label class="form-label" for="llmTimeoutInput">LLM Timeout (ms)</label>
             <input type="number" id="llmTimeoutInput" class="form-input" value="120000" min="5000" step="5000">
             <span class="subtext-hint">How long to wait for a single reply before retrying. Raise this if you see "did not respond within Ns" errors on a slow provider or local model.</span>
+          </div>
+
+          <!-- Default Effort Level -->
+          <div class="form-group" id="effortDefaultGroup">
+            <label class="form-label" for="effortDefaultSelect">Default Effort Level</label>
+            <select id="effortDefaultSelect" class="form-select">
+              <option value="medium">Medium (2x budget, 1 retry - Recommended)</option>
+              <option value="low">Low (1x budget, 0 retries - Fast)</option>
+              <option value="high">High (3x budget, 2 retries - Thorough)</option>
+              <option value="xhigh">XHigh (4x budget, cross-checking)</option>
+              <option value="max">Max (8x budget, human escalation)</option>
+            </select>
+            <span class="subtext-hint">Default effort used when Auto mode resolves or when no level is explicitly chosen.</span>
           </div>
 
           <!-- Feature Toggles -->

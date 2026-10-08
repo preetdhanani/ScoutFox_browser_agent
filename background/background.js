@@ -22,15 +22,26 @@
  * tabs (the ones a run opens for itself), so several tab ids may point at one session object.
  */
 
+// Must stay the first import: it sets zod's jitless flag before any module that bundles zod runs (see the file).
+import '../src/background/boot/zodJitless.ts';
+import { isGeminiStreamCut } from '../src/background/boot/rejections.ts';
 import { AgentEngine, describeRestrictedUrl, lastRuntimeError } from './agentEngine.js';
+import { AgentRunner } from '../src/background/runner/AgentRunner.ts';
+import { Storage } from '../src/shared/storage.ts';
 import { ApiClients } from './apiClients.js';
-import { Logger } from '../utils/logger.js';
+import { Logger } from '../src/shared/logger.ts';
 
 // Catch anything that would otherwise die silently in the service worker's global scope.
 self.addEventListener('error', (event) => {
   Logger.error('Background', '[UNCAUGHT_ERROR] Uncaught exception in service worker', event.error || event.message);
 });
 self.addEventListener('unhandledrejection', (event) => {
+  if (isGeminiStreamCut(event.reason)) {
+    // The Google SDK's second report of a cut stream (see the file). The call itself failed and was logged already.
+    event.preventDefault();
+    Logger.info('Background', '[GEMINI_STREAM_CUT] Ignored the Google SDK\'s unhandled rejection of a cut stream: the call itself already failed and was logged.');
+    return;
+  }
   Logger.error('Background', '[UNHANDLED_REJECTION] Unhandled promise rejection in service worker', event.reason);
 });
 
@@ -55,6 +66,22 @@ self.addEventListener('unhandledrejection', (event) => {
  */
 const sessions = new Map();
 
+let activeEngineKind = 'graph';
+
+Storage.getSettings().then((s) => {
+  if (s && s.engine) {
+    activeEngineKind = s.engine;
+  }
+}).catch(() => {});
+
+if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.agent_settings?.newValue?.engine) {
+      activeEngineKind = changes.agent_settings.newValue.engine;
+    }
+  });
+}
+
 /**
  * Register an extra tab against an existing session, so a run can span tabs without the panel
  * losing its place. Idempotent.
@@ -77,7 +104,9 @@ function getOrCreateSession(tabId, windowId) {
   let session = sessions.get(tabId);
   if (session) return session;
 
-  const engine = new AgentEngine(tabId, windowId);
+  const engine = activeEngineKind === 'graph'
+    ? new AgentRunner(tabId, windowId)
+    : new AgentEngine(tabId, windowId);
   session = { engine, ports: new Set(), lastBroadcastHadNoListeners: false, ownerTabId: tabId };
   sessions.set(tabId, session);
 
@@ -95,7 +124,7 @@ function getOrCreateSession(tabId, windowId) {
     adoptTabIntoSession(session, newTabId);
   });
 
-  Logger.info('Background', `[SESSION_CREATED] New session for tab [${tabId}].`);
+  Logger.info('Background', `[SESSION_CREATED] New session (${activeEngineKind} engine) for tab [${tabId}].`);
   return session;
 }
 
@@ -126,7 +155,12 @@ function endSessionForClosedTab(tabId) {
   if (session.engine.status === 'running' || session.engine.status === 'paused') {
     session.engine.stop();
   }
-  AgentEngine.forgetSession(session.engine.sessionId);
+  if (session.engine instanceof AgentRunner || session.engine.constructor.name === 'AgentRunner') {
+    AgentRunner.forgetSession(session.engine.sessionId);
+    session.engine.dispose?.();
+  } else {
+    AgentEngine.forgetSession(session.engine.sessionId);
+  }
   Logger.info('Background', `[SESSION_CLOSED] Tab [${tabId}] closed. Its session and persisted state are gone.`);
   syncKeepaliveAlarm();
 }
@@ -365,9 +399,18 @@ chrome.runtime.onConnect.addListener((port) => {
           history: session.engine.history,
           planSteps: session.engine.planSteps,
           currentPhase: session.engine.currentPhase,
+          graphLocation: session.engine.graphLocation,
           // Without this a panel that reconnects while the agent is waiting on ask_user shows a
           // paused run with no question and no answer box - a dead end the user cannot clear.
           pendingQuestion: session.engine.pendingQuestion,
+          pendingApproval: session.engine.pendingApproval,
+          pendingConfirm: session.engine.pendingConfirm,
+          pendingChallengeHelp: session.engine.pendingChallengeHelp,
+          pendingContinueBudget: session.engine.pendingContinueBudget,
+          effort: session.engine.effort,
+          effortProfile: session.engine.effortProfile,
+          runStats: session.engine.runStats,
+          findings: session.engine.findings,
           stateVersion: session.engine.stateVersion,
           bootId: session.engine.bootId,
           scoutFoxGroupId: session.engine.scoutFoxGroupId
@@ -697,7 +740,10 @@ function routeMessage(request, sender, sendResponse) {
     const forceRefresh = !!payload?.forceRefresh;
     ApiClients.fetchAvailableModels(payload, forceRefresh)
       .then(models => sendResponse({ success: true, models }))
-      .catch(err => sendResponse({ success: false, error: err.message }));
+      .catch(err => {
+        const fallbacks = ApiClients.getFallbackModels ? ApiClients.getFallbackModels(payload?.provider) : [];
+        sendResponse({ success: false, error: err.message, models: fallbacks });
+      });
     return true;
   }
 
@@ -715,7 +761,7 @@ function routeMessage(request, sender, sendResponse) {
 
   // Every action below this point belongs to one window's session.
   const session = getOrCreateSession(request.tabId !== undefined ? request.tabId : 'legacy');
-  const agentEngine = session.engine;
+  let agentEngine = session.engine;
 
   if (action === 'GET_AGENT_STATE') {
     // Logger's own cold-boot restore is itself async. Answering with getLogsHistory()
@@ -730,9 +776,18 @@ function routeMessage(request, sender, sendResponse) {
         history: agentEngine.history,
         planSteps: agentEngine.planSteps,
         currentPhase: agentEngine.currentPhase,
+        graphLocation: agentEngine.graphLocation,
         // Same reason as the onConnect path above: a resync landing while the agent is waiting
         // on ask_user must carry the question, or the panel renders a paused run it cannot answer.
         pendingQuestion: agentEngine.pendingQuestion,
+        pendingApproval: agentEngine.pendingApproval,
+        pendingConfirm: agentEngine.pendingConfirm,
+        pendingChallengeHelp: agentEngine.pendingChallengeHelp,
+        pendingContinueBudget: agentEngine.pendingContinueBudget,
+        effort: agentEngine.effort,
+        effortProfile: agentEngine.effortProfile,
+        runStats: agentEngine.runStats,
+        findings: agentEngine.findings,
         logs: Logger.getLogsHistory(),
         stateVersion: agentEngine.stateVersion,
         bootId: agentEngine.bootId,
@@ -743,6 +798,24 @@ function routeMessage(request, sender, sendResponse) {
   }
 
   if (action === 'START_TASK') {
+    if (['idle', 'stopped'].includes(session.engine.status)) {
+      const isGraph = session.engine instanceof AgentRunner || session.engine.constructor.name === 'AgentRunner';
+      if ((activeEngineKind === 'graph' && !isGraph) || (activeEngineKind === 'legacy' && isGraph)) {
+        session.engine.dispose?.();
+        session.engine = (activeEngineKind === 'graph')
+          ? new AgentRunner(session.ownerTabId, session.engine.windowId)
+          : new AgentEngine(session.ownerTabId, session.engine.windowId);
+        session.engine.setStateChangeCallback((state) => {
+          broadcastToSession(session, 'STATE_UPDATE', state);
+          syncKeepaliveAlarm();
+        });
+        session.engine.setTabAdoptedCallback((newTabId) => {
+          adoptTabIntoSession(session, newTabId);
+        });
+        agentEngine = session.engine;
+      }
+    }
+
     // Claim synchronously, before any await, so a double-clicked send button cannot open two
     // concurrent runs. onMessage handlers are serialized, so this is the one point where the
     // second request is guaranteed to see the first.
@@ -758,7 +831,7 @@ function routeMessage(request, sender, sendResponse) {
           agentEngine.releaseTaskClaim();
           throw new Error('No automatable tab found. ScoutFox cannot script Chrome\'s internal pages (chrome://…) — open a normal website such as https://google.com and try again.');
         }
-        agentEngine.startTask(payload.prompt, tab.id).catch((err) => {
+        agentEngine.startTask(payload.prompt, tab.id, payload.effort, payload.autoApprove ?? false).catch((err) => {
           Logger.error('Background', '[START_TASK_ERROR] Uncaught exception starting task', err);
         });
         sendResponse({ success: true, tabId: tab.id, tabUrl: tab.url, tabTitle: tab.title });
@@ -790,6 +863,58 @@ function routeMessage(request, sender, sendResponse) {
 
   if (action === 'ANSWER_QUESTION') {
     sendResponse(agentEngine.answerQuestion(payload && payload.answer));
+    return true;
+  }
+
+  if (action === 'APPROVE_PLAN') {
+    if (typeof agentEngine.approvePlan === 'function') {
+      agentEngine.approvePlan(payload).then(() => {
+        sendResponse({ success: true });
+      }).catch((err) => {
+        sendResponse({ success: false, error: err.message });
+      });
+    } else {
+      sendResponse({ success: false, error: 'approvePlan is not supported on this engine' });
+    }
+    return true;
+  }
+
+  if (action === 'CONFIRM_ACTION') {
+    if (typeof agentEngine.confirmAction === 'function') {
+      agentEngine.confirmAction(payload && payload.decision, payload && payload.remember).then(() => {
+        sendResponse({ success: true });
+      }).catch((err) => {
+        sendResponse({ success: false, error: err.message });
+      });
+    } else {
+      sendResponse({ success: false, error: 'confirmAction is not supported on this engine' });
+    }
+    return true;
+  }
+
+  if (action === 'RESOLVE_CHALLENGE') {
+    if (typeof agentEngine.resolveChallenge === 'function') {
+      agentEngine.resolveChallenge(payload && payload.action).then(() => {
+        sendResponse({ success: true });
+      }).catch((err) => {
+        sendResponse({ success: false, error: err.message });
+      });
+    } else {
+      sendResponse({ success: false, error: 'resolveChallenge is not supported on this engine' });
+    }
+    return true;
+  }
+
+  if (action === 'CONTINUE_BUDGET') {
+    if (typeof agentEngine.continueBudget === 'function') {
+      agentEngine.continueBudget(payload && payload.action, payload && payload.additionalSteps).then(() => {
+        sendResponse({ success: true });
+      }).catch((err) => {
+        sendResponse({ success: false, error: err.message });
+      });
+    } else {
+      sendResponse({ success: false, error: 'continueBudget is not supported on this engine' });
+    }
     return true;
   }
 

@@ -25,7 +25,7 @@ const TAB = 100;
 
 function makeMock() {
   const tabs = new Map([[TAB, { id: TAB, url: 'https://example.com/work', groupId: -1, windowId: 1, active: true, index: 0 }]]);
-  const storage = {};
+  const storage = { agent_settings: { engine: 'legacy' } };
   const noop = () => {};
   const listeners = {};
   let groupCounter = 5000;
