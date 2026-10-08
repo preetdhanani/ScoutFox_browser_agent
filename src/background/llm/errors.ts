@@ -24,7 +24,8 @@ const MISSING_KEY: Partial<Record<ChatProvider | 'agent_router', string>> = {
   openrouter: 'OpenRouter API Key is missing. Please enter your OpenRouter API Key in Settings and click Save Settings.',
   anthropic: 'Anthropic Claude API Key is missing. Please enter your API Key in Settings.',
   gemini: 'Google Gemini API Key is missing. Please enter your Gemini API Key in the Settings tab and click Save Settings.',
-  agent_router: 'AgentRouter API Key is missing. Please enter your AgentRouter API Key in Settings and click Save Settings.'
+  agent_router: 'AgentRouter API Key is missing. Please enter your AgentRouter API Key in Settings and click Save Settings.',
+  nvidia: 'NVIDIA API Key is missing. Please enter your NVIDIA API Key in Settings and click Save Settings.'
 };
 
 /** What a Gemini reply with no text has always been reported as, also when LangChain cannot read the reply at all. */
@@ -147,6 +148,19 @@ export function describeFailure(provider: ChatProvider, error: unknown, ctx: Fai
     text = status === 401
       ? 'OpenRouter API Authentication Error (401): Invalid or missing API key. Please check your key in Settings.'
       : `OpenRouter API Error (${status}): ${bodyOf(provider, error, ctx)}`;
+  } else if (provider === 'nvidia') {
+    if (status === 401) {
+      text = 'NVIDIA API Authentication Error (401): Invalid or missing API key. Please check your key in Settings.';
+    } else if (status === 403) {
+      const detail = bodyOf(provider, error, ctx).trim();
+      text = detail
+        ? `NVIDIA API Authorization Error (403): Account lacks permission for Public API Endpoints or model is restricted. Check build.nvidia.com dashboard. (${detail})`
+        : 'NVIDIA API Authorization Error (403): Account lacks permission for Public API Endpoints or model is restricted. Check build.nvidia.com dashboard.';
+    } else if (status === 429) {
+      text = 'NVIDIA API Rate Limit Exceeded (429): Free tier limit (typically 40 RPM) reached. Please wait before retrying.';
+    } else {
+      text = `NVIDIA API Error (${status}): ${bodyOf(provider, error, ctx)}`;
+    }
   } else if (provider === 'anthropic') {
     text = `Anthropic API error (${status}): ${bodyOf(provider, error, ctx)}`;
   } else if (provider === 'gemini') {
@@ -161,6 +175,7 @@ export function describeFailure(provider: ChatProvider, error: unknown, ctx: Fai
 export function wrapFailure(provider: ChatProvider, inner: string, ctx: FailureContext = {}): string {
   switch (provider) {
     case 'openrouter': return `OpenRouter API connection error: ${inner}`;
+    case 'nvidia': return `NVIDIA API connection error: ${inner}`;
     case 'anthropic': return `Anthropic API Error: ${inner}`;
     case 'gemini': return `Gemini API Error: ${inner}`;
     default: return `API connection error (${ctx.baseUrl}): ${inner}`;

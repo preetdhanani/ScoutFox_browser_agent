@@ -69,6 +69,13 @@ export const ApiClients = {
   },
 
   /**
+   * NVIDIA NIM Client (build.nvidia.com)
+   */
+  callNvidia(settings, messages, systemPrompt, options = {}) {
+    return callProvider('nvidia', settings, messages, systemPrompt, options);
+  },
+
+  /**
    * Ollama API Client
    * Sends think:false, an explicit context window and, when the caller gives one, its schema as `format`.
    */

@@ -26,7 +26,7 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { ChatOpenAICompletions } from '@langchain/openai';
 import { GEMINI_EMPTY_TEXT, UnreadableReplyError, scrubKey, statusOf } from './errors.ts';
-import { SDK_TIMEOUT_MS, baseUrlOf, maxTokensOf, modelOf, withV1 } from './settings.ts';
+import { SDK_TIMEOUT_MS, baseUrlOf, maxTokensOf, modelOf, normalizeNvidiaBaseUrl, withV1 } from './settings.ts';
 import type { ChatProvider, ChatTurn, LlmSettings } from './types.ts';
 
 const OPENAI_BASE_URL = 'https://api.openai.com';
@@ -193,14 +193,26 @@ export function textOfChoices(raw: string | undefined): string {
   return '';
 }
 
-function openaiFamilyCall(provider: 'openrouter' | 'openai' | 'openai_compatible', settings: LlmSettings, apiKey: string): ProviderCall {
+function openaiFamilyCall(provider: 'openrouter' | 'openai' | 'openai_compatible' | 'nvidia', settings: LlmSettings, apiKey: string): ProviderCall {
   const openrouter = provider === 'openrouter';
-  const baseURL = openrouter
-    ? OPENROUTER_BASE_URL
-    : withV1(baseUrlOf(settings) || (provider === 'openai_compatible' ? GROQ_BASE_URL : OPENAI_BASE_URL));
+  const rawBaseUrl = baseUrlOf(settings);
+  let baseURL: string;
+  if (openrouter) {
+    baseURL = OPENROUTER_BASE_URL;
+  } else if (provider === 'nvidia') {
+    baseURL = normalizeNvidiaBaseUrl(rawBaseUrl);
+  } else {
+    const defaultBaseUrl = provider === 'openai_compatible' ? GROQ_BASE_URL : OPENAI_BASE_URL;
+    let base = rawBaseUrl || defaultBaseUrl;
+    base = base.replace(/\/+(?:chat\/completions|models)\/?$/i, '');
+    baseURL = withV1(base);
+  }
   const watch = watchFetch({ apiKey, keepReply: true });
+  const defaultModel = openrouter
+    ? 'anthropic/claude-3.5-sonnet'
+    : (provider === 'nvidia' ? 'meta/llama-3.3-70b-instruct' : 'gpt-4o-mini');
   const model = new ChatOpenAICompletions({
-    model: modelOf(settings) || (openrouter ? 'anthropic/claude-3.5-sonnet' : 'gpt-4o-mini'),
+    model: modelOf(settings) || defaultModel,
     apiKey: apiKey || 'unused',
     temperature: settings.temperature ?? 0.1,
     maxRetries: 0,
@@ -208,9 +220,12 @@ function openaiFamilyCall(provider: 'openrouter' | 'openai' | 'openai_compatible
     configuration: { baseURL, fetch: watch.fetch, ...(openrouter ? { defaultHeaders: OPENROUTER_HEADERS } : {}) }
   });
   const headers = openaiRequestHeaders(apiKey);
+  const logTag = provider === 'nvidia'
+    ? 'NvidiaClient'
+    : (openrouter ? 'OpenRouterClient' : 'OpenAIClient');
   return {
     baseUrl: baseURL,
-    logTag: openrouter ? 'OpenRouterClient' : 'OpenAIClient',
+    logTag,
     logTarget: openrouter ? 'OpenRouter' : `${baseURL}/chat/completions`,
     invoke: async (messages, options = {}) => {
       try {

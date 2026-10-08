@@ -16,6 +16,7 @@
 * ⚡ **Persistent Storage Model Caching**: Instant 0ms model dropdown loading on panel open.
 * 🦙 **Universal Multi-Provider LLM Support**:
   * **Google Gemini API** (`gemini-2.0-flash`, `gemini-1.5-flash`, `gemini-1.5-pro`)
+  * **NVIDIA NIM (`build.nvidia.com`)** (`meta/llama-3.3-70b-instruct`, `deepseek-ai/deepseek-r1`, `nvidia/llama-3.1-nemotron-70b-instruct`)
   * **Ollama (Local Host)** (`qwen2.5:14b`, `llama3.1:8b`, `gemma2:9b`)
   * **Groq Cloud / OpenAI-Compatible** (`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`)
   * **OpenAI Official** (`gpt-4o-mini`, `gpt-4o`)
@@ -92,7 +93,7 @@ After you change the code:
 - A turn marked **"did not finish"** (no card at all) means it ran out of its step budget or hit an error before completing - it is never silently shown as done.
 
 ### Configure it (Settings tab)
-- **LLM Provider / Model**: pick from OpenRouter, AgentRouter, Gemini, Ollama, OpenAI, Anthropic, or Groq, and search/select the exact model.
+- **LLM Provider / Model**: pick from OpenRouter, AgentRouter, Gemini, Ollama, OpenAI, Anthropic, NVIDIA NIM, or Groq, and search/select the exact model.
 - **Model Overrides**: configure dedicated Planner Model and Reflect Model overrides for the graph engine.
 - **Max Steps** (default 250, up to 1,000), **Delay (ms)**, and **LLM Timeout (ms)**: tune how long a task can run, how long it pauses between actions, and how long it waits for a single LLM reply before retrying.
 - **Show Floating Element Badges**: toggle the numbered `[1]`, `[2]` overlays ScoutFox draws on page elements it can see.
@@ -139,20 +140,41 @@ The `launchctl` setting is lost after a reboot, so run it again if the error com
 
 ---
 
+## 🟢 Running NVIDIA NIM Hosted Models
+
+To use NVIDIA NIM hosted models with 1,000 free inference credits:
+1. Create a free account at `build.nvidia.com`.
+2. Generate an API key starting with `nvapi-`.
+3. In ScoutFox Settings, select **NVIDIA NIM (build.nvidia.com)**.
+4. Enter your `nvapi-...` key and click **Save Settings**.
+5. Select a hosted model such as `meta/llama-3.3-70b-instruct` or `deepseek-ai/deepseek-r1`.
+6. Rate limit is typically 40 requests per minute (RPM) on the free tier.
+
+---
+
 ## 🐍 Standalone Terminal Python Runner
 
-No Chrome extension setup needed! Run ScoutFox directly from your Mac terminal using Playwright:
+No Chrome extension setup needed!
+Run ScoutFox directly from your Mac terminal using Playwright:
 
 ```bash
 cd python_runner
 pip install -r requirements.txt
 playwright install chromium
 
-# List available models
+# List available models (Ollama, OpenAI, or NVIDIA NIM)
 python agent.py --list-models
 
-# Run automation goal
+# Run with local Ollama
 python agent.py --goal "Find top 3 trending python repositories on GitHub and summarize them"
+
+# Run with NVIDIA NIM (reads $NVIDIA_API_KEY or pass --api-key)
+export NVIDIA_API_KEY="nvapi-..."
+python agent.py --provider nvidia --goal "Search for open source browser agents"
+
+# Run with OpenAI (reads $OPENAI_API_KEY or pass --api-key)
+export OPENAI_API_KEY="sk-..."
+python agent.py --provider openai --goal "Search for open source browser agents"
 ```
 
 ---

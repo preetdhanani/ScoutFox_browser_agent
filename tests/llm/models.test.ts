@@ -62,7 +62,7 @@ test('an entry older than an hour is not used', async (t) => {
 });
 
 test('it never throws: an HTTP error, a network error and an empty list all give the fallback list', async (t) => {
-  for (const provider of ['openrouter', 'openai', 'openai_compatible', 'ollama']) {
+  for (const provider of ['openrouter', 'openai', 'openai_compatible', 'ollama', 'nvidia']) {
     spyFetch(t, () => new Response('nope', { status: 500 }));
     assert.deepEqual(await fetchAvailableModels({ provider, apiKey: 'k' }, true), getFallbackModels(provider), `${provider}: HTTP 500`);
 
@@ -78,6 +78,7 @@ test('it never throws: an HTTP error, a network error and an empty list all give
 test('a failure is not cached', async (t) => {
   spyFetch(t, () => new Response('nope', { status: 500 }));
   await fetchAvailableModels({ provider: 'openai', apiKey: 'abcdef' }, true);
+  await fetchAvailableModels({ provider: 'nvidia', apiKey: 'abcdef' }, true);
   assert.equal(store.models_cache, undefined);
 });
 
@@ -133,6 +134,77 @@ test('anthropic has no list endpoint here: its fallback list is the list', async
   const sent = spyFetch(t);
   assert.deepEqual(await fetchAvailableModels({ provider: 'anthropic', apiKey: 'k' }, true), ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022']);
   assert.equal(sent.length, 0);
+});
+
+test('nvidia lists models with Bearer auth when key is set, and fetches public catalog without auth when key is missing', async (t) => {
+  const sent = spyFetch(t, () => jsonResponse({ data: [{ id: 'meta/llama-3.3-70b-instruct' }, { id: 'deepseek-ai/deepseek-r1' }] }));
+  const settings = { provider: 'nvidia', apiKey: 'nvapi-test123456' };
+
+  assert.deepEqual(await fetchAvailableModels(settings, true), ['deepseek-ai/deepseek-r1', 'meta/llama-3.3-70b-instruct']);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, 'https://integrate.api.nvidia.com/v1/models');
+  assert.equal(sent[0].headers.authorization, 'Bearer nvapi-test123456');
+  assert.deepEqual(Object.keys(store.models_cache ?? {}), ['nvidia_default_123456']);
+
+  // Explicit baseUrl is captured in cache key
+  const settingsWithBase = { provider: 'nvidia', apiKey: 'nvapi-test123456', baseUrl: 'https://integrate.api.nvidia.com/v1' };
+  assert.deepEqual(await fetchAvailableModels(settingsWithBase, true), ['deepseek-ai/deepseek-r1', 'meta/llama-3.3-70b-instruct']);
+  assert.ok(store.models_cache?.['nvidia_https://integrate.api.nvidia.com/v1_123456']);
+
+  // Missing API key: still queries public models endpoint without Authorization header
+  sent.length = 0;
+  const noKey = await fetchAvailableModels({ provider: 'nvidia' }, true);
+  assert.deepEqual(noKey, ['deepseek-ai/deepseek-r1', 'meta/llama-3.3-70b-instruct']);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].headers.authorization, undefined, 'no Authorization header when key is missing');
+
+  // Error case: returns fallbacks
+  spyFetch(t, () => new Response('error', { status: 500 }));
+  assert.deepEqual(await fetchAvailableModels({ provider: 'nvidia', apiKey: 'nvapi-test' }, true), getFallbackModels('nvidia'));
+});
+
+test('nvidia normalizes build.nvidia.com and trailing endpoints', async (t) => {
+  const sent = spyFetch(t, () => jsonResponse({ data: [{ id: 'nvidia/llama-3.1-nemotron-70b-instruct' }] }));
+  await fetchAvailableModels({ provider: 'nvidia', baseUrl: 'https://build.nvidia.com' }, true);
+  assert.equal(sent[0].url, 'https://integrate.api.nvidia.com/v1/models');
+
+  await fetchAvailableModels({ provider: 'nvidia', baseUrl: 'https://build.nvidia.com/v1' }, true);
+  assert.equal(sent[1].url, 'https://integrate.api.nvidia.com/v1/models');
+
+  await fetchAvailableModels({ provider: 'nvidia', baseUrl: 'https://integrate.api.nvidia.com/v1/chat/completions' }, true);
+  assert.equal(sent[2].url, 'https://integrate.api.nvidia.com/v1/models');
+});
+
+test('nvidia fallback list contains curated models', () => {
+  const models = getFallbackModels('nvidia');
+  assert.ok(models.includes('meta/llama-3.3-70b-instruct'));
+  assert.ok(models.includes('deepseek-ai/deepseek-r1'));
+  assert.ok(models.includes('nvidia/llama-3.1-nemotron-70b-instruct'));
+  assert.ok(models.includes('meta/llama-3.1-405b-instruct'));
+  assert.ok(models.includes('mistralai/mixtral-8x22b-instruct'));
+  assert.ok(models.includes('qwen/qwen2.5-72b-instruct'));
+  assert.ok(models.includes('nvidia/nemotron-4-340b-instruct'));
+  assert.equal(models.length, 7);
+});
+
+test('nvidia filters non-chat models (embedding, reranker, guard, safety, clip)', async (t) => {
+  const mixedData = [
+    { id: 'meta/llama-3.3-70b-instruct' },
+    { id: 'nvidia/nv-embedqa-e5-v5' },
+    { id: 'nvidia/reranking-mistral-4b' },
+    { id: 'meta/llama-guard-3-8b' },
+    { id: 'meta/llama-3.2-11b-vision-instruct' },
+    { id: 'nvidia/clip-benchmark' },
+    { id: 'meta/llama-safety-eval' }
+  ];
+  spyFetch(t, () => jsonResponse({ data: mixedData }));
+  const models = await fetchAvailableModels({ provider: 'nvidia', apiKey: 'nvapi-test' }, true);
+  assert.deepEqual(models, ['meta/llama-3.2-11b-vision-instruct', 'meta/llama-3.3-70b-instruct']);
+
+  // If filtering leaves nothing, fallback list is returned
+  spyFetch(t, () => jsonResponse({ data: [{ id: 'nvidia/embed-only' }] }));
+  const fallbacks = await fetchAvailableModels({ provider: 'nvidia', apiKey: 'nvapi-test' }, true);
+  assert.deepEqual(fallbacks, getFallbackModels('nvidia'));
 });
 
 test('an unknown provider gets an empty list, and the default list when it fails', async () => {

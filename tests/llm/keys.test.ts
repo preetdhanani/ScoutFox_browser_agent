@@ -32,7 +32,8 @@ const PROVIDERS: Array<[string, LlmSettings]> = [
   ['openrouter', { provider: 'openrouter', apiKey: KEY }],
   ['anthropic', { provider: 'anthropic', apiKey: KEY }],
   ['gemini', { provider: 'gemini', apiKey: KEY }],
-  ['agent_router', { provider: 'agent_router', apiKey: KEY }]
+  ['agent_router', { provider: 'agent_router', apiKey: KEY }],
+  ['nvidia', { provider: 'nvidia', apiKey: KEY }]
 ];
 
 /** Every value that a callback was given, as text. Errors and headers do not serialize by themselves, so they are opened up. */
@@ -107,7 +108,7 @@ test('a real tracer sends no key to the LangSmith server, on the AgentRouter pat
     return textReply(url);
   }) as typeof fetch);
 
-  for (const [name, settings] of PROVIDERS.filter(([provider]) => ['agent_router', 'anthropic', 'openai'].includes(provider))) {
+  for (const [name, settings] of PROVIDERS.filter(([provider]) => ['agent_router', 'anthropic', 'openai', 'nvidia'].includes(provider))) {
     const client = new Client({ apiUrl: 'https://smith.test', apiKey: 'lsv2-fake', autoBatchTracing: false });
     const tracer = new LangChainTracer({ projectName: 'scoutfox', client });
     await generateCompletion(settings, MESSAGES, 'SYS', { callbacks: [tracer] });
@@ -118,3 +119,12 @@ test('a real tracer sends no key to the LangSmith server, on the AgentRouter pat
   assert.ok(posted.some((entry) => /"name":"ChatAnthropic"|ChatAnthropic/.test(entry)), 'the AgentRouter run was traced');
   for (const entry of posted) assert.ok(!entry.includes(KEY), `a request to LangSmith carries the key: ${entry.slice(0, 200)}`);
 });
+
+test('getApiKey strips Bearer prefix and wrapping quotes for non-NVIDIA providers as well', async () => {
+  const { getApiKey } = await import('../../src/background/llm/settings.ts');
+  assert.equal(getApiKey({ apiKey: 'Bearer sk-proj-123456789' }, 'openai'), 'sk-proj-123456789');
+  assert.equal(getApiKey({ apiKey: '"sk-proj-123456789"' }, 'openai'), 'sk-proj-123456789');
+  assert.equal(getApiKey({ apiKey: "'sk-proj-123456789'" }, 'openai'), 'sk-proj-123456789');
+  assert.equal(getApiKey({ apiKey: 'Bearer sk-ant-api03-123' }, 'anthropic'), 'sk-ant-api03-123');
+});
+

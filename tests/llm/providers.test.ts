@@ -43,6 +43,13 @@ test('openrouter: the base URL of the settings is not used', async (t) => {
   assert.equal(await urlOf(t, { provider: 'openrouter', ...key, baseUrl: 'https://evil.example/v1' }), 'https://openrouter.ai/api/v1/chat/completions');
 });
 
+test('nvidia: the base URL defaults to https://integrate.api.nvidia.com/v1/chat/completions, and custom baseUrl is supported', async (t) => {
+  const key = { apiKey: 'nvapi-test-123' };
+  assert.equal(await urlOf(t, { provider: 'nvidia', ...key }), 'https://integrate.api.nvidia.com/v1/chat/completions');
+  assert.equal(await urlOf(t, { provider: 'nvidia', ...key, baseUrl: 'https://integrate.api.nvidia.com/v1' }), 'https://integrate.api.nvidia.com/v1/chat/completions');
+  assert.equal(await urlOf(t, { provider: 'nvidia', ...key, baseUrl: 'https://custom.nim.local:8000/v1/' }), 'https://custom.nim.local:8000/v1/chat/completions');
+});
+
 test('the default model of each provider, and the model of the settings (trimmed)', async (t) => {
   const sent = spyFetch(t);
   const modelSent = async (settings: LlmSettings) => {
@@ -55,6 +62,8 @@ test('the default model of each provider, and the model of the settings (trimmed
   assert.equal(await modelSent({ provider: 'openai_compatible' }), 'gpt-4o-mini', 'as before: only the settings screen defaults it to a Groq model');
   assert.equal(await modelSent({ provider: 'anthropic' }), 'claude-3-5-sonnet-20241022');
   assert.equal(await modelSent({ provider: 'gemini' }), 'gemini-1.5-flash');
+  assert.equal(await modelSent({ provider: 'nvidia' }), 'meta/llama-3.3-70b-instruct');
+  assert.equal(await modelSent({ provider: 'nvidia', model: '  deepseek-ai/deepseek-r1  ' }), 'deepseek-ai/deepseek-r1');
   assert.equal(await modelSent({ provider: 'openai', model: '  gpt-4o  ' }), 'gpt-4o');
   assert.equal(await modelSent({ provider: 'openai', model: '   ' }), 'gpt-4o-mini', 'a blank model is no model');
 });
@@ -75,7 +84,7 @@ test('the key: the top-level key wins, the saved key is the fallback, and both a
 
 test('the temperature is the settings\' own, 0 included, and 0.1 when there is none', async (t) => {
   const sent = spyFetch(t);
-  for (const provider of ['openrouter', 'openai', 'openai_compatible', 'anthropic']) {
+  for (const provider of ['openrouter', 'openai', 'openai_compatible', 'anthropic', 'nvidia']) {
     await generateCompletion({ provider, apiKey: 'sk-test-123' }, TURNS, 'SYS');
     assert.equal(sent.at(-1)!.body.temperature, 0.1, `${provider}: default`);
     await generateCompletion({ provider, apiKey: 'sk-test-123', temperature: 0 }, TURNS, 'SYS');
@@ -87,19 +96,22 @@ test('the temperature is the settings\' own, 0 included, and 0.1 when there is n
 
 test('the OpenAI family sends the turns as they are, after the system prompt', async (t) => {
   const sent = spyFetch(t);
-  await generateCompletion({ provider: 'openrouter', apiKey: 'sk-or-test-123' }, TURNS, 'SYS');
-  assert.deepEqual(sent[0].body.messages, [
-    { role: 'system', content: 'SYS' },
-    { role: 'user', content: 'hello' },
-    { role: 'assistant', content: 'prev' },
-    { role: 'user', content: 'next' }
-  ]);
+  for (const provider of ['openrouter', 'nvidia']) {
+    sent.length = 0;
+    await generateCompletion({ provider, apiKey: 'sk-test-123' }, TURNS, 'SYS');
+    assert.deepEqual(sent[0].body.messages, [
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'prev' },
+      { role: 'user', content: 'next' }
+    ], provider);
+  }
 });
 
 test('json and schema ask for nothing from the cloud providers: no format, no response_format, no schema', async (t) => {
   const sent = spyFetch(t);
   const schema = { type: 'object', oneOf: [{ properties: { action: { const: 'click' } } }] };
-  for (const provider of ['openrouter', 'openai', 'openai_compatible', 'anthropic', 'gemini']) {
+  for (const provider of ['openrouter', 'openai', 'openai_compatible', 'anthropic', 'gemini', 'nvidia']) {
     await generateCompletion({ provider, apiKey: 'sk-test-123' }, TURNS, 'SYS', { json: true, schema });
     const request = sent.at(-1)!;
     assert.doesNotMatch(JSON.stringify(request.body), /oneOf|response_format|"format"|responseSchema|responseMimeType|tools/, provider);
@@ -108,7 +120,7 @@ test('json and schema ask for nothing from the cloud providers: no format, no re
 
 test('one call is one request, whatever the provider answers', async (t) => {
   const sent = spyFetch(t, () => new Response('overloaded', { status: 529 }));
-  for (const provider of ['openrouter', 'openai', 'openai_compatible', 'anthropic', 'gemini']) {
+  for (const provider of ['openrouter', 'openai', 'openai_compatible', 'anthropic', 'gemini', 'nvidia']) {
     sent.length = 0;
     await assert.rejects(generateCompletion({ provider, apiKey: 'sk-test-123' }, TURNS, 'SYS'));
     assert.equal(sent.length, 1, `${provider}: LangChain's own 6 retries are off, callWithRetry is the only retry layer`);
@@ -126,7 +138,7 @@ test('a chat model is built for every call: two calls do not share a client', as
 
 test('callbacks in the options are handed to the model, for opt-in tracing', async (t) => {
   spyFetch(t);
-  for (const provider of ['openai', 'anthropic', 'gemini']) {
+  for (const provider of ['openai', 'anthropic', 'gemini', 'nvidia']) {
     const started: string[] = [];
     const handler = BaseCallbackHandler.fromMethods({
       handleChatModelStart: (llm) => { started.push(String(llm.id.at(-1))); }

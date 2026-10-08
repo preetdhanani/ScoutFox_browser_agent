@@ -58,7 +58,8 @@ const CLOUD = {
   openai: { provider: 'openai', apiKey: 'k', model: 'gpt-4o-mini', baseUrl: 'https://api.openai.com' },
   openai_compatible: { provider: 'openai_compatible', apiKey: 'k', model: 'llama-3.3-70b-versatile', baseUrl: 'https://api.groq.com/openai/v1' },
   anthropic: { provider: 'anthropic', apiKey: 'k', model: 'claude-3-5-sonnet-20241022' },
-  gemini: { provider: 'gemini', apiKey: 'k', model: 'gemini-1.5-flash' }
+  gemini: { provider: 'gemini', apiKey: 'k', model: 'gemini-1.5-flash' },
+  nvidia: { provider: 'nvidia', apiKey: 'nvapi-test', model: 'meta/llama-3.3-70b-instruct', baseUrl: 'https://integrate.api.nvidia.com/v1' }
 };
 const OLLAMA = { provider: 'ollama', model: 'qwen3.5:9b', baseUrl: 'http://localhost:11434' };
 

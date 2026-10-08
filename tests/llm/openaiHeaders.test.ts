@@ -38,6 +38,7 @@ const OPENAI_BASE = 'https://api.openai.com/v1';
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 const LOCAL_BASE = 'http://localhost:1234/v1';
+const NVIDIA_BASE = 'https://integrate.api.nvidia.com/v1';
 const OPENROUTER_HEADERS = { 'HTTP-Referer': 'https://github.com/preetdhanani/ScoutFox_browser_agent', 'X-Title': 'ScoutFox AI Agent' };
 
 /** The setups of the factory that share ChatOpenAICompletions: the provider, and the settings that select the base URL. */
@@ -45,7 +46,8 @@ const SETUPS = {
   openai: { provider: 'openai', settings: { baseUrl: 'https://api.openai.com' }, base: OPENAI_BASE, key: 'sk-test-123' },
   groq: { provider: 'openai_compatible', settings: { baseUrl: GROQ_BASE }, base: GROQ_BASE, key: 'gsk-test-123' },
   openrouter: { provider: 'openrouter', settings: {}, base: OPENROUTER_BASE, key: 'sk-or-test-123' },
-  keyless: { provider: 'openai_compatible', settings: { baseUrl: LOCAL_BASE }, base: LOCAL_BASE, key: '' }
+  keyless: { provider: 'openai_compatible', settings: { baseUrl: LOCAL_BASE }, base: LOCAL_BASE, key: '' },
+  nvidia: { provider: 'nvidia', settings: {}, base: NVIDIA_BASE, key: 'nvapi-test-123' }
 } as const;
 
 /** One call through the factory: the model is built by the product code, exactly as a real call builds it. */
@@ -138,6 +140,9 @@ test('with the factory the headers that reach fetch are exactly today\'s, for ev
 
   await factoryCall('keyless', 'local');
   assert.deepEqual(sent.at(-1)?.headers, { 'content-type': 'application/json' }, 'keyless: no Authorization at all');
+
+  await factoryCall('nvidia', 'meta/llama-3.3-70b-instruct');
+  assert.deepEqual(sent.at(-1)?.headers, { authorization: 'Bearer nvapi-test-123', 'content-type': 'application/json' }, 'nvidia');
 });
 
 test('without the nulls LangChain adds accept, a User-Agent and seven x-stainless headers', async (t) => {

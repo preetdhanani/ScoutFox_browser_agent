@@ -33,7 +33,8 @@ const PROVIDERS = [
   { name: 'agent_router', host: null, settings: { provider: 'agent_router', apiKey: 'sk-test-123', model: 'claude-3-5-sonnet' } },
   { name: 'openrouter', host: 'https://openrouter.ai', settings: { provider: 'openrouter', apiKey: 'sk-or-test-123', model: 'anthropic/claude-3.5-sonnet' } },
   { name: 'anthropic', host: 'https://api.anthropic.com', settings: { provider: 'anthropic', apiKey: 'sk-ant-test-123', model: 'claude-3-5-sonnet-20241022' } },
-  { name: 'gemini', host: 'https://generativelanguage.googleapis.com', settings: { provider: 'gemini', apiKey: 'AIza-test-123', model: 'gemini-1.5-flash' } }
+  { name: 'gemini', host: 'https://generativelanguage.googleapis.com', settings: { provider: 'gemini', apiKey: 'AIza-test-123', model: 'gemini-1.5-flash' } },
+  { name: 'nvidia', host: 'https://integrate.api.nvidia.com', settings: { provider: 'nvidia', apiKey: 'nvapi-test-123', model: 'meta/llama-3.3-70b-instruct' } }
 ] as const;
 
 /** A server for one provider, and the settings that lead the provider to it. */

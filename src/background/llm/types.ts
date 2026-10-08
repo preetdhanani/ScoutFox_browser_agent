@@ -18,7 +18,7 @@ export interface LlmSettings {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
-  providerConfigs?: Record<string, { baseUrl?: string; apiKey?: string; model?: string } | undefined>;
+  providerConfigs?: Record<string, { baseUrl?: string; apiKey?: string; model?: string; llmTimeoutMs?: number } | undefined>;
   temperature?: number;
   llmTimeoutMs?: number;
   /** Anthropic and AgentRouter max_tokens. No settings screen sets it, so it is 8192 unless someone stored a value. */
@@ -44,8 +44,8 @@ export interface CompletionOptions {
  * The providers that are one plain chat-model call (factory.ts). `ollama` (ollama.ts) and `agent_router`
  * (agentRouter.ts) have their own modules, because each has its own fallbacks and error rules.
  */
-export type ChatProvider = 'openrouter' | 'openai' | 'openai_compatible' | 'anthropic' | 'gemini';
+export type ChatProvider = 'openrouter' | 'openai' | 'openai_compatible' | 'anthropic' | 'gemini' | 'nvidia';
 
 export function isChatProvider(provider: string): provider is ChatProvider {
-  return provider === 'openrouter' || provider === 'openai' || provider === 'openai_compatible' || provider === 'anthropic' || provider === 'gemini';
+  return provider === 'openrouter' || provider === 'openai' || provider === 'openai_compatible' || provider === 'anthropic' || provider === 'gemini' || provider === 'nvidia';
 }

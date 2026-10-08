@@ -2,7 +2,7 @@
   "name": "scoutfox-ai-browser-agent",
   "version": "1.0.0",
   "private": true,
-  "description": "Autonomous AI Browser Agent for Local & Cloud LLMs (Ollama, OpenRouter, AgentRouter, Gemini, OpenAI, Claude, Groq).",
+  "description": "Autonomous AI Browser Agent for Local & Cloud LLMs (Ollama, OpenRouter, AgentRouter, Gemini, OpenAI, Claude, Groq, NVIDIA NIM).",
   "type": "module",
   "engines": {
     "node": ">=22.18"

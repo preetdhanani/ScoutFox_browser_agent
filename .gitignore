@@ -25,3 +25,6 @@ docs/
 # Build output
 dist/
 scoutfox-chrome-extension.zip
+
+# Local bug notes
+Bugs/

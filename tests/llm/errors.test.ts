@@ -24,7 +24,8 @@ const SETTINGS: Record<string, LlmSettings> = {
   openai: { provider: 'openai', apiKey: KEY, model: 'gpt-4o-mini', baseUrl: 'https://api.openai.com' },
   keyless: { provider: 'openai_compatible', model: 'local', baseUrl: 'http://localhost:1234' },
   anthropic: { provider: 'anthropic', apiKey: KEY, model: 'claude-3-5-sonnet-20241022' },
-  gemini: { provider: 'gemini', apiKey: KEY, model: 'gemini-1.5-flash' }
+  gemini: { provider: 'gemini', apiKey: KEY, model: 'gemini-1.5-flash' },
+  nvidia: { provider: 'nvidia', apiKey: KEY, model: 'meta/llama-3.3-70b-instruct', baseUrl: 'https://integrate.api.nvidia.com/v1' }
 };
 
 const failureOf = (promise: Promise<unknown>) => promise.then(() => assert.fail('the call was expected to fail'), (error: Error) => error);
@@ -40,7 +41,8 @@ test('a missing key fails with today\'s text before any request is made', async 
   const expected: Record<string, RegExp> = {
     openrouter: /^OpenRouter API Key is missing\. Please enter your OpenRouter API Key in Settings and click Save Settings\.$/,
     anthropic: /^Anthropic Claude API Key is missing\. Please enter your API Key in Settings\.$/,
-    gemini: /^Google Gemini API Key is missing\. Please enter your Gemini API Key in the Settings tab and click Save Settings\.$/
+    gemini: /^Google Gemini API Key is missing\. Please enter your Gemini API Key in the Settings tab and click Save Settings\.$/,
+    nvidia: /^NVIDIA API Key is missing\. Please enter your NVIDIA API Key in Settings and click Save Settings\.$/
   };
   for (const [name, pattern] of Object.entries(expected)) {
     const error = await failureOf(generateCompletion({ ...SETTINGS[name], apiKey: '' }, MESSAGES, 'system'));
@@ -67,6 +69,7 @@ test('assertApiKey passes a key and, for the OpenAI family, an empty one', () =>
   assert.doesNotThrow(() => assertApiKey('openai', ''));
   assert.doesNotThrow(() => assertApiKey('openai_compatible', ''));
   assert.throws(() => assertApiKey('anthropic', ''), /Anthropic Claude API Key is missing/);
+  assert.throws(() => assertApiKey('nvidia', ''), /NVIDIA API Key is missing/);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -132,10 +135,38 @@ test('gemini: the status and the message of the error', async (t) => {
   assert.equal((await fail('gemini')).message, 'Gemini API Error: Gemini API Error (429): Resource has been exhausted (e.g. check quota).');
 });
 
+test('nvidia: 401, 403, 429, and other status diagnostics through the real client', async (t) => {
+  let reply = () => jsonResponse({ error: { message: 'Invalid API key' } }, 401);
+  const sent = spyFetch(t, () => reply());
+  assert.equal((await fail('nvidia')).message,
+    'NVIDIA API connection error: NVIDIA API Authentication Error (401): Invalid or missing API key. Please check your key in Settings.');
+
+  reply = () => textResponse('{"error":"Account lacks Public API Endpoints entitlement"}', 403);
+  assert.equal((await fail('nvidia')).message,
+    'NVIDIA API connection error: NVIDIA API Authorization Error (403): Account lacks permission for Public API Endpoints or model is restricted. Check build.nvidia.com dashboard. ({"error":"Account lacks Public API Endpoints entitlement"})');
+
+  reply = () => textResponse('', 403);
+  assert.equal((await fail('nvidia')).message,
+    'NVIDIA API connection error: NVIDIA API Authorization Error (403): Account lacks permission for Public API Endpoints or model is restricted. Check build.nvidia.com dashboard.');
+
+  reply = () => textResponse('   ', 403);
+  assert.equal((await fail('nvidia')).message,
+    'NVIDIA API connection error: NVIDIA API Authorization Error (403): Account lacks permission for Public API Endpoints or model is restricted. Check build.nvidia.com dashboard.');
+
+  reply = () => textResponse('{"error":"rate limit"}', 429);
+  assert.equal((await fail('nvidia')).message,
+    'NVIDIA API connection error: NVIDIA API Rate Limit Exceeded (429): Free tier limit (typically 40 RPM) reached. Please wait before retrying.');
+
+  reply = () => textResponse('internal error', 500);
+  assert.equal((await fail('nvidia')).message,
+    'NVIDIA API connection error: NVIDIA API Error (500): internal error');
+  assert.equal(sent.length, 6);
+});
+
 test('no error text carries the API key, also when the server sends it back', async (t) => {
   const echo = `Incorrect API key provided: ${KEY}. You can find your API key at https://platform.openai.com/account/api-keys.`;
   spyFetch(t, () => textResponse(JSON.stringify({ error: { message: echo } }), 401));
-  for (const name of ['openrouter', 'openai', 'anthropic', 'gemini']) {
+  for (const name of ['openrouter', 'openai', 'anthropic', 'gemini', 'nvidia']) {
     const error = await fail(name);
     assert.doesNotMatch(error.message, new RegExp(KEY), name);
   }
@@ -153,6 +184,7 @@ test('a network failure shows the fetch error, as it always did', async (t) => {
   assert.equal((await fail('openai')).message, `API connection error (${OPENAI_URL}): Failed to fetch`);
   assert.equal((await fail('anthropic')).message, 'Anthropic API Error: Failed to fetch');
   assert.equal((await fail('gemini')).message, 'Gemini API Error: Failed to fetch');
+  assert.equal((await fail('nvidia')).message, 'NVIDIA API connection error: Failed to fetch');
 });
 
 /** Answers that are successful for HTTP and no chat reply for any of the four clients. */
@@ -169,7 +201,8 @@ test('a 200 that the client cannot read as a chat reply says so and shows what t
     openrouter: (body) => `OpenRouter API connection error: OpenRouter API Error (200): not a chat reply: ${body}`,
     openai: (body) => `API connection error (${OPENAI_URL}): API Error (200): not a chat reply: ${body}`,
     keyless: (body) => `API connection error (http://localhost:1234/v1): API Error (200): not a chat reply: ${body}`,
-    anthropic: (body) => `Anthropic API Error: Anthropic API error (200): not a chat reply: ${body}`
+    anthropic: (body) => `Anthropic API Error: Anthropic API error (200): not a chat reply: ${body}`,
+    nvidia: (body) => `NVIDIA API connection error: NVIDIA API Error (200): not a chat reply: ${body}`
   };
   let next = UNREADABLE_BODIES[0];
   const sent = spyFetch(t, () => next[1]());
@@ -193,7 +226,7 @@ test('an unreadable body is shown up to 600 characters', async (t) => {
 
 test('a reply whose body never arrives is a network failure, not an unreadable reply', async (t) => {
   spyFetch(t, () => new Response(new ReadableStream({ pull(controller) { controller.error(new TypeError('terminated')); } }), { status: 200, headers: { 'content-type': 'application/json' } }));
-  for (const name of ['openrouter', 'openai', 'anthropic']) {
+  for (const name of ['openrouter', 'openai', 'anthropic', 'nvidia']) {
     const error = await fail(name);
     assert.match(error.message, /terminated/, name);
     assert.doesNotMatch(error.message, /not a chat reply/, name);
@@ -213,7 +246,7 @@ test('a call that was cancelled is never reported as an unreadable reply, even w
 
 test('a server that answers in the legacy completion shape, choices[0].text, is read as it always was', async (t) => {
   spyFetch(t, () => jsonResponse({ id: 'c1', object: 'text_completion', choices: [{ index: 0, text: 'from text field', finish_reason: 'stop' }] }));
-  for (const name of ['openrouter', 'openai', 'keyless']) {
+  for (const name of ['openrouter', 'openai', 'keyless', 'nvidia']) {
     assert.equal(await generateCompletion(SETTINGS[name], MESSAGES, 'system'), 'from text field', name);
   }
 });
@@ -285,16 +318,24 @@ test('describeFailure and wrapFailure: the pieces of today\'s texts, one by one'
   assert.equal(describeFailure('gemini', http(599, '[GoogleGenerativeAI Error]: Error fetching from https://g.test/x: [599 ] '), ctx), 'Gemini API Error (599): ');
   assert.equal(describeFailure('gemini', http(502, '[GoogleGenerativeAI Error]: Error fetching from https://g.test/x: [502 Bad Gateway] upstream said no'), ctx), 'Gemini API Error (502): upstream said no', 'a message is never replaced');
 
+  assert.equal(describeFailure('nvidia', http(401, '401 bad key'), ctx), 'NVIDIA API Authentication Error (401): Invalid or missing API key. Please check your key in Settings.');
+  assert.equal(describeFailure('nvidia', http(403, '403 Forbidden'), { ...ctx, rawBody: 'Forbidden' }), 'NVIDIA API Authorization Error (403): Account lacks permission for Public API Endpoints or model is restricted. Check build.nvidia.com dashboard. (Forbidden)');
+  assert.equal(describeFailure('nvidia', http(403, '403 Forbidden'), { ...ctx, rawBody: '   ' }), 'NVIDIA API Authorization Error (403): Account lacks permission for Public API Endpoints or model is restricted. Check build.nvidia.com dashboard.');
+  assert.equal(describeFailure('nvidia', http(429, '429 Rate limit'), ctx), 'NVIDIA API Rate Limit Exceeded (429): Free tier limit (typically 40 RPM) reached. Please wait before retrying.');
+  assert.equal(describeFailure('nvidia', http(500, '500 Server Error'), { ...ctx, rawBody: 'Server Error' }), 'NVIDIA API Error (500): Server Error');
+
   // No status: the reason behind the failure, never the generic wrapper text of the SDK.
   const connection = Object.assign(new Error('Connection error.'), { cause: new TypeError('fetch failed') });
   assert.equal(describeFailure('openai', connection), 'fetch failed');
   assert.equal(describeFailure('anthropic', connection), 'fetch failed');
+  assert.equal(describeFailure('nvidia', connection), 'fetch failed');
   assert.equal(describeFailure('openai', new Error('Connection error.')), 'Connection error.', 'no cause, the error\'s own text');
   assert.equal(describeFailure('gemini', new Error('[GoogleGenerativeAI Error]: Error fetching from https://g.test/x: fetch failed')), 'fetch failed');
   assert.equal(describeFailure('openai', 'a string was thrown'), 'a string was thrown');
 
   // The wrappers.
   assert.equal(wrapFailure('openrouter', 'inner'), 'OpenRouter API connection error: inner');
+  assert.equal(wrapFailure('nvidia', 'inner'), 'NVIDIA API connection error: inner');
   assert.equal(wrapFailure('openai', 'inner', ctx), 'API connection error (https://x.test/v1): inner');
   assert.equal(wrapFailure('openai_compatible', 'inner', ctx), 'API connection error (https://x.test/v1): inner');
   assert.equal(wrapFailure('anthropic', 'inner'), 'Anthropic API Error: inner');

@@ -44,6 +44,25 @@ test('ApiClients - OpenRouter Completion Success', async (t) => {
   assert.equal(res, '{"action": "finish", "answer": "Found 3 papers."}');
 });
 
+test('ApiClients - NVIDIA Completion Success', async (t) => {
+  const sent = spyFetch(t, () => jsonResponse({
+    choices: [{ message: { content: '{"action": "finish", "answer": "Found 3 papers."}' } }]
+  }));
+
+  const settings = { provider: 'nvidia', apiKey: 'nvapi-test-key', model: 'meta/llama-3.3-70b-instruct' };
+  const res = await ApiClients.generateCompletion(settings, [{ role: 'user', content: 'Find papers' }], 'System prompt');
+
+  assert.equal(sent.length, 1, 'one request, no hidden retry');
+  assert.equal(sent[0].url, 'https://integrate.api.nvidia.com/v1/chat/completions');
+  assert.equal(sent[0].headers['authorization'], 'Bearer nvapi-test-key');
+  assert.equal(sent[0].body.model, 'meta/llama-3.3-70b-instruct');
+  assert.deepEqual(sent[0].body.messages, [
+    { role: 'system', content: 'System prompt' },
+    { role: 'user', content: 'Find papers' }
+  ]);
+  assert.equal(res, '{"action": "finish", "answer": "Found 3 papers."}');
+});
+
 test('ApiClients - OpenRouter Missing API Key Error', async (t) => {
   const sent = spyFetch(t);
   const settings = { provider: 'openrouter', apiKey: '', model: 'anthropic/claude-3.5-sonnet' };
@@ -51,6 +70,17 @@ test('ApiClients - OpenRouter Missing API Key Error', async (t) => {
   await assert.rejects(
     async () => ApiClients.generateCompletion(settings, [{ role: 'user', content: 'Task' }], 'System'),
     /OpenRouter API Key is missing/
+  );
+  assert.equal(sent.length, 0, 'the missing key is found before any request');
+});
+
+test('ApiClients - NVIDIA Missing API Key Error', async (t) => {
+  const sent = spyFetch(t);
+  const settings = { provider: 'nvidia', apiKey: '', model: 'meta/llama-3.3-70b-instruct' };
+
+  await assert.rejects(
+    async () => ApiClients.generateCompletion(settings, [{ role: 'user', content: 'Task' }], 'System'),
+    /NVIDIA API Key is missing/
   );
   assert.equal(sent.length, 0, 'the missing key is found before any request');
 });
