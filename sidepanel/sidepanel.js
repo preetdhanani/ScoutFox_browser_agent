@@ -241,7 +241,7 @@ async function loadSettings() {
   document.getElementById('delayInput').value = currentSettings.actionDelayMs || DEFAULT_SETTINGS.actionDelayMs;
   document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || DEFAULT_SETTINGS.ollamaNumPredict;
   const defaultTimeout = DEFAULT_PROVIDER_CONFIGS[activeProvider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
-  document.getElementById('llmTimeoutInput').value = providerCfg.llmTimeoutMs || currentSettings.llmTimeoutMs || defaultTimeout;
+  document.getElementById('llmTimeoutInput').value = providerCfg.llmTimeoutMs || (activeProvider === 'nvidia' ? defaultTimeout : (currentSettings.llmTimeoutMs || defaultTimeout));
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
   const effortSelect = document.getElementById('effortDefaultSelect');
   if (effortSelect) {
@@ -479,7 +479,7 @@ async function autoSaveCurrentForm() {
   currentSettings = await Storage.saveSettings(newSettings);
   // Show the value that was stored: one below the minimum was raised above, and the field must not
   // keep showing the raw number that was typed.
-  document.getElementById('llmTimeoutInput').value = currentSettings.llmTimeoutMs;
+  document.getElementById('llmTimeoutInput').value = (currentSettings.providerConfigs?.[provider]?.llmTimeoutMs) || currentSettings.llmTimeoutMs;
   updateModelBadge(newSettings.model);
 }
 
@@ -990,7 +990,7 @@ function initEventListeners() {
     updateSelectedModel(modelToSet);
 
     const defaultTimeout = DEFAULT_PROVIDER_CONFIGS[provider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
-    const timeoutToSet = savedCfg.llmTimeoutMs || currentSettings.llmTimeoutMs || defaultTimeout;
+    const timeoutToSet = savedCfg.llmTimeoutMs || (provider === 'nvidia' ? defaultTimeout : (currentSettings.llmTimeoutMs || defaultTimeout));
     document.getElementById('llmTimeoutInput').value = timeoutToSet;
 
     // Update settings object
