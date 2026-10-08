@@ -120,6 +120,7 @@ The declarativeNetRequest rule 8888 in `background.js` still sets the `User-Agen
 `deadline.ts` gives every call a deadline (`llmTimeoutMs`) and joins it with the task's abort signal, so a timeout, Pause and Stop really cancel the request.
 Pause and Stop abort with a reason tagged `{ scoutfox: 'user' }`, and that tag, never the text of an error, tells them from a timeout.
 The SDK clients' own 10 minute `timeout` is set out of the way (`SDK_TIMEOUT_MS`), so `llmTimeoutMs` is the only timer, also above 10 minutes.
+NVIDIA NIM defaults to a 300s timeout (`DEFAULT_NVIDIA_LLM_TIMEOUT_MS`) to handle cold-start and queue latency on hosted 70B+ models, while other providers default to 120s.
 `errors.ts` keeps the old user-facing error texts, `models.ts` keeps the model lists and their cache, and API keys are taken out of every error text.
 Every model's `fetch` is a `watchFetch` (`factory.ts`): it keeps the raw text of a response for the error texts and tells "nobody answered" from "the client could not read the answer".
 The second is an `UnreadableReplyError` with the status of the answer, so a 200 that is no chat reply reads `API Error (200): not a chat reply: <what the server said>` and not an internal TypeError.
