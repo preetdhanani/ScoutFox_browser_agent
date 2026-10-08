@@ -33,7 +33,7 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
 2. **Visual Action Overlay (`content/actionExecutor.js`)**: Injects floating numeric badges on page elements so users see target elements in real-time, then executes the model's chosen action against the indexed element.
    This now includes a stale-element fallback (re-find a moved/re-rendered element by its id, CSS path, or tag plus visible text) and a `browser_batch` bulk-action mode that correctly reports partial success/failure with a readable message, instead of a blank all-or-nothing result.
    Real clicks are dispatched via `chrome.debugger` (CDP input events) with realistic mouse hold delays, pointer events, and animated visual cursor overlay with ripples and element highlighting in content scripts, falling back to synthetic DOM events if the debugger cannot attach.
-3. **Multi-Provider API Client (`background/apiClients.js`, `src/background/llm/`)**: Universal client migrated to LangChain chat model packages behind the `ApiClients` surface, supporting Ollama (`http://localhost:11434`), OpenAI-compatible endpoints (Groq, LM Studio, vLLM, Llama API), OpenAI, Anthropic Claude, and Google Gemini.
+3. **Multi-Provider API Client (`background/apiClients.js`, `src/background/llm/`)**: Universal client migrated to LangChain chat model packages behind the `ApiClients` surface, supporting Ollama (`http://localhost:11434`), OpenAI-compatible endpoints (Groq, LM Studio, vLLM, Llama API), OpenAI, Anthropic Claude, Google Gemini, and NVIDIA NIM (`build.nvidia.com`).
    For Ollama, the main action call now sends a JSON schema in `format` with `think:false` (constrained decoding), so the model can only answer with a real action.
    A server older than 0.5 that rejects a schema falls back to `format:"json"`, and the other providers are unchanged.
 4. **Fault-Tolerant Action Loop (`background/agentEngine.js`, `src/background/agent/`, `src/background/runner/AgentRunner.ts`)**: Self-correcting execution loop with a JSON fallback parser and error recovery for 8B-32B small models.
@@ -55,7 +55,7 @@ By utilizing an **Indexed DOM Distillation Engine**, **Visual On-Screen Action B
 ## 3. Next version (planned, decided 2026-09-28, revised 2026-09-29): LangGraph rework
 
 > **Status**: Decided by Prit on 2026-09-28, and revised on 2026-09-29 after his design review.
-> Phases P0a, P0, P1, P2, the answer audit provenance gate with honest finish policy, P3 (real input, CDP trusted events, and perception), P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch), P5 (Long-Horizon Worker with P5d Risk Gate backend), P6 (UI overhaul for LangGraph), and P7/P7b (default graph engine, xhigh/max effort profiles, multi-source cross-checking, mid-site reflection, and interactive challenge/budget holds) are built.
+> Phases P0a, P0, P1, P2, the answer audit provenance gate with honest finish policy, P3 (real input, CDP trusted events, and perception), P4 (Spike S5, orchestrator graph, worker subgraph, AgentRunner at API parity with AgentEngine, and dual-engine switch), P5 (Long-Horizon Worker with P5d Risk Gate backend), P6 (UI overhaul for LangGraph), P7/P7b (default graph engine, xhigh/max effort profiles, multi-source cross-checking, mid-site reflection, and interactive challenge/budget holds), and NVIDIA NIM provider integration are built.
 > Everything in section 2 describes the current code.
 > The target audience and the local-first, small-model niche from section 1 stay the same.
 
@@ -213,6 +213,7 @@ The design is written and phases P0a, P0, P1, P2, the answer audit provenance ga
 - P7b (XHigh and Max Effort Profiles & Interactive Holds): xhigh (4x budget, key-field cross-checking) and max (8x budget, mid-site reflection, alternate entry points, ask-user escalation ladder rungs, and full cross-checking in compileTruthTable) profiles in `shared/effort.json`.
   Interactive bot challenge (Security Challenge Help Card) and soft-cap budget continuation (Continue Budget Card) holds in worker subgraph with resume APIs on AgentRunner and background message handlers.
   6-tier effort selector in side panel.
+- NVIDIA NIM Integration: first-class provider support for NVIDIA NIM hosted models (`build.nvidia.com`) with keyless model listing, 300s default timeout persistence, and standalone Python runner integration.
 
 Every phase keeps the tests green, and the graph remains selectable behind `settings.engine` while real-site evaluation and remaining graph features continue.
 

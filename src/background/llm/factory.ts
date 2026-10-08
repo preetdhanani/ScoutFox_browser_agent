@@ -14,7 +14,7 @@
  *   - the fetch of the model is a watchFetch: it keeps the text of a response for the error texts, takes the key
  *     out of an error response before the SDK reads it, and tells an answer the client could not read from no answer.
  *
- * The OpenAI family (openai, openai_compatible with Groq and keyless local servers, openrouter) uses
+ * The OpenAI family (openai, openai_compatible with Groq and keyless local servers, openrouter, nvidia) uses
  * ChatOpenAICompletions and not ChatOpenAI, which posts some model ids (gpt-5.6, codex, -pro) to
  * /v1/responses, an endpoint compatible servers do not have. The header check that decided this is in
  * "Early check results" of docs/langgraph-design.md, and tests/llm/openaiHeaders.test.ts pins it.

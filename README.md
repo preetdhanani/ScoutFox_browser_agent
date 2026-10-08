@@ -1,6 +1,6 @@
 # ScoutFox AI Browser Agent 🦊
 
-**ScoutFox** is an open-source, production-ready Chrome Extension (Manifest V3) and Python automation runner that empowers local models (Ollama 8B/14B/27B) and cloud APIs (Google Gemini, OpenAI, Claude, Groq) to autonomously control your web browser.
+**ScoutFox** is an open-source, production-ready Chrome Extension (Manifest V3) and Python automation runner that empowers local models (Ollama 8B/14B/27B) and cloud APIs (Google Gemini, OpenAI, Claude, Groq, NVIDIA NIM) to autonomously control your web browser.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Manifest V3](https://img.shields.io/badge/Chrome-Manifest--V3-brightgreen.svg)](public/manifest.json)
@@ -95,7 +95,7 @@ After you change the code:
 ### Configure it (Settings tab)
 - **LLM Provider / Model**: pick from OpenRouter, AgentRouter, Gemini, Ollama, OpenAI, Anthropic, NVIDIA NIM, or Groq, and search/select the exact model.
 - **Model Overrides**: configure dedicated Planner Model and Reflect Model overrides for the graph engine.
-- **Max Steps** (default 250, up to 1,000), **Delay (ms)**, and **LLM Timeout (ms)**: tune how long a task can run, how long it pauses between actions, and how long it waits for a single LLM reply before retrying.
+- **Max Steps** (default 250, up to 1,000), **Delay (ms)**, and **LLM Timeout (ms)**: tune how long a task can run, how long it pauses between actions, and how long it waits for a single LLM reply before retrying (default 120s, or 300s for NVIDIA NIM).
 - **Show Floating Element Badges**: toggle the numbered `[1]`, `[2]` overlays ScoutFox draws on page elements it can see.
 - **Engine**: configure `settings.engine` (`'graph'` vs `'legacy'`, defaulting to `'graph'`) to choose between the LangGraph orchestrator/worker engine and the legacy execution loop.
 - **Default Effort Level**: select from Medium (default), Low, High, XHigh, or Max as the baseline effort.
@@ -144,7 +144,7 @@ The `launchctl` setting is lost after a reboot, so run it again if the error com
 
 To use NVIDIA NIM hosted models with 1,000 free inference credits:
 1. Create a free account at `build.nvidia.com`.
-2. Generate an API key starting with `nvapi-`.
+2. Generate an API key starting with `nvapi-` (public model catalog listing also works keylessly).
 3. In ScoutFox Settings, select **NVIDIA NIM (build.nvidia.com)**.
 4. Enter your `nvapi-...` key and click **Save Settings**.
 5. Select a hosted model such as `meta/llama-3.3-70b-instruct` or `deepseek-ai/deepseek-r1`.
