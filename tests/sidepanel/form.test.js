@@ -37,10 +37,10 @@ class FakeElement {
     this.listeners[type].push(fn);
   }
 
-  dispatchEvent(event) {
+  async dispatchEvent(event) {
     const type = typeof event === 'string' ? event : event.type;
     const fns = this.listeners[type] || [];
-    for (const fn of fns) fn(event);
+    for (const fn of fns) await fn(event);
   }
 
   getAttribute(_name) { return null; }
@@ -255,13 +255,13 @@ test('provider switching preserves custom timeout and updates base URL placehold
 
   // Switch to nvidia: timeout should become nvidia's default (300000)
   providerSelect.value = 'nvidia';
-  providerSelect.dispatchEvent({ type: 'change' });
+  await providerSelect.dispatchEvent({ type: 'change' });
   assert.equal(timeoutInput.value, 300000, 'nvidia should use its default 300000ms timeout');
   assert.equal(baseUrlInput.placeholder, 'https://integrate.api.nvidia.com/v1', 'placeholder updates for nvidia');
 
   // Switch back to openai: custom global timeout (65000) should be restored
   providerSelect.value = 'openai';
-  providerSelect.dispatchEvent({ type: 'change' });
+  await providerSelect.dispatchEvent({ type: 'change' });
   assert.equal(timeoutInput.value, 65000, 'openai should restore the 65000ms custom timeout');
   assert.equal(baseUrlInput.placeholder, 'https://api.openai.com', 'placeholder updates for openai');
 });
