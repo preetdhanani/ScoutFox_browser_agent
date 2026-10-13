@@ -161,6 +161,20 @@ export function sanitizeAction(actionObj: ActionObject, options: SanitizeOptions
     else if (act.ref !== undefined) act.element_id = act.ref;
   }
 
+  // wait: normalise seconds -> amount, then clamp to the 1..5 s band the JSON
+  // schema enforces for Ollama. Cloud providers get no schema, so a reply of
+  // {action:'wait', amount:600} used to park the run for ten minutes inside
+  // one action (BUG-36). amount:0 waits the legacy 1 s, not 0.
+  if (act.action === 'wait') {
+    const rawWait = Number((act as any).amount ?? (act as any).seconds ?? 1);
+    if (Number.isFinite(rawWait)) {
+      (act as any).amount = Math.min(5, Math.max(1, rawWait));
+    } else {
+      (act as any).amount = 1;
+    }
+    delete (act as any).seconds;
+  }
+
   // Parsed unconditionally, NOT only when the value already happens to be a number. Gating
   // on `typeof === 'number'` let a string element_id through untouched, and page content is
   // attacker-controlled input to the model, so a prompt-injected reply could put arbitrary

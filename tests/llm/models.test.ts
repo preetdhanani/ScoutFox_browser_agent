@@ -207,7 +207,63 @@ test('nvidia filters non-chat models (embedding, reranker, guard, safety, clip)'
   assert.deepEqual(fallbacks, getFallbackModels('nvidia'));
 });
 
-test('an unknown provider gets an empty list, and the default list when it fails', async () => {
+test('an unknown provider gets an empty list, never another provider\u2019s list', async () => {
+  // featere/custom-endpoint: a provider ScoutFox does not know (a user-added endpoint above all)
+  // gets no guessed defaults; the caller that holds the descriptor hands back the saved list.
   assert.deepEqual(await fetchAvailableModels({ provider: 'nope' }, true), []);
-  assert.deepEqual(getFallbackModels('nope'), ['gemini-2.0-flash', 'gemini-1.5-flash', 'qwen2.5:14b', 'gpt-4o-mini']);
+  assert.deepEqual(getFallbackModels('nope'), []);
 });
+
+test('models: every known provider default model in DEFAULT_PROVIDER_CONFIGS is non-empty string', async () => {
+  const { DEFAULT_PROVIDER_CONFIGS } = await import('../../src/shared/storage.ts');
+  for (const [provider, cfg] of Object.entries(DEFAULT_PROVIDER_CONFIGS)) {
+    assert.equal(typeof cfg.model, 'string', `${provider} has no default model`);
+    assert.ok(cfg.model.length > 0, `${provider} default model is empty`);
+  }
+});
+
+test('models: groq default model in DEFAULT_PROVIDER_CONFIGS is not decommissioned llama-3.1-70b-versatile', async () => {
+  const { DEFAULT_PROVIDER_CONFIGS } = await import('../../src/shared/storage.ts');
+  const groq = DEFAULT_PROVIDER_CONFIGS.openai_compatible;
+  assert.notEqual(groq.model, 'llama-3.1-70b-versatile');
+  assert.equal(groq.model, 'llama-3.3-70b-versatile');
+  assert.equal(groq.baseUrl, 'https://api.groq.com/openai/v1');
+});
+
+test('models: no fallback model list offers decommissioned Groq id for openai or openai_compatible', () => {
+  for (const provider of ['openai', 'openai_compatible']) {
+    const models = getFallbackModels(provider);
+    assert.ok(!models.includes('llama-3.1-70b-versatile'), `${provider} fallback list has decommissioned model`);
+  }
+});
+
+test('models: getFallbackModels returns curated non-empty list for openai_compatible', () => {
+  const models = getFallbackModels('openai_compatible');
+  assert.ok(models.length > 0);
+  assert.ok(models.includes('llama-3.3-70b-versatile'));
+});
+
+test('models: getFallbackModels returns curated list for anthropic', () => {
+  const models = getFallbackModels('anthropic');
+  assert.ok(models.length > 0);
+  assert.ok(models.some((m) => m.includes('claude-3-5-sonnet')));
+});
+
+test('models: getFallbackModels returns curated list for gemini', () => {
+  const models = getFallbackModels('gemini');
+  assert.ok(models.length > 0);
+  assert.ok(models.includes('gemini-2.0-flash'));
+});
+
+test('models: getFallbackModels returns curated list for ollama', () => {
+  const models = getFallbackModels('ollama');
+  assert.ok(models.length > 0);
+  assert.ok(models.includes('qwen2.5:14b'));
+});
+
+test('models: getFallbackModels returns curated list for agent_router', () => {
+  const models = getFallbackModels('agent_router');
+  assert.ok(models.length > 0);
+  assert.ok(models.some((m) => m.includes('claude') || m.includes('gpt')));
+});
+

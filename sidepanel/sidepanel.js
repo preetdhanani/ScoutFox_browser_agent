@@ -8,18 +8,26 @@
 import '../src/background/boot/zodJitless.ts';
 import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../src/shared/storage.ts';
 import {
-  renderPlanApprovalCard,
   renderActionConfirmationCard,
   renderChallengeHelpCard,
   renderContinueBudgetCard,
   renderProvenanceFindingsTable
 } from './cards.js';
 import { updateLiveGraphView } from './graphStrip.js';
+import {
+  initCustomProviderDialog,
+  providerMeta,
+  buildProviderOptions,
+  isCustomProviderId,
+  CUSTOM_TRIGGER_VALUE,
+  CUSTOM_EMPTY_MODELS_TEXT
+} from './customProvider.js';
 
 let backgroundPort = null;
 let currentSettings = { ...DEFAULT_SETTINGS };
+let customProviderDialog = null;
 
-// The TAB this panel is attached to. One AgentEngine session exists per tab (background.js
+// The TAB this panel is attached to. One session exists per tab (background.ts
 // keeps a Map keyed by tabId), so every message this panel sends must say which tab it belongs
 // to. The panel has to work this out for itself: a side-panel port reaches the background
 // worker with no sender.tab at all, so the worker cannot tell which tab a panel came from.
@@ -189,7 +197,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // not read directly from storage here. That used to be a second, racing path: the background
   // worker's own restore of persisted logs is async, so a resync landing before it finished got
   // back an empty array and this direct read's result was overwritten with it. The background
-  // now awaits its own restore before answering GET_AGENT_STATE (see logger.ts/background.js),
+  // now awaits its own restore before answering GET_AGENT_STATE (see logger.ts/background.ts),
   // so it is the single, complete, authoritative source and this duplicate is no longer needed.
   await loadSettings();
   initTabs();
@@ -197,6 +205,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   initPortConnection();
   initEventListeners();
   initCombobox();
+  customProviderDialog = initCustomProviderDialog({
+    getSettings: () => currentSettings,
+    applySettings: (s) => { currentSettings = s; },
+    sendBgMessage,
+    showToast,
+    // Puts a provider id into effect without a synthetic change event (which does not fire on
+    // programmatic assignment): rebuilds the options, then loads the provider into the form.
+    providerSelected: async (id) => {
+      document.getElementById('providerSelect').value = id;
+      await applyProviderSelection(id);
+    }
+  });
   await loadSessionHistory();
   followSavedSessionChanges();
   await fetchDynamicModels(false);
@@ -231,16 +251,25 @@ async function loadSettings() {
   applyTheme(currentSettings.theme || 'system');
 
   const activeProvider = currentSettings.provider || 'openrouter';
-  const providerCfg = (currentSettings.providerConfigs && currentSettings.providerConfigs[activeProvider]) || DEFAULT_PROVIDER_CONFIGS[activeProvider] || {};
+  const activeIsCustom = isCustomProviderId(activeProvider, currentSettings);
+  const providerCfg = (currentSettings.providerConfigs && currentSettings.providerConfigs[activeProvider]) || (activeIsCustom ? {} : (DEFAULT_PROVIDER_CONFIGS[activeProvider] || {}));
+
+  // The options for user-added providers must exist BEFORE the value is assigned: assigning a
+  // <select> a value with no matching <option> silently leaves select.value === ''.
+  buildProviderOptions(document.getElementById('providerSelect'), currentSettings.customProviders);
 
   document.getElementById('providerSelect').value = activeProvider;
-  document.getElementById('baseUrlInput').placeholder = DEFAULT_PROVIDER_CONFIGS[activeProvider]?.baseUrl || 'https://openrouter.ai/api/v1';
+  document.getElementById('baseUrlInput').placeholder = activeIsCustom
+    ? (providerCfg.baseUrl || '')
+    : (DEFAULT_PROVIDER_CONFIGS[activeProvider]?.baseUrl || 'https://openrouter.ai/api/v1');
   document.getElementById('baseUrlInput').value = providerCfg.baseUrl || currentSettings.baseUrl || (DEFAULT_PROVIDER_CONFIGS[activeProvider]?.baseUrl || '');
   document.getElementById('apiKeyInput').value = providerCfg.apiKey || currentSettings.apiKey || '';
   document.getElementById('maxStepsInput').value = currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
   document.getElementById('delayInput').value = currentSettings.actionDelayMs || DEFAULT_SETTINGS.actionDelayMs;
   document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || DEFAULT_SETTINGS.ollamaNumPredict;
-  const defaultTimeout = DEFAULT_PROVIDER_CONFIGS[activeProvider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
+  // A custom provider has no curated default; its per-provider timeout (set in the dialog) is
+  // already in providerCfg, so the fallback here is the global one.
+  const defaultTimeout = activeIsCustom ? DEFAULT_SETTINGS.llmTimeoutMs : (DEFAULT_PROVIDER_CONFIGS[activeProvider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs);
   document.getElementById('llmTimeoutInput').value = providerCfg.llmTimeoutMs || (activeProvider === 'nvidia' ? defaultTimeout : (currentSettings.llmTimeoutMs || defaultTimeout));
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
   const effortSelect = document.getElementById('effortDefaultSelect');
@@ -262,7 +291,14 @@ async function loadSettings() {
     ollamaGroup.style.display = activeProvider === 'ollama' ? 'flex' : 'none';
   }
 
+  syncCustomProviderActions(activeProvider);
   updateSelectedModel(providerCfg.model || currentSettings.model);
+}
+
+/** Edit and Delete apply to a user-added provider only; the row stays hidden for the built-ins. */
+function syncCustomProviderActions(providerId) {
+  const actions = document.getElementById('customProviderActions');
+  if (actions) actions.style.display = isCustomProviderId(providerId, currentSettings) ? 'flex' : 'none';
 }
 
 /**
@@ -328,7 +364,10 @@ function renderModelOptions(modelsList) {
   }
 
   if (combinedList.length === 0 && savedModel !== '__custom__') {
-    optionsContainer.innerHTML = `<div class="subtext-hint" style="padding: 10px; text-align: center;">No matching models found.</div>`;
+    // A custom provider with an empty saved list is a real state, not a failed fetch: the picker
+    // says so and keeps accepting ids typed by hand.
+    const emptySource = Array.isArray(modelsList) && modelsList.length === 0 && providerMeta(activeProvider, currentSettings).isCustom;
+    optionsContainer.innerHTML = `<div class="subtext-hint" style="padding: 10px; text-align: center;">${emptySource ? CUSTOM_EMPTY_MODELS_TEXT : 'No matching models found.'}</div>`;
     return;
   }
 
@@ -499,28 +538,41 @@ async function fetchDynamicModels(forceRefresh = false) {
     provider: document.getElementById('providerSelect').value,
     baseUrl: document.getElementById('baseUrlInput').value.trim(),
     apiKey: document.getElementById('apiKeyInput').value.trim(),
-    forceRefresh
+    forceRefresh,
+    // The background resolves a user-added provider from the snapshot it is handed (its descriptor
+    // carries the protocol and the saved list); it reads no settings of its own for this message.
+    providerConfigs: currentSettings.providerConfigs,
+    customProviders: currentSettings.customProviders
   };
+  const activeMeta = providerMeta(tempSettings.provider, currentSettings);
 
   return new Promise((resolve) => {
     sendBgMessage({ action: 'FETCH_MODELS', payload: tempSettings }, (res) => {
       if (btnFetch) btnFetch.disabled = false;
 
-      if (res && res.success && res.models && res.models.length > 0) {
+      if (res && res.success && Array.isArray(res.models)) {
         allFetchedModels = res.models;
         renderModelOptions(allFetchedModels);
 
         if (statusEl) {
-          statusEl.textContent = forceRefresh
-            ? `Retrieved ${res.models.length} model(s) fresh from API!`
-            : `Loaded ${res.models.length} model(s) from local cache (${allFetchedModels.length} total).`;
+          if (res.models.length > 0) {
+            statusEl.textContent = forceRefresh
+              ? `Retrieved ${res.models.length} model(s) fresh from API!`
+              : `Loaded ${res.models.length} model(s) from local cache (${allFetchedModels.length} total).`;
+          } else if (activeMeta.isCustom) {
+            statusEl.textContent = CUSTOM_EMPTY_MODELS_TEXT;
+          } else {
+            statusEl.textContent = 'No models available.';
+          }
         }
         resolve(res.models);
       } else {
         if (statusEl) statusEl.textContent = `Could not fetch models (${res?.error || 'Unreachable'}). Using fallbacks.`;
         allFetchedModels = (res && res.models && res.models.length > 0)
           ? res.models
-          : (DEFAULT_PROVIDER_CONFIGS[tempSettings.provider]?.model ? [DEFAULT_PROVIDER_CONFIGS[tempSettings.provider].model] : []);
+          : (activeMeta.isCustom
+            ? activeMeta.savedModels
+            : (DEFAULT_PROVIDER_CONFIGS[tempSettings.provider]?.model ? [DEFAULT_PROVIDER_CONFIGS[tempSettings.provider].model] : []));
         renderModelOptions(allFetchedModels);
         resolve(allFetchedModels);
       }
@@ -578,27 +630,52 @@ function initPortConnection() {
   connectPort();
 }
 
+/**
+ * Resolves which tab this panel belongs to. Called once at startup and again on
+ * every reconnect while the id is still unknown, so a panel that woke up before
+ * the tab was queryable does not stay stuck on a bare port name (BUG-21).
+ */
+async function resolveMyTabId() {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
+      const tabs = await new Promise((resolve) => chrome.tabs.query({ active: true, currentWindow: true }, (t) => resolve(t || [])));
+      const id = tabs && tabs[0] ? tabs[0].id : null;
+      if (id !== null && id !== undefined) {
+        myTabId = id;
+        return id;
+      }
+    }
+  } catch (err) {
+    reportClientError('sidepanel:resolve-tab', err);
+  }
+  return null;
+}
+
 function connectPort() {
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
-  try {
-    // The '_fresh'/plain distinction is kept only for the background worker's own connect log
-    // line - one session exists per tab now, and reopening the panel on a tab that already has
-    // one (running or finished) always reflects it rather than clearing on a "genuine open".
-    // Deliberately starting over is CLEAR_HISTORY's job, not a side effect of reconnecting.
-    // What actually matters here is tabId, so this panel is routed to ITS OWN tab's session
-    // rather than a shared one - riding in the port name itself is simple, synchronous, and
-    // available the instant the port is created.
-    const base = hasConnectedBefore ? 'scoutfox_sidepanel' : 'scoutfox_sidepanel_fresh';
-    hasConnectedBefore = true;
-    const portName = myTabId !== null ? `${base}:${myTabId}` : base;
-    backgroundPort = chrome.runtime.connect({ name: portName });
-  } catch (err) {
-    reportClientError('sidepanel:port-connect', err);
-    setConnectionBanner(true);
-    scheduleReconnect();
-    return;
-  }
+  // A panel whose tab id is still unknown re-resolves it before connecting, so
+  // the reconnect uses the suffixed port name instead of the bare one the
+  // background ignores (BUG-21).
+  const doConnect = () => {
+    try {
+      // The '_fresh'/plain distinction is kept only for the background worker's own connect log
+      // line - one session exists per tab now, and reopening the panel on a tab that already has
+      // one (running or finished) always reflects it rather than clearing on a "genuine open".
+      // Deliberately starting over is CLEAR_HISTORY's job, not a side effect of reconnecting.
+      // What actually matters here is tabId, so this panel is routed to ITS OWN tab's session
+      // rather than a shared one - riding in the port name itself is simple, synchronous, and
+      // available the instant the port is created.
+      const base = hasConnectedBefore ? 'scoutfox_sidepanel' : 'scoutfox_sidepanel_fresh';
+      hasConnectedBefore = true;
+      const portName = myTabId !== null ? `${base}:${myTabId}` : base;
+      backgroundPort = chrome.runtime.connect({ name: portName });
+    } catch (err) {
+      reportClientError('sidepanel:port-connect', err);
+      setConnectionBanner(true);
+      scheduleReconnect();
+      return;
+    }
 
   backgroundPort.onMessage.addListener((msg) => {
     try {
@@ -632,6 +709,13 @@ function connectPort() {
   }
   setConnectionBanner(false);
   resyncAgentState();
+  };
+
+  if (myTabId === null) {
+    void resolveMyTabId().then(() => doConnect());
+  } else {
+    doConnect();
+  }
 }
 
 /**
@@ -973,39 +1057,38 @@ function initEventListeners() {
   // Switch per-provider memory when provider dropdown changes
   document.getElementById('providerSelect').addEventListener('change', async () => {
     const provider = document.getElementById('providerSelect').value;
-    const providerConfigs = currentSettings.providerConfigs || DEFAULT_PROVIDER_CONFIGS;
-    const savedCfg = providerConfigs[provider] || DEFAULT_PROVIDER_CONFIGS[provider] || {};
-
-    const ollamaGroup = document.getElementById('ollamaNumPredictGroup');
-    if (ollamaGroup) {
-      ollamaGroup.style.display = provider === 'ollama' ? 'flex' : 'none';
+    if (provider === CUSTOM_TRIGGER_VALUE) {
+      // The trigger is not a provider: put the previous selection back and open the Add dialog.
+      document.getElementById('providerSelect').value = currentSettings.provider || 'openrouter';
+      if (customProviderDialog) customProviderDialog.open('add');
+      return;
     }
+    await applyProviderSelection(provider);
+  });
 
-    const baseUrlToSet = savedCfg.baseUrl || (DEFAULT_PROVIDER_CONFIGS[provider] ? DEFAULT_PROVIDER_CONFIGS[provider].baseUrl : '');
-    document.getElementById('baseUrlInput').placeholder = DEFAULT_PROVIDER_CONFIGS[provider]?.baseUrl || 'https://openrouter.ai/api/v1';
-    document.getElementById('baseUrlInput').value = baseUrlToSet;
-    document.getElementById('apiKeyInput').value = savedCfg.apiKey || '';
-
-    const modelToSet = savedCfg.model || (DEFAULT_PROVIDER_CONFIGS[provider] ? DEFAULT_PROVIDER_CONFIGS[provider].model : currentSettings.model);
-    updateSelectedModel(modelToSet);
-
-    const defaultTimeout = DEFAULT_PROVIDER_CONFIGS[provider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs;
-    const timeoutToSet = savedCfg.llmTimeoutMs || (provider === 'nvidia' ? defaultTimeout : (currentSettings.llmTimeoutMs || defaultTimeout));
-    document.getElementById('llmTimeoutInput').value = timeoutToSet;
-
-    // Update settings object
-    currentSettings.provider = provider;
-    currentSettings.baseUrl = baseUrlToSet;
-    currentSettings.apiKey = savedCfg.apiKey || '';
-    currentSettings.model = modelToSet;
-    if (provider !== 'nvidia') {
-      currentSettings.llmTimeoutMs = timeoutToSet;
+  document.getElementById('btnEditCustomProvider')?.addEventListener('click', () => {
+    if (customProviderDialog && isCustomProviderId(currentSettings.provider, currentSettings)) {
+      customProviderDialog.open('edit', currentSettings.provider);
     }
+  });
 
-    await autoSaveCurrentForm();
-
-    const shouldRefresh = provider === 'ollama' || provider === 'nvidia' || (savedCfg.apiKey && savedCfg.apiKey.length > 5);
-    await fetchDynamicModels(shouldRefresh);
+  document.getElementById('btnDeleteCustomProvider')?.addEventListener('click', async () => {
+    const id = currentSettings.provider;
+    if (!isCustomProviderId(id, currentSettings)) return;
+    const descriptor = currentSettings.customProviders[id];
+    const sessions = await Storage.getSessions();
+    const usedBy = sessions.filter((s) => s && s.provider === id).length;
+    const suffix = usedBy > 0 ? ` ${usedBy} saved session(s) used it; their history stays.` : '';
+    if (!window.confirm(`Delete ${descriptor.displayName || id}? Its key and model list are removed.${suffix}`)) return;
+    const settingsAfter = await Storage.deleteCustomProvider(id);
+    if (settingsAfter) currentSettings = settingsAfter;
+    await loadSettings();
+    // The picker may still hold the deleted provider's ids; the healed provider's own list
+    // (usually a cache hit) replaces them.
+    await fetchDynamicModels(false);
+    const fellBack = currentSettings.provider !== id && descriptor.id === id;
+    const healedName = providerMeta(currentSettings.provider, currentSettings).displayName;
+    showToast(`Provider ${descriptor.displayName || id} deleted.${fellBack ? ` The panel fell back to ${healedName}.` : ''}`);
   });
 
   document.getElementById('btnSaveSettings').addEventListener('click', async () => {
@@ -1022,10 +1105,70 @@ function initEventListeners() {
   });
 }
 
+/**
+ * Put one provider into effect: load its saved URL, key, model and timeout into the form, update
+ * the settings object, autosave, and refresh the model list. The body of the provider-change
+ * handler, also called after a custom provider is added or deleted so the form follows without a
+ * synthetic change event.
+ */
+async function applyProviderSelection(provider) {
+  const activeIsCustom = isCustomProviderId(provider, currentSettings);
+  const providerConfigs = currentSettings.providerConfigs || DEFAULT_PROVIDER_CONFIGS;
+  const savedCfg = activeIsCustom ? (providerConfigs[provider] || {}) : (providerConfigs[provider] || DEFAULT_PROVIDER_CONFIGS[provider] || {});
+
+  const ollamaGroup = document.getElementById('ollamaNumPredictGroup');
+  if (ollamaGroup) {
+    ollamaGroup.style.display = provider === 'ollama' ? 'flex' : 'none';
+  }
+
+  // The dropdown options may have changed (a provider was added or deleted), so rebuild them here
+  // as well; the assignment below needs its option to exist.
+  buildProviderOptions(document.getElementById('providerSelect'), currentSettings.customProviders);
+  document.getElementById('providerSelect').value = provider;
+  syncCustomProviderActions(provider);
+
+  const baseUrlToSet = savedCfg.baseUrl || (activeIsCustom ? '' : (DEFAULT_PROVIDER_CONFIGS[provider] ? DEFAULT_PROVIDER_CONFIGS[provider].baseUrl : ''));
+  document.getElementById('baseUrlInput').placeholder = activeIsCustom
+    ? (savedCfg.baseUrl || '')
+    : (DEFAULT_PROVIDER_CONFIGS[provider]?.baseUrl || 'https://openrouter.ai/api/v1');
+  document.getElementById('baseUrlInput').value = baseUrlToSet;
+  document.getElementById('apiKeyInput').value = savedCfg.apiKey || '';
+
+  const modelToSet = savedCfg.model || (activeIsCustom ? '' : (DEFAULT_PROVIDER_CONFIGS[provider] ? DEFAULT_PROVIDER_CONFIGS[provider].model : currentSettings.model));
+  updateSelectedModel(modelToSet);
+
+  const defaultTimeout = activeIsCustom ? DEFAULT_SETTINGS.llmTimeoutMs : (DEFAULT_PROVIDER_CONFIGS[provider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs);
+  const timeoutToSet = savedCfg.llmTimeoutMs || (provider === 'nvidia' ? defaultTimeout : (currentSettings.llmTimeoutMs || defaultTimeout));
+  document.getElementById('llmTimeoutInput').value = timeoutToSet;
+
+  // Update settings object
+  currentSettings.provider = provider;
+  currentSettings.baseUrl = baseUrlToSet;
+  currentSettings.apiKey = savedCfg.apiKey || '';
+  currentSettings.model = modelToSet;
+  if (provider !== 'nvidia') {
+    currentSettings.llmTimeoutMs = timeoutToSet;
+  }
+
+  await autoSaveCurrentForm();
+
+  const shouldRefresh = provider === 'ollama' || provider === 'nvidia' || activeIsCustom || (savedCfg.apiKey && savedCfg.apiKey.length > 5);
+  await fetchDynamicModels(shouldRefresh);
+}
+
 async function startTask() {
   const btn = document.getElementById('btnStartTask');
   const prompt = document.getElementById('taskInput').value.trim();
   if (!prompt) return;
+
+  // A custom endpoint has no default model to fall back on, so an empty model would be sent as
+  // an empty string. Fail here, at the button, with the fix named.
+  const activeProviderId = currentSettings.provider || 'openrouter';
+  const activeMeta = providerMeta(activeProviderId, currentSettings);
+  if (activeMeta.isCustom && !(currentSettings.providerConfigs?.[activeProviderId]?.model || currentSettings.model)) {
+    showToast(`Pick a model for ${activeMeta.displayName} in Settings first: a custom endpoint has no default to fall back on.`);
+    return;
+  }
 
   // Claim synchronously, before the first await. renderState() does disable this button, but
   // only once a running STATE_UPDATE has made the round trip, and both the click handler and
@@ -1171,6 +1314,7 @@ async function autoSaveActiveSession(state) {
       task: state.task,
       timestamp: new Date().toLocaleString(),
       model: currentSettings.model || '',
+      provider: currentSettings.provider || '',
       history: state.history,
       planSteps: state.planSteps || []
     });
@@ -1275,8 +1419,12 @@ function renderState(state) {
   }
 
   if (status === 'running' || status === 'paused') {
-    if (processingBanner) processingBanner.style.display = 'flex';
-    if (processingPhaseText) processingPhaseText.textContent = currentPhase || `Processing step ${stepCount}...`;
+    if (processingBanner) {
+      processingBanner.style.display = 'flex';
+      processingBanner.classList.toggle('paused', status === 'paused');
+    }
+    // A pause with no card of its own says why (a Resume button with no reason looks like the agent stopped by itself).
+    if (processingPhaseText) processingPhaseText.textContent = pauseReasonText(state) || currentPhase || `Processing step ${stepCount}...`;
     
     const maxSteps = (state.budget && state.budget.hardCap) || currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
     const workingSteps = (state.budget && state.budget.workingTotal) || maxSteps;
@@ -1326,6 +1474,25 @@ function renderState(state) {
       }
     } else {
       processingEffortBadge.style.display = 'none';
+    }
+  }
+
+  // The run shows which provider and model it uses (featere/custom-endpoint A6.3): what the
+  // settings held when the task started, kept for the whole run. A user-added provider appears
+  // under its display name, exactly as it does in the picker.
+  const processingModelChip = document.getElementById('processingModelChip');
+  if (processingModelChip) {
+    if (status === 'running' || status === 'paused') {
+      const runProvider = providerMeta(currentSettings.provider || 'openrouter', currentSettings);
+      const runModel = currentSettings.providerConfigs?.[currentSettings.provider]?.model || currentSettings.model || '';
+      if (runProvider.exists && runModel) {
+        processingModelChip.textContent = `${runProvider.displayName} · ${runModel}`;
+        processingModelChip.style.display = 'inline-block';
+      } else {
+        processingModelChip.style.display = 'none';
+      }
+    } else {
+      processingModelChip.style.display = 'none';
     }
   }
 
@@ -1701,7 +1868,8 @@ function renderFinishCard(turn, findings = null) {
   const body = `<div class="finish-body">${formatMarkdownText(shown)}</div>`;
 
   const allFindings = (findings && findings.length > 0) ? findings : (turn.findings || (turn.table && turn.table.rows ? turn.table.rows : []));
-  const findingsHtml = allFindings && allFindings.length > 0 ? renderProvenanceFindingsTable(allFindings) : '';
+  const hasEmbeddedTable = hasMarkdownBlocks(shown) && String(shown).includes('|');
+  const findingsHtml = (allFindings && allFindings.length > 0 && !hasEmbeddedTable) ? renderProvenanceFindingsTable(allFindings) : '';
 
   if (!audit) {
     return unconfirmed
@@ -1757,6 +1925,23 @@ function withoutEngineNotes(answer) {
   const lead = text.replace(/^\s+/, '');
   const banner = ENGINE_BANNERS.find((b) => lead.startsWith(b));
   return banner ? lead.slice(banner.length).replace(/^\s+/, '') : text;
+}
+
+/**
+ * Why the run is paused, in one line, for a pause that has no card of its own: the question, confirmation, challenge and
+ * budget holds each draw their own card (renderTurns), so this says nothing for them. '' when the run is not paused.
+ * `pauseReason` comes from the runner: 'user' (the Pause button), 'llm_failure' (the model request failed, the error is in
+ * the timeline), 'worker_restart' (the browser restarted the extension's worker, or a run that was cut off with no Pause pending); anything else is unknown, said honestly.
+ */
+function pauseReasonText(state) {
+  if (!state || state.status !== 'paused') return '';
+  if (state.pendingQuestion || state.pendingConfirm || state.pendingChallengeHelp || state.pendingContinueBudget) return '';
+  switch (state.pauseReason) {
+    case 'user': return 'Paused by you. Press Resume to continue.';
+    case 'llm_failure': return 'Paused: the model request failed (see the error above). Press Resume to try again.';
+    case 'worker_restart': return 'Paused: the extension restarted. Press Resume to continue.';
+    default: return 'Paused. Press Resume to continue.';
+  }
 }
 
 /** Plan progress. Only 'completed' counts as done: a skipped step is not progress. */
@@ -1870,9 +2055,9 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
         </div>`
       : '';
 
-    const approvalPrompt = (isLive && status === 'paused' && pendingApproval)
-      ? renderPlanApprovalCard(pendingApproval, planSteps, effortProfile)
-      : '';
+    // Plans are approved automatically by the runner (background.ts passes autoApprove:true),
+    // so a plan hold is never surfaced here. The old Plan Approval card - and its in-card effort
+    // picker - is gone from the product; effort is resolved by the engine's own heuristic.
 
     const confirmPrompt = (isLive && status === 'paused' && pendingConfirm)
       ? renderActionConfirmationCard(pendingConfirm)
@@ -1896,7 +2081,6 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
     return `<div class="turn">
       ${sessionDivider}
       ${turn.goal ? `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(turn.goal)}</div>` : ''}
-      ${approvalPrompt ? approvalPrompt : ''}
       ${confirmPrompt ? confirmPrompt : ''}
       ${challengePrompt ? challengePrompt : ''}
       ${budgetPrompt ? budgetPrompt : ''}
@@ -1970,48 +2154,8 @@ function initTimelineInteraction() {
     const sendBtn = e.target.closest('.ask-user-send');
     if (sendBtn) { sendAnswer(sendBtn.closest('.ask-user-prompt')); return; }
 
-    const levelChip = e.target.closest('.btn-level-chip');
-    if (levelChip) {
-      const group = levelChip.closest('.level-chips-group');
-      const card = levelChip.closest('.plan-approval-card');
-      if (group) {
-        group.querySelectorAll('.btn-level-chip').forEach(c => c.classList.remove('active'));
-        levelChip.classList.add('active');
-      }
-      const level = levelChip.getAttribute('data-level');
-      const approveBtn = card ? card.querySelector('.btn-approve-plan') : null;
-      if (approveBtn && level) {
-        approveBtn.setAttribute('data-level', level);
-      }
-      return;
-    }
-
-    const approveBtn = e.target.closest('.btn-approve-plan');
-    if (approveBtn) {
-      approveBtn.disabled = true;
-      const level = approveBtn.getAttribute('data-level') || 'medium';
-      sendBgMessage({ action: 'APPROVE_PLAN', payload: { level } }, (res) => {
-        if (chrome.runtime.lastError || (res && res.success === false)) {
-          approveBtn.disabled = false;
-          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
-          showTaskError(errMsg || 'Failed to approve plan.');
-        }
-      });
-      return;
-    }
-
-    const stopPlanBtn = e.target.closest('.btn-stop-plan');
-    if (stopPlanBtn) {
-      stopPlanBtn.disabled = true;
-      sendBgMessage({ action: 'STOP_TASK' }, (res) => {
-        if (chrome.runtime.lastError || (res && res.success === false)) {
-          stopPlanBtn.disabled = false;
-          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
-          showTaskError(errMsg || 'Failed to stop task.');
-        }
-      });
-      return;
-    }
+    // The Plan Approval card (with its effort chips) is never rendered - plans are approved
+    // automatically - so there is no click handling for it here.
 
     const allowBtn = e.target.closest('.btn-confirm-allow');
     if (allowBtn) {
@@ -2188,7 +2332,7 @@ function renderFilteredLogs() {
     const payload = log.data ? `<div class="log-payload">${escapeHtml(JSON.stringify(log.data, null, 2))}</div>` : '';
 
     if (msg.includes('[NEW_SESSION_RUN]')) {
-      return `<div class="log-entry" style="border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); padding: 10px 0; margin: 10px 0; font-weight: 600;">${msg}</div>`;
+      return `<div class="log-entry" style="border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); padding: 10px 0; margin: 10px 0; font-weight: 600;">${escapeHtml(msg)}</div>`;
     }
 
     return `
@@ -2506,13 +2650,19 @@ function parseMarkdownBlocks(source) {
   return special ? blocks : null;
 }
 
+function markdownTableInline(text) {
+  let escaped = escapeHtml(text);
+  escaped = escaped.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="site-link">$1</a>');
+  return escaped.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+}
+
 function renderMarkdownTable(table) {
   const cell = (tag, text, index) => {
     const classes = [];
     if (table.aligns[index]) classes.push(`md-al-${table.aligns[index]}`);
     if (text && text.length <= MARKDOWN_SHORT_CELL) classes.push('md-nw');
     const attributes = `${classes.length ? ` class="${classes.join(' ')}"` : ''}${tag === 'th' ? ' scope="col"' : ''}`;
-    return `<${tag}${attributes}>${markdownInline(text)}</${tag}>`;
+    return `<${tag}${attributes}>${markdownTableInline(text)}</${tag}>`;
   };
   const head = `<thead><tr>${table.head.map((text, i) => cell('th', text, i)).join('')}</tr></thead>`;
   const body = table.rows.length
@@ -2554,7 +2704,7 @@ function escapeHtml(str) {
 // never imports this file; the export list does not change how it loads in the browser.
 export {
   buildTurns, renderTurns, renderFinishCard, renderAuditDetails, renderPlanRows, normalizeAudit,
-  planCounts, escapeHtml, initTimelineInteraction, openAuditDetails, closedAuditDetails, describeAction, firstSentence, withoutEngineNotes,
+  planCounts, pauseReasonText, escapeHtml, initTimelineInteraction, openAuditDetails, closedAuditDetails, describeAction, firstSentence, withoutEngineNotes,
   partialSubtitle, renderState, finishLandingTop, finishCardKey, noteFinishCard, scrollTimelineToLatest,
   formatMarkdownText, hasMarkdownBlocks, legacyBullets, splitTableRow,
   loadSettings, autoSaveCurrentForm, openComboboxMenu, closeComboboxMenu, updateSelectedModel,

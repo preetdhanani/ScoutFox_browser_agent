@@ -9,12 +9,14 @@ export interface RunnerMeta {
   attachedTabIds: number[];
   pauseDetach: { tabIds: number[]; at: number } | null;
   lastBeatAt: number;
+  evidence?: any;
 }
 
 export class SessionRunnerMeta {
   private threadId: string;
   private area: StorageSessionArea;
   private pendingWrite: NodeJS.Timeout | null = null;
+  private pendingMeta: RunnerMeta | null = null;
   private lastWrittenAt = 0;
 
   constructor(threadId: string, area?: StorageSessionArea) {
@@ -66,10 +68,17 @@ export class SessionRunnerMeta {
       return;
     }
 
+    // Keep only the LATEST payload: the timeout used to close over the first
+    // captured meta, so writes landing inside the throttle window were dropped
+    // and storage kept a stale stateVersion/group map until the next write
+    // (BUG-41).
+    this.pendingMeta = meta;
     if (!this.pendingWrite) {
       this.pendingWrite = setTimeout(() => {
         this.pendingWrite = null;
-        void this.writeImmediate(meta);
+        const latest = this.pendingMeta;
+        this.pendingMeta = null;
+        if (latest) void this.writeImmediate(latest);
       }, 250 - elapsed);
     }
   }
@@ -79,6 +88,7 @@ export class SessionRunnerMeta {
       clearTimeout(this.pendingWrite);
       this.pendingWrite = null;
     }
+    this.pendingMeta = null;
     try {
       await this.area.remove(this.storageKey());
     } catch {

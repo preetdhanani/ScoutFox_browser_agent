@@ -26,7 +26,9 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { ChatOpenAICompletions } from '@langchain/openai';
 import { GEMINI_EMPTY_TEXT, UnreadableReplyError, scrubKey, statusOf } from './errors.ts';
-import { SDK_TIMEOUT_MS, baseUrlOf, maxTokensOf, modelOf, normalizeNvidiaBaseUrl, withV1 } from './settings.ts';
+import { Logger } from '../../shared/logger.ts';
+import { SDK_TIMEOUT_MS, baseUrlOf, endpointHostOf, endpointOriginOf, maxTokensOf, modelOf, normalizeCustomAnthropicBase, normalizeCustomOpenaiBase, normalizeNvidiaBaseUrl, withV1 } from './settings.ts';
+import type { CustomProvider } from '../../shared/storage.ts';
 import type { ChatProvider, ChatTurn, LlmSettings } from './types.ts';
 
 const OPENAI_BASE_URL = 'https://api.openai.com';
@@ -98,17 +100,100 @@ export interface FetchWatchOptions {
   headers?: Record<string, string>;
   /** Take out `accept`, `user-agent` and the `x-stainless-*` headers that the SDK adds. */
   stripSdkHeaders?: boolean;
+  /** Header names to take off every request after everything else was applied. A keyless Anthropic-style
+   * client still carries the SDK's placeholder `x-api-key`, which a server that takes no key must not see. */
+  removeHeaders?: string[];
   /** Also keep the text of a successful reply, for a reply the client cannot read. Only for replies that are not streamed. */
   keepReply?: boolean;
+  /**
+   * The endpoint origin of a user-added provider. When set, the request goes out with `redirect: 'manual'`,
+   * a redirect whose destination is another origin is refused with a named error, and a same-origin redirect
+   * is followed with the real request (see foreignRedirectOf below). Custom endpoints are the one place where
+   * the operator of the endpoint is not ScoutFox's author, so ScoutFox never lets one walk a request, and its
+   * Authorization header, to a host the user did not configure.
+   */
+  refuseForeignRedirects?: string;
 }
 
 /** The request as the SDK made it, with the headers of `options` applied. */
-function withWireHeaders(init: RequestInit | undefined, { headers, stripSdkHeaders }: FetchWatchOptions): RequestInit | undefined {
-  if (!headers && !stripSdkHeaders) return init;
+function withWireHeaders(init: RequestInit | undefined, { headers, stripSdkHeaders, removeHeaders }: FetchWatchOptions): RequestInit | undefined {
+  if (!headers && !stripSdkHeaders && !(removeHeaders && removeHeaders.length)) return init;
   const merged = new Headers(init?.headers);
   if (stripSdkHeaders) for (const name of [...merged.keys()]) if (SDK_HEADER.test(name)) merged.delete(name);
   for (const [name, value] of Object.entries(headers ?? {})) merged.set(name, value);
+  for (const name of removeHeaders ?? []) merged.delete(name);
   return { ...init, headers: merged };
+}
+
+/** The statuses at which fetch would have followed a redirect on its own. */
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+/** The host of a URL for an error text ("gateway.example:8443"), or 'unreadable' when it does not parse. */
+function hostForErrorText(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+  } catch {
+    return 'an unreadable location';
+  }
+}
+
+/**
+ * What a redirect of a guarded request means, and what to do about it.
+ *
+ * With `redirect: 'manual'` Chromium answers a redirect with an opaque response that carries no
+ * Location and no status, so the destination is learned by probing the same URL with a plain
+ * unauthenticated GET (the real request was stopped AT the redirect, so nothing secret travelled;
+ * the probe sends neither a key nor a body). When a plain redirect response with a Location did
+ * arrive, the header is read directly.
+ *
+ * A redirect inside the configured origin is legitimate (a trailing-slash or http-to-https hop of
+ * the same server): the real request is re-issued with `redirect: 'follow'`, headers and body
+ * intact. A redirect that leaves the origin is refused with a named error, so a relay cannot walk
+ * ScoutFox, and its key, to cloud metadata or a host on the LAN.
+ */
+async function foreignRedirectOf(
+  response: Response,
+  requestUrl: string,
+  requestInit: RequestInit | undefined,
+  endpointOrigin: string
+): Promise<Response> {
+  const redirected = response.type === 'opaqueredirect' || isRedirectStatus(response.status);
+  if (!redirected) return response;
+
+  let destination: string | null = null;
+  if (response.type === 'opaqueredirect') {
+    try {
+      const probe = await fetch(requestUrl, { method: 'GET', redirect: 'follow' });
+      destination = probe.url || null;
+    } catch {
+      throw new Error('The endpoint redirected to another location. ScoutFox did not follow it and could not verify the destination.');
+    }
+  } else {
+    const location = response.headers.get('location');
+    if (location) {
+      try {
+        destination = new URL(location, requestUrl).href;
+      } catch {
+        destination = null;
+      }
+    }
+  }
+  if (!destination) {
+    throw new Error('The endpoint redirected to another location. ScoutFox did not follow it.');
+  }
+  let destinationOrigin: string;
+  try {
+    destinationOrigin = new URL(destination).origin;
+  } catch {
+    throw new Error('The endpoint redirected to an unreadable location. ScoutFox did not follow it.');
+  }
+  if (destinationOrigin !== endpointOrigin) {
+    throw new Error(`The endpoint redirected to ${hostForErrorText(destination)}, which is not ${hostForErrorText(endpointOrigin)}. ScoutFox did not follow it.`);
+  }
+  return fetch(requestUrl, { ...requestInit, redirect: 'follow' });
 }
 
 /**
@@ -142,7 +227,14 @@ export function watchFetch(options: FetchWatchOptions = {}) {
     fetch: (async (input: string | URL | Request, init?: RequestInit) => {
       let response: Response;
       try {
-        response = await fetch(input, withWireHeaders(init, options));
+        const requestInit = withWireHeaders(init, options);
+        response = await fetch(input, options.refuseForeignRedirects
+          ? { ...requestInit, redirect: 'manual' }
+          : requestInit);
+        if (options.refuseForeignRedirects) {
+          const requestUrl = typeof input === 'string' ? input : (input instanceof URL ? input.href : input.url);
+          response = await foreignRedirectOf(response, requestUrl, requestInit, options.refuseForeignRedirects);
+        }
       } catch (error) {
         rejected = true;
         throw error;
@@ -323,4 +415,126 @@ export function createProviderCall(provider: ChatProvider, settings: LlmSettings
     case 'gemini': return geminiCall(settings, apiKey);
     default: return openaiFamilyCall(provider, settings, apiKey);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Custom providers (user-added endpoints)
+// ---------------------------------------------------------------------------------------------
+
+const CUSTOM_LOG_TAG = 'CustomClient';
+
+/** The one chat model of a user-added OpenAI-style endpoint, built for the call and dropped after it. */
+function customOpenaiCall(descriptor: CustomProvider, settings: LlmSettings, apiKey: string, origin: string, model: string): ProviderCall {
+  const baseURL = normalizeCustomOpenaiBase(descriptor.baseUrl);
+  const watch = watchFetch({ apiKey, keepReply: true, refuseForeignRedirects: origin });
+  const client = new ChatOpenAICompletions({
+    model,
+    apiKey: apiKey || 'unused',
+    temperature: settings.temperature ?? 0.1,
+    maxRetries: 0,
+    timeout: SDK_TIMEOUT_MS,
+    configuration: { baseURL, fetch: watch.fetch }
+  });
+  const headers = openaiRequestHeaders(apiKey);
+  return {
+    baseUrl: baseURL,
+    logTag: CUSTOM_LOG_TAG,
+    logTarget: `${baseURL}/chat/completions`,
+    invoke: async (messages, options = {}) => {
+      try {
+        const reply = await client.invoke(messages, { ...options, options: { headers } });
+        // A server that answers in the legacy completion shape (choices[0].text) leaves LangChain with an empty reply.
+        const legacy = reply.text ? '' : textOfChoices(watch.body());
+        return legacy ? new AIMessage(legacy) : reply;
+      } catch (error) {
+        throw watch.asAnswered(error, options.signal);
+      }
+    },
+    lastBody: watch.body
+  };
+}
+
+/**
+ * The one chat model of a user-added Anthropic-style endpoint. `anthropicApiUrl` is the base without
+ * /v1 (the SDK appends /v1/messages itself, as agentRouter.ts documents), the direct-browser-access
+ * header is set so an endpoint that is the real Anthropic API also works, and the SDK's placeholder
+ * x-api-key is removed from the wire for a keyless endpoint.
+ */
+function customAnthropicCall(descriptor: CustomProvider, settings: LlmSettings, apiKey: string, origin: string, model: string): ProviderCall {
+  const base = normalizeCustomAnthropicBase(descriptor.baseUrl);
+  const watch = watchFetch({
+    apiKey,
+    stripSdkHeaders: true,
+    keepReply: true,
+    refuseForeignRedirects: origin,
+    headers: { 'anthropic-dangerous-direct-browser-access': 'true' },
+    removeHeaders: apiKey ? [] : ['x-api-key']
+  });
+  const client = new ChatAnthropic({
+    model,
+    apiKey: apiKey || 'unused',
+    anthropicApiUrl: base,
+    maxTokens: maxTokensOf(settings),
+    temperature: settings.temperature ?? 0.1,
+    maxRetries: 0,
+    clientOptions: { fetch: watch.fetch, timeout: SDK_TIMEOUT_MS }
+  });
+  return {
+    baseUrl: `${base}/v1`,
+    logTag: CUSTOM_LOG_TAG,
+    logTarget: `${base}/v1/messages`,
+    invoke: async (messages, options) => {
+      try {
+        return await client.invoke(messages, options);
+      } catch (error) {
+        throw watch.asAnswered(error, options?.signal);
+      }
+    },
+    lastBody: watch.body
+  };
+}
+
+/**
+ * Builds the model for one call to a user-added endpoint. Unlike the built-ins there is no default
+ * model to fall back on (an unknown id sent silently would be a lie), so an empty model fails here,
+ * before any request, with the sentence the panel also shows.
+ */
+/** The http origins whose plain-HTTP note was already logged: one line per origin per worker
+ * life, not one per call (C3.2). Private hosts are exempt: there, http is the normal case. */
+const HTTP_NOTE_LOGGED = new Set<string>();
+
+function isPrivateHost(host: string): boolean {
+  return /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]|::1)/.test(host)
+    || host === 'host.docker.internal'
+    || host.endsWith('.local')
+    || host.endsWith('.lan');
+}
+
+export function createCustomProviderCall(descriptor: CustomProvider, settings: LlmSettings, apiKey: string): ProviderCall {
+  const origin = endpointOriginOf(descriptor.baseUrl);
+  if (!origin) {
+    throw new Error(`${descriptor.displayName || descriptor.id} has an unusable base URL (${descriptor.baseUrl || 'empty'}). Open Settings and correct it.`);
+  }
+  // A quiet note, once, when a public endpoint is called over plain http: the key travels
+  // unencrypted. Local servers are not warned about - there, http is the normal case.
+  if (origin.startsWith('http:')) {
+    const host = endpointHostOf(descriptor.baseUrl) || '';
+    if (host && !isPrivateHost(host) && !HTTP_NOTE_LOGGED.has(origin)) {
+      HTTP_NOTE_LOGGED.add(origin);
+      Logger.info('Llm', `[CUSTOM] ${descriptor.displayName || descriptor.id} is called over plain HTTP (http://${host}). The key travels unencrypted; prefer https when the server offers it.`);
+    }
+  }
+  // Two protocols exist. A descriptor with anything else (a value a newer build wrote, or corrupted
+  // storage) is disabled with a pointer at Edit, never guessed into one of the two clients.
+  if (descriptor.protocol !== 'openai' && descriptor.protocol !== 'anthropic') {
+    throw new Error(`${descriptor.displayName || descriptor.id} has an unknown API protocol (${String(descriptor.protocol) || 'empty'}). Open Settings, press Edit provider, and pick OpenAI Chat Completions or Anthropic Messages.`);
+  }
+  const model = modelOf(settings);
+  if (!model) {
+    throw new Error(`No model is selected for ${descriptor.displayName || descriptor.id}. Pick one in Settings, or type the model id under Custom model name.`);
+  }
+  if (descriptor.protocol === 'anthropic') {
+    return customAnthropicCall(descriptor, settings, apiKey, origin, model);
+  }
+  return customOpenaiCall(descriptor, settings, apiKey, origin, model);
 }

@@ -92,9 +92,12 @@ test('routes: orchestrator schedRouter routes to site, compile, or hold', () => 
   assert.equal(schedRouter({ ...base, ctl: { stopRequested: true } }), 'finalize');
 });
 
-test('routes: orchestrator summaryRouter routes to finalize on stop, else reflect', () => {
-  assert.equal(summaryRouter({ ctl: { stopRequested: true } } as AgentStateT), 'finalize');
-  assert.equal(summaryRouter({ siteOut: { status: 'stopped' } } as any), 'finalize');
+test('routes: orchestrator summaryRouter routes a stopped run into compile, else reflect', () => {
+  // A stopped run must still pass through compile: its stopped branch writes the
+  // "Task was stopped by user" partial_result and the stopped endReason before
+  // finalize closes the checkpoint (BUG-16).
+  assert.equal(summaryRouter({ ctl: { stopRequested: true } } as AgentStateT), 'compile');
+  assert.equal(summaryRouter({ siteOut: { status: 'stopped' } } as any), 'compile');
   assert.equal(summaryRouter({ siteOut: { status: 'done' } } as any), 'reflect');
 });
 

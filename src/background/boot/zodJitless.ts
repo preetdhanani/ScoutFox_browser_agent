@@ -1,6 +1,6 @@
 /**
  * Switches zod's code generation off. This has to be the FIRST import of every entry that bundles
- * zod: the service worker (background/background.js) and the side panel (sidepanel/sidepanel.js).
+ * zod: the service worker (src/background/background.ts) and the side panel (sidepanel/sidepanel.js).
  *
  * Why: zod 4 can compile an object schema into a function with `new Function(...)`, and it probes
  * once whether that is allowed. The extension CSP (`script-src 'self'`) forbids it. The probe's

@@ -2,7 +2,7 @@
  * agent/recovery.ts
  *
  * Retry wrapper for the one operation in this codebase that had no retry at all: a single LLM
- * call (ApiClients.generateCompletion). Providers wrap every failure - timeout, DNS, a 500 -
+ * call. Providers wrap every failure - timeout, DNS, a 500 -
  * into a bare Error with no status code (nothing anywhere reads response.headers or preserves
  * err.name), so there is no reliable way to tell "worth retrying" from "will never work" by
  * message text alone. Retrying a handful of times regardless of message content is still the
@@ -25,6 +25,7 @@ export interface RetryOptions {
   isAbort?: (err: unknown) => boolean;
   shouldContinue?: () => boolean;
   onRetry?: (attemptNumber: number, err: unknown, delayMs: number) => void;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -35,6 +36,7 @@ export interface RetryOptions {
  * - `shouldContinue()` is re-checked before every attempt and before every backoff sleep, so a
  *   Pause/Stop that lands while a retry is pending is respected instead of retried into.
  * - `onRetry(attemptNumber, err, delayMs)` runs before each backoff sleep, for logging only.
+ * - `sleep(ms)` overrides the default timer with an injectable clock sleep.
  *
  * Throws the last error once attempts are exhausted, aborted, or `shouldContinue()` says stop.
  */
@@ -43,7 +45,8 @@ export async function callWithRetry<T>(attempt: (attemptNumber: number) => T | P
   baseDelayMs = LLM_RETRY_BASE_DELAY_MS,
   isAbort = () => false,
   shouldContinue = () => true,
-  onRetry = () => {}
+  onRetry = () => {},
+  sleep
 }: RetryOptions = {}): Promise<T> {
   let lastErr: unknown;
   for (let i = 1; i <= maxAttempts; i++) {
@@ -57,7 +60,11 @@ export async function callWithRetry<T>(attempt: (attemptNumber: number) => T | P
       if (isAbort(err) || i === maxAttempts) throw err;
       const delayMs = baseDelayMs * i;
       onRetry(i, err, delayMs);
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (sleep) {
+        await sleep(delayMs);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
   }
   throw lastErr;

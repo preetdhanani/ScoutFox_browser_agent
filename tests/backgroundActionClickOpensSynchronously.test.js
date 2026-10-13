@@ -18,99 +18,38 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { routerRig } from './helpers/routerRig.ts';
 
-function makeMock() {
-  const tabs = new Map([[100, { id: 100, url: 'https://example.com/a', groupId: -1 }]]);
-  const noop = () => {};
-  const listeners = {};
-  const callOrder = [];
-
-  // A storage read with a real async gap - if anything before sidePanel.open() ever awaits
-  // this (directly or via ensureScoutFoxGroup), open() would be called only after this
-  // resolves, one or more ticks late - too late for Chrome's gesture window.
-  let groupCounter = 5000;
-
-  return {
-    __tabs: tabs,
-    __listeners: listeners,
-    __callOrder: callOrder,
-    chrome: {
-      runtime: { lastError: null, onConnect: { addListener: noop }, onMessage: { addListener: noop } },
-      storage: {
-        local: {
-          get: (keys, cb) => { setTimeout(() => cb({}), 5); }, // deliberately async, not synchronous
-          set: (d, cb) => { setTimeout(() => cb && cb(), 5); },
-          remove: (k, cb) => cb && cb()
-        }
-      },
-      tabs: {
-        onRemoved: { addListener: noop },
-        onActivated: { addListener: noop },
-        onCreated: { addListener: noop },
-        onUpdated: { addListener: noop },
-        query: (q, cb) => cb([tabs.get(100)]),
-        get: (id, cb) => cb(tabs.get(id)),
-        group: (opts, cb) => {
-          setTimeout(() => {
-            const gid = groupCounter++;
-            const ids = Array.isArray(opts.tabIds) ? opts.tabIds : [opts.tabIds];
-            ids.forEach((id) => { const t = tabs.get(id); if (t) t.groupId = gid; });
-            cb(gid);
-          }, 5);
-        }
-      },
-      tabGroups: { onRemoved: { addListener: noop }, get: (id, cb) => cb({ id, title: 'ScoutFox' }), update: (id, opts, cb) => cb && cb() },
-      alarms: { create: noop, clear: noop, get: (n, cb) => cb(null), onAlarm: { addListener: noop } },
-      action: { onClicked: { addListener: (fn) => { listeners.onClicked = fn; } } },
-      declarativeNetRequest: { updateSessionRules: () => Promise.resolve() },
-      sidePanel: {
-        setPanelBehavior: () => Promise.resolve(),
-        setOptions: (opts, cb) => { callOrder.push({ call: 'setOptions', opts }); if (cb) cb(); },
-        open: (opts) => { callOrder.push({ call: 'open', opts }); return Promise.resolve(); }
-      }
-    }
-  };
-}
-
-global.self = { addEventListener: () => {} };
-const mock = makeMock();
-global.chrome = mock.chrome;
-
-await import('../background/background.js');
-await new Promise((r) => setTimeout(r, 20));
-
-test('chrome.sidePanel.open() is invoked synchronously by the click handler, not after an await', () => {
-  mock.__callOrder.length = 0;
+test('chrome.sidePanel.open() is invoked synchronously by the click handler, not after an await', async (t) => {
+  const rig = await routerRig({
+    tabs: [{ id: 100, url: 'https://example.com/a', windowId: 1, active: true }]
+  });
+  t.after(rig.cleanup);
 
   // Call the listener exactly as Chrome does: synchronously, from this line. If the handler
   // itself awaits anything before calling open(), that call will not have happened yet by
   // the time this synchronous line returns - proving the bug this test guards against.
-  mock.__listeners.onClicked(mock.__tabs.get(100));
+  rig.fc.action.click(rig.fc.tabs.get(100));
 
-  const openCallHappenedSynchronously = mock.__callOrder.some((c) => c.call === 'open');
+  const openCallHappenedSynchronously = rig.fc.callsTo('sidePanel.open').some((c) => c.args[0]?.tabId === 100);
   assert.equal(openCallHappenedSynchronously, true,
     'chrome.sidePanel.open() must be called in the same synchronous tick as the click - ' +
     'awaiting anything (ensureScoutFoxGroup, a storage read, tabs.group) before it loses ' +
     'Chrome\'s user-gesture window and open() then fails silently, breaking "click the icon to open the extension" entirely');
 
-  // setOptions() may legitimately run before open() - it is callback-style, not awaited, so it
-  // does not cross an async boundary either. The actual invariant is just that open() is not
-  // preceded by anything that yields to the event loop, which the synchronous-call assertion
-  // above already proves; a real await-before-open() bug would make this array empty entirely.
-  assert.ok(mock.__callOrder.length >= 1);
+  assert.ok(rig.fc.callsTo('sidePanel.open').length >= 1);
 });
 
-test('the tab is still enabled for the panel, just not on open()\'s critical path', async () => {
-  mock.__callOrder.length = 0;
-  mock.__tabs.get(100).groupId = -1;
+test('the tab is still enabled for the panel, just not on open()\'s critical path', async (t) => {
+  const rig = await routerRig({
+    tabs: [{ id: 100, url: 'https://example.com/a', windowId: 1, active: true }]
+  });
+  t.after(rig.cleanup);
 
-  mock.__listeners.onClicked(mock.__tabs.get(100));
-  // This mock delays its async calls by 5ms each - give the handler enough room to finish
-  // everything, not just enough to prove open() didn't wait for it.
-  await new Promise((r) => setTimeout(r, 100));
+  await rig.clickIcon(rig.fc.tabs.get(100));
 
-  const enableCall = mock.__callOrder.find((c) => c.call === 'setOptions' && c.opts.tabId === 100 && c.opts.enabled === true);
+  const enableCall = rig.fc.callsTo('sidePanel.setOptions').find((c) => c.args[0]?.tabId === 100 && c.args[0]?.enabled === true);
   assert.ok(enableCall, 'the tab must still be enabled for the panel, just not on open()\'s critical path');
-  assert.equal(mock.__tabs.get(100).groupId, -1,
+  assert.equal(rig.fc.tabs.get(100)?.groupId, -1,
     'and no group is created on click at all any more - which also means nothing async is left that could tempt someone to await it before open()');
 });

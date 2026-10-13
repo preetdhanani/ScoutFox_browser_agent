@@ -3,6 +3,7 @@
 // Every addConditionalEdges call specifies its declared route map so compiledGraph.getGraph()
 // can inspect all edges statically.
 import { END } from '@langchain/langgraph/web';
+import { Logger } from '../../shared/logger.ts';
 import type { AgentStateT } from './state.ts';
 import type { WorkerStateT } from './workerState.ts';
 
@@ -33,6 +34,8 @@ export const ORCHESTRATOR_ROUTE_MAPS = {
   summary: {
     finalize: 'finalize',
     reflect: 'reflect',
+    compile: 'compile',
+    sched: 'sched',
   },
   reflect: {
     finalize: 'finalize',
@@ -104,8 +107,18 @@ export function schedRouter(state: AgentStateT): keyof typeof ORCHESTRATOR_ROUTE
 }
 
 export function summaryRouter(state: AgentStateT): keyof typeof ORCHESTRATOR_ROUTE_MAPS.summary {
+  // A stopped run still passes through compile: its stopped branch writes the
+  // "Task was stopped by user" partial_result and the stopped endReason, and
+  // finalize then closes the checkpoint with no pending task left (BUG-16).
   if (state.ctl?.stopRequested || state.siteOut?.status === 'stopped') {
-    return 'finalize';
+    return 'compile';
+  }
+  if (state.siteOut?.finalAnswer) {
+    return 'compile';
+  }
+  const reflect = state.effortProfile?.reflect ?? (state.effortProfile as any)?.reflectMode;
+  if (reflect === 'never') {
+    return 'sched';
   }
   return 'reflect';
 }
@@ -191,6 +204,7 @@ export const WORKER_ROUTE_MAPS = {
   verify: {
     end_stopped: END,
     hold: 'hold',
+    end_partial: END,
     perceive: 'perceive',
     recover: 'recover',
   },
@@ -232,8 +246,8 @@ export function meterRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MAPS
   const used = state.siteRun?.used ?? 0;
   const softCapAsk = Boolean(state.siteIn?.profile?.softCapAsk);
   const softCapReached = Boolean(state.siteRun?.softCapReached);
-  if (alloc > 0 && used >= Math.floor(alloc * 0.95)) {
-    if (!softCapAsk || softCapReached || used >= alloc) {
+  if (alloc > 0 && used >= alloc) {
+    if (!softCapAsk || softCapReached) {
       return 'end_partial';
     }
   }
@@ -317,6 +331,13 @@ export function verifyRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MAP
   if (state.ctl?.stopRequested) return 'end_stopped';
   if (state.ctl?.pauseRequested) return 'hold';
 
+  const alloc = state.siteRun?.alloc ?? 10;
+  const used = state.siteRun?.used ?? 0;
+  const hardCapLeft = state.siteIn?.hardCapLeft ?? Infinity;
+  if ((alloc > 0 && used >= alloc) || used >= hardCapLeft) {
+    return 'end_partial';
+  }
+
   const result = state.verifyResult;
   if (!result || result.outcome === 'ok') {
     return 'perceive';
@@ -327,6 +348,13 @@ export function verifyRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MAP
 export function recoverRouter(state: WorkerStateT): keyof typeof WORKER_ROUTE_MAPS.recover {
   if (state.ctl?.stopRequested) return 'end_stopped';
   if (state.ctl?.pauseRequested) return 'hold';
+
+  const alloc = state.siteRun?.alloc ?? 10;
+  const used = state.siteRun?.used ?? 0;
+  const hardCapLeft = state.siteIn?.hardCapLeft ?? Infinity;
+  if ((alloc > 0 && used >= alloc) || used >= hardCapLeft) {
+    return 'end_partial';
+  }
 
   const stuckLevel = state.siteRun?.stuckLevel ?? 0;
   if (stuckLevel >= 3) {

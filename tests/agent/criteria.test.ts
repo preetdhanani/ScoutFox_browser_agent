@@ -86,3 +86,55 @@ test('criteria: evaluateSiteCriteria doneWhen predicate', () => {
   assert.equal(resNoMatch.met, false);
   assert.equal(resNoMatch.status, 'partial');
 });
+
+test('criteria: all_required with only auto-value fields ends the site honestly, not vacuously', () => {
+  const site: SiteSpec = {
+    id: 's1',
+    name: 'replan-site',
+    domain: 'example.com',
+    goal: 'Collect links',
+    goalKind: 'collect',
+    role: 'reference',
+    kind: 'page',
+    difficulty: 1,
+    namedByUser: true,
+    criteria: {
+      fields: [
+        { name: 'url', required: true }
+      ],
+      doneWhen: 'all_required'
+    }
+  };
+
+  const res = evaluateSiteCriteria(site, []);
+  assert.equal(res.met, true);
+  assert.equal(res.status, 'done');
+  assert.ok(res.reason.includes('auto-recorded'));
+});
+
+test('criteria: all_required with mixed auto-value and normal fields still demands the normal ones', () => {
+  const site: SiteSpec = {
+    id: 's1',
+    name: 'store',
+    domain: 'store.com',
+    goal: 'Collect price and link',
+    goalKind: 'collect',
+    role: 'reference',
+    kind: 'page',
+    difficulty: 1,
+    namedByUser: true,
+    criteria: {
+      fields: [
+        { name: 'url', required: true },
+        { name: 'price', required: true }
+      ],
+      doneWhen: 'all_required'
+    }
+  };
+
+  const res = evaluateSiteCriteria(site, []);
+  assert.equal(res.met, false);
+  assert.equal(res.status, 'partial');
+  assert.ok(res.reason.includes('price'));
+  assert.ok(!res.reason.includes('url'));
+});

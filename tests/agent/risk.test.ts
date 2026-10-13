@@ -212,3 +212,85 @@ test('risk: Unapproved external navigation is risky with targetDomain', () => {
   });
   assert.equal(searchNav.level, 'safe');
 });
+
+test('risk: browser_batch resolves each step element from the page snapshot (BUG-19)', () => {
+  // A single type into a password field is forbidden; the identical step inside a
+  // batch must be forbidden too, not silently safe.
+  const passwordBatch = evaluateActionRisk({
+    action: {
+      action: 'browser_batch',
+      steps: [
+        { action: 'type', element_id: 3, text: 'hunter2' },
+        { action: 'wait', amount: 2 },
+      ],
+    },
+    resolveElementInfo: (id) =>
+      id === 3 ? { role: 'textbox', label: 'Passwort', fieldKind: 'password' } : null,
+  });
+  assert.equal(passwordBatch.level, 'forbidden');
+  assert.match(passwordBatch.reason, /Batch step 1 forbidden/i);
+
+  // A click labeled like a destructive submit is risky; same inside a batch.
+  const deleteBatch = evaluateActionRisk({
+    action: {
+      action: 'browser_batch',
+      steps: [{ action: 'click', element_id: 7 }],
+    },
+    resolveElementInfo: (id) =>
+      id === 7 ? { role: 'button', label: 'Konto löschen' } : null,
+  });
+  assert.equal(deleteBatch.level, 'risky');
+  assert.match(deleteBatch.reason, /Batch step 1 risky/i);
+
+  // A benign batch stays safe when every step resolves.
+  const benignBatch = evaluateActionRisk({
+    action: {
+      action: 'browser_batch',
+      steps: [
+        { action: 'type', element_id: 8, text: 'laptop' },
+        { action: 'click', element_id: 9 },
+      ],
+    },
+    resolveElementInfo: (id) =>
+      id === 8
+        ? { role: 'searchbox', label: 'Suche', formKind: 'search', fieldKind: 'search' }
+        : id === 9
+          ? { role: 'button', label: 'Sortieren' }
+          : null,
+  });
+  assert.equal(benignBatch.level, 'safe');
+});
+
+test('risk: browser_batch fails closed on uninspectable element steps (BUG-19)', () => {
+  // A stale/unknown element id cannot be inspected; the step must not pass as safe.
+  const unknownId = evaluateActionRisk({
+    action: {
+      action: 'browser_batch',
+      steps: [{ action: 'click', element_id: 99 }],
+    },
+    resolveElementInfo: () => null,
+  });
+  assert.equal(unknownId.level, 'risky');
+  assert.match(unknownId.reason, /cannot inspect/i);
+
+  // A click step without any element id is also uninspectable -> risky.
+  const missingId = evaluateActionRisk({
+    action: {
+      action: 'browser_batch',
+      steps: [{ action: 'click' }],
+    },
+  });
+  assert.equal(missingId.level, 'risky');
+
+  // Non-element steps (wait, scroll, press_key without element semantics) stay safe.
+  const nonElementSteps = evaluateActionRisk({
+    action: {
+      action: 'browser_batch',
+      steps: [
+        { action: 'wait', amount: 2 },
+        { action: 'scroll', direction: 'down' },
+      ],
+    },
+  });
+  assert.equal(nonElementSteps.level, 'safe');
+});

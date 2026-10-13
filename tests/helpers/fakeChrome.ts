@@ -19,7 +19,7 @@
  *     debugger: { commands: { 'Page.captureScreenshot': { data: 'AAAA' } } },
  *   });
  *   globalThis.chrome = fc.chrome;                    // or: const restore = fc.install();
- *   await import('../background/background.js');
+ *   await import('../src/background/background.ts');
  *   fc.tabs.add({ id: 300, openerTabId: 101 });       // the user opens a tab: state + tabs.onCreated
  *   await fc.runtime.send({ action: 'START_TASK' });  // a side panel sendMessage round trip
  *   fc.callsTo('tabs.group');                         // [{ api: 'tabs.group', args: [...] }]

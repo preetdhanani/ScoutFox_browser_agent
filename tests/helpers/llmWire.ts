@@ -79,6 +79,32 @@ export function textReply(url: string, text: string = DEFAULT_REPLY_TEXT): Respo
   return jsonResponse({ id: 'c1', object: 'chat.completion', created: 1, model: 'm', choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }] });
 }
 
+/**
+ * Environment variables that the provider SDKs read on their own when they run in Node. The extension runs in a
+ * service worker with no `process.env`, so none of these can reach a real request; a Node test can pick them up,
+ * though. Claude Code sets ANTHROPIC_AUTH_TOKEN (and ANTHROPIC_BASE_URL) in its shell, and the Anthropic SDK then
+ * adds `Authorization: Bearer <token>` next to x-api-key, which broke the header tests on that machine.
+ */
+const SDK_ENV_NAMES = [
+  'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL',
+  'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_PROJECT_ID',
+  'GOOGLE_API_KEY', 'GEMINI_API_KEY'
+];
+const scrubbedTests = new WeakSet<object>();
+
+/** Removes the SDK variables above until the test ends, once per test (a second call must not "restore" the removed values). */
+function scrubSdkEnv(t: { after: (fn: () => void) => void }): void {
+  if (scrubbedTests.has(t)) return;
+  scrubbedTests.add(t);
+  const saved = new Map<string, string>();
+  for (const name of SDK_ENV_NAMES) {
+    const value = process.env[name];
+    if (value !== undefined) saved.set(name, value);
+    delete process.env[name];
+  }
+  t.after(() => { for (const [name, value] of saved) process.env[name] = value; });
+}
+
 const ORIGINAL_FETCH = Symbol.for('scoutfox.llmWire.originalFetch');
 type Installed = typeof fetch & { [ORIGINAL_FETCH]?: typeof fetch };
 
@@ -88,6 +114,7 @@ type Installed = typeof fetch & { [ORIGINAL_FETCH]?: typeof fetch };
  * restored "what was there before it" would leave the first spy in place for every later test.
  */
 export function installFetch(t: { after: (fn: () => void) => void }, replacement: typeof fetch): void {
+  scrubSdkEnv(t);
   const current = globalThis.fetch as Installed;
   const real = current[ORIGINAL_FETCH] ?? current;
   (replacement as Installed)[ORIGINAL_FETCH] = real;
@@ -108,7 +135,9 @@ export function spyFetch(
     if (text) {
       try { body = JSON.parse(text); } catch { body = text; }
     }
-    const request: SentRequest = { url, method: String(init?.method), headers: Object.fromEntries(new Headers(init?.headers).entries()), body, signal: init?.signal };
+    // A fetch without an explicit method is a GET; recording the string "undefined" for it made
+    // every GET indistinguishable from any other methodless call.
+    const request: SentRequest = { url, method: init?.method ? String(init.method) : 'GET', headers: Object.fromEntries(new Headers(init?.headers).entries()), body, signal: init?.signal };
     sent.push(request);
     return reply(request);
   }) as typeof fetch);

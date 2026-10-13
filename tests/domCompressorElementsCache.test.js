@@ -6,17 +6,13 @@
  * tests/actionExecutorElementResolution.test.js for the fallback-chain behaviour itself; this
  * test is the missing link - that the object those tests assume actually gets populated by a
  * real getSnapshot() call.
- *
- * content/domCompressor.js is a browser IIFE with no exports, loaded here via new Function
- * against a minimal fake DOM - the same technique used throughout this suite.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
+import { DOMCompressor } from '../src/content/domCompressor.ts';
+import { withGlobals } from './helpers/contentGlobals.ts';
 
-const SRC = fs.readFileSync(new URL('../content/domCompressor.js', import.meta.url), 'utf8');
-
-function loadCompressor(interactiveEls) {
+function createEnv(interactiveEls) {
   const fakeWindow = { location: { href: 'https://example.com', hostname: 'example.com' } };
   const fakeDocument = {
     title: 'Test Page',
@@ -28,8 +24,7 @@ function loadCompressor(interactiveEls) {
   };
   const fakeNode = { ELEMENT_NODE: 1 };
   const fakeCSS = { escape: (s) => s };
-  const fn = new Function('window', 'document', 'Node', 'CSS', `${SRC}\nreturn window.domCompressorInstance;`);
-  return fn(fakeWindow, fakeDocument, fakeNode, fakeCSS);
+  return { fakeWindow, fakeDocument, fakeNode, fakeCSS };
 }
 
 function makeButton(id) {
@@ -46,8 +41,12 @@ function makeButton(id) {
 }
 
 test('getSnapshot() populates this.elements, not just the returned snapshot object', () => {
-  const compressor = loadCompressor([makeButton('submit-btn')]);
-  const snapshot = compressor.getSnapshot();
+  const env = createEnv([makeButton('submit-btn')]);
+  const compressor = new DOMCompressor();
+  const snapshot = withGlobals(
+    { window: env.fakeWindow, document: env.fakeDocument, Node: env.fakeNode, CSS: env.fakeCSS },
+    () => compressor.getSnapshot()
+  );
 
   assert.equal(snapshot.elementCount, 1);
   assert.ok(Array.isArray(compressor.elements), 'this.elements must be set so resolveElement() can read it later');
@@ -57,10 +56,17 @@ test('getSnapshot() populates this.elements, not just the returned snapshot obje
 });
 
 test('a second snapshot replaces the cache instead of accumulating stale entries', () => {
-  const compressor = loadCompressor([makeButton('a')]);
-  compressor.getSnapshot();
+  const env = createEnv([makeButton('a')]);
+  const compressor = new DOMCompressor();
+  withGlobals(
+    { window: env.fakeWindow, document: env.fakeDocument, Node: env.fakeNode, CSS: env.fakeCSS },
+    () => compressor.getSnapshot()
+  );
   assert.equal(compressor.elements.length, 1);
 
-  compressor.getSnapshot(); // same page, one call later - simulates a re-snapshot mid-run
+  withGlobals(
+    { window: env.fakeWindow, document: env.fakeDocument, Node: env.fakeNode, CSS: env.fakeCSS },
+    () => compressor.getSnapshot()
+  );
   assert.equal(compressor.elements.length, 1, 'the cache must reflect only the latest snapshot');
 });

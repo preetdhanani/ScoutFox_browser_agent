@@ -1,5 +1,5 @@
 // src/background/runner/AgentRunner.ts
-// Drop-in replacement for AgentEngine that drives the LangGraph StateGraph engine.
+// Runner that drives the LangGraph StateGraph engine.
 // Implements full engine surface, single-flight drive, status derivation,
 // tab sandboxing, and checkpointer persistence.
 import {
@@ -10,6 +10,7 @@ import {
 } from '@langchain/langgraph/web';
 import { Storage, type Settings } from '../../shared/storage.ts';
 import { Logger } from '../../shared/logger.ts';
+import { BUILD_STAMP } from '../../shared/build.ts';
 import { buildOrchestratorGraph } from '../graph/orchestrator.ts';
 import { SessionStorageSaver } from '../checkpoint/SessionStorageSaver.ts';
 import { SessionActionJournal } from './actionJournal.ts';
@@ -18,14 +19,20 @@ import { runtimeRegistry, type BrowserPort, type ExecResult, type LlmPort, type 
 import { generateCompletion } from '../llm/index.ts';
 import { inputDispatcher } from '../browser/input.ts';
 import { cdp } from '../browser/cdp.ts';
-import type { EffortChoice, EffortProfile, HistoryEntry, Limits, PlanView, RunStats, RunStatus } from '../graph/state.ts';
-
-function lastRuntimeError(): string | null {
-  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError) {
-    return chrome.runtime.lastError.message ?? 'Unknown chrome error';
-  }
-  return null;
-}
+import { lastRuntimeError } from '../browser/tabs.ts';
+import { NetworkBuffers } from '../browser/network.ts';
+import { ensureScoutFoxGroup, isTabInScope, groupIdForWindow } from '../browser/groups.ts';
+import { openNewWindow } from '../browser/windows.ts';
+import { takeSnapshot } from '../browser/snapshot.ts';
+import { executeAction } from '../browser/execute.ts';
+import { EvidenceLedger } from '../agent/evidence.ts';
+import type { LedgerSnapshot } from '../agent/evidence.ts';
+import { decideOnFailedAudit } from '../agent/finishPolicy.ts';
+import type { GateContext, GateDecision } from '../agent/finishPolicy.ts';
+import { previousTurnsSummary } from '../agent/previousTurns.ts';
+import { compactLedgerSnapshot, finishedPlanStatuses, noteTypedText, withoutTypedText } from '../agent/planEvidence.ts';
+import { goalSources } from '../agent/answerAudit.ts';
+import type { Effect, EffortChoice, EffortProfile, HistoryEntry, Limits, PlanView, RunStats, RunStatus } from '../graph/state.ts';
 
 export class AgentRunner {
   public threadId: string;
@@ -55,16 +62,59 @@ export class AgentRunner {
   public pendingChallengeHelp: any | null = null;
   public pendingContinueBudget: any | null = null;
   public pauseReason: 'user' | 'llm_failure' | 'worker_restart' | null = null;
+  public budget: any | null = null;
   public effort: EffortChoice | null = null;
   public effortProfile: EffortProfile | null = null;
   public runStats: RunStats | null = null;
   public findings: any[] = [];
 
   public scoutFoxGroupIds = new Map<number, number>();
-  public networkBuffers = new Map<number, any[]>();
+  public networkBuffers = new NetworkBuffers(100);
   public autoApprovePlan = true; // Auto-approves plan during P4
+  public autoConfirmAction = false; // Auto-confirms action during headless/mock tests
+  public finishPolicy: (ctx: GateContext) => GateDecision = decideOnFailedAudit;
+  public evidenceSnapshot: LedgerSnapshot = { v: 1, entries: [], visits: [] };
+  public lastRefusedFinish: any = null;
+  public finishSendBacks = 0;
+
+  get evidence(): EvidenceLedger {
+    const ledger = EvidenceLedger.fromSnapshot(this.evidenceSnapshot);
+    const origRecord = ledger.record.bind(ledger);
+    const origClear = ledger.clear.bind(ledger);
+    ledger.record = (input) => {
+      const res = origRecord(input);
+      this.evidenceSnapshot = ledger.toSnapshot();
+      return res;
+    };
+    ledger.clear = () => {
+      origClear();
+      this.evidenceSnapshot = ledger.toSnapshot();
+    };
+    return ledger;
+  }
+
+  noteTypedText(action: unknown): void {
+    if (!action || typeof action !== 'object') return;
+    if (!this.runtime.typedTexts) this.runtime.typedTexts = [];
+    noteTypedText(action as any, this.runtime.typedTexts);
+  }
+
+  withoutTypedText(text: string): string {
+    return withoutTypedText(text, this.runtime?.typedTexts ?? []);
+  }
 
   private taskClaimed = false;
+  // Tabs this session adopted via open_window. A tab whose ScoutFox grouping
+  // failed must still be automatable by the session that opened it - without
+  // this set the scope wall threw terminal out_of_scope on every snapshot
+  // (BUG-39).
+  private adoptedTabIds = new Set<number>();
+  // A Stop/Pause that lands while a START_TASK claim is held (the tab pick is
+  // still in flight). stop()/pause() cannot act on a run that has not started,
+  // so they record the intent here and startTask honours it after its awaits
+  // instead of silently eating it (BUG-34).
+  private stopDuringClaim = false;
+  private pauseDuringClaim = false;
   private isLoopActive = false;
   private _activeTabId: number | null = null;
   private onStateChangeCb: ((state: Record<string, any>) => void) | null = null;
@@ -133,11 +183,14 @@ export class AgentRunner {
   }
 
   groupIdForWindow(windowId: number | 'default'): number | null {
-    if (typeof windowId === 'number') {
-      return this.scoutFoxGroupIds.get(windowId) ?? null;
-    }
-    const first = this.scoutFoxGroupIds.values().next();
-    return first.done ? null : first.value;
+    return groupIdForWindow(
+      {
+        windowId: this.windowId,
+        groupIds: this.scoutFoxGroupIds,
+        persist: () => void this.persistState(),
+      },
+      windowId
+    );
   }
 
   // -------------------------------------------------------------------------------------------
@@ -190,7 +243,11 @@ export class AgentRunner {
           effectiveSettings = { ...settings, model: settings.reflectModel };
         }
         const chatMessages = req.messages.map((m) => ({ role: m.role, content: m.content }));
-        const text = await generateCompletion(effectiveSettings, chatMessages, req.system, {
+        let systemPrompt = req.system;
+        if (effectiveSettings.systemInstructions?.trim()) {
+          systemPrompt = `${effectiveSettings.systemInstructions.trim()}\n\n${systemPrompt}`;
+        }
+        const text = await generateCompletion(effectiveSettings, chatMessages, systemPrompt, {
           signal: req.signal,
           schema: req.schema ?? undefined,
           callbacks: req.callbacks as any,
@@ -215,21 +272,10 @@ export class AgentRunner {
         });
       },
       snapshot: async (tabId, opts) => {
-        if (typeof chrome === 'undefined' || !chrome.tabs?.sendMessage) {
-          return { url: '', title: '', elementsText: '', refs: [] };
-        }
-        return new Promise((resolve, reject) => {
-          chrome.tabs.sendMessage(tabId, { action: 'GET_DOM_SNAPSHOT', maxElements: opts.maxElements, showBadges: opts.showBadges }, (resp) => {
-            const err = lastRuntimeError();
-            if (err) reject(new Error(err));
-            else {
-              const data = resp?.data ?? resp;
-              resolve({
-                ...data,
-                docId: resp?.docId ?? data?.docId ?? 'doc-1',
-              });
-            }
-          });
+        return await takeSnapshot(tabId, opts, {
+          isTabInScope: (id) => browser.isTabInScope(id),
+          clearBadges: (id) => browser.clearBadges(id),
+          sleep: (ms) => this.runtime?.clock ? this.runtime.clock.sleep(ms) : new Promise((r) => setTimeout(r, ms)),
         });
       },
       pageSig: async (tabId, opts) => {
@@ -267,23 +313,7 @@ export class AgentRunner {
         };
       },
       execute: async (tabId, action, opts) => {
-        try {
-          const res = await inputDispatcher.dispatchAction(tabId, action as any, { docId: opts.docId });
-          return {
-            success: res.success,
-            message: res.message,
-            error: res.error,
-            via: res.via ?? 'cdp',
-            effect: 'dom_changed',
-          };
-        } catch (err: any) {
-          return {
-            success: false,
-            error: err.message,
-            via: 'synthetic',
-            effect: 'none',
-          };
-        }
+        return await this.executeActionOnTab(tabId, action, opts);
       },
       navigate: async (tabId, url) => {
         if (typeof chrome === 'undefined' || !chrome.tabs?.update) return;
@@ -298,12 +328,12 @@ export class AgentRunner {
         await chrome.tabs.goBack(tabId);
       },
       waitForTabComplete: async (tabId, timeoutMs) => {
-        await this.waitForTabComplete(tabId, timeoutMs);
+        await this.waitForTabComplete(tabId, timeoutMs, control.stepSignal());
       },
       waitDomQuiet: async (tabId, quietMs, maxMs) => {
         if (typeof chrome === 'undefined' || !chrome.tabs?.sendMessage) return;
         await new Promise((resolve) => {
-          chrome.tabs.sendMessage(tabId, { action: 'WAIT_DOM_QUIET', quietMs, maxMs }, () => {
+          chrome.tabs.sendMessage(tabId, { action: 'WAIT_DOM_QUIET', payload: { quietMs, maxWaitMs: maxMs } }, () => {
             lastRuntimeError();
             resolve(undefined);
           });
@@ -319,21 +349,44 @@ export class AgentRunner {
           }
         },
         detachAll: async () => {
-          await cdp.detachAll();
+          // Only THIS session's tabs: the module-level cdp tracks every
+          // session, and detaching all of them would yank other running
+          // sessions' debuggers mid-run (BUG-33).
+          const ids = Array.from(runtime.attachedTabIds ?? []);
+          await Promise.allSettled(ids.map((tabId) => cdp.detach(tabId)));
         },
       },
       clearBadges: async (tabId) => {
         if (typeof chrome === 'undefined' || !chrome.tabs?.sendMessage) return;
-        chrome.tabs.sendMessage(tabId, { action: 'CLEAR_BADGES' }, () => {
-          lastRuntimeError();
+        return new Promise<void>((resolve) => {
+          chrome.tabs.sendMessage(tabId, { action: 'CLEAR_BADGES' }, () => {
+            lastRuntimeError();
+            resolve();
+          });
         });
       },
-      isTabInScope: async (_tabId) => {
-        return true;
+      isTabInScope: async (tabId) => {
+        if (tabId === this.ownerTabId && this.scoutFoxGroupIds.size === 0) {
+          return true;
+        }
+        // A tab this session opened itself stays in scope even when its ScoutFox
+        // grouping failed (chrome.tabs.group returned null): the old wall threw
+        // terminal out_of_scope on every snapshot of the agent's own tab (BUG-39).
+        if (this.adoptedTabIds.has(tabId)) {
+          return true;
+        }
+        return await isTabInScope(
+          {
+            windowId: this.windowId,
+            groupIds: this.scoutFoxGroupIds,
+            persist: () => void this.persistState(),
+          },
+          tabId
+        );
       },
     };
 
-    return {
+    const runtime: RunRuntime = {
       threadId: this.threadId,
       ownerTabId: this.ownerTabId,
       bootId: this.bootId,
@@ -348,11 +401,12 @@ export class AgentRunner {
       browser,
       journal: this.journal,
       net: {
-        marker: () => `${this.bootId}:${this.stepCount}`,
-        read: () => '[]',
+        marker: () => (runtime as any)?._systemActionMarker ?? (this as any)._systemActionMarker ?? `${this.bootId}:${this.stepCount}`,
+        read: (tabId: number, filter: any, includeBody: boolean, limit: number) =>
+          this.networkBuffers.read(tabId, filter, includeBody, limit),
       },
       emit: {
-        enterNode: (name) => {
+        enterNode: (name: string) => {
           this.currentPhase = name;
           const orchestratorNodes = ['plan', 'alloc', 'sched', 'site', 'summary', 'reflect', 'compile', 'offer', 'finalize'];
           const workerNodes = ['open', 'perceive', 'meter', 'blocked', 'policy', 'risk', 'hold', 'execute', 'verify', 'recover', 'record'];
@@ -368,7 +422,7 @@ export class AgentRunner {
           }
           this.notifyStateChange();
         },
-        setPhase: (text) => {
+        setPhase: (text: string) => {
           this.currentPhase = text;
           this.graphLocation.phase = text;
           this.notifyStateChange();
@@ -376,7 +430,7 @@ export class AgentRunner {
       },
       clock: {
         now: () => Date.now(),
-        sleep: async (ms, signal) => {
+        sleep: async (ms: number, signal?: AbortSignal) => {
           if (signal?.aborted) return;
           await new Promise<void>((resolve) => {
             const timer = setTimeout(resolve, ms);
@@ -387,7 +441,12 @@ export class AgentRunner {
           });
         },
       },
+      finishPolicy: (ctx) => this.finishPolicy(ctx),
+      typedTexts: [],
+      navigatedFrom: null,
     };
+
+    return runtime;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -400,15 +459,20 @@ export class AgentRunner {
       return { success: false, error: 'A task is already active or paused. Stop it before starting another.' };
     }
     this.taskClaimed = true;
+    this.stopDuringClaim = false;
+    this.pauseDuringClaim = false;
     return { success: true };
   }
 
   releaseTaskClaim() {
     this.taskClaimed = false;
+    this.stopDuringClaim = false;
+    this.pauseDuringClaim = false;
   }
 
   async startTask(userPrompt: string, tabId: number, requestedEffort?: string, autoApprove?: boolean) {
     if (!userPrompt || !userPrompt.trim()) {
+      this.releaseTaskClaim();
       return { success: false, error: 'Cannot start empty prompt.' };
     }
 
@@ -420,14 +484,48 @@ export class AgentRunner {
     await this.clearPromise;
     this.dirty = true;
     this.activeTabId = tabId;
+    this.currentTask = userPrompt.trim();
+    Logger.info('AgentRunner', `[START_TASK] Starting task on tab [${tabId}].`);
+    Logger.info('AgentRunner', `[NEW_SESSION_RUN] Starting task on tab [${tabId}] (build ${BUILD_STAMP}): ${this.currentTask}`);
 
     await this.ensureScoutFoxGroup(tabId);
 
-    this.currentTask = userPrompt.trim();
+    // BUG-34: a Stop/Pause may have landed while the claim was held and the tab
+    // pick was in flight. Honour it here instead of resetting the flags and
+    // running anyway.
+    const stopLandedDuringClaim = this.stopDuringClaim;
+    const pauseLandedDuringClaim = this.pauseDuringClaim;
+    this.stopDuringClaim = false;
+    this.pauseDuringClaim = false;
+    if (stopLandedDuringClaim) {
+      this.releaseTaskClaim();
+      this.status = 'stopped';
+      this.pauseReason = null;
+      this.currentTask = '';
+      Logger.info('AgentRunner', '[START_TASK_CANCELLED] A stop landed while the task was being claimed; the task was not started.');
+      this.notifyStateChange({ stopped: true });
+      return { success: false, error: 'The task was stopped before it started.' };
+    }
+
     this.status = 'running';
+    // A reason from an earlier pause must not outlive that pause (the panel prints it under the status).
+    this.pauseReason = null;
     this.stepCount = 0;
+    this.lastRefusedFinish = null;
+    this.finishSendBacks = 0;
+    // BUG-35: a new task must not inherit the previous run's hold cards.
+    this.clearHoldMirrors();
+    // BUG-26: typed strings from the previous task must not be stripped from the
+    // new task's evidence texts (the sidepanel sends START_TASK without
+    // CLEAR_HISTORY).
+    if (this.runtime) {
+      this.runtime.typedTexts = [];
+      this.runtime.navigatedFrom = null;
+    }
     this.runtime.control.stopRequested = false;
-    this.runtime.control.pauseRequested = false;
+    // A pause that landed during the claim starts the run paused: the drive's
+    // first hold check picks the flag up (BUG-34).
+    this.runtime.control.pauseRequested = pauseLandedDuringClaim === true;
 
     try {
       const userSettings = await this.runtime.settings().catch(() => null);
@@ -459,6 +557,14 @@ export class AgentRunner {
 
   pause(): { success: boolean; error?: string } {
     if (this.status !== 'running') {
+      // A task is being claimed right now: record the pause so the run starts
+      // paused instead of ignoring the request (BUG-34).
+      if (this.taskClaimed) {
+        this.pauseDuringClaim = true;
+        Logger.info('AgentRunner', '[PAUSED] Pause landed while a task was being claimed; the task will start paused.');
+        this.notifyStateChange({ paused: true });
+        return { success: true };
+      }
       return { success: false, error: `Cannot pause when status is "${this.status}".` };
     }
     this.dirty = true;
@@ -466,7 +572,8 @@ export class AgentRunner {
     this.pauseReason = 'user';
     this.activeAbort?.abort({ scoutfox: 'user', reason: 'user_pause' });
     this.runtime.control.abortStep('user_pause');
-    this.notifyStateChange();
+    Logger.info('AgentRunner', '[PAUSED] Agent runner paused.');
+    this.notifyStateChange({ paused: true });
     this.startPauseDetachTimer();
     return { success: true };
   }
@@ -481,7 +588,8 @@ export class AgentRunner {
     this.pauseReason = null;
     this.pendingQuestion = null;
     this.runtime.control.pauseRequested = false;
-    this.notifyStateChange();
+    Logger.info('AgentRunner', '[RESUMED] Agent runner resumed.');
+    this.notifyStateChange({ resumed: true });
 
     void this.drive(new Command({ resume: { kind: 'resume' } }));
     return { success: true };
@@ -489,18 +597,43 @@ export class AgentRunner {
 
   stop(): { success: boolean; error?: string } {
     if (this.status === 'idle' || this.status === 'stopped') {
+      // A task is being claimed right now (the tab pick is still in flight):
+      // record the stop so startTask cancels instead of running anyway (BUG-34).
+      if (this.taskClaimed) {
+        this.stopDuringClaim = true;
+        Logger.info('AgentRunner', '[STOPPED] Stop landed while a task was being claimed; the task will not start.');
+        this.notifyStateChange({ stopped: true });
+        return { success: true };
+      }
       return { success: false, error: 'No task is running or paused.' };
     }
     const wasPaused = this.status === 'paused';
     this.clearPauseDetachTimer();
     this.dirty = true;
     this.status = 'stopped';
+    this.pauseReason = null;
+    // BUG-35: the hold mirrors must not survive a stop - the panel would render a
+    // question/approval card under a "stopped" status, and the stale card carried
+    // into the next task on the same tab. stop() still resumes a hold's interrupt
+    // below; this only clears the runner's own fields.
+    this.clearHoldMirrors();
     this.activeAbort?.abort({ scoutfox: 'user', reason: 'user_stop' });
     this.runtime.control.abortStep('user_stop');
-    this.notifyStateChange();
+    Logger.info('AgentRunner', '[STOPPED] Agent runner stopped.');
+    this.notifyStateChange({ stopped: true });
+
+    const targetTabId = this._activeTabId ?? this.ownerTabId;
+    if (targetTabId) {
+      void this.runtime?.browser?.clearBadges?.(targetTabId);
+    }
 
     if (wasPaused) {
-      void this.drive(new Command({ resume: { kind: 'stop' } }));
+      // The hold's interrupt is still sitting in the checkpointer, so it must be resumed -
+      // the graph already knows what to do with kind:'stop' (hold nodes route it to
+      // end/finalize). The drive would otherwise die on executeDriveLoop's stopRequested
+      // guard, and the pending interrupt would survive in the checkpoint: the restarted
+      // worker would then resurrect this stopped run as 'paused' with the old question.
+      void this.drive(new Command({ resume: { kind: 'stop' } }), { allowWhileStopped: true });
     }
     return { success: true };
   }
@@ -517,6 +650,7 @@ export class AgentRunner {
 
     this.clearPauseDetachTimer();
     this.status = 'running';
+    this.pauseReason = null;
     this.pendingQuestion = null;
     this.notifyStateChange();
 
@@ -529,6 +663,7 @@ export class AgentRunner {
     this.dirty = true;
     this.pendingApproval = null;
     this.status = 'running';
+    this.pauseReason = null;
     this.notifyStateChange();
 
     await this.drive(new Command({ resume: { kind: 'approve', ...decision } }));
@@ -539,6 +674,7 @@ export class AgentRunner {
     this.dirty = true;
     this.pendingConfirm = null;
     this.status = 'running';
+    this.pauseReason = null;
     this.notifyStateChange();
 
     await this.drive(new Command({ resume: { kind: decision, remember } }));
@@ -553,6 +689,7 @@ export class AgentRunner {
     this.dirty = true;
     this.pendingChallengeHelp = null;
     this.status = 'running';
+    this.pauseReason = null;
     this.notifyStateChange();
 
     await this.drive(new Command({ resume: { kind: action } }));
@@ -567,6 +704,7 @@ export class AgentRunner {
     this.dirty = true;
     this.pendingContinueBudget = null;
     this.status = 'running';
+    this.pauseReason = null;
     this.notifyStateChange();
 
     await this.drive(new Command({ resume: { kind: action, additionalSteps } }));
@@ -579,11 +717,23 @@ export class AgentRunner {
     this.planSteps = [];
     this.findings = [];
     this.status = 'idle';
+    this.pauseReason = null;
+    this.stepCount = 0;
+    this.stateVersion = 0;
     this.pendingApproval = null;
+    this.pendingQuestion = null;
     this.pendingConfirm = null;
     this.pendingChallengeHelp = null;
     this.pendingContinueBudget = null;
     this.graphLocation = { phase: 'Starting' };
+    this.evidenceSnapshot = { v: 1, entries: [], visits: [] };
+    this.lastRefusedFinish = null;
+    this.finishSendBacks = 0;
+    if (this.runtime) {
+      this.runtime.typedTexts = [];
+      this.runtime.navigatedFrom = null;
+    }
+    void this.meta.clear();
     if (this.saver?.deleteThread) {
       this.clearPromise = this.saver.deleteThread(this.threadId)
         .then(() => {
@@ -592,6 +742,23 @@ export class AgentRunner {
         .catch(() => {});
     }
     this.notifyStateChange();
+  }
+
+  previousTurnsSummary(): string[] {
+    return previousTurnsSummary(this.history);
+  }
+
+  /**
+   * Clears every pending-hold mirror the panel renders cards from. Used by
+   * stop(), startTask() and clearHistory() so a hold never outlives the run it
+   * belonged to (BUG-35).
+   */
+  private clearHoldMirrors(): void {
+    this.pendingQuestion = null;
+    this.pendingApproval = null;
+    this.pendingConfirm = null;
+    this.pendingChallengeHelp = null;
+    this.pendingContinueBudget = null;
   }
 
   getState(): Record<string, any> {
@@ -603,6 +770,8 @@ export class AgentRunner {
       planSteps: this.planSteps,
       currentPhase: this.currentPhase,
       graphLocation: this.graphLocation,
+      pauseReason: this.pauseReason,
+      budget: this.budget,
       pendingQuestion: this.pendingQuestion,
       pendingApproval: this.pendingApproval,
       pendingConfirm: this.pendingConfirm,
@@ -615,6 +784,10 @@ export class AgentRunner {
       effortProfile: this.effortProfile,
       runStats: this.runStats,
       findings: this.findings,
+      // No `evidence` here on purpose (BUG-40): notifyStateChange spreads this
+      // object into every STATE_UPDATE broadcast, which used to clone up to
+      // 60 entries / 150k chars of ledger text over the port per stream chunk.
+      // Nothing on the panel side reads it; consumers use `engine.evidence`.
     };
   }
 
@@ -627,6 +800,7 @@ export class AgentRunner {
   }
 
   async persistState() {
+    this.evidenceSnapshot = compactLedgerSnapshot(this.evidenceSnapshot);
     await this.meta.writeImmediate({
       stateVersion: this.stateVersion,
       scoutFoxGroupIds: Array.from(this.scoutFoxGroupIds.entries()),
@@ -634,6 +808,7 @@ export class AgentRunner {
       attachedTabIds: Array.from(this.runtime.attachedTabIds),
       pauseDetach: null,
       lastBeatAt: Date.now(),
+      evidence: this.evidenceSnapshot.entries.length > 0 ? this.evidenceSnapshot : undefined,
     });
   }
 
@@ -641,12 +816,12 @@ export class AgentRunner {
   // Single-Flight Graph Drive
   // -------------------------------------------------------------------------------------------
 
-  private async drive(input: any): Promise<void> {
+  private async drive(input: any, opts?: { allowWhileStopped?: boolean }): Promise<void> {
     if (this.currentDrive) {
       await this.currentDrive;
     }
 
-    const drivePromise = this.executeDriveLoop(input);
+    const drivePromise = this.executeDriveLoop(input, opts);
     this.currentDrive = drivePromise;
     try {
       await drivePromise;
@@ -657,10 +832,13 @@ export class AgentRunner {
     }
   }
 
-  private async executeDriveLoop(initialInput: any): Promise<void> {
+  private async executeDriveLoop(initialInput: any, opts?: { allowWhileStopped?: boolean }): Promise<void> {
     let currentInput: any = initialInput;
 
-    while (currentInput !== null && !this.runtime.control.stopRequested) {
+    // opts.allowWhileStopped is true only for stop()'s own finalize resume: the run is already
+    // marked stopped by then, and every router routes on state.ctl (which runsStopped into
+    // finalize), so the loop deliberately bypasses the stopRequested guard for that one drive.
+    while (currentInput !== null && (!this.runtime.control.stopRequested || opts?.allowWhileStopped)) {
       const inputToExecute = currentInput;
       currentInput = null;
 
@@ -671,7 +849,105 @@ export class AgentRunner {
     }
   }
 
+  /**
+   * Mirrors one stream chunk (values mode, optionally from a subgraph) into the
+   * runner's own state mirrors. Shared by the drive loop and the stop-time
+   * resume so a stopped run ends with the same mirrors a finished one has.
+   */
+  private absorbStreamValues(ns: string[], values: any): void {
+    if (ns.length === 0) {
+      // Root orchestrator values
+      if (values.task !== undefined) this.currentTask = values.task;
+      if (values.stepCount !== undefined) this.stepCount = values.stepCount;
+      if (values.history !== undefined) this.history = [...values.history];
+      if (values.findings !== undefined) this.findings = values.findings;
+      if (values.effort !== undefined) this.effort = values.effort;
+      if (values.effortProfile !== undefined) this.effortProfile = values.effortProfile;
+      if (values.runStats !== undefined) this.runStats = values.runStats;
+      if (values.budget !== undefined) this.budget = values.budget;
+      if (values.evidence !== undefined) this.evidenceSnapshot = values.evidence;
+      if (values.lastRefusedFinish !== undefined) this.lastRefusedFinish = values.lastRefusedFinish;
+      if (values.finishSendBacks !== undefined) this.finishSendBacks = values.finishSendBacks;
+      const plan = values.planMeta ?? values.plan;
+      if (plan?.sites) {
+        this.planSteps = plan.sites.map((s: any) => {
+          const rawSt = values.sites?.[s.id]?.status;
+          const mappedSt = rawSt === 'running' ? 'in_progress' : rawSt === 'done' ? 'completed' : (rawSt ?? 'pending');
+          return {
+            id: s.id,
+            text: plan?.source === 'fallback'
+              ? s.name
+              : (s.domain && !s.name?.toLowerCase().includes(s.domain.toLowerCase())
+                ? `${s.name} (${s.domain}): ${s.goal}`
+                : `${s.name}: ${s.goal}`),
+            status: mappedSt,
+          };
+        });
+      }
+      if (values.siteIn?.site?.domain) {
+        this.graphLocation.siteDomain = values.siteIn.site.domain;
+      }
+    } else {
+      // Worker values
+      if (values.evidenceBase && typeof values.evidenceBase === 'object') {
+        // The worker folded its full ledger (prior sites + this site's events);
+        // the raw event stream alone is capped and loses the earliest pages
+        // (BUG-23). Events in the same chunk ride on top; the ledger dedupes.
+        this.evidenceSnapshot = values.evidenceBase as LedgerSnapshot;
+      }
+      if (values.evidenceEvents && Array.isArray(values.evidenceEvents)) {
+        const ledger = EvidenceLedger.fromSnapshot(this.evidenceSnapshot);
+        for (const ev of values.evidenceEvents) {
+          ledger.record(ev);
+        }
+        this.evidenceSnapshot = ledger.toSnapshot();
+      }
+      if (values.siteRun?.spec?.domain) {
+        this.graphLocation.siteDomain = values.siteRun.spec.domain;
+      }
+      if (values.siteRun?.used !== undefined) {
+        const base = values.siteIn?.stepBase ?? 0;
+        this.stepCount = base + values.siteRun.used;
+      }
+      if (values.siteRun?.lastRefusedFinish) {
+        this.lastRefusedFinish = values.siteRun.lastRefusedFinish;
+      }
+      if (values.siteRun?.finishSendBacks !== undefined) {
+        this.finishSendBacks = values.siteRun.finishSendBacks;
+      }
+      if (values.history && Array.isArray(values.history)) {
+        // Worker chunks re-deliver the site's full history channel, so the
+        // mirror must skip entries it already holds. The old `type_step` key
+        // collapsed distinct rows: every entry without a step shared one key
+        // (a second user_answer in the same site was invisible) and two
+        // same-type entries at the same step vanished too (BUG-38). Compare by
+        // JSON identity instead - only a re-delivery of the SAME row matches.
+        const seen = new Set(this.history.map((h) => JSON.stringify(h)));
+        for (const entry of values.history) {
+          const k = JSON.stringify(entry);
+          if (!seen.has(k)) {
+            seen.add(k);
+            this.history = [...this.history, entry];
+          }
+        }
+      }
+    }
+    if (this.history.length > 400) {
+      this.history = this.history.slice(-400);
+    }
+    this.notifyStateChange();
+  }
+
   private async executeDriveStep(input: any): Promise<Command | null> {
+    // Whatever starts a drive (a task, a Resume, an answer, an approval) has just set the status to 'running'. A drive that
+    // was still winding down (a Pause and a quick Resume) can write 'paused' AFTER that, from its own end-of-stream
+    // snapshot, and this drive never wrote 'running' again: the panel then showed Resume for a run that was going on. This
+    // drive is what runs now, so say so - unless a new Pause landed in between (its flag is set), or the run is stopping.
+    if (this.status === 'paused' && !this.runtime.control.pauseRequested && !this.runtime.control.stopRequested) {
+      this.status = 'running';
+      this.pauseReason = null;
+      this.notifyStateChange();
+    }
     this.isLoopActive = true;
     const runAbort = new AbortController();
     this.activeAbort = runAbort;
@@ -689,49 +965,32 @@ export class AgentRunner {
       const stream = await this.graph.stream(input, cfg);
       for await (const chunk of stream) {
         const [ns, values] = Array.isArray(chunk) ? chunk : [[], chunk];
-        if (ns.length === 0) {
-          // Root orchestrator values
-          if (values.task !== undefined) this.currentTask = values.task;
-          if (values.stepCount !== undefined) this.stepCount = values.stepCount;
-          if (values.history !== undefined) this.history = values.history;
-          if (values.findings !== undefined) this.findings = values.findings;
-          if (values.effort !== undefined) this.effort = values.effort;
-          if (values.effortProfile !== undefined) this.effortProfile = values.effortProfile;
-          if (values.runStats !== undefined) this.runStats = values.runStats;
-          const plan = values.planMeta ?? values.plan;
-          if (plan?.sites) {
-            this.planSteps = plan.sites.map((s: any) => ({
-              id: s.id,
-              text: `${s.name}: ${s.goal}`,
-              status: values.sites?.[s.id]?.status === 'running' ? 'in_progress' : (values.sites?.[s.id]?.status ?? 'pending'),
-            }));
-          }
-          if (values.siteIn?.site?.domain) {
-            this.graphLocation.siteDomain = values.siteIn.site.domain;
-          }
-        } else {
-          // Worker values
-          if (values.siteRun?.spec?.domain) {
-            this.graphLocation.siteDomain = values.siteRun.spec.domain;
-          }
-          if (values.history && Array.isArray(values.history)) {
-            const seen = new Set(this.history.map((h) => `${h.type}_${(h as any).step}`));
-            for (const entry of values.history) {
-              const k = `${entry.type}_${(entry as any).step}`;
-              if (!seen.has(k)) {
-                seen.add(k);
-                this.history.push(entry);
-              }
-            }
-          }
-        }
-        this.notifyStateChange();
+        this.absorbStreamValues(ns, values);
       }
     } catch (err: any) {
       if (isGraphInterrupt(err)) {
         // Normal interrupt
       } else if (this.runtime.control.isUserAbort(err, runAbort.signal)) {
-        // Aborted cleanly by pause or stop
+        if (this.runtime.control.stopRequested) {
+          // B6: a user Stop in the middle of a site still runs the graph to its
+          // stopped end. On resume the interrupted node re-runs against the
+          // already-aborted step signal, every router sees ctl.stopRequested,
+          // the worker ends and compile's stopped branch writes the
+          // partial_result + endReason 'stopped' before finalize closes the
+          // checkpoint with no pending task (a leftover pending task is what a
+          // worker restart resurrected as paused). The aborted runAbort signal
+          // must not leak into the resume config - both updateState and stream
+          // would throw "Aborted" with it.
+          try {
+            const stopStream = await this.graph.stream(null, { ...cfg, signal: undefined });
+            for await (const chunk of stopStream) {
+              const [ns, values] = Array.isArray(chunk) ? chunk : [[], chunk];
+              this.absorbStreamValues(ns, values);
+            }
+          } catch (stopErr: any) {
+            Logger.warn('AgentRunner', `Failed to run compile on user stop: ${stopErr.message}`);
+          }
+        }
       } else {
         Logger.error('AgentRunner', `Graph execution failure: ${err.message}`);
         try {
@@ -743,8 +1002,21 @@ export class AgentRunner {
         } catch {
           // Ignore
         }
-        this.status = 'idle';
-        this.notifyStateChange();
+        this.status = 'error';
+        this.planSteps = this.planSteps.map((step) =>
+          step.status === 'in_progress' ? { ...step, status: 'failed' } : step
+        );
+        try {
+          const snap = await this.graph.getState(cfg);
+          if (snap.values?.history) {
+            this.history = [...snap.values.history];
+          } else {
+            this.history = [...this.history, { type: 'error', content: `Execution Error: ${err.message}` }];
+          }
+        } catch {
+          this.history = [...this.history, { type: 'error', content: `Execution Error: ${err.message}` }];
+        }
+        this.notifyStateChange({ error: err.message });
         return null;
       }
     } finally {
@@ -758,7 +1030,24 @@ export class AgentRunner {
     return autoResume;
   }
 
-  private async deriveStatus(snapshot: StateSnapshot): Promise<Command | null> {
+  /**
+   * Reads the status of the run from a checkpoint snapshot, and returns the command that keeps the run going when the
+   * hold it stands at is one the runner answers by itself (an auto-approved plan, an auto-confirmed action).
+   *
+   * `status` must not read 'paused' for a hold that nobody will ever see and that the runner answers itself: the panel
+   * shows a Resume button for 'paused' with no card behind it, which is what a user reported ("it stops after every task
+   * and I have to press Resume"). So the auto-resume cases are decided BEFORE anything is written to `status`.
+   *
+   * Two cases are never answered by the runner:
+   *   - a Pause that is pending (`pauseRequested`): answering the hold again and again would loop for ever (the hold node
+   *     shows the plan hold for every orchestrator pause, and the scheduler routes a pending pause back to it), with the
+   *     status 'running' and Resume refused. The run is paused, for the user's reason.
+   *   - a worker restart (`restoring`): it must not start a graph drive from the constructor, and the command would be
+   *     dropped anyway. A restored PLAN hold has no card in the product, so it is left paused with the reason
+   *     'worker_restart', and the user's Resume continues it (the hold node reads a plain resume on a plan hold as the
+   *     approval). A restored confirmation is never auto-approved: it keeps its card, and the user decides.
+   */
+  private async deriveStatus(snapshot: StateSnapshot, opts: { restoring?: boolean } = {}): Promise<Command | null> {
     if (this.runtime.control.stopRequested) {
       this.status = 'stopped';
       return null;
@@ -770,13 +1059,31 @@ export class AgentRunner {
 
     if (interruptedTask) {
       const interrupt = interruptedTask.interrupts[0]?.value as any;
+
+      const pausePending = this.runtime.control.pauseRequested;
+      const autoAnswered = !pausePending && (
+        (interrupt?.kind === 'approve_plan' && this.autoApprovePlan) ||
+        (interrupt?.kind === 'confirm_action' && this.autoConfirmAction && !opts.restoring)
+      );
+      if (autoAnswered) {
+        if (interrupt.kind === 'approve_plan') this.pendingApproval = null;
+        else this.pendingConfirm = null;
+        if (!opts.restoring) {
+          this.status = 'running';
+          this.pauseReason = null;
+          return new Command({ resume: { kind: 'approve' } });
+        }
+        this.status = 'paused';
+        this.pauseReason = 'worker_restart';
+        this.startPauseDetachTimer();
+        return null;
+      }
+
       this.status = 'paused';
 
       if (interrupt?.kind === 'approve_plan') {
-        if (this.autoApprovePlan) {
-          this.pendingApproval = null;
-          return new Command({ resume: { kind: 'approve' } });
-        }
+        // The runner would have approved this plan itself: the only reason it is paused is the user's pending Pause.
+        if (this.autoApprovePlan && pausePending) this.pauseReason = 'user';
         const rootValues = snapshot.values ?? {};
         this.pendingApproval = {
           kind: 'approve_plan',
@@ -827,7 +1134,17 @@ export class AgentRunner {
       return null;
     }
 
+    if (snapshot.values?.budget !== undefined) {
+      this.budget = snapshot.values.budget;
+    }
     this.status = snapshot.values?.runStatus ?? 'idle';
+    this.pauseReason = null; // not paused any more, so no reason to show
+    if (this.status === 'idle' && this.planSteps.length > 0) {
+      const ledger = EvidenceLedger.fromSnapshot(this.evidenceSnapshot);
+      const planTexts = this.planSteps.map((s) => s.text);
+      const finished = finishedPlanStatuses(planTexts, ledger, goalSources(this.currentTask || ''));
+      this.planSteps = this.planSteps.map((step, idx) => ({ ...step, status: finished[idx] ?? step.status }));
+    }
     return null;
   }
 
@@ -836,64 +1153,77 @@ export class AgentRunner {
   // -------------------------------------------------------------------------------------------
 
   async ensureScoutFoxGroup(tabId: number, explicitWindowId?: number): Promise<number | null> {
-    if (!tabId || typeof chrome === 'undefined' || !chrome.tabs?.group) return null;
-
-    try {
-      const tab = await new Promise<chrome.tabs.Tab | null>((resolve) => {
-        chrome.tabs.get(tabId, (t) => {
-          lastRuntimeError();
-          resolve(t ?? null);
-        });
-      });
-      if (!tab) return null;
-
-      const windowId = explicitWindowId ?? tab.windowId ?? this.windowId;
-      const recordedGroupId = typeof windowId === 'number' ? this.scoutFoxGroupIds.get(windowId) : null;
-
-      if (recordedGroupId && chrome.tabGroups?.get) {
-        const activeGrp = await new Promise<chrome.tabGroups.TabGroup | null>((resolve) => {
-          chrome.tabGroups.get(recordedGroupId, (g) => {
-            lastRuntimeError();
-            resolve(g ?? null);
-          });
-        });
-        if (activeGrp && activeGrp.windowId === windowId) {
-          if (tab.groupId === recordedGroupId) return recordedGroupId;
-          await chrome.tabs.group({ tabIds: tabId, groupId: recordedGroupId });
-          return recordedGroupId;
-        }
-      }
-
-      const newGroupId = await chrome.tabs.group({ tabIds: tabId });
-      if (typeof windowId === 'number') this.scoutFoxGroupIds.set(windowId, newGroupId);
-      if (chrome.tabGroups?.update) {
-        await chrome.tabGroups.update(newGroupId, { title: 'ScoutFox', color: 'orange' });
-      }
-      return newGroupId;
-    } catch {
-      return null;
-    }
+    return await ensureScoutFoxGroup(
+      {
+        windowId: this.windowId,
+        groupIds: this.scoutFoxGroupIds,
+        persist: () => void this.persistState(),
+      },
+      tabId,
+      explicitWindowId
+    );
   }
 
-  async waitForTabComplete(tabId: number, timeoutMs = 15000): Promise<void> {
+  async openNewWindow(url?: string) {
+    return await openNewWindow(
+      {
+        adoptTab: (newTabId, winId) => {
+          // This session deliberately took the tab over: it stays in scope even
+          // if its ScoutFox grouping below fails (BUG-39).
+          this.adoptedTabIds.add(newTabId);
+          this.onTabAdoptedCb?.(newTabId, winId);
+        },
+        ensureGroup: async (newTabId, winId) => {
+          return await this.ensureScoutFoxGroup(newTabId, winId);
+        },
+        setActiveTab: (newTabId) => {
+          this.activeTabId = newTabId;
+          this.notifyStateChange();
+        },
+      },
+      url
+    );
+  }
+
+  async executeActionOnTab(tabId: number, action: any, opts: any = {}): Promise<any> {
+    const settings = await Storage.getSettings().catch(() => null);
+    return await executeAction(tabId, action, {
+      runRuntime: this.runtime,
+      openNewWindow: (url) => this.openNewWindow(url),
+      docId: opts?.docId,
+      signal: this.runtime.control.stepSignal(),
+      waitDomQuiet: (tId, qMs, mMs) => this.runtime.browser.waitDomQuiet(tId, qMs, mMs),
+      actionDelayMs: settings?.actionDelayMs,
+    });
+  }
+
+  async waitForTabComplete(tabId: number, timeoutMs = 15000, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
     if (typeof chrome === 'undefined' || !chrome.tabs?.onUpdated) return;
 
     await new Promise<void>((resolve) => {
       let resolved = false;
-      const timer = setTimeout(() => {
+      const cleanup = () => {
         if (!resolved) {
           resolved = true;
           chrome.tabs.onUpdated.removeListener(listener);
+          signal?.removeEventListener('abort', onAbort);
           resolve();
         }
-      }, timeoutMs);
+      };
+
+      const timer = setTimeout(() => cleanup(), timeoutMs);
+
+      const onAbort = () => {
+        clearTimeout(timer);
+        cleanup();
+      };
+      signal?.addEventListener('abort', onAbort);
 
       const listener = (tid: number, changeInfo: { status?: string }) => {
         if (tid === tabId && changeInfo.status === 'complete' && !resolved) {
-          resolved = true;
           clearTimeout(timer);
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
+          cleanup();
         }
       };
 
@@ -905,25 +1235,55 @@ export class AgentRunner {
   // Pause Detach & Notifications
   // -------------------------------------------------------------------------------------------
 
-  private startPauseDetachTimer(): void {
+  private startPauseDetachTimer(tabId?: number): void {
+    if (tabId !== undefined) {
+      this.clearPauseDetachTimer(tabId);
+      cdp.startPauseTimer(tabId);
+      return;
+    }
+    // No explicit tab: arm EVERY tab this session still has a debugger on.
+    // Arming only the active tab left the debuggers on adopted tabs
+    // (open_window) attached for the whole pause, keeping Chrome's "debugging"
+    // bar up on them (BUG-42).
     this.clearPauseDetachTimer();
-    this.pauseTimer = setTimeout(() => {
-      void cdp.detachAll();
-    }, 30 * 60 * 1000); // 30 minutes
-  }
-
-  private clearPauseDetachTimer(): void {
-    if (this.pauseTimer) {
-      clearTimeout(this.pauseTimer);
-      this.pauseTimer = null;
+    const tabIds = new Set<number>(Array.from(this.runtime?.attachedTabIds ?? []));
+    const fallback = this._activeTabId ?? this.ownerTabId;
+    if (fallback) tabIds.add(fallback);
+    for (const id of tabIds) {
+      cdp.startPauseTimer(id);
     }
   }
 
-  private notifyStateChange(): void {
+  private clearPauseDetachTimer(tabId?: number): void {
+    const targetTabId = tabId ?? this._activeTabId ?? this.ownerTabId;
+    if (targetTabId) {
+      cdp.clearPauseTimer(targetTabId);
+    }
+  }
+
+  dispose(): void {
+    this.clearPauseDetachTimer();
+    // Detach only THIS session's tabs: cdp.detachAll() detaches every tab any
+    // session ever attached, yanking other running sessions' debuggers when
+    // one tab is closed (BUG-33).
+    const ids = Array.from(this.runtime?.attachedTabIds ?? []);
+    void Promise.allSettled(ids.map((tabId) => cdp.detach(tabId)));
+    runtimeRegistry.delete(this.threadId);
+  }
+
+  private notifyStateChange(extraData: Record<string, any> = {}): void {
     this.stateVersion++;
+    this.meta.scheduleWrite({
+      stateVersion: this.stateVersion,
+      scoutFoxGroupIds: Array.from(this.scoutFoxGroupIds.entries()),
+      aliases: [],
+      attachedTabIds: Array.from(this.runtime.attachedTabIds),
+      pauseDetach: null,
+      lastBeatAt: Date.now(),
+    });
     if (this.onStateChangeCb) {
       try {
-        this.onStateChangeCb(this.getState());
+        this.onStateChangeCb({ ...this.getState(), ...extraData });
       } catch (err: any) {
         Logger.error('AgentRunner', `StateChange callback failed: ${err.message}`);
       }
@@ -940,41 +1300,49 @@ export class AgentRunner {
 
   recordNetworkRequest(tabId: number, req: any) {
     if (!tabId || !req) return;
-    if (!this.networkBuffers.has(tabId)) {
-      this.networkBuffers.set(tabId, []);
-    }
-    const buf = this.networkBuffers.get(tabId)!;
-    buf.push(req);
-    if (buf.length > 100) buf.shift();
+    const marker = this.runtime?.net?.marker ? this.runtime.net.marker() : `${this.bootId}:${this.stepCount}`;
+    this.networkBuffers.record(tabId, req, marker);
+  }
+
+  readNetworkRequests(tabId: number, filter: any = {}, includeBody = true, limit = 10): string {
+    return this.networkBuffers.read(tabId, filter, includeBody, limit);
   }
 
   private async restoreState(): Promise<void> {
     try {
       const meta = await this.meta.read();
-      if (!meta) return;
-
       if (this.dirty) return;
 
-      this.stateVersion = meta.stateVersion;
-      if (meta.scoutFoxGroupIds) {
-        for (const [wId, gId] of meta.scoutFoxGroupIds) {
-          this.scoutFoxGroupIds.set(wId, gId);
+      if (meta) {
+        this.stateVersion = (meta.stateVersion ?? 0) + 1;
+        if (meta.scoutFoxGroupIds) {
+          for (const [wId, gId] of meta.scoutFoxGroupIds) {
+            this.scoutFoxGroupIds.set(wId, gId);
+          }
         }
+      } else {
+        this.stateVersion = 1;
       }
 
       const cfg = { configurable: { thread_id: this.threadId } };
       const snapshot = await this.graph.getState(cfg, { subgraphs: true });
       if (snapshot.values?.task) {
         this.currentTask = snapshot.values.task;
-        this.history = snapshot.values.history ?? [];
+        this.history = snapshot.values.history ? [...snapshot.values.history] : [];
         this.stepCount = snapshot.values.stepCount ?? 0;
         this.currentPhase = snapshot.values.phase ?? '';
         if (snapshot.values.findings) {
           this.findings = snapshot.values.findings;
         }
+        if (snapshot.values.evidence) {
+          this.evidenceSnapshot = snapshot.values.evidence;
+        }
+      }
+      if (meta?.evidence && this.evidenceSnapshot.entries.length === 0) {
+        this.evidenceSnapshot = meta.evidence;
       }
 
-      await this.deriveStatus(snapshot);
+      await this.deriveStatus(snapshot, { restoring: true });
       if (this.status === 'paused') {
         this.runtime.resumedAfterRestart = true;
       }
@@ -983,17 +1351,14 @@ export class AgentRunner {
     }
   }
 
-  dispose() {
-    this.clearPauseDetachTimer();
-    runtimeRegistry.delete(this.threadId);
-  }
-
   static async forgetSession(tabId: number | string): Promise<void> {
     const threadId = String(tabId);
     const saver = new SessionStorageSaver();
     await saver.deleteThread(threadId).catch(() => {});
+    const meta = new SessionRunnerMeta(threadId);
+    await meta.clear().catch(() => {});
     if (typeof chrome !== 'undefined' && chrome.storage?.session?.remove) {
-      await chrome.storage.session.remove([`runner_meta_${threadId}`, `action_journal_${threadId}`]).catch(() => {});
+      await chrome.storage.session.remove([`sf:meta:${threadId}`, `action_journal_${threadId}`, `runner_meta_${threadId}`]).catch(() => {});
     }
   }
 }

@@ -26,8 +26,11 @@ export class ProviderTimeoutError extends Error {
   readonly provider: string;
   readonly timeoutMs: number;
 
-  constructor(provider: string, timeoutMs: number) {
-    super(`Provider [${provider}] did not respond within ${Math.round(timeoutMs / 1000)}s. The request was abandoned - check that the provider is reachable, or raise llmTimeoutMs in settings.`);
+  constructor(provider: string, timeoutMs: number, source?: string) {
+    // B3.3: the message names the effective value AND where it came from (the provider's own
+    // setting, the global setting, or a default), so the user knows which field to change.
+    const from = source ? ` (${source})` : '';
+    super(`Provider [${provider}] did not respond within ${Math.round(timeoutMs / 1000)}s${from}. The request was abandoned - check that the provider is reachable, or raise llmTimeoutMs in settings.`);
     this.name = 'ProviderTimeoutError';
     this.provider = provider;
     this.timeoutMs = timeoutMs;
@@ -60,6 +63,8 @@ export interface DeadlineOptions {
   timeoutMs: number;
   /** The task's signal for this call (the step signal). */
   signal?: AbortSignal | null;
+  /** Where this timeout came from, worded for the error text ('the global timeout setting', ...). */
+  source?: string;
 }
 
 /**
@@ -70,12 +75,12 @@ export interface DeadlineOptions {
  * The call is also raced against that signal, so control comes back at once even when a client is slow to notice
  * its abort, or ignores it. Its timer and its one listener are removed on every path.
  */
-export async function withDeadline<T>({ provider, timeoutMs, signal }: DeadlineOptions, run: (callSignal: AbortSignal) => Promise<T>): Promise<T> {
+export async function withDeadline<T>({ provider, timeoutMs, signal, source }: DeadlineOptions, run: (callSignal: AbortSignal) => Promise<T>): Promise<T> {
   const stepSignal = signal ?? undefined;
   if (stepSignal?.aborted) throw stepAbortError(stepSignal, true);
 
   const deadline = new AbortController();
-  const timer = setTimeout(() => deadline.abort(new ProviderTimeoutError(provider, timeoutMs)), timeoutMs);
+  const timer = setTimeout(() => deadline.abort(new ProviderTimeoutError(provider, timeoutMs, source)), timeoutMs);
   const callSignal = stepSignal ? AbortSignal.any([stepSignal, deadline.signal]) : deadline.signal;
 
   /** What a rejection means, judged by who aborted. Null when nobody did: the error is the provider's own. */

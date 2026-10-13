@@ -9,9 +9,9 @@
  * What the live page does (read with the real extractor in a real browser): every option of the
  * configurator is one <li> whose textContent holds the batch list once where people see it and
  * again in several hidden copies, so one <li> is about 5000 characters of the same few words.
- * tests/fixtures/site/configurator.html has that shape. The compressor is loaded the way the other
- * domCompressor tests load it (content/domCompressor.js is a browser IIFE, run with new Function
- * against a small fake DOM), and the fixture is read into the fake nodes by the tiny HTML reader
+ * tests/fixtures/site/configurator.html has that shape. The compressor is the TypeScript module
+ * (src/content/domCompressor.ts, which builds the shipped content/domCompressor.js), run against
+ * a small fake DOM, and the fixture is read into the fake nodes by the tiny HTML reader
  * below, so the test runs on the page file and not on a hand copy of its text.
  *
  * The fix collapses a run of at least four units that are the same after masking digits into
@@ -23,7 +23,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-const SRC = fs.readFileSync(new URL('../content/domCompressor.js', import.meta.url), 'utf8');
+import { DOMCompressor } from '../src/content/domCompressor.ts';
+import { withGlobals } from './helpers/contentGlobals.ts';
+
 const FIXTURE = fs.readFileSync(new URL('./fixtures/site/configurator.html', import.meta.url), 'utf8');
 
 const CAP = 4500;
@@ -45,15 +47,18 @@ function loadCompressor({ nodes = [], contentType = 'text/html', hostname = 'sho
     contentType,
     documentElement: { scrollHeight: 800 },
     body: container,
-    querySelector: () => container // the <main> of the page, or the body: either way this container
+    querySelector: () => container
   };
-  const fn = new Function('window', 'document', `${SRC}\nreturn window.domCompressorInstance;`);
-  return fn(fakeWindow, fakeDocument);
+  const compressor = new DOMCompressor();
+  return {
+    extractPageText: () =>
+      withGlobals({ window: fakeWindow, document: fakeDocument }, () => compressor.extractPageText()),
+    collapseRepeatedRuns: (text) => compressor.collapseRepeatedRuns(text)
+  };
 }
 
 /** What the compressor returns for a page made of these paragraphs. */
 function pageTextOf(...paragraphs) {
-  // innerText is what the extractor falls back to for a page with under 100 characters of paragraphs.
   return loadCompressor({ nodes: paragraphs.map((p) => textNode(p)), innerText: paragraphs.join('\n') }).extractPageText();
 }
 

@@ -94,6 +94,7 @@ After you change the code:
 
 ### Configure it (Settings tab)
 - **LLM Provider / Model**: pick from OpenRouter, AgentRouter, Gemini, Ollama, OpenAI, Anthropic, NVIDIA NIM, or Groq, and search/select the exact model.
+- **Custom endpoint** (own provider): pick **Custom endpoint…** at the bottom of the provider dropdown to add any OpenAI Chat Completions or Anthropic Messages server by its base URL, protocol and models - a relay, a self-hosted vLLM/LM Studio/llama.cpp box, or a paid gateway the built-in list does not know. The dialog shows the exact request URLs it will send, fetches the model list when the endpoint offers one, accepts ids typed by hand when it does not, and its **Test** button makes the same chat call a run would. The API key is stored like every credential and is cleared automatically if you later point the provider at a different host. Up to 20 custom providers; they can be edited or deleted from Settings at any time.
 - **Model Overrides**: configure dedicated Planner Model and Reflect Model overrides for the graph engine.
 - **Max Steps** (default 250, up to 1,000), **Delay (ms)**, and **LLM Timeout (ms)**: tune how long a task can run, how long it pauses between actions, and how long it waits for a single LLM reply before retrying (default 120s, or 300s for NVIDIA NIM).
 - **Show Floating Element Badges**: toggle the numbered `[1]`, `[2]` overlays ScoutFox draws on page elements it can see.
@@ -189,8 +190,8 @@ Everything above in this README describes the extension as it works today.
 
 What will change for you:
 
-* **Approve the plan first (built in phase P6)**: the agent shows its plan and the sites it will visit in an interactive Plan Approval Card.
-  You review the targets and effort level, approve it once, and then it runs.
+* **Plans run without an approval gate**: the agent still plans the sites and the effort it will use, but it approves the plan itself and starts immediately.
+  The interactive Plan Approval Card (and its in-card effort picker) is gone.
 * **Real clicks (built in phase P3)**: while a task runs, the agent clicks through Chrome's debugger, like a real mouse, with animated cursor overlay and click ripples.
   Chrome shows a yellow "is debugging this browser" bar during the task.
   If the debugger cannot attach (for example when DevTools is open), it falls back to synthetic clicks.
@@ -231,7 +232,7 @@ What will change for you:
   The LangGraph runtime foundation and AgentRunner are the primary engine (phases P4 and P7).
   Long-horizon multi-site orchestration, dynamic scheduling, multi-mode worker policy, budgeting with slack recycling, blocked escalation ladders, loop/stuck detection, effort profiles, and LLM reflection with plan revisions are available in the graph engine (phase P5).
   Deterministic keyword-based risk gating and banned action recovery protect against hazardous executions (phase P5d).
-  The side panel UI features interactive Plan Approval, Action Confirmation, Security Challenge Help, Continue Budget, and Provenance Findings cards with Studio Mono styling and live graph breadcrumbs (phases P6 and P7b).
+  The side panel UI features Action Confirmation, Security Challenge Help, Continue Budget, and Provenance Findings cards with Studio Mono styling and live graph breadcrumbs (phases P6 and P7b); plans are approved automatically instead of through a Plan Approval card.
   The legacy engine, content scripts, and side panel core are still plain JavaScript, and they move in later phases.
 
 See [PRD.md](PRD.md) for the details.

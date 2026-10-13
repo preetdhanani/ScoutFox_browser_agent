@@ -61,22 +61,24 @@
  * expectation is the worker of the table above with some room (3,500 KB against about 3,190 KB now), and it moves
  * with the worker: raise it together with a table row when a phase adds to the worker on purpose.
  */
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const ROOT = fileURLToPath(new URL('.', import.meta.url));
 export const OUT_DIR = 'dist';
 
-export const WORKER_ENTRY = 'background/background.js';
+export const WORKER_ENTRY = 'src/background/background.ts';
 export const WORKER_OUTPUT = 'background/sw.js';
 export const SIDE_PANEL_ENTRY = 'sidepanel/sidepanel.html';
 // Source path in, dist path out. They are the same today; they will differ once the sources move.
 // Order does not matter for the build. The manifest decides the injection order.
 export const CONTENT_ENTRIES = [
-  { input: 'content/domCompressor.js', output: 'content/domCompressor.js' },
-  { input: 'content/actionExecutor.js', output: 'content/actionExecutor.js' },
+  { input: 'src/content/domCompressorEntry.ts', output: 'content/domCompressor.js' },
+  { input: 'src/content/actionExecutorEntry.ts', output: 'content/actionExecutor.js' },
   { input: 'content/content.js', output: 'content/content.js' },
-  { input: 'content/net-recorder.js', output: 'content/net-recorder.js' }
+  { input: 'src/content/net-recorder.ts', output: 'content/net-recorder.js' },
+  { input: 'content/netRelay.js', output: 'content/netRelay.js' }
 ];
 
 /**
@@ -164,6 +166,26 @@ export function warningRecorder() {
   return recorder;
 }
 
+let stampCache;
+
+/**
+ * "<ISO time> <git short hash>[-dirty]", the same for every pass of one build run. Read by src/shared/build.ts and printed in
+ * the worker's boot log, so a pasted log shows which build ran. git is optional: no git, or a copy of the repo without .git,
+ * gives "no-git" and never fails the build.
+ */
+export function buildStamp() {
+  if (stampCache) return stampCache;
+  let rev = 'no-git';
+  try {
+    const run = (args) => execFileSync('git', args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).toString().trim();
+    rev = run(['rev-parse', '--short', 'HEAD']) + (run(['status', '--porcelain']) ? '-dirty' : '');
+  } catch {
+    // keep "no-git"
+  }
+  stampCache = `${new Date().toISOString()} ${rev}`;
+  return stampCache;
+}
+
 /** Options every pass shares. `publicDir` and `emptyOutDir` are switched on by the first pass only. */
 function base(recorder, output = {}) {
   return {
@@ -174,7 +196,7 @@ function base(recorder, output = {}) {
     // build.mjs prints its own summary. Warnings and errors still come through.
     logLevel: 'warn',
     publicDir: false,
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+    define: { 'process.env.NODE_ENV': JSON.stringify('production'), __SCOUTFOX_BUILD__: JSON.stringify(buildStamp()) },
     build: {
       outDir: OUT_DIR,
       emptyOutDir: false,

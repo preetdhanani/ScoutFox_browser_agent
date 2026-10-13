@@ -13,7 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { describeRestrictedUrl } = await import('../background/agentEngine.js');
+const { describeRestrictedUrl } = await import('../src/background/browser/tabs.ts');
 
 const RESTRICTED = [
   ['chrome://extensions/', 'internal chrome:// page'],

@@ -1,6 +1,7 @@
 {
   "title": "Just a moment...",
   "url": "http://127.0.0.1:8765/challenge.html",
+  "domain": "127.0.0.1",
   "scrollState": {
     "scrollY": 0,
     "pageHeight": 779,
@@ -8,5 +9,24 @@
   },
   "elementCount": 2,
   "elementsText": "[1] input[checkbox] \"Verify you are human\" (label=\"Verify you are human\" value=\"on\")\n[2] a \"Cloudflare\"",
+  "refs": [
+    1,
+    2
+  ],
+  "shownRefs": [
+    1,
+    2
+  ],
+  "elementInfo": {
+    "1": {
+      "role": "checkbox",
+      "label": "Verify you are human",
+      "fieldKind": "text"
+    },
+    "2": {
+      "role": "link",
+      "label": "Cloudflare"
+    }
+  },
   "pageText": "\n### shop.example\n\nVerifying you are human. This may take a few seconds.\nshop.example needs to review the security of your connection before proceeding.\nRay ID: 8c1f2a3b4d5e6f70\nPerformance & security by Cloudflare"
 }

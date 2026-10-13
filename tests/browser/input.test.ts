@@ -363,3 +363,99 @@ test('InputDispatcher: click falls back to synthetic when CDP click throws', asy
   assert.equal(res.via, 'synthetic');
   assert.equal(syntheticCalled, true);
 });
+
+test('InputDispatcher: safeProbeEnd returns unknown when probe message throws or fails', async () => {
+  const fc = fakeChrome({
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    dom: {
+      101: {
+        EFFECT_PROBE_BEGIN: () => ({ success: true }),
+        EFFECT_PROBE_END: () => {
+          throw new Error('Could not establish connection.');
+        }
+      }
+    }
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  const dispatcher = new InputDispatcher(cdp);
+
+  const res = await (dispatcher as any).safeProbeEnd(101);
+  assert.equal(res, 'unknown');
+});
+
+test('InputDispatcher: click uses injected sleep for 300ms probe delay', async () => {
+  let sleepDuration = 0;
+  const fc = fakeChrome({
+    debugger: {
+      commands: {
+        'Emulation.setFocusEmulationEnabled': {},
+        'Input.dispatchMouseEvent': () => ({})
+      }
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: [{ result: 800 }] },
+    dom: {
+      101: {
+        RESOLVE_ELEMENT_POINT: () => ({ success: true, point: { x: 50, y: 50 }, tag: 'button', text: 'Go' }),
+        EFFECT_PROBE_BEGIN: () => ({ success: true }),
+        EFFECT_PROBE_END: () => ({ success: true, effect: 'dom_changed' })
+      }
+    }
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  const dispatcher = new InputDispatcher(cdp);
+
+  const customSleep = async (ms: number) => {
+    sleepDuration = ms;
+  };
+
+  const res = await dispatcher.dispatchAction(101, { action: 'click', element_id: 1 }, {
+    sleep: customSleep
+  });
+
+  assert.equal(res.success, true);
+  assert.equal(sleepDuration, 300);
+});
+
+test('InputDispatcher: click detects URL change even when initial URL was empty', async () => {
+  let currentUrl = '';
+  const fc = fakeChrome({
+    debugger: {
+      commands: {
+        'Emulation.setFocusEmulationEnabled': {},
+        'Input.dispatchMouseEvent': () => {
+          currentUrl = 'https://example.com/target';
+          return {};
+        }
+      }
+    },
+    tabs: { list: [{ id: 101, url: '' }] },
+    scripting: { executeScript: [{ result: 800 }] },
+    dom: {
+      101: {
+        RESOLVE_ELEMENT_POINT: () => ({ success: true, point: { x: 50, y: 50 }, tag: 'a', text: 'Link' }),
+        EFFECT_PROBE_BEGIN: () => ({ success: true }),
+        EFFECT_PROBE_END: () => ({ success: true, effect: 'none' })
+      }
+    }
+  });
+  (fc.chrome.tabs as any).get = (tabId: number, cb: (tab: any) => void) => {
+    cb({ id: tabId, url: currentUrl });
+  };
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  const dispatcher = new InputDispatcher(cdp);
+
+  const res = await dispatcher.dispatchAction(101, { action: 'click', element_id: 1 }, {
+    sleep: async () => {}
+  });
+
+  assert.equal(res.success, true);
+  assert.equal(res.effect, 'url_changed');
+  assert.equal(res.urlAfter, 'https://example.com/target');
+});

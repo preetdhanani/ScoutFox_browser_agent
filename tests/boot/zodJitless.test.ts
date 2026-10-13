@@ -66,8 +66,12 @@ test('the boot module only sets the flag, and imports nothing', () => {
 });
 
 test('the worker entry and the side panel entry import it first', () => {
-  for (const entry of ['background/background.js', 'sidepanel/sidepanel.js']) {
-    const imports = fs.readFileSync(`${ROOT}${entry}`, 'utf8').split('\n').filter((line) => /^import\b/.test(line));
-    assert.equal(imports[0], "import '../src/background/boot/zodJitless.ts';", `${entry}: the first import is not the zod boot module`);
+  const entries: Array<{ file: string; expected: string }> = [
+    { file: 'src/background/background.ts', expected: "import './boot/zodJitless.ts';" },
+    { file: 'sidepanel/sidepanel.js', expected: "import '../src/background/boot/zodJitless.ts';" }
+  ];
+  for (const { file, expected } of entries) {
+    const imports = fs.readFileSync(`${ROOT}${file}`, 'utf8').split('\n').filter((line) => /^import\b/.test(line));
+    assert.equal(imports[0], expected, `${file}: the first import is not the zod boot module`);
   }
 });

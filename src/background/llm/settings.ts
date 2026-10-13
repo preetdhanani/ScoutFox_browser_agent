@@ -1,7 +1,7 @@
 /**
  * llm/settings.ts - how a provider reads the settings it was handed.
  *
- * The rules are the ones apiClients.js always had: the top-level key wins over the key saved for the
+ * The rules for provider settings: the top-level key wins over the key saved for the
  * provider, and every value is trimmed. Base URLs get a trailing slash removed, and OpenAI-style ones
  * end in /v1.
  */
@@ -68,6 +68,85 @@ export function normalizeNvidiaBaseUrl(url?: string): string {
   return withV1(base);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Custom providers (user-added endpoints)
+// ---------------------------------------------------------------------------------------------
+
+/** Which wire dialect a user-added endpoint speaks. A property of the endpoint, not of the model behind it. */
+export type ProviderProtocol = 'openai' | 'anthropic';
+
+/** The scheme, host and port of a URL ("https://gateway.example:8443"), or null when it does not parse. */
+export function endpointOriginOf(url: string | undefined | null): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url.trim()).origin;
+  } catch {
+    return null;
+  }
+}
+
+/** The host of a URL, with a non-default port ("gateway.example", "localhost:8000"). '' when it does not parse. */
+export function endpointHostOf(url: string | undefined | null): string {
+  if (!url) return '';
+  try {
+    const parsed = new URL(url.trim());
+    return parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+  } catch {
+    return '';
+  }
+}
+
+/** Trailing endpoint paths a user may paste instead of the bare base. The same suffixes are
+ * stripped for both protocols (a user who picked the wrong dialect for the URL they pasted still
+ * gets a sane base, and the eventual error names the protocol that was used); what differs is
+ * only the path that gets appended. */
+const CUSTOM_ENDPOINT_SUFFIX = /\/+(?:chat\/completions|messages|models)\/?$/i;
+
+function trimmedUrlBase(url: string | undefined | null): string {
+  return (url || '').trim().replace(/\/+$/, '');
+}
+
+/**
+ * The base URL a custom OpenAI-style client posts against ({@link customChatUrl} appends the path).
+ *
+ * A trailing /chat/completions or /models is stripped (users paste the full endpoint), and /v1 is
+ * appended ONLY when the path is empty: a bare host gets the conventional /v1, while an explicit
+ * mount path (a relay at /api/openai) is respected as typed, because `withV1` would wrongly append
+ * /v1 to it. A URL already ending in a version segment is used as is.
+ */
+export function normalizeCustomOpenaiBase(url: string | undefined | null): string {
+  const base = trimmedUrlBase(url).replace(CUSTOM_ENDPOINT_SUFFIX, '').replace(/\/+$/, '');
+  let path: string;
+  try {
+    path = new URL(base).pathname.replace(/\/+$/, '');
+  } catch {
+    return base;
+  }
+  return path === '' ? `${base}/v1` : base;
+}
+
+/**
+ * The base URL a custom Anthropic-style client is given. The Anthropic SDK appends /v1/messages to
+ * the URL it is handed (see agentRouter.ts, which strips /v1 for the same reason), so a trailing
+ * /v1 would produce /v1/v1/messages. A trailing /messages or /models is stripped (users paste the
+ * full endpoint), then a trailing /v1 is stripped; a custom mount path is kept as typed.
+ */
+export function normalizeCustomAnthropicBase(url: string | undefined | null): string {
+  return trimmedUrlBase(url).replace(CUSTOM_ENDPOINT_SUFFIX, '').replace(/\/+$/, '').replace(/\/v1$/i, '');
+}
+
+/** The exact URL a chat request is posted to, for the form's live preview and for the sender. */
+export function customChatUrl(protocol: ProviderProtocol, baseUrl: string | undefined | null): string {
+  const base = protocol === 'anthropic' ? normalizeCustomAnthropicBase(baseUrl) : normalizeCustomOpenaiBase(baseUrl);
+  return protocol === 'anthropic' ? `${base}/v1/messages` : `${base}/chat/completions`;
+}
+
+/** The exact URL a model-list request is sent to, for the form's live preview and for the sender. */
+export function customModelsUrl(protocol: ProviderProtocol, baseUrl: string | undefined | null): string {
+  const base = protocol === 'anthropic' ? normalizeCustomAnthropicBase(baseUrl) : normalizeCustomOpenaiBase(baseUrl);
+  return protocol === 'anthropic' ? `${base}/v1/models` : `${base}/models`;
+}
+
 /** LangChain's own default is 4096, which is too little for a page's worth of actions, so Anthropic-style calls always send one. */
 const DEFAULT_MAX_TOKENS = 8192;
 
@@ -89,10 +168,18 @@ export function timeoutMsOf(settings: LlmSettings): number {
   const provider = providerOf(settings);
   const defaultMs = provider === 'nvidia' ? DEFAULT_NVIDIA_LLM_TIMEOUT_MS : DEFAULT_LLM_TIMEOUT_MS;
   const configMs = Number(settings.providerConfigs?.[provider]?.llmTimeoutMs);
+  // A user-added provider keeps its own timeout in its descriptor (the dialog's field); it takes
+  // precedence over the global value, after the shared per-provider config, mirroring how the
+  // NVIDIA per-provider timeout is honored for a built-in.
+  const customMs = Number(settings.customProviders?.[provider]?.llmTimeoutMs);
   const raw = Number(settings.llmTimeoutMs);
 
   if (configMs > 0) {
     return Math.min(configMs, MAX_TIMER_MS);
+  }
+
+  if (customMs > 0) {
+    return Math.min(customMs, MAX_TIMER_MS);
   }
 
   if (raw > 0) {
@@ -100,4 +187,17 @@ export function timeoutMsOf(settings: LlmSettings): number {
   }
 
   return Math.min(defaultMs, MAX_TIMER_MS);
+}
+
+/** Where the effective timeout came from, worded for the timeout error text (B3.3): the message
+ * names the value AND its source, in the same precedence order timeoutMsOf applies. */
+export function timeoutSourceOf(settings: LlmSettings): string {
+  const provider = providerOf(settings);
+  const configMs = Number(settings.providerConfigs?.[provider]?.llmTimeoutMs);
+  const customMs = Number(settings.customProviders?.[provider]?.llmTimeoutMs);
+  const raw = Number(settings.llmTimeoutMs);
+  if (configMs > 0) return 'the provider\'s own timeout setting';
+  if (customMs > 0) return 'the provider\'s own timeout setting';
+  if (raw > 0) return 'the global timeout setting';
+  return provider === 'nvidia' ? 'the NVIDIA default timeout' : 'the default timeout';
 }

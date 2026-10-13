@@ -1,26 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { isValidWebTab } from '../src/background/browser/tabs.ts';
+
 // Test 1: isValidWebTab url validation logic
 test('isValidWebTab - rejects Chrome Web Store and restricted protocols', () => {
-  function isValidWebTab(tab) {
-    if (!tab || !tab.url) return false;
-    const url = tab.url.toLowerCase();
-
-    if (url.includes('chromewebstore.google.com') || url.includes('chrome.google.com/webstore')) {
-      return false;
-    }
-
-    return !url.startsWith('chrome://') && 
-           !url.startsWith('chrome-extension://') && 
-           !url.startsWith('chrome-search://') && 
-           !url.startsWith('chrome-untrusted://') && 
-           !url.startsWith('edge://') && 
-           !url.startsWith('about:') && 
-           !url.startsWith('view-source:') && 
-           !url.startsWith('devtools:') && 
-           !url.startsWith('data:');
-  }
 
   assert.equal(isValidWebTab({ url: 'https://chromewebstore.google.com/detail/scoutfox' }), false);
   assert.equal(isValidWebTab({ url: 'https://chrome.google.com/webstore/category/extensions' }), false);

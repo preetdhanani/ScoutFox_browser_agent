@@ -6,6 +6,7 @@ import { isGraphInterrupt, type LangGraphRunnableConfig } from '@langchain/langg
 import type { Settings } from '../../shared/storage.ts';
 import type { ControlSnapshot, Effect, HistoryEntry, NodeName, PolicyMode, TrailEntry } from '../graph/state.ts';
 import type { NetFilter, OneShot, PageAction, PageSig } from '../graph/workerState.ts';
+import type { GateContext, GateDecision } from '../agent/finishPolicy.ts';
 
 export interface RunControl {
   pauseRequested: boolean;
@@ -13,7 +14,7 @@ export interface RunControl {
   stepSignal(): AbortSignal;                            // fresh AbortController per LLM call or wait; already
                                                         // aborted (reason tagged user) if pause or stop is set
   abortStep(reason: 'user_pause' | 'user_stop'): void;  // signal.reason = { scoutfox: 'user', reason }
-  isUserAbort(err: unknown, signal: AbortSignal): boolean; // checks the reason tag, never error text
+  isUserAbort(err: unknown, signal?: AbortSignal): boolean; // checks the reason tag, never error text
   snapshot(): ControlSnapshot;
 }
 
@@ -42,6 +43,7 @@ export interface ExecResult {
   error?: string;
   label?: string;
   submitted?: boolean;
+  result?: unknown;
   resultData?: unknown;
   via: 'cdp' | 'synthetic' | 'background';
   effect: Effect;
@@ -104,6 +106,9 @@ export interface RunRuntime {
     now(): number;
     sleep(ms: number, signal?: AbortSignal): Promise<void>;
   };
+  finishPolicy?: (ctx: GateContext) => GateDecision;
+  typedTexts?: string[];
+  navigatedFrom?: { site: string; before: string } | null;
 }
 
 const registry = new Map<string, RunRuntime>();

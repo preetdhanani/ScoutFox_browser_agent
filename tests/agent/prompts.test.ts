@@ -77,3 +77,179 @@ test('prompts: buildPolicyUserMessage injects budget and failure memory', () => 
   assert.ok(msg.includes('(x2, blocked by ScoutFox)'));
   assert.ok(msg.includes('CURRENT PAGE: "Framework Shop" - https://frame.work (product)'));
 });
+
+test('prompts: buildPolicySystemPrompt uses wait {amount} and press_key keys without Space', () => {
+  const prompt = buildPolicySystemPrompt('browse', 'small', ['price'], true, 'collect');
+  assert.ok(prompt.includes('wait {amount} - 1 to 5, only while the page is still loading'));
+  assert.ok(!prompt.includes('wait {seconds}'));
+  assert.ok(prompt.includes('press_key {key} - Enter, Escape, Tab, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, PageDown, PageUp, Home, End, Backspace, Delete'));
+  assert.ok(!prompt.includes('Backspace, Space'));
+});
+
+test('prompts: buildPolicySystemPrompt includes large tier actions when tier is large', () => {
+  const prompt = buildPolicySystemPrompt('browse', 'large', ['price'], true, 'collect');
+  assert.ok(prompt.includes('execute_js {code}'));
+  assert.ok(prompt.includes('read_network_requests {filter, includeBody, limit}'));
+  assert.ok(prompt.includes('browser_batch {steps, stopOnError}'));
+  assert.ok(prompt.includes('open_window {url}'));
+});
+
+test('prompts: buildPolicySystemPrompt excludes large tier actions when tier is small', () => {
+  const prompt = buildPolicySystemPrompt('browse', 'small', ['price'], true, 'collect');
+  assert.ok(!prompt.includes('execute_js'));
+  assert.ok(!prompt.includes('browser_batch'));
+  assert.ok(!prompt.includes('open_window'));
+});
+
+test('prompts: buildPolicySystemPrompt uses subgoal_done for non-collect goalKind', () => {
+  const prompt = buildPolicySystemPrompt('browse', 'small', [], false, 'do');
+  assert.ok(prompt.includes('subgoal_done {summary, evidence}'));
+  assert.ok(!prompt.includes('record_finding'));
+});
+
+test('prompts: buildPolicySystemPrompt uses subgoal_done for an answer site in browse mode', () => {
+  const prompt = buildPolicySystemPrompt('browse', 'small', [], false, 'answer');
+  assert.ok(prompt.includes('subgoal_done {summary, evidence}'), 'an answer site browsing first ends with subgoal_done');
+  assert.ok(!prompt.includes('record_finding'));
+});
+
+test('prompts: buildPlanUserMessage renders earlier session goal and answer when present', () => {
+  const msg = buildPlanUserMessage({
+    task: 'Find the lowest price',
+    tabTitle: 'Shop',
+    tabUrl: 'https://shop.test',
+    earlierSessionGoal: 'Look up item 42',
+    earlierSessionAnswer: 'Item 42 was 99 USD',
+  });
+  assert.ok(msg.includes('Earlier in this session:'));
+  assert.ok(msg.includes('- Asked: "Look up item 42"'));
+  assert.ok(msg.includes('Result: Item 42 was 99 USD'));
+});
+
+test('prompts: buildPlanUserMessage works when tabTitle and tabUrl are absent', () => {
+  const msg = buildPlanUserMessage({ task: 'Inspect widgets' });
+  assert.equal(msg, 'Task: Inspect widgets');
+});
+
+test('prompts: buildPolicyUserMessage renders harvest budget when meterMode is harvest', () => {
+  const msg = buildPolicyUserMessage({
+    task: 'Harvest details',
+    siteIndex: 1,
+    totalSites: 1,
+    domain: 'store.test',
+    role: 'primary',
+    goal: 'Extract phone number',
+    usedSteps: 9,
+    allocSteps: 10,
+    meterMode: 'harvest',
+    pageTitle: 'Contact',
+    pageUrl: 'https://store.test/contact',
+    pageType: 'page',
+    scrollY: 0,
+    pageText: 'Phone: 555-1234',
+    elementsText: '[1] text "555-1234"',
+  });
+  assert.ok(msg.includes('BUDGET: Only 1 steps left on this site: save what this page shows now.'));
+});
+
+test('prompts: buildPolicyUserMessage includes price candidates formatted with currency and value', () => {
+  const msg = buildPolicyUserMessage({
+    task: 'Check price',
+    siteIndex: 1,
+    totalSites: 1,
+    domain: 'shop.test',
+    role: 'primary',
+    goal: 'Find price',
+    usedSteps: 1,
+    allocSteps: 10,
+    meterMode: 'normal',
+    pageTitle: 'Item',
+    pageUrl: 'https://shop.test/item',
+    pageType: 'product',
+    scrollY: 0,
+    pageText: 'Item 42',
+    elementsText: '',
+    priceCandidates: [
+      { id: '[1]', text: '$99.00', value: 99, currency: '$', context: 'Main offer' },
+      'stringCandidate',
+    ],
+  });
+  assert.ok(msg.includes('PRICE CANDIDATES:'));
+  assert.ok(msg.includes('[1] $99.00 ($99) - "Main offer"'));
+  assert.ok(msg.includes('stringCandidate'));
+});
+
+test('prompts: buildPolicyUserMessage includes correction when provided', () => {
+  const msg = buildPolicyUserMessage({
+    task: 'Find item',
+    siteIndex: 1,
+    totalSites: 1,
+    domain: 'shop.test',
+    role: 'primary',
+    goal: 'Find item',
+    usedSteps: 2,
+    allocSteps: 10,
+    meterMode: 'normal',
+    pageTitle: 'Shop',
+    pageUrl: 'https://shop.test',
+    pageType: 'listing',
+    scrollY: 0,
+    pageText: '',
+    elementsText: '',
+    correction: 'Element 4 is not clickable, choose element 5 instead.',
+  });
+  assert.ok(msg.includes('CORRECTION: Element 4 is not clickable, choose element 5 instead.'));
+});
+
+test('prompts: buildPolicyUserMessage includes userAnswers and oneShotContext when provided', () => {
+  const msg = buildPolicyUserMessage({
+    task: 'Book ticket',
+    siteIndex: 1,
+    totalSites: 1,
+    domain: 'book.test',
+    role: 'primary',
+    goal: 'Select date',
+    usedSteps: 3,
+    allocSteps: 10,
+    meterMode: 'normal',
+    pageTitle: 'Booking',
+    pageUrl: 'https://book.test',
+    pageType: 'listing',
+    scrollY: 0,
+    pageText: '',
+    elementsText: '',
+    userAnswers: ['I prefer aisle seat', 'Flight at 10 AM'],
+    oneShotContext: 'ONESHOT: Here is an example interaction.',
+  });
+  assert.ok(msg.includes('You asked a question and the user answered: "I prefer aisle seat".'));
+  assert.ok(msg.includes('You asked a question and the user answered: "Flight at 10 AM".'));
+  assert.ok(msg.includes('ONESHOT: Here is an example interaction.'));
+});
+
+test('prompts: buildPolicyUserMessage caps recentSteps to last 5 entries', () => {
+  const recent = ['step 1', 'step 2', 'step 3', 'step 4', 'step 5', 'step 6', 'step 7'];
+  const msg = buildPolicyUserMessage({
+    task: 'Walkthrough',
+    siteIndex: 1,
+    totalSites: 1,
+    domain: 'test.com',
+    role: 'primary',
+    goal: 'Walkthrough',
+    usedSteps: 7,
+    allocSteps: 20,
+    meterMode: 'normal',
+    pageTitle: 'Test',
+    pageUrl: 'https://test.com',
+    pageType: 'listing',
+    scrollY: 0,
+    pageText: '',
+    elementsText: '',
+    recentSteps: recent,
+  });
+  assert.ok(msg.includes('RECENT STEPS:'));
+  assert.ok(!msg.includes('step 1'));
+  assert.ok(!msg.includes('step 2'));
+  assert.ok(msg.includes('step 3'));
+  assert.ok(msg.includes('step 7'));
+});
+

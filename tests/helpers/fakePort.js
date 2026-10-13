@@ -1,6 +1,6 @@
 /**
  * Shared chrome.runtime.connect() port fake, for tests that drive the real background.js
- * through its onConnect listener rather than calling AgentEngine directly.
+ * through its onConnect listener rather than calling the agent runner directly.
  *
  * Was hand-rolled byte-for-byte identically in backgroundSessionFreshCollision.test.js,
  * multiWindowSameSessionE2E.test.js and multiWindowSessionIsolation.test.js.

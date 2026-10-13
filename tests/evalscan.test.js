@@ -111,7 +111,7 @@ const NOT_ALLOWED_FILES = [
   'src/background/llm/factory.ts',
   'src/background/agent/parse.ts',
   'src/shared/storage.ts',
-  'background/background.js',
+  'src/background/background.ts',
   'sidepanel/sidepanel.js',
   'content/content.js',
   'node_modules/some-other-library/index.js',
@@ -127,7 +127,7 @@ test('every allowlist entry is narrow: a file, a kind, a snippet and a count', (
 
 test('the only allowlist entry that is not a library is the in-page execute_js', () => {
   const ours = ALLOWLIST.filter((entry) => !entry.file.startsWith('node_modules/'));
-  assert.deepEqual(ours.map((entry) => entry.file), ['background/agentEngine.js']);
+  assert.deepEqual(ours.map((entry) => entry.file), ['src/background/browser/executeJs.ts']);
   assert.match(ours[0].snippet, /async \(\) => \{ \$\{src\} \}/);
 });
 

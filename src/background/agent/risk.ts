@@ -31,7 +31,22 @@ export interface RiskEvaluationInput {
   pageType?: string | null;
   pageUrl?: string;
   approvedDomains?: string[];
+  /**
+   * Resolves an element id against the page snapshot. Used by the browser_batch
+   * recursion: model-produced batch steps never carry their own elementInfo, so
+   * the caller must resolve each step's element the same way it does for the
+   * top-level action, or the rules that depend on elementInfo (password fields,
+   * risky labels, login/submit detection) are blind inside every batch.
+   */
+  resolveElementInfo?: (elementId: number) => ElementInfo | null | undefined;
 }
+
+/**
+ * Batch steps that act on a page element. If one of these arrives without any
+ * inspectable element info, the verdict fails closed to risky: a prompt-injected
+ * page must not be able to slip an action past the gate by omitting context.
+ */
+const ELEMENT_TARGETING_VERBS = new Set(['click', 'type', 'select_option']);
 
 /**
  * Extracts and normalizes the hostname from a URL string.
@@ -111,13 +126,98 @@ function containsAnyWord(text: string, words: string[]): boolean {
  * Evaluates the risk of a proposed action according to ScoutFox Risk Gate rules.
  */
 export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdict {
-  const { action, elementInfo, pageType, pageUrl = '', approvedDomains = [] } = input;
+  const { action, elementInfo, pageType, pageUrl = '', approvedDomains = [], resolveElementInfo } = input;
   const actionVerb = action.action;
   const label = (elementInfo?.label || '').trim();
   const formKind = elementInfo?.formKind;
   const fieldKind = elementInfo?.fieldKind;
 
   const actionSummary = describeAction(action, elementInfo);
+
+  // execute_js runs arbitrary page code: risky
+  if (actionVerb === 'execute_js') {
+    return {
+      level: 'risky',
+      variant: 'form',
+      reason: 'Executing arbitrary JavaScript code on the page.',
+      actionSummary,
+    };
+  }
+
+  // browser_batch evaluates each step: most severe step decides
+  if (actionVerb === 'browser_batch') {
+    const steps = Array.isArray(action.steps) ? action.steps : [];
+    if (steps.length === 0) {
+      return {
+        level: 'safe',
+        reason: 'Empty batch.',
+        actionSummary,
+      };
+    }
+
+    let worstVerdict: ActionRiskVerdict = {
+      level: 'safe',
+      reason: 'Standard batch action.',
+      actionSummary,
+    };
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const stepVerb = typeof step?.action === 'string' ? step.action : '';
+
+      // A model-produced batch step never carries its own elementInfo (the step
+      // schema does not define it), so resolve the step's element from the page
+      // snapshot exactly like the top-level action. Without this, every rule
+      // that depends on elementInfo sees null inside a batch and returns safe.
+      let stepInfo: ElementInfo | null = step?.elementInfo ?? null;
+      if (!stepInfo && typeof step?.element_id === 'number' && resolveElementInfo) {
+        stepInfo = resolveElementInfo(step.element_id) ?? null;
+      }
+
+      // Fail closed: an element-targeting step whose element cannot be inspected
+      // (unknown or stale id, or no resolver) must not classify as safe, or a
+      // prompt-injected page could evade the gate by omitting the context.
+      if (!stepInfo && ELEMENT_TARGETING_VERBS.has(stepVerb)) {
+        const uninspectable: ActionRiskVerdict = {
+          level: 'risky',
+          variant: 'form',
+          reason: `Batch step ${i + 1} targets an element the risk gate cannot inspect (${stepVerb || 'unknown action'}); the step needs confirmation.`,
+          actionSummary,
+        };
+        if (worstVerdict.level !== 'risky') {
+          worstVerdict = uninspectable;
+        }
+        continue;
+      }
+
+      const stepVerdict = evaluateActionRisk({
+        action: step,
+        elementInfo: stepInfo,
+        pageType,
+        pageUrl,
+        approvedDomains,
+        resolveElementInfo,
+      });
+
+      if (stepVerdict.level === 'forbidden') {
+        return {
+          ...stepVerdict,
+          actionSummary,
+          reason: `Batch step ${i + 1} forbidden: ${stepVerdict.reason}`,
+        };
+      }
+
+      if (stepVerdict.level === 'risky' && worstVerdict.level !== 'risky') {
+        worstVerdict = {
+          ...stepVerdict,
+          actionSummary,
+          reason: `Batch step ${i + 1} risky: ${stepVerdict.reason}`,
+        };
+      }
+    }
+
+    return worstVerdict;
+  }
 
   // 1. FORBIDDEN: Typing into credentials/OTP fields
   if (actionVerb === 'type') {
@@ -307,8 +407,12 @@ function describeAction(action: any, elementInfo?: ElementInfo | null): string {
   if (verb === 'open_window') {
     return `Open window at ${action.url || 'URL'}`;
   }
-  if (verb === 'scroll') {
-    return `Scroll ${action.direction || 'down'}`;
+  if (verb === 'execute_js') {
+    return 'Execute JS';
+  }
+  if (verb === 'browser_batch') {
+    const count = Array.isArray(action.steps) ? action.steps.length : 0;
+    return `Batch (${count} steps)`;
   }
   return `${verb} ${label || idStr}`.trim();
 }

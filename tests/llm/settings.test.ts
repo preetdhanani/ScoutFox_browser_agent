@@ -60,6 +60,14 @@ test('the timeout is llmTimeoutMs, 120 s when it is not a positive number, and n
   assert.equal(timeoutMsOf({ llmTimeoutMs: 1e12 }), 2 ** 31 - 1);
 });
 
+test('a user-added provider\'s own timeout sits between the per-provider config and the global value', () => {
+  const custom = { 'acme-gateway': { id: 'acme-gateway', displayName: 'Acme', protocol: 'openai' as const, baseUrl: 'https://gw.example', models: [], keyMode: 'apiKey' as const, createdAt: 1, updatedAt: 1, llmTimeoutMs: 4000 } };
+  assert.equal(timeoutMsOf({ provider: 'acme-gateway', customProviders: custom } as LlmSettings), 4000, 'the descriptor value alone');
+  assert.equal(timeoutMsOf({ provider: 'acme-gateway', llmTimeoutMs: 60000, customProviders: custom } as LlmSettings), 4000, 'it beats the global value');
+  assert.equal(timeoutMsOf({ provider: 'acme-gateway', providerConfigs: { 'acme-gateway': { llmTimeoutMs: 8000 } }, customProviders: custom } as LlmSettings), 8000, 'the shared per-provider config still wins');
+  assert.equal(timeoutMsOf({ provider: 'openai' } as LlmSettings), 120000, 'a built-in without values keeps the default');
+});
+
 test('normalizeNvidiaBaseUrl maps build.nvidia.com, strips endpoints, and ends in /v1', () => {
   assert.equal(normalizeNvidiaBaseUrl(''), 'https://integrate.api.nvidia.com/v1');
   assert.equal(normalizeNvidiaBaseUrl(undefined), 'https://integrate.api.nvidia.com/v1');

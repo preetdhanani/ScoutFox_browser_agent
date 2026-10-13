@@ -1,0 +1,207 @@
+/**
+ * ScoutFox DOMCompressor Class
+ * Extracts interactive elements from the webpage and produces a concise structured snapshot.
+ * Preserves the instance method dispatch seam for all callers and tamper scripts.
+ */
+
+import {
+  extractPageTextFromDocument,
+  finishPageText,
+  collapseRepeatedRuns,
+  capPageText,
+  PAGE_TEXT_CAP
+} from './pageText.ts';
+import {
+  generateDocId,
+  getElementFromMap,
+  resolveElementWithStatus,
+  type ElementMap,
+  type ResolveElementResult
+} from './refMap.ts';
+import {
+  computeRole,
+  computeFieldKind,
+  computeFormKind,
+  computeHrefDomain,
+  getElementSummary as formatElementSummary,
+  type FormattedElement,
+  type ElementInfoRecord
+} from './perception.ts';
+import {
+  getCssPath,
+  findInteractiveElements,
+  isVisible
+} from './snapshot.ts';
+
+export interface SnapshotOptions {
+  maxElements?: number;
+  withElementInfo?: boolean;
+  showBadges?: boolean;
+}
+
+export interface ScrollState {
+  scrollY: number;
+  pageHeight: number;
+  viewportHeight: number;
+}
+
+export interface DomSnapshot {
+  title: string;
+  url: string;
+  domain: string;
+  scrollState: ScrollState;
+  elementCount: number;
+  elementsText: string;
+  elements: FormattedElement[];
+  refs: number[];
+  shownRefs: number[];
+  elementInfo: Record<string | number, ElementInfoRecord>;
+  pageText: string;
+}
+
+export class DOMCompressor {
+  elementMap: ElementMap;
+  counter: number;
+  docId: string;
+  elements?: FormattedElement[];
+  elementInfo: Record<string | number, ElementInfoRecord>;
+
+  constructor() {
+    this.elementMap = new Map();
+    this.counter = 0;
+    this.docId = this.generateDocId();
+    this.elementInfo = {};
+  }
+
+  generateDocId(): string {
+    return generateDocId(typeof crypto !== 'undefined' ? crypto : undefined);
+  }
+
+  getSnapshot(options: SnapshotOptions = {}): DomSnapshot {
+    const maxElements = options.maxElements || 120;
+    this.elementMap.clear();
+    this.elementInfo = {};
+    this.counter = 0;
+    this.docId = this.docId || this.generateDocId();
+
+    const interactiveElements = this.findInteractiveElements();
+    const formattedElements: FormattedElement[] = [];
+
+    for (const el of interactiveElements) {
+      if (this.counter >= maxElements) break;
+
+      this.counter++;
+      const id = this.counter;
+      if (typeof WeakRef !== 'undefined') {
+        this.elementMap.set(id, new WeakRef(el));
+      } else {
+        this.elementMap.set(id, el);
+      }
+
+      el.setAttribute('data-agent-id', String(id));
+      const info = this.getElementSummary(el, id);
+      formattedElements.push(info);
+    }
+
+    const doc = typeof document !== 'undefined' ? document : undefined;
+    const win = typeof window !== 'undefined' ? window : undefined;
+
+    const title = (doc && doc.title) || 'Untitled Page';
+    const url = (win && win.location && win.location.href) || '';
+    const scrollY = Math.round((win && win.scrollY) || 0);
+    const pageHeight = Math.round((doc && doc.documentElement && doc.documentElement.scrollHeight) || 0);
+    const viewportHeight = (win && win.innerHeight) || 0;
+
+    this.elements = formattedElements;
+
+    const refs = formattedElements.map((e) => e.id);
+    const shownRefs = refs.slice();
+    let domain = '';
+    try {
+      domain = (win && win.location && win.location.hostname) || '';
+    } catch {
+      // Ignored
+    }
+
+    return {
+      title,
+      url,
+      domain,
+      scrollState: { scrollY, pageHeight, viewportHeight },
+      elementCount: formattedElements.length,
+      elementsText: formattedElements.map((e) => e.formatted).join('\n'),
+      elements: formattedElements,
+      refs,
+      shownRefs,
+      elementInfo: this.elementInfo || {},
+      pageText: this.extractPageText()
+    };
+  }
+
+  extractPageText(): string {
+    const doc = typeof document !== 'undefined' ? document : undefined;
+    const win = typeof window !== 'undefined' ? window : undefined;
+    return extractPageTextFromDocument(doc, win);
+  }
+
+  finishPageText(text: string): string {
+    return finishPageText(text);
+  }
+
+  collapseRepeatedRuns(text: string): string {
+    return collapseRepeatedRuns(text);
+  }
+
+  capPageText(text: string, cap = PAGE_TEXT_CAP, cutEarlier = false): string {
+    return capPageText(text, cap, cutEarlier);
+  }
+
+  getElement(id: number | string): Element | null {
+    const doc = typeof document !== 'undefined' ? document : undefined;
+    return getElementFromMap(this.elementMap, id, doc);
+  }
+
+  resolveElementWithStatus(id: number | string, expectedDocId?: string): ResolveElementResult {
+    const doc = typeof document !== 'undefined' ? document : undefined;
+    return resolveElementWithStatus(this.elementMap, id, this.docId, expectedDocId, doc);
+  }
+
+  getCssPath(el: Element): string {
+    const doc = typeof document !== 'undefined' ? document : undefined;
+    return getCssPath(el, doc);
+  }
+
+  findInteractiveElements(): Element[] {
+    const doc = typeof document !== 'undefined' ? document : undefined;
+    return findInteractiveElements(doc);
+  }
+
+  isVisible(el: Element): boolean {
+    return isVisible(el);
+  }
+
+  computeRole(el: Element, tagName: string, type: string): string {
+    return computeRole(el, tagName, type);
+  }
+
+  computeFieldKind(el: Element, tagName: string, type: string): string | undefined {
+    return computeFieldKind(el, tagName, type);
+  }
+
+  computeFormKind(el: Element): string | undefined {
+    return computeFormKind(el);
+  }
+
+  computeHrefDomain(el: Element, tagName: string): string | undefined {
+    const win = typeof window !== 'undefined' ? window : undefined;
+    return computeHrefDomain(el, tagName, win && win.location ? win.location.href : undefined);
+  }
+
+  getElementSummary(el: Element, id: number): FormattedElement {
+    const win = typeof window !== 'undefined' ? window : undefined;
+    const { summary, info } = formatElementSummary(el, id, (element) => this.getCssPath(element), win);
+    this.elementInfo = this.elementInfo || {};
+    this.elementInfo[id] = info;
+    return summary;
+  }
+}

@@ -183,6 +183,41 @@ export function wrapFailure(provider: ChatProvider, inner: string, ctx: FailureC
 }
 
 // ---------------------------------------------------------------------------------------------
+// Custom providers (user-added endpoints)
+// ---------------------------------------------------------------------------------------------
+
+/** The user-facing name of each protocol, for error texts that say which dialect was spoken. */
+export function protocolLabel(protocol: 'openai' | 'anthropic'): string {
+  return protocol === 'anthropic' ? 'Anthropic Messages' : 'OpenAI Chat Completions';
+}
+
+export interface CustomFailureContext extends FailureContext {
+  /** The display name of the provider, as the panel and the logs show it. */
+  providerLabel: string;
+  /** The dialect that was spoken, so a provider pointed at the wrong endpoint is recognizable from the text alone. */
+  protocol: 'openai' | 'anthropic';
+}
+
+/**
+ * The provider's own words for a failed call to a user-added endpoint. Unlike the built-ins, the
+ * text names the display name, the protocol and the exact URL, because no curated knowledge exists
+ * for an endpoint ScoutFox has never heard of: the user must be able to see what was sent (B3).
+ */
+export function describeCustomFailure(error: unknown, ctx: CustomFailureContext): string {
+  const status = statusOf(error);
+  const dialect = protocolLabel(ctx.protocol);
+  const text = status === undefined
+    ? `${ctx.providerLabel} (${dialect}) could not be reached at ${ctx.baseUrl}: ${detailOf(ctx.protocol, error)}`
+    : `${ctx.providerLabel} (${dialect}) returned ${status} at ${ctx.baseUrl}: ${bodyOf(ctx.protocol, error, ctx)}`;
+  return scrubKey(text, ctx.apiKey);
+}
+
+/** The text that is thrown to the caller for a user-added endpoint: the same words behind its own prefix. */
+export function wrapCustomFailure(inner: string, ctx: CustomFailureContext): string {
+  return `${ctx.providerLabel} connection error: ${inner}`;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Ollama
 // ---------------------------------------------------------------------------------------------
 

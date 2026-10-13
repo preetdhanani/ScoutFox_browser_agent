@@ -26,6 +26,7 @@ export interface LadderContext {
     waitForTabComplete?: (tabId: number, timeoutMs: number) => Promise<any>;
   };
   sleep?: (ms: number) => Promise<void>;
+  systemAction?: (tabId: number, kind: any, url?: string, opts?: any) => Promise<any>;
 }
 
 export interface LadderResult {
@@ -108,7 +109,9 @@ export async function executeBlockedLadder(
       }
     }
 
-    if (ctx.browser.reload) {
+    if (ctx.systemAction) {
+      await ctx.systemAction(ctx.tabId, 'reload').catch(() => {});
+    } else if (ctx.browser.reload) {
       await ctx.browser.reload(ctx.tabId).catch(() => {});
     } else if (ctx.browser.reloadTab) {
       await ctx.browser.reloadTab(ctx.tabId).catch(() => {});
@@ -117,7 +120,7 @@ export async function executeBlockedLadder(
       if (current?.url) await ctx.browser.navigate(ctx.tabId, current.url).catch(() => {});
     }
 
-    if (ctx.browser.waitForTabComplete) {
+    if (!ctx.systemAction && ctx.browser.waitForTabComplete) {
       await ctx.browser.waitForTabComplete(ctx.tabId, 8000).catch(() => {});
     }
     if (verdict === 'challenge') {
@@ -134,9 +137,13 @@ export async function executeBlockedLadder(
   if (rung === 'search') {
     const query = ctx.searchQuery || ctx.domain;
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-    await ctx.browser.navigate(ctx.tabId, searchUrl);
-    if (ctx.browser.waitForTabComplete) {
-      await ctx.browser.waitForTabComplete(ctx.tabId, 8000).catch(() => {});
+    if (ctx.systemAction) {
+      await ctx.systemAction(ctx.tabId, 'navigate', searchUrl).catch(() => {});
+    } else {
+      await ctx.browser.navigate(ctx.tabId, searchUrl);
+      if (ctx.browser.waitForTabComplete) {
+        await ctx.browser.waitForTabComplete(ctx.tabId, 8000).catch(() => {});
+      }
     }
 
     return {
@@ -158,9 +165,13 @@ export async function executeBlockedLadder(
       targetUrl = `https://duckduckgo.com/?q=${encodeURIComponent(q)}`;
     }
 
-    await ctx.browser.navigate(ctx.tabId, targetUrl).catch(() => {});
-    if (ctx.browser.waitForTabComplete) {
-      await ctx.browser.waitForTabComplete(ctx.tabId, 8000).catch(() => {});
+    if (ctx.systemAction) {
+      await ctx.systemAction(ctx.tabId, 'navigate', targetUrl).catch(() => {});
+    } else {
+      await ctx.browser.navigate(ctx.tabId, targetUrl).catch(() => {});
+      if (ctx.browser.waitForTabComplete) {
+        await ctx.browser.waitForTabComplete(ctx.tabId, 8000).catch(() => {});
+      }
     }
 
     return {

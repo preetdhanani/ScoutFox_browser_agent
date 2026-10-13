@@ -51,6 +51,19 @@ export const TAMPERS = {
     does: 'removes the statement that switches zod code generation off from background/sw.js, so zod probes new Function under the CSP (the CSP violation in the worker must fail the run)',
     apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'globalThis.__zod_globalConfig = { jitless: true };', '')
   },
+  'stale-paused-status': {
+    does: 'puts back the old status bug in background/sw.js: an auto-approved plan hold leaves the runner status "paused" for the whole run, so the panel shows a Resume button with no reason (the paused-without-a-reason check must fail the run)',
+    apply: (dir) => {
+      const file = inside(dir, 'background/sw.js');
+      const code = fs.readFileSync(file, 'utf8');
+      // The needle is the one place that answers a plan hold by itself and sets the status; whitespace is not matched literally
+      // so a change of indentation in the build does not turn this control into a silent no-op.
+      const needle = /(if \(!opts\.restoring\) \{\s*this\.status = )"running"(;[^}]{0,120}?return new Command\(\{ resume: \{ kind: "approve" \} \}\);)/g;
+      const count = [...code.matchAll(needle)].length;
+      if (count !== 1) throw new Error(`tamper=stale-paused-status: expected exactly one auto-approve status write in sw.js, found ${count} (did deriveStatus change?)`);
+      fs.writeFileSync(file, code.replace(needle, '$1"paused"$2'));
+    }
+  },
   'broken-net-recorder': {
     does: 'makes content/net-recorder.js (the MAIN-world content script) throw when it loads (the fixture page checks must fail)',
     apply: (dir) => prepend(inside(dir, 'content/net-recorder.js'), 'throw new Error(\'recorder boom (tamper=broken-net-recorder)\');\n')

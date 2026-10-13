@@ -3,6 +3,7 @@
 // Erasable TypeScript (no enums, no parameter properties).
 
 import type { Finding, Predicate, SiteSpec } from '../graph/state.ts';
+import { isAutoValueField } from './findings.ts';
 
 export interface PagePredicateContext {
   url: string;
@@ -109,10 +110,24 @@ export function evaluateSiteCriteria(
   }
 
   // criteria.doneWhen === 'all_required'
-  const requiredFieldNames = criteria.fields.filter((f) => f.required).map((f) => f.name);
+  // Auto-value fields (url, link, ...) are recorded by the engine on every finding, so code never
+  // demands them from the model: demanding them made a site with a url column unsatisfiable, and
+  // an unsatisfiable site is what kept the summarize loop spinning.
+  // When every field is auto-value there is nothing for the model to collect on this page.
+  // Ending the site honestly beats a vacuous "All required fields found" with zero findings.
+  const requiredFieldNames = criteria.fields
+    .filter((f) => f.required && !isAutoValueField(f.name))
+    .map((f) => f.name);
   if (requiredFieldNames.length === 0) {
-    if (criteria.fields.length > 0) {
-      requiredFieldNames.push(criteria.fields[0].name);
+    const nonAuto = criteria.fields.filter((f) => !isAutoValueField(f.name));
+    if (nonAuto.length > 0) {
+      requiredFieldNames.push(nonAuto[0].name);
+    } else if (criteria.fields.length > 0) {
+      return {
+        met: true,
+        status: 'done',
+        reason: 'Only auto-recorded fields (link/URL) were required - there was nothing to collect from this page'
+      };
     }
   }
 

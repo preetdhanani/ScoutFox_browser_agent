@@ -62,7 +62,7 @@ for (const [name, settings, reply] of PROVIDERS) {
     t.mock.timers.tick(4 * MINUTE + 1);
     await flush();
     await call;
-    assert.match(outcome, /Provider \[\w+\] did not respond within 900s\. The request was abandoned - check that the provider is reachable, or raise llmTimeoutMs in settings\.$/);
+    assert.match(outcome, /Provider \[\w+\] did not respond within 900s \(the global timeout setting\)\. The request was abandoned - check that the provider is reachable, or raise llmTimeoutMs in settings\.$/);
     assert.doesNotMatch(outcome, /Request timed out/);
     assert.equal(hanging.signal!.aborted, true, 'the deadline cancelled the request');
   });

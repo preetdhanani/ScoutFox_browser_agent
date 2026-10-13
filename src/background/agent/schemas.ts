@@ -10,7 +10,7 @@
  *     interprets schemas and never uses eval or new Function (the worker's CSP forbids both).
  * A policy mode is a list of verbs (verbsFor in actions.ts), so its schema is
  * buildActionSchema(verbs). Cloud providers get no schema on the wire: they keep the legacy
- * prompt and free-text replies (see buildSystemPrompt in agentEngine.js).
+ * prompt and free-text replies (see prompts.ts).
  *
  * The rules below were measured against qwen3.5:9b and gemma4:12b on Ollama 0.34.4
  * (docs/spikes/ollama-constrained and tests/evals/ollamaNodes.mjs):
@@ -363,7 +363,10 @@ export function buildPolicySchema(options: PolicySchemaOptions): JsonSchema {
       required: ['action', 'reason'],
       properties: { action: { const: 'mark_blocked' }, reason: { type: 'string' } }
     });
-  } else if (goalKind === 'do') {
+  } else if (goalKind === 'do' || goalKind === 'answer') {
+    // Answer sites browse first (to reach the content) and end with subgoal_done; the record node
+    // stores its summary as the site's final answer. Leaving answer out of this branch gave the
+    // schema no way to end the site at all, so "(The model did not provide an answer.)".
     branches.push({
       type: 'object',
       additionalProperties: false,

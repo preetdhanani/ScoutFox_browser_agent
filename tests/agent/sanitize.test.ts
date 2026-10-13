@@ -140,3 +140,27 @@ test('rejections are reported to the log sink', () => {
   assert.match(lines[1], /browser_batch step selected an element id that is not on the page \(98\)/);
   assert.match(lines[2], /"execute_js", which is not available here/);
 });
+
+test('sanitizeAction: wait action normalizes seconds alias to amount and clamps (BUG-36)', () => {
+  const waitWithSeconds = sanitizeAction({ action: 'wait', seconds: 3 }, options);
+  assert.equal(waitWithSeconds.action, 'wait');
+  assert.equal(waitWithSeconds.amount, 3);
+
+  const waitWithBoth = sanitizeAction({ action: 'wait', seconds: 4, amount: 2 }, options);
+  assert.equal(waitWithBoth.amount, 2, 'existing amount takes precedence');
+
+  // Cloud providers get no JSON schema, so sanitize must clamp: a reply of
+  // {action:'wait', amount:600} used to park the run for ten minutes.
+  const waitHuge = sanitizeAction({ action: 'wait', amount: 600 }, options);
+  assert.equal(waitHuge.amount, 5, 'a cloud wait of 600 s is clamped to the 5 s schema cap');
+
+  const waitZero = sanitizeAction({ action: 'wait', amount: 0 }, options);
+  assert.equal(waitZero.amount, 1, 'amount:0 waits the legacy 1 s, not 0 ms');
+
+  const waitFraction = sanitizeAction({ action: 'wait', amount: 0.2 }, options);
+  assert.equal(waitFraction.amount, 1, 'a sub-second wait is raised to the 1 s floor');
+
+  const waitSecondsAliasClamped = sanitizeAction({ action: 'wait', seconds: 99 }, options);
+  assert.equal(waitSecondsAliasClamped.amount, 5, 'the seconds alias goes through the same clamp');
+  assert.equal((waitSecondsAliasClamped as any).seconds, undefined, 'the alias is dropped so no unclamped copy survives');
+});

@@ -80,6 +80,12 @@ test('buildPolicySchema: browse, extract, answer, and harvest schemas', () => {
   const doSchema = buildPolicySchema({ mode: 'browse', goalKind: 'do' });
   assert.equal(validateAgainst(doSchema, { action: 'subgoal_done', summary: 'Added to cart', evidence: 'Items: 1' }).ok, true);
 
+  // browse mode (answer): page verbs to reach the content, and subgoal_done to end with the answer
+  const browseAnswerSchema = buildPolicySchema({ mode: 'browse', goalKind: 'answer' });
+  assert.equal(validateAgainst(browseAnswerSchema, { action: 'click', element_id: 1 }).ok, true);
+  assert.equal(validateAgainst(browseAnswerSchema, { action: 'subgoal_done', summary: 'Top repos: ...', evidence: 'on the page' }).ok, true);
+  assert.equal(validateAgainst(browseAnswerSchema, { action: 'record_finding', value: 'x' }).ok, false);
+
   // extract mode
   const extractSchema = buildPolicySchema({ mode: 'extract', columns: ['price'] });
   assert.equal(validateAgainst(extractSchema, { action: 'record_finding', price: '100 EUR' }).ok, true);

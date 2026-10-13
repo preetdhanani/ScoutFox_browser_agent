@@ -19,6 +19,13 @@ When modifying background scripts, content scripts, or sidepanel UI:
 4. Click the **Reload (🔄)** icon on the extension card.
 5. If testing content script DOM changes, refresh the target web page tab as well.
 
+**Which build is loaded?**
+The loaded extension is whatever was last built AND reloaded, which is not always what is in the editor.
+Every build carries a stamp (the build time and the git short hash, with `-dirty` when `git status` shows anything, untracked files included; `no-git` when git is missing or does not answer within 5 seconds).
+It is printed in the Logs tab on the `[WORKER_BOOT]` line and on every `[NEW_SESSION_RUN]` line, so a pasted log shows which build ran.
+If the build time is older than your last edit, the extension was not rebuilt or not reloaded.
+With nothing committed, `-dirty` is the same for every build, so the time is what tells builds apart.
+
 ### Scripts
 | Script | What it does |
 | --- | --- |
@@ -83,6 +90,8 @@ Runs `tsc --noEmit` in two projects.
 `tsconfig.json` covers `src/`, the code of the extension.
 It runs in the MV3 service worker, so it has the WebWorker lib and the `chrome` types, and nothing from Node or from a page: `Buffer`, `process`, `NodeJS.Timeout` and `document` do not compile there.
 `tests/tsconfig.json` extends it for the tests, the test helpers and the Node scripts, which run in Node, and adds the `node` types.
+It also adds the `DOM` lib alongside `WebWorker` on purpose: content-script code and its tests (`domCompressor.ts`, the action executor, the cursor overlay) use `document`, `HTMLElement` and friends, so the DOM types must compile somewhere the tests can see them.
+The tradeoff to know: a worker-side test that accidentally uses `document` or `window` now typechecks but is `undefined` at runtime in Node - the old guard (which failed such code at compile time) is gone, and `tests/tsconfigScopes.test.ts` asserts the DOM lib is present rather than absent.
 `tests/tsconfigScopes.test.ts` checks both rules with the real compiler.
 
 TypeScript files use erasable syntax only (no `enum`, `namespace` or constructor parameter properties) and explicit `.ts` extensions in imports, because Node runs them directly by stripping types.
@@ -127,6 +136,11 @@ The second is an `UnreadableReplyError` with the status of the answer, so a 200 
 It also takes the key out of an error response before the SDK reads it, because LangChain hands that error to every callback (tracing) unchanged, and Gemini's error is scrubbed where the request is made.
 The key is never in the options of a model either: AgentRouter's wire image, which carries it, is put on the request by that `fetch` and not in `defaultHeaders`, and `tests/llm/keys.test.ts` runs every provider against a server that echoes its headers.
 The requests are built by LangChain and the SDKs, so provider tests capture them with a fetch spy (`tests/helpers/llmWire.ts`) instead of stubbing a response object.
+A user-added endpoint (feature `featere/custom-endpoint`) is a provider too: its descriptor (`id`, display name, protocol, base URL, saved model list) lives in `settings.customProviders` and its credential in `providerConfigs[id].apiKey`, like every credential.
+`createCustomProviderCall` (`factory.ts`) builds the client by the descriptor's protocol - `ChatOpenAICompletions` on `{base}/chat/completions` or `ChatAnthropic` on `{base}/v1/messages` - behind the same `watchFetch` as the built-ins, with error texts that name the provider, the protocol and the URL host and never the key.
+The URL rules (`customChatUrl`, `customModelsUrl`, and the two normalizers in `llm/settings.ts`) are shared by the sender and by the form's live preview, so the preview cannot disagree with what is sent; they strip a pasted endpoint path (`/chat/completions`, `/messages`, `/models`), add `/v1` only to a bare host, and never rewrite a custom mount.
+A provider the code does not know gets no model list: `getFallbackModels` has no default arm any more, so a custom endpoint falls back to the list its user saved (which may be empty) and `getFallbackModels('nope')` is `[]`.
+Changing the host of a saved provider clears its stored key at save time (the origin rule in `saveCustomProvider`), because nothing stored may be sent to a host the user did not choose.
 
 ### Worker Bundle and CSP
 The worker bundles the LangChain provider packages, answer audit, and LangGraph runtime, so `background/sw.js` is 4,339 KB unminified (966 KB gzip).
@@ -284,8 +298,7 @@ Tests in `tests/agent/risk.test.ts` and `tests/graph/workerRisk.test.ts` cover r
 
 ### SidePanel UI Overhaul and LangGraph Cards (Phase P6)
 Phase P6 upgrades the side panel with specialized event-delegated cards and live execution visualization:
-- **Plan Approval Card (`sidepanel/cards.js`)**: renders when the orchestrator enters `approve_plan` hold.
-  It displays planned sites, target fields, effort level selection, and estimated steps and duration, with Approve and Cancel buttons.
+- **Plan Approval Card (`sidepanel/cards.js`)**: the renderer still exists, but the panel no longer shows it. `background.ts` starts every task with `autoApprove:true`, so the runner approves the plan in code and never enters the `approve_plan` hold for a user; only a direct `START_TASK` with `autoApprove:false` (tests, tools) still holds.
 - **Action Confirmation Card (`sidepanel/cards.js`)**: renders when a worker action triggers a risk hold.
   It shows a variant badge (`purchase`, `login`, `form`, `navigate`), action summary, target domain, an optional "Remember domain" checkbox for external navigation, and Confirm/Deny buttons.
 - **Provenance Findings Table (`sidepanel/cards.js`)**: renders extracted findings with source domain, field name, value, verification status badge, and excerpted evidence snippet.

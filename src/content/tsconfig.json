@@ -1,0 +1,11 @@
+{
+  // Content scripts running in web pages (src/content/). They have the DOM lib and the chrome
+  // types (chrome.runtime only), and Node globals or WebWorker-only APIs do NOT compile here.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM"],
+    "types": ["chrome"]
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["**/node_modules"]
+}

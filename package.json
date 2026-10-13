@@ -9,9 +9,10 @@
   },
   "scripts": {
     "test": "node --test \"tests/**/*.test.js\" \"tests/**/*.test.ts\"",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tests",
+    "check:tests": "node scripts/checkTestCount.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p src/content && tsc --noEmit -p tests",
     "test:e2e": "node tests/e2e/smoke.mjs --mock --build",
-    "check": "for f in content/domCompressor.js content/actionExecutor.js content/content.js background/apiClients.js background/agentEngine.js background/background.js sidepanel/sidepanel.js; do node --check \"$f\" || exit 1; done",
+    "check": "for f in content/*.js sidepanel/*.js; do node --check \"$f\" || exit 1; done",
     "build": "node scripts/build.mjs",
     "evalscan": "node scripts/evalscan.mjs",
     "zip": "node scripts/zip.mjs"

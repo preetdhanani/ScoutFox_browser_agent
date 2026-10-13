@@ -9,17 +9,12 @@
  *
  * Fixed by sorting every matching node by its distance from the viewport and taking the
  * nearest ones, so the fallback always centers on where the user is looking.
- *
- * content/domCompressor.js is a browser IIFE (no module exports, relies on window/document
- * globals), so it is loaded here via new Function against a minimal fake DOM - the same
- * technique used elsewhere in this suite for net-recorder.js and actionExecutor.js.
  */
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-
-const SRC = fs.readFileSync(new URL('../content/domCompressor.js', import.meta.url), 'utf8');
+import { DOMCompressor } from '../src/content/domCompressor.ts';
+import { withGlobals } from './helpers/contentGlobals.ts';
 
 function makeNode(text, rectTop) {
   return {
@@ -45,8 +40,11 @@ function loadCompressor({ scrollY, innerHeight, nodes, containerInnerText }) {
     querySelector: () => null // no <article>/<main>/#readme match -> falls back to document.body
   };
 
-  const fn = new Function('window', 'document', `${SRC}\nreturn window.domCompressorInstance;`);
-  return fn(fakeWindow, fakeDocument);
+  const compressor = new DOMCompressor();
+  return {
+    extractPageText: () =>
+      withGlobals({ window: fakeWindow, document: fakeDocument }, () => compressor.extractPageText())
+  };
 }
 
 // A name for number i made of letters only (0 is "q", 10 is "a"...). The paragraphs below must not

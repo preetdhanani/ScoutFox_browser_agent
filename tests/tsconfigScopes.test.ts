@@ -1,13 +1,14 @@
 /**
- * The two TypeScript projects and what each one may use.
+ * The three TypeScript projects and what each one may use.
  *
- * tsconfig.json is the extension itself (src/): it runs in the MV3 service worker, so it has the
+ * tsconfig.json is the extension worker (src/): it runs in the MV3 service worker, so it has the
  * WebWorker lib and the chrome types, and Node globals or `document` must NOT compile there. Code
  * that uses Buffer, process, NodeJS.Timeout or document passes a typecheck that allows them and then
- * fails at run time in the worker. tests/tsconfig.json extends it and adds the node types, because
- * the tests run in Node.
+ * fails at run time in the worker. src/content/tsconfig.json is for content scripts with the DOM
+ * lib. tests/tsconfig.json extends it and adds the node and DOM types, because the tests run in Node
+ * and test both worker and content code.
  *
- * These tests run the real tsc on small scratch projects that extend the two configs.
+ * These tests run the real tsc on small scratch projects that extend the configs.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,13 +99,31 @@ test('tests/ (tests/tsconfig.json) has the Node globals and node: modules on top
   const result = typecheck('tests/tsconfig.json', node);
   assert.equal(result.output, '');
   assert.equal(result.ok, true);
-  // Tests may use Node, but they are still not a page: document does not exist in either project.
-  assert.equal(typecheck('tests/tsconfig.json', 'export const title = document.title;\n').ok, false);
+  // Tests may use Node and import content scripts, so DOM globals exist in the tests project.
+  assert.equal(typecheck('tests/tsconfig.json', 'export const title = document.title;\n').ok, true);
+});
+
+test('src/content/ (src/content/tsconfig.json) has DOM globals and rejects Node globals', () => {
+  const dom = [
+    'export const title = document.title;',
+    'export const href = window.location.href;',
+    'export const res = new Response("ok");',
+    ''
+  ].join('\n');
+  const domResult = typecheck('src/content/tsconfig.json', dom);
+  assert.equal(domResult.output, '');
+  assert.equal(domResult.ok, true);
+
+  const nodeResult = typecheck('src/content/tsconfig.json', 'export const bytes = Buffer.from("x");\nexport const env = process.env.DEBUG;\n');
+  assert.equal(nodeResult.ok, false);
+  assert.match(nodeResult.output, /Cannot find name 'Buffer'/);
+  assert.match(nodeResult.output, /Cannot find name 'process'/);
 });
 
 test('npm run typecheck runs both projects', () => {
   const scripts = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts as Record<string, string>;
   const commands = scripts.typecheck.split('&&').map((part) => part.trim());
   assert.ok(commands.some((c) => /^tsc --noEmit$/.test(c) || /^tsc --noEmit -p (\.\/)?tsconfig\.json$/.test(c)), `no run of tsconfig.json in: ${scripts.typecheck}`);
+  assert.ok(commands.some((c) => /^tsc --noEmit -p (\.\/)?src\/content(\/tsconfig\.json)?$/.test(c)), `no run of src/content/tsconfig.json in: ${scripts.typecheck}`);
   assert.ok(commands.some((c) => /^tsc --noEmit -p (\.\/)?tests(\/tsconfig\.json)?$/.test(c)), `no run of tests/tsconfig.json in: ${scripts.typecheck}`);
 });

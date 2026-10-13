@@ -18,6 +18,9 @@
  *      last one with an alias key, found by the string-aware scanner and repaired by the ladder of
  *      repairJson.ts. A tool call written as bare JSON ({"name": ..., "arguments": ...}) is converted
  *      or is the tool-call parse error, like markup;
+ *   3b. an answer written as a JSON object of its own ({"answer": "..."}, see answerJson.ts): only when `finish`
+ *      is one of the verbs, and before the text intents below, which would read {"answer": "Go to https://..."}
+ *      as a navigate. It becomes a `finish` flagged as inferred (autoWrapped);
  *   4. plain-text intents (click, type, navigate, scroll, read), only for verbs this reply may use;
  *   5. prose becomes an unconfirmed `finish`, only when `finish` is one of the verbs;
  *   6. sanitize (sanitize.ts): aliases, the verb check, element ids, browser_batch step ids.
@@ -33,7 +36,8 @@
  */
 import { PLAN_MAX_STEPS } from './schemas.ts';
 import { balancedEnd, findTopLevelObjects, parsePartialOrTruncatedJson, rescueTruncatedJson } from './repairJson.ts';
-import { maxRef, sanitizeAction } from './sanitize.ts';
+import { answerWrapperOf } from './answerJson.ts';
+import { sanitizeAction } from './sanitize.ts';
 import type { ActionObject, LogSink, PageRefs } from './sanitize.ts';
 import { convertBareToolCall, convertToolCallMarkup, endsInsideMarkupToken, hasToolCallMarkup, isToolCallShape, TOOL_CALL_MARKUP_ERROR } from './toolCalls.ts';
 
@@ -44,12 +48,6 @@ export interface ParseOptions {
   refs?: PageRefs;
   /** Where a guardrail reports a rejection or a prose auto-wrap (the engine passes its Logger). */
   log?: LogSink;
-  /**
-   * Word a rejected element_id of a single action the way the old engine always did ("Selected
-   * element_id N does not exist on this page (valid range: 1-N)..."), and not with the design text
-   * that browser_batch steps use. Only the old engine sets it, and it goes away with the old engine.
-   */
-  legacyElementIdError?: boolean;
 }
 
 export type ParseErrorKind =
@@ -59,6 +57,9 @@ export type ParseErrorKind =
   | 'not_an_action'
   | 'unknown_action'
   | 'unavailable_action'
+  // A verb the engine knows that this site does not offer (record_finding sent to an answer site). Only the worker makes
+  // this one, because the worker knows the site's goal kind; the text it shows the model is the worker's own.
+  | 'verb_not_offered'
   | 'bad_element_id'
   | 'bad_step_element_id';
 
@@ -275,7 +276,7 @@ function elementListError(id: string): string {
  *   sees on its next turn with a `kind` that says which rule rejected it.
  */
 export function parseModelReply(text: unknown, options: ParseOptions): ParseResult {
-  const { verbs, refs, log, legacyElementIdError } = options;
+  const { verbs, refs, log } = options;
 
   // 0. Empty output
   if (!text || typeof text !== 'string') return fail('', 'empty', 'Empty output from model.');
@@ -315,6 +316,18 @@ export function parseModelReply(text: unknown, options: ParseOptions): ParseResu
         if (bare.found) {
           if (!bare.action) return fail(thought, 'tool_call_markup', TOOL_CALL_MARKUP_ERROR, text);
           actionObj = bare.action;
+        }
+      }
+
+      // 3b. The answer written as a JSON object of its own ({"answer": "..."}), which has no "action" key. Only where the
+      // reply may end the run (verbs include finish), and BEFORE the text intents below: their regexes would read
+      // {"answer": "Go to https://..."} as a navigate. The finish is still flagged autoWrapped: the model never sent
+      // the finish action. An empty value ('' for null, '' or an empty array) becomes an empty answer, never JSON text.
+      if (!actionObj && verbs.includes('finish')) {
+        const wrapped = answerWrapperOf(cleanText);
+        if (wrapped) {
+          log?.('info', '[ANSWER_UNWRAPPED] The reply was a JSON object with only an answer in it. Using the answer as the finish text.');
+          actionObj = { action: 'finish', answer: wrapped.answer, reason: 'Answer sent as a JSON object', autoWrapped: true };
         }
       }
 
@@ -375,9 +388,7 @@ export function parseModelReply(text: unknown, options: ParseOptions): ParseResu
     // of visibly failing. Routing it through the same parse-error/retry path as malformed
     // JSON (consecutiveParseErrors, corrective feedback, the 3-strike circuit breaker) gives
     // the model a chance to look at the element list again instead of clicking blind.
-    if (!legacyElementIdError) return fail(thought, 'bad_element_id', elementListError(idForMessage(act.element_id)));
-    const range = refs ? `valid range: 1-${maxRef(refs)}` : 'valid ids start at 1';
-    return fail(thought, 'bad_element_id', `Selected element_id ${act.invalidElementId} does not exist on this page (${range}). Re-check the numbered element list and choose a real one.`);
+    return fail(thought, 'bad_element_id', elementListError(idForMessage(act.element_id)));
   }
 
   // 7. Every id of a browser_batch (checked in sanitize.ts with the same rule as the id above).

@@ -9,15 +9,12 @@
  * null, and every element whose live reference went stale (removed and re-inserted, replaced by
  * a re-render) failed with "no longer resolvable" instead of being re-found.
  *
- * content/actionExecutor.js is a browser IIFE with no exports, loaded here via new Function
- * against a minimal fake DOM - the same technique used throughout this suite for content
- * scripts (see actionExecutorClickDoesNotDoubleFire.test.js).
+ * The executor is the TypeScript module (src/content/actionExecutor.ts, which builds the shipped
+ * content/actionExecutor.js), run here against a minimal fake DOM.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-
-const SRC = fs.readFileSync(new URL('../content/actionExecutor.js', import.meta.url), 'utf8');
+import { ActionExecutor } from '../src/content/actionExecutor.ts';
 
 /**
  * @param {object} domCompressorShape - what window.domCompressor looks like: getElement()
@@ -26,7 +23,8 @@ const SRC = fs.readFileSync(new URL('../content/actionExecutor.js', import.meta.
  *   specific fallback tier under test; everything else returns null/empty by default.
  */
 function loadActionExecutor(domCompressorShape, documentOverrides = {}) {
-  const fakeWindow = { domCompressor: domCompressorShape, scrollY: 0 };
+  const fakeCSS = { escape: (s) => s };
+  const fakeWindow = { domCompressor: domCompressorShape, scrollY: 0, CSS: fakeCSS };
   const fakeDocument = {
     contains: () => false, // every scenario here is "the live reference is gone"
     getElementById: () => null,
@@ -36,9 +34,7 @@ function loadActionExecutor(domCompressorShape, documentOverrides = {}) {
     body: { appendChild() {}, contains: () => false },
     ...documentOverrides
   };
-  const fakeCSS = { escape: (s) => s };
-  const fn = new Function('window', 'document', 'CSS', `${SRC}\nreturn window.actionExecutorInstance;`);
-  return fn(fakeWindow, fakeDocument, fakeCSS);
+  return new ActionExecutor(fakeDocument, fakeWindow);
 }
 
 test('a stale live reference with no elements cache resolves to nothing (pre-fix behaviour, still correct on its own)', () => {

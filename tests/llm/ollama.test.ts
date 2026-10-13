@@ -594,3 +594,140 @@ test('a client that hangs up while the reply streams: the call rejects at once a
     await pause(5);
   }
 });
+
+test('callOllama message formatting: preserves multi-turn conversation roles and order', async (t) => {
+  const sent = spyFetch(t);
+  const turns = [
+    { role: 'user', content: 'Step 1 query' },
+    { role: 'assistant', content: 'Step 1 response' },
+    { role: 'user', content: 'Step 2 query' }
+  ];
+  await callOllama({ provider: 'ollama' }, turns, 'System role prompt');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].body.messages, [
+    { role: 'system', content: 'System role prompt' },
+    { role: 'user', content: 'Step 1 query' },
+    { role: 'assistant', content: 'Step 1 response' },
+    { role: 'user', content: 'Step 2 query' }
+  ]);
+});
+
+test('callOllama message formatting: handles empty turns array with only system prompt', async (t) => {
+  const sent = spyFetch(t);
+  await callOllama({ provider: 'ollama' }, [], 'Solo system prompt');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].body.messages, [
+    { role: 'system', content: 'Solo system prompt' }
+  ]);
+});
+
+test('callOllama preserves unicode and emoji characters in message content', async (t) => {
+  const sent = spyFetch(t);
+  const emojiPrompt = 'Search for 💻 laptop with 16GB RAM €1.200';
+  await callOllama({ provider: 'ollama' }, [{ role: 'user', content: emojiPrompt }], 'Unicode SYS 🚀');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.messages[0].content, 'Unicode SYS 🚀');
+  assert.equal(sent[0].body.messages[1].content, emojiPrompt);
+});
+
+test('callOllama preserves whitespace and newlines in message content', async (t) => {
+  const sent = spyFetch(t);
+  const multiline = 'Line 1\n\nLine 2\tIndented\nLine 3';
+  await callOllama({ provider: 'ollama' }, [{ role: 'user', content: multiline }], 'SYS\nMultiline');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.messages[0].content, 'SYS\nMultiline');
+  assert.equal(sent[0].body.messages[1].content, multiline);
+});
+
+test('callOllama resetOllamaCaches clears both THINK_UNSUPPORTED and SCHEMA_UNSUPPORTED caches', async (t) => {
+  resetOllamaCaches();
+  const sent = queue(t, [
+    httpError(400, '{"error":"model does not support thinking"}'),
+    ok('{"action":"done"}')
+  ]);
+  await ask({ model: 'cache-test:1b' });
+  assert.equal(sent.length, 2);
+
+  // Cache is active: next call omits think from the start
+  await ask({ model: 'cache-test:1b' });
+  assert.equal(sent.length, 3);
+  assert.ok(!('think' in sent[2].body));
+
+  // Reset caches: model will send think: false again
+  resetOllamaCaches();
+  await ask({ model: 'cache-test:1b' });
+  assert.equal(sent.length, 4);
+  assert.equal(sent[3].body.think, false);
+});
+
+test('callOllama parses and passes custom num_predict option when provided', async (t) => {
+  const sent = spyFetch(t);
+  await ask({ ollamaNumPredict: 512 });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.options.num_predict, 512);
+});
+
+test('callOllama passes num_ctx when set to custom positive value', async (t) => {
+  const sent = spyFetch(t);
+  await ask({ ollamaNumCtx: 16384 });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.options.num_ctx, 16384);
+});
+
+test('callOllama sets stream: true on outgoing chat requests', async (t) => {
+  const sent = spyFetch(t);
+  await ask();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.stream, true);
+});
+
+test('callOllama formats request with plan schema when schema option is provided', async (t) => {
+  const sent = spyFetch(t);
+  const planSchema = buildPlanSchema();
+  await ask({}, { schema: planSchema });
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].body.format, planSchema);
+});
+
+test('callOllama formats request with action schema when schema option is provided', async (t) => {
+  const sent = spyFetch(t);
+  await ask({}, { schema: ACTION_SCHEMA });
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].body.format, ACTION_SCHEMA);
+});
+
+test('callOllama omits format parameter when neither json nor schema is set', async (t) => {
+  const sent = spyFetch(t);
+  await ask({}, { json: false });
+  assert.equal(sent.length, 1);
+  assert.ok(!('format' in sent[0].body));
+});
+
+test('callOllama normalizes baseUrl with trailing slash', async (t) => {
+  const sent = spyFetch(t);
+  await ask({ baseUrl: 'http://localhost:11434/' });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, 'http://localhost:11434/api/chat');
+});
+
+test('callOllama uses default localhost baseUrl when baseUrl is empty string', async (t) => {
+  const sent = spyFetch(t);
+  await ask({ baseUrl: '' });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, 'http://localhost:11434/api/chat');
+});
+
+test('callOllama includes think: false by default for unknown models', async (t) => {
+  const sent = spyFetch(t);
+  await ask({ model: 'new-model:8b' });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.think, false);
+});
+
+test('callOllama passes custom temperature in request options', async (t) => {
+  const sent = spyFetch(t);
+  await ask({ temperature: 0.8 });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.options.temperature, 0.8);
+});
+

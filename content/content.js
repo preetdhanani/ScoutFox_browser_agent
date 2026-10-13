@@ -168,8 +168,16 @@
         if (!window.domCompressor) {
           return sendResponse({ success: false, error: 'DOMCompressor engine not initialized on page.' });
         }
-        const snapshot = window.domCompressor.getSnapshot(payload || {});
-        if (payload?.showBadges && window.actionExecutor) {
+        if (window.actionExecutor && typeof window.actionExecutor.removeBadges === 'function') {
+          window.actionExecutor.removeBadges();
+        }
+        const effectivePayload = {
+          maxElements: (payload && payload.maxElements) ?? request.maxElements,
+          showBadges: (payload && payload.showBadges) ?? request.showBadges,
+          ...(payload || {})
+        };
+        const snapshot = window.domCompressor.getSnapshot(effectivePayload);
+        if (effectivePayload.showBadges && window.actionExecutor) {
           window.actionExecutor.renderBadges(snapshot.elements);
         }
         const elementInfo = window.domCompressor.elementInfo || {};
@@ -293,8 +301,8 @@
     }
 
     if (action === 'WAIT_DOM_QUIET') {
-      const quietMs = (payload && payload.quietMs) || 100;
-      const maxWaitMs = (payload && payload.maxWaitMs) || 500;
+      const quietMs = (payload && payload.quietMs) || request.quietMs || 100;
+      const maxWaitMs = (payload && (payload.maxWaitMs || payload.maxMs)) || request.maxWaitMs || request.maxMs || 500;
       const start = Date.now();
 
       const checkQuiet = () => {

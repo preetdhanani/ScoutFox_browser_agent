@@ -171,10 +171,14 @@ export interface SnapshotElement {
 export interface DomSnapshot {
   title: string;
   url: string;
+  domain: string;
   scrollState: { scrollY: number; pageHeight: number; viewportHeight: number };
   elementCount: number;
   elementsText: string;
   elements: SnapshotElement[];
+  refs: number[];
+  shownRefs: number[];
+  elementInfo: Record<string, any>;
   pageText: string;
 }
 
@@ -406,6 +410,23 @@ function summarize(el: ElementSpec, id: number, nth: number, scrollY: number, vi
   };
 }
 
+function computeFieldKind(el: ElementSpec): string | undefined {
+  const tagName = el.tag.toLowerCase();
+  if (tagName !== 'input' && tagName !== 'textarea') return undefined;
+  const lowerType = (el.type || '').toLowerCase();
+  const name = (el.name || '').toLowerCase();
+  const id = (el.id || '').toLowerCase();
+  const combined = `${name} ${id}`;
+
+  if (lowerType === 'password' || combined.includes('password') || combined.includes('passwort')) return 'password';
+  if (lowerType === 'email' || combined.includes('email') || combined.includes('e-mail')) return 'email';
+  if (/card|cc-number|cvv|cvc|cardnumber|kreditkarte/i.test(combined) || (lowerType === 'tel' && combined.includes('cc'))) return 'cc';
+  if (/otp|2fa|one-time|verification|code|mfa|token/i.test(combined)) return 'otp';
+  if (lowerType === 'search' || /search|suche|query/i.test(combined)) return 'search';
+  if (/address|street|city|zip|postcode|plz|strasse|ort/i.test(combined)) return 'address';
+  return 'text';
+}
+
 /** The snapshot of a page as it stands, and which elements got an id (element N is listed[N - 1]). */
 function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElements: number): { snapshot: DomSnapshot; listed: ElementSpec[] } {
   const viewportHeight = page.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT;
@@ -417,15 +438,36 @@ function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElem
     seen.set(tag, nth);
     return summarize(el, i + 1, nth, scrollY, viewportHeight);
   });
+  const refs = summaries.map((e) => e.id);
+  const shownRefs = refs.slice();
+  let domain = '';
+  try {
+    domain = new URL(page.url).hostname;
+  } catch (_) {}
+  const elementInfo: Record<string, any> = {};
+  for (const s of summaries) {
+    const el = listed[s.id - 1];
+    elementInfo[s.id] = {
+      role: s.role,
+      label: s.text,
+      formKind: undefined,
+      fieldKind: el ? computeFieldKind(el) : undefined,
+      hrefDomain: undefined,
+    };
+  }
   return {
     listed,
     snapshot: {
       title: page.title || 'Untitled Page',
       url: normalizeUrl(page.url),
+      domain,
       scrollState: { scrollY: Math.round(scrollY), pageHeight: Math.round(pageHeightOf(page, viewportHeight)), viewportHeight },
       elementCount: summaries.length,
       elementsText: summaries.map((e) => e.formatted).join('\n'),
       elements: summaries,
+      refs,
+      shownRefs,
+      elementInfo,
       pageText: formatPageText(page.text),
     },
   };

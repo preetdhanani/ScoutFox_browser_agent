@@ -10,11 +10,16 @@
  *
  * The model server is one of two:
  *   --mock   an offline, scripted stand-in for Ollama (lib/mockOllama.mjs). No model and no
- *            Ollama needed. This is what CI runs (`npm run test:e2e`).
+ *            Ollama needed. This is what CI runs (`npm run test:e2e`). It speaks the protocol of the
+ *            LangGraph engine (plan, policy per mode, reflect). It cannot drive the old engine any more.
  *   default  a small proxy in front of a real local Ollama (lib/ollamaProxy.mjs, see there for
  *            why a proxy is needed).
  *
- * The run fails (exit code 1, every problem printed) when a task does not finish, its answer is
+ * A graph run stops at the holds of the engine, and the harness answers them like a user at the side panel would:
+ * it approves the plan the engine proposes, approves a confirmation to navigate to a host of the task's fixture site, denies
+ * every other confirmation, and answers a question only when the task defines an answer (see answerHolds).
+ *
+ * The run fails (exit code 1, every problem printed) when a task does not end the way it must, its answer is
  * wrong, the service worker logs an error or hits a CSP violation, the fixture page a task runs on shows a console error
  * or a page error, the page's content scripts are not there (the MAIN-world net recorder did not
  * run, or the isolated-world content script does not answer), or the side panel page loaded on
@@ -30,7 +35,7 @@
  *         node smoke.mjs --headful                 watch it in a real window
  *         node smoke.mjs --out=report.json         also save the full report as JSON
  *         node smoke.mjs --panel-screenshots=dir   save the side panel (light and dark) per task
- *         node smoke.mjs --max-steps=10            the engine's step cap for a task
+ *         node smoke.mjs --max-steps=30            the engine's step cap for a task
  *         node smoke.mjs --timeout=360000          per task, in milliseconds
  *         node smoke.mjs --dump-snapshots          save what the content script sees on each
  *                                                  fixture page to tests/fixtures/snapshots/
@@ -60,7 +65,8 @@ import { fileURLToPath } from 'node:url';
 import { startFixtureServer } from './lib/fixtureServer.mjs';
 import { startOllamaProxy } from './lib/ollamaProxy.mjs';
 import { missingManifestFiles, prepareExtensionCopy, TAMPERS } from './lib/extensionCopy.mjs';
-import { TASKS } from './lib/tasks.mjs';
+import { MOCK_FAIL_PREFIX } from './lib/callRecord.mjs';
+import { runFacts, TASKS } from './lib/tasks.mjs';
 import { HOST_RULES } from './lib/twoSources.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -72,7 +78,7 @@ const SNAPSHOT_DIR = path.join(REPO, 'tests', 'fixtures', 'snapshots');
 // read, so these go into the e2e folder, where the mock's self-test reads them.
 const E2E_SNAPSHOT_DIR = path.join(HERE, 'lib', 'snapshots');
 
-const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'mock', 'tamper', 'engine']);
+const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'mock', 'tamper']);
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)(?:=(.*))?$/);
   return m ? [m[1], m[2] === undefined ? true : m[2]] : [a, true];
@@ -83,15 +89,22 @@ const CHROMIUM = process.env.CHROMIUM_PATH || '/Applications/Chromium.app/Conten
 const CHROMIUM_ARGS = (process.env.CHROMIUM_ARGS || '').split(/\s+/).filter(Boolean);
 const OLLAMA = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
 const MODEL = args.model || (MOCK ? 'mock-agent' : 'qwen3.5:9b');
-const ENGINE = args.engine || 'legacy';
 const FIXTURE_PORT = Number(process.env.FIXTURE_PORT || 8765);
 const PROXY_PORT = Number(process.env.PROXY_PORT || 11435);
 // A mock task takes a few seconds, so a run that hangs should fail early.
 const TASK_TIMEOUT_MS = Number(args.timeout || (MOCK ? 60 * 1000 : 6 * 60 * 1000));
-// The fixture tasks need 1 to 3 steps. A lower cap than the default 25 keeps a looping run
-// short, and it is still far above what a working run uses.
-const MAX_STEPS = Number(args['max-steps'] || 10);
+// The fixture tasks need 1 to 3 steps. The cap is also the hard cap the graph engine builds its step budget from:
+// a Medium site gets up to 24 steps, and with a cap of 30 that budget is not scaled down. So the cap is not lowered to
+// the step count of a task. A run that loops is stopped by the loop guard below.
+const MAX_STEPS = Number(args['max-steps'] || 30);
+// The effort level every task starts with. Without it the engine reads the words of the task ("cheapest" means High).
+const EFFORT = 'medium';
 const POLL_MS = 250;
+// The mock keeps count of identical requests in a row. A model that gets the same prompt this many times in a row
+// is in a loop that nothing breaks, and the run is stopped instead of waiting for the task timeout.
+const LOOP_LIMIT = 15;
+// How long a run may stand paused with no hold the harness can answer, before it is stopped.
+const PAUSE_GRACE_MS = 3000;
 
 const SNAPSHOT_PAGES = ['store', 'search', 'compare', 'challenge', 'error'];
 // `page` is the address the task starts on, query included; `name` is the file it is served from.
@@ -210,7 +223,7 @@ function checkDist() {
 // What the build reads. Update this list when sources move (it only feeds a warning).
 // Paths that do not exist are skipped, so the ones a later phase adds (shared) are listed already.
 // tsconfig.json is read by Vite's TypeScript transform (target, verbatimModuleSyntax), so it counts too.
-const BUILD_INPUTS = ['background', 'content', 'sidepanel', 'src', 'shared', 'public', 'vite.config.mjs', 'scripts/build.mjs', 'tsconfig.json', 'package.json', 'package-lock.json'];
+const BUILD_INPUTS = ['content', 'sidepanel', 'src', 'shared', 'public', 'vite.config.mjs', 'scripts/build.mjs', 'tsconfig.json', 'package.json', 'package-lock.json'];
 
 /** The smoke run tests dist/, so say so when dist/ is older than what it was built from. */
 function warnIfDistIsStale() {
@@ -300,6 +313,68 @@ async function watchWorker(target, errors) {
   await session.send('Log.enable').catch(() => { /* not every target has the Log domain */ });
   // Not optional: without it a CSP violation in the worker cannot be seen, so a failure to enable it is an error of its own.
   await session.send('Audits.enable');
+  // Counting what the engine sends to the page is optional: a worker that cannot be counted leaves the tally empty.
+  await instrumentWorker(session);
+  return session;
+}
+
+/**
+ * Puts the counters into the worker. The target exists before the worker has run its script, and there is no `chrome` until
+ * it has, so this asks again for a few seconds. Returns 'ok', 'already', 'not patchable' or null (never got there).
+ */
+async function instrumentWorker(session) {
+  for (let i = 0; i < 50; i++) {
+    const res = await session.send('Runtime.evaluate', { expression: TALLY_SCRIPT, returnByValue: true }).catch(() => null);
+    const value = res && res.result && res.result.value;
+    if (value === 'ok' || value === 'already' || value === 'not patchable') return value;
+    await sleep(100);
+  }
+  return null;
+}
+
+/**
+ * Counts what the engine sends to the pages, inside the worker: every chrome.tabs.sendMessage by its action name, and every
+ * chrome.debugger.sendCommand by its method. The wrappers only count and pass everything on. This is how the harness sees that
+ * a click was (or was never) sent to the page, which the history of the panel cannot show: a click the engine's parser rejects
+ * leaves no trace there. It changes the temp copy's worker at run time, never a file.
+ */
+const TALLY_SCRIPT = `(() => {
+  if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.sendMessage) return 'no chrome yet';
+  if (self.__e2eTally) return 'already';
+  const tally = { messages: {}, cdp: {} };
+  const bump = (bucket, key) => { bucket[key] = (bucket[key] || 0) + 1; };
+  const sendMessage = chrome.tabs.sendMessage;
+  chrome.tabs.sendMessage = function (tabId, message, ...rest) {
+    bump(tally.messages, message && typeof message.action === 'string' ? message.action : '(no action)');
+    return sendMessage.call(this, tabId, message, ...rest);
+  };
+  if (chrome.debugger && chrome.debugger.sendCommand) {
+    const sendCommand = chrome.debugger.sendCommand;
+    chrome.debugger.sendCommand = function (target, method, ...rest) {
+      bump(tally.cdp, String(method));
+      return sendCommand.call(this, target, method, ...rest);
+    };
+  }
+  if (chrome.tabs.sendMessage === sendMessage) return 'not patchable';
+  self.__e2eTally = tally;
+  return 'ok';
+})()`;
+
+/** What the worker has counted so far ({messages, cdp}), or null when it was not counting (a worker that restarted, a CDP session that is gone). */
+async function readTally(ctx) {
+  try {
+    const res = await ctx.worker.session.send('Runtime.evaluate', { expression: 'JSON.stringify(self.__e2eTally || null)', returnByValue: true });
+    return JSON.parse(res.result.value);
+  } catch {
+    return null;
+  }
+}
+
+/** The counts of `after` minus those of `before` (both from readTally), or null when either is missing. */
+function tallyDelta(after, before) {
+  if (!after || !before) return null;
+  const minus = (a, b) => Object.fromEntries(Object.entries(a).map(([k, n]) => [k, n - (b[k] || 0)]).filter(([, n]) => n !== 0));
+  return { messages: minus(after.messages, before.messages), cdp: minus(after.cdp, before.cdp) };
 }
 
 async function closeBrowser(browser) {
@@ -341,11 +416,12 @@ async function launch(puppeteer, extensionDir) {
 
   // Errors from the worker and from the driver page. A worker that restarts is watched again.
   const workerErrors = [];
+  const worker = { session: null }; // the CDP session of the newest worker, for the tally
   const isWorker = (t) => t.type() === 'service_worker' && t.url().endsWith('/background/sw.js');
   const watching = new Map(); // target -> the promise of its watcher, so awaiting it waits for the real attach
   const watch = (t) => {
     if (!watching.has(t)) {
-      watching.set(t, watchWorker(t, workerErrors).catch((err) => workerErrors.push(`could not watch the service worker: ${err.message}`)));
+      watching.set(t, watchWorker(t, workerErrors).then((session) => { worker.session = session; }).catch((err) => workerErrors.push(`could not watch the service worker: ${err.message}`)));
     }
     return watching.get(t);
   };
@@ -367,7 +443,7 @@ async function launch(puppeteer, extensionDir) {
   driver.on('pageerror', (err) => workerErrors.push(`driver page: ${err}`));
   driver.on('console', (msg) => { if (msg.type() === 'error') workerErrors.push(`driver page console.error: ${oneLine(msg.text(), 300)}`); });
   await driver.goto(`chrome-extension://${extensionId}/driver.html`);
-  return { browser, driver, extensionId, workerErrors, panel: newPanelSink() };
+  return { browser, driver, extensionId, workerErrors, worker, panel: newPanelSink() };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -642,13 +718,6 @@ async function panelScreenshots(ctx, tabId, name, dir, schemes = ['light', 'dark
 // A task
 // ---------------------------------------------------------------------------------------------
 
-function lastTurn(history) {
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i].type === 'user_goal') return history.slice(i);
-  }
-  return history;
-}
-
 /**
  * The log entries of this run. The worker keeps one log buffer for every run since it started, and
  * the state answer carries all of it, so the run's own part starts at the engine's START_TASK
@@ -665,13 +734,17 @@ function logsOfRun(stateLogs, portLogs, tabId) {
 /**
  * Saves the settings the extension runs with. Same shape the side panel's own save writes: the panel
  * header shows providerConfigs[provider].model, the engine uses the top-level model.
+ *
+ * What makes a graph run the same every time: the engine kind, the model and its server, the hard step cap
+ * (maxSteps, the base of the step budget) and the effort level (effortDefault; START_TASK asks for the same level
+ * too, because the engine reads the words of a task when the level is "auto"). The engine reads no tier setting yet
+ * (plan stage 2d), so the mock's /api/show answer will decide it later.
  */
 async function saveSettings(ctx, llm, model) {
   await ctx.driver.evaluate(async (settings) => {
     await chrome.storage.local.set({ agent_settings: settings });
   }, {
-    engine: ENGINE,
-    provider: 'ollama', baseUrl: llm.url, apiKey: '', model, maxSteps: MAX_STEPS,
+    provider: 'ollama', baseUrl: llm.url, apiKey: '', model, maxSteps: MAX_STEPS, effortDefault: EFFORT,
     providerConfigs: { ollama: { baseUrl: llm.url, apiKey: '', model } }
   });
   ctx.model = model;
@@ -679,6 +752,121 @@ async function saveSettings(ctx, llm, model) {
 
 /** The model a task runs with: the mock's behaviour can depend on the model name (see mockOllama.mjs), a real run never does. */
 const modelOf = (name) => (MOCK && TASKS[name].mockModel) || MODEL;
+
+// ---------------------------------------------------------------------------------------------
+// The holds of the engine, answered like a user at the side panel
+// ---------------------------------------------------------------------------------------------
+
+/** The names of the holds a state shows (the engine waits for a person at each). */
+function holdsOf(state) {
+  return [
+    state.pendingApproval && 'plan',
+    state.pendingConfirm && 'confirm',
+    state.pendingQuestion && 'question',
+    state.pendingChallengeHelp && 'challenge',
+    state.pendingContinueBudget && 'budget'
+  ].filter(Boolean);
+}
+
+/**
+ * Sends one message to the worker the way the side panel does, and does not wait for the answer: the answer to
+ * APPROVE_PLAN, CONFIRM_ACTION and the other resumes comes only when the engine has driven the run on to its next
+ * stop, which can be the end of the run. The answers are kept on the driver page, and the report shows them.
+ */
+function fire(ctx, message) {
+  return ctx.driver.evaluate((m) => {
+    window.__replies = window.__replies || [];
+    chrome.runtime.sendMessage(m).then(
+      (reply) => { window.__replies.push({ action: m.action, reply }); },
+      (err) => { window.__replies.push({ action: m.action, error: String((err && err.message) || err) }); }
+    );
+  }, message);
+}
+
+/** A host the task runs on: the fixture server's, and the host name the task serves its page under. */
+function fixtureHostsOf(fixtures, task) {
+  return [new URL(fixtures.origin).hostname, task.host].filter(Boolean).map((h) => h.toLowerCase());
+}
+
+/**
+ * Answers every hold the state shows that has not been answered yet, the way a user would, and writes what it did into
+ * run.decisions (the report prints them):
+ *   - the plan card: not expected (START_TASK never sets autoApprove, so the engine approves the plan itself); kept as a fallback for an explicit autoApprove:false run;
+ *   - a confirmation: approve when it is a navigation to a host of the task's fixture site, deny everything else;
+ *   - a question: answer it only when the task defines an answer for it, else stop the run and fail it (the harness never
+ *     makes an answer up);
+ *   - a bot check that asks for help: skip the site (the harness never solves a bot check);
+ *   - a budget question: finish the site, never spend more.
+ * A hold is answered once, and armed again when the state no longer shows it.
+ */
+async function answerHolds(ctx, run, task, tabId, state, hosts) {
+  const decide = async (hold, decision, detail, message) => {
+    run.decisions.push({ atMs: Date.now() - run.startedAt, hold, decision, detail });
+    if (message) await fire(ctx, { ...message, tabId });
+  };
+  const once = (hold, shown) => {
+    if (!shown) { run.armed[hold] = true; return false; }
+    if (!run.armed[hold]) return false;
+    run.armed[hold] = false;
+    return true;
+  };
+
+  if (once('plan', state.pendingApproval)) {
+    const approval = state.pendingApproval;
+    const level = (approval.effortProfile && approval.effortProfile.level) || (state.effort && state.effort.level) || EFFORT;
+    const sites = ((approval.planMeta && approval.planMeta.sites) || []).map((s) => s.domain || '?').join(', ') || 'none';
+    await decide('plan', 'approve', `level ${level}, sites: ${sites}`, { action: 'APPROVE_PLAN', payload: { level } });
+  }
+
+  if (once('confirm', state.pendingConfirm)) {
+    const c = state.pendingConfirm;
+    const target = String(c.targetDomain || '').toLowerCase().replace(/^www\./, '');
+    const approve = c.variant === 'navigate' && !!target && hosts.some((h) => target === h || target.endsWith(`.${h}`));
+    await decide('confirm', approve ? 'approve' : 'deny', `${c.variant}: ${c.actionSummary} (target ${c.targetDomain || 'none'}, page ${c.pageUrl})`,
+      { action: 'CONFIRM_ACTION', payload: { decision: approve ? 'approve' : 'reject' } });
+  }
+
+  if (once('question', state.pendingQuestion)) {
+    const question = String(state.pendingQuestion);
+    const known = (task.answers || []).find((a) => a.match.test(question));
+    if (known) {
+      await decide('question', 'answer', `"${oneLine(question, 120)}" -> "${known.answer}"`, { action: 'ANSWER_QUESTION', payload: { answer: known.answer } });
+    } else {
+      run.problems.push(`the run asked the user "${oneLine(question, 200)}" and the task defines no answer for it`);
+      run.stopped = 'unanswered question';
+      await decide('question', 'stop the run', `"${oneLine(question, 120)}" has no answer in the task`, { action: 'STOP_TASK' });
+    }
+  }
+
+  if (once('challenge', state.pendingChallengeHelp)) {
+    const c = state.pendingChallengeHelp;
+    await decide('challenge', 'skip the site', `${c.domain}: ${oneLine(c.reason, 120)}`, { action: 'RESOLVE_CHALLENGE', payload: { action: 'skip' } });
+  }
+
+  if (once('budget', state.pendingContinueBudget)) {
+    const b = state.pendingContinueBudget;
+    await decide('budget', 'finish the site', `${b.domain} used ${b.stepsUsed} steps`, { action: 'CONTINUE_BUDGET', payload: { action: 'finish' } });
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Running one task
+// ---------------------------------------------------------------------------------------------
+
+/** The first MOCK-FAIL text anywhere in what the model said or the engine showed, or null (see mockOllama.mjs). */
+function findMockFail(facts, calls) {
+  const texts = [...facts.steps.map((s) => s.raw), facts.answer, ...calls.map((c) => c.content), ...facts.errors];
+  const hit = texts.find((t) => typeof t === 'string' && t.includes(MOCK_FAIL_PREFIX));
+  return hit ? oneLine(hit.slice(hit.indexOf(MOCK_FAIL_PREFIX)), 240) : null;
+}
+
+/** Did the engine accept the plan of the mock? Its rows read "<domain>: <goal>" for every site of the mock's plan reply, where the generic fallback plan has one row with the task. */
+function planAccepted(calls, plan) {
+  const first = calls.find((c) => c.node === 'plan' && c.status === 200);
+  let sites;
+  try { sites = JSON.parse(first ? first.content : '').sites; } catch { return false; }
+  return Array.isArray(sites) && plan.length === sites.length && sites.every((s, i) => plan[i].text === `${s.domain}: ${s.goal}`);
+}
 
 async function runTask(ctx, fixtures, llm, name) {
   const task = TASKS[name];
@@ -700,34 +888,57 @@ async function runTask(ctx, fixtures, llm, name) {
   // Listen like a side panel attached to that tab would: same port name, same messages.
   await ctx.driver.evaluate((id) => {
     window.__logs = [];
+    window.__states = [];
+    window.__replies = [];
     if (window.__port) window.__port.disconnect();
     window.__port = chrome.runtime.connect({ name: `scoutfox_sidepanel:${id}` });
-    window.__port.onMessage.addListener((m) => { if (m.type === 'LOG_ENTRY') window.__logs.push(m.payload); });
+    window.__port.onMessage.addListener((m) => {
+      if (m.type === 'LOG_ENTRY') window.__logs.push(m.payload);
+      // Every state the runner broadcasts is what the side panel renders from. Only the few fields that decide whether a
+      // pause has a reason are kept (a payload carries the whole history, and there is one per stream chunk).
+      if (m.type === 'STATE_UPDATE' && m.payload) {
+        const p = m.payload;
+        window.__states.push({
+          status: p.status,
+          pauseReason: p.pauseReason == null ? null : p.pauseReason,
+          hold: !!(p.pendingQuestion || p.pendingApproval || p.pendingConfirm || p.pendingChallengeHelp || p.pendingContinueBudget)
+        });
+      }
+    });
   }, tabId);
 
   const firstCall = llm.calls.length;
+  const tallyBefore = await readTally(ctx);
   const startedAt = Date.now();
-  const started = await ctx.driver.evaluate((id, prompt) => chrome.runtime.sendMessage({
-    action: 'START_TASK', tabId: id, payload: { prompt }
-  }), tabId, task.prompt);
+  // No autoApprove: the engine approves the plan itself, exactly like the side panel does.
+  const started = await ctx.driver.evaluate((id, prompt, effort) => chrome.runtime.sendMessage({
+    action: 'START_TASK', tabId: id, payload: { prompt, effort }
+  }), tabId, task.prompt, EFFORT);
   if (!started || !started.success) throw new Error(`START_TASK was rejected: ${JSON.stringify(started)}`);
 
   // START_TASK answers before the engine flips to "running", so the end of the run is the first
-  // non-running status AFTER the run started. A fast run (the mock answers in milliseconds) can
-  // begin and end between two polls, so "started" is also read from the history: the turn's
-  // user_goal entry is written right after the status becomes "running". Each task has a fresh
-  // tab and so a fresh session, which means any user_goal in it is this run's.
+  // status that is neither "running" nor "paused" AFTER the run started ("paused" is a hold: a confirmation,
+  // a question, a challenge, a budget question). A fast run (the mock answers in milliseconds) can begin and end between
+  // two polls, so "started" is also read from the history: the turn's user_goal entry is written right after
+  // the status becomes "running". Each task has a fresh tab and so a fresh session, which means any
+  // user_goal in it is this run's.
   const shotName = `${name}-${model.replace(/[^a-z0-9.]+/gi, '_')}`;
   const shotDir = args['panel-screenshots'] ? path.resolve(String(args['panel-screenshots'])) : null;
   const screenshots = [];
+  const hosts = fixtureHostsOf(fixtures, task);
+  const run = { startedAt, decisions: [], problems: [], armed: { plan: true, confirm: true, question: true, challenge: true, budget: true }, stopped: null, loop: null };
+  const getState = () => ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE', tabId: id }), tabId);
+  const stop = () => ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'STOP_TASK', tabId: id }), tabId);
   let state = null;
   let seenRunning = false;
   let liveShotTaken = false;
   let timedOut = false;
+  let pausedSince = null;
   for (;;) {
-    state = await ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE', tabId: id }), tabId);
+    state = await getState();
+    const holds = holdsOf(state);
     const running = state.status === 'running';
-    const begun = seenRunning || running || (state.history || []).some((h) => h.type === 'user_goal');
+    const begun = seenRunning || running || holds.length > 0 || (state.history || []).some((h) => h.type === 'user_goal');
     if (running) {
       seenRunning = true;
       // The plan checklist is only drawn while a run is live, so catch it once mid-run.
@@ -735,48 +946,90 @@ async function runTask(ctx, fixtures, llm, name) {
         liveShotTaken = true;
         screenshots.push(...await panelScreenshots(ctx, tabId, `${shotName}-live`, shotDir, ['light']));
       }
-    } else if (begun) {
+    } else if (begun && state.status !== 'paused') {
       break;
+    }
+    if (state.status === 'paused') {
+      if (holds.length) {
+        pausedSince = null;
+        await answerHolds(ctx, run, task, tabId, state, hosts);
+        if (run.stopped) break;
+      } else {
+        // Paused by the user or by a failure: nobody is going to resume it.
+        pausedSince = pausedSince ?? Date.now();
+        if (Date.now() - pausedSince > PAUSE_GRACE_MS) {
+          run.problems.push('the run is paused and shows no hold that the harness can answer');
+          run.stopped = 'paused with no hold';
+          await stop();
+          break;
+        }
+      }
+    } else {
+      pausedSince = null;
     }
     const waited = Date.now() - startedAt;
     if (!begun && waited > 15000) {
       throw new Error(`The engine did not start the run within 15 s of START_TASK (status "${state.status}").`);
     }
+    // The mock counts identical requests in a row. The reply never depends on it, but a run that gets the same
+    // prompt again and again changes nothing and will not end by itself.
+    const lastCall = MOCK ? llm.calls[llm.calls.length - 1] : null;
+    if (lastCall && llm.calls.length > firstCall && lastCall.repeat + 1 >= LOOP_LIMIT) {
+      run.loop = { calls: lastCall.repeat + 1, lastCall: lastCall.n, node: lastCall.node, mode: lastCall.mode };
+      run.stopped = 'loop guard';
+      await stop();
+      break;
+    }
     if (waited > TASK_TIMEOUT_MS) {
       timedOut = true;
-      await ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'STOP_TASK', tabId: id }), tabId);
+      run.stopped = 'timeout';
+      await stop();
       break;
     }
     await sleep(POLL_MS);
   }
+  // The harness stopped it: the state read above is from before the Stop, so read it again (the engine settles in a moment).
+  if (run.stopped) {
+    await sleep(500);
+    state = await getState();
+  }
   const wallMs = Date.now() - startedAt;
   const logs = logsOfRun(state.logs, await ctx.driver.evaluate(() => window.__logs), tabId);
-
-  const turn = lastTurn(state.history || []);
-  const finish = turn.find((h) => h.type === 'finish');
-  const errors = turn.filter((h) => h.type === 'error').map((h) => h.content);
-  const steps = [];
-  for (const item of turn) {
-    if (item.type === 'agent_response') steps.push({ step: item.step, action: item.action, raw: item.rawResponse });
-    if (item.type === 'execution_result' && steps.length) {
-      const last = steps[steps.length - 1];
-      if (!last.result) last.result = item.success ? `ok: ${item.message || ''}` : `FAILED: ${item.error || ''}`;
+  const replies = await ctx.driver.evaluate(() => window.__replies || []);
+  // An answer of the harness that the engine refused would leave the run standing at its hold, so it is a problem of its own.
+  for (const reply of replies) {
+    if (reply.error || (reply.reply && reply.reply.success === false)) {
+      run.problems.push(`the engine refused the answer of the harness to ${reply.action}: ${oneLine(reply.error || reply.reply.error || reply.reply, 160)}`);
     }
   }
+
+  // The status of every broadcast of the run. A fast mock run lasts about two seconds, so the 3 s "standing pause" check above can
+  // never see a pause that is wrong for only part of the run; this reads each state the panel was sent instead. A pause is
+  // fine when somebody has to answer something (a hold) or the user paused; anything else is a Resume button with no
+  // reason, which is what users reported ("it stops after every task and I have to press Resume").
+  const states = await ctx.driver.evaluate(() => window.__states || []);
+  const stateStatuses = {};
+  for (const st of states) stateStatuses[st.status] = (stateStatuses[st.status] || 0) + 1;
+  const strayPause = states.find((st) => st.status === 'paused' && !st.hold && st.pauseReason !== 'user');
+  if (strayPause) {
+    run.problems.push(`the runner reported "paused" with no hold to answer and no user pause (pauseReason ${JSON.stringify(strayPause.pauseReason)}): the panel shows a Resume button with no reason`);
+  }
+  if (states.length === 0) {
+    run.problems.push('no STATE_UPDATE reached the harness port, so the paused-without-a-reason check could not look at anything');
+  }
+
   const calls = llm.calls.slice(firstCall);
-  const answer = finish ? finish.answer : null;
-  // What the engine's finish gate did: the audit it attached to the finish entry, how many finishes it
-  // refused on the way (each one is a step with a model call), and the plan rows as they ended.
-  const audit = finish && finish.audit ? finish.audit : null;
-  const refusals = turn.filter((h) => h.type === 'execution_result' && h.finishRefused).length;
-  const plan = (state.planSteps || []).map((s) => ({ text: s.text, status: s.status }));
-  const judged = { answer, steps, audit, plan, refusals };
+  const tally = tallyDelta(await readTally(ctx), tallyBefore);
+  // What the engine did, as facts (lib/tasks.mjs): the final entry, the sites and how they ended, the steps, the calls per node.
+  const facts = runFacts({ history: state.history || [], planSteps: state.planSteps || [], calls, tally });
+  const answer = facts.answer;
   // Before the tab closes: closing it ends its session, and the panel would show nothing.
   if (shotDir) screenshots.push(...await panelScreenshots(ctx, tabId, shotName, shotDir));
   if (page.url() !== probes[0].url) probes.push(await probePage(ctx, page, tabId));
   await sleep(300); // late page errors
   await page.close();
 
+  const expectOutcome = task.expectOutcome || 'finish';
   return {
     task: name,
     model,
@@ -784,54 +1037,88 @@ async function runTask(ctx, fixtures, llm, name) {
     prompt: task.prompt,
     status: state.status,
     timedOut,
-    finished: !!finish,
-    unconfirmed: !!(finish && finish.unconfirmed),
+    stopped: run.stopped,
+    loop: run.loop,
+    outcome: facts.outcome,
+    expectOutcome,
+    unconfirmed: facts.unconfirmed,
     answer,
-    answerCorrect: answer ? task.check(judged) : false,
-    audit,
-    refusals,
-    planStatus: plan,
-    expectProblems: MOCK && answer && task.expectMock ? task.expectMock(judged) : [],
-    errors,
+    answerCorrect: answer ? !!task.check(facts) : false,
+    expectProblems: MOCK && task.expectMock ? task.expectMock(facts) : [],
+    holdProblems: run.problems,
+    stateUpdates: { count: states.length, byStatus: stateStatuses },
+    mockFail: MOCK ? findMockFail(facts, calls) : null,
+    planAccepted: MOCK ? planAccepted(calls, facts.plan) : null,
+    decisions: run.decisions,
+    replies,
+    facts,
+    errors: facts.errors,
     pageErrors,
     probes,
-    plan: plan.map((s) => s.text),
-    planFallback: logs.some((l) => /\[PLANNER_FALLBACK\]/.test(l.message)),
-    steps,
     wallMs,
     modelCalls: calls.length,
     promptTokens: calls.reduce((s, c) => s + (c.promptEvalCount || 0), 0),
     outputTokens: calls.reduce((s, c) => s + (c.evalCount || 0), 0),
     calls,
     screenshots,
+    logLines: logs.map((l) => `${l.level} ${l.module}: ${oneLine(l.message, 200)}`),
     warnings: logs.filter((l) => l.level === 'WARN' || l.level === 'ERROR').map((l) => `${l.level} ${oneLine(l.message, 200)}`)
   };
 }
 
+/** The calls of a run as a few lines: all of them for a short run, the first three and the last two for a long one. */
+function callLines(calls) {
+  const lines = [];
+  const shown = calls.length <= 8 ? calls : [...calls.slice(0, 3), null, ...calls.slice(-2)];
+  for (const c of shown) {
+    if (c === null) { lines.push(`  ... ${calls.length - 5} more call(s) ...`); continue; }
+    lines.push(`  call ${c.n} (${c.node}${c.mode ? `:${c.mode}` : ''}): ${(c.ms / 1000).toFixed(1)} s, status ${c.status}, format ${c.format}, think ${c.think}, system ${fmtInt(c.systemChars)} chars, request ${fmtInt(c.requestBytes)} B, prompt_eval ${fmtInt(c.promptEvalCount)}, eval ${fmtInt(c.evalCount)}, done ${c.doneReason}`);
+    lines.push(`          reply: ${oneLine(c.content, 150)}`);
+    if (c.note) lines.push(`          mock:  ${c.note}${c.repeat ? ` (the same request ${c.repeat + 1} times in a row)` : ''}`);
+  }
+  return lines;
+}
+
+const countsText = (counts) => Object.entries(counts || {}).map(([k, n]) => `${k} x${n}`).join(', ') || 'none';
+
 function printReport(r) {
+  const f = r.facts;
   console.log(`\n=== ${r.task} (${r.model}) ===`);
   console.log(`start page: ${r.startUrl}`);
   console.log(`prompt:     ${r.prompt}`);
-  const outcome = r.timedOut ? 'TIMED OUT' : r.finished ? (r.unconfirmed ? 'FINISHED (unconfirmed)' : 'FINISHED') : `ENDED WITHOUT FINISH (status ${r.status})`;
-  console.log(`outcome:    ${outcome}; answer check: ${r.answerCorrect ? 'PASS' : 'FAIL'}`);
+  const how = r.stopped ? `; the harness stopped it (${r.stopped}${r.loop ? `: the same prompt ${r.loop.calls} times in a row, ${r.loop.node}:${r.loop.mode}, call ${r.loop.lastCall}` : ''})` : '';
+  const outcome = r.outcome === 'finish' ? 'FINISH' : r.outcome === 'partial_result' ? 'PARTIAL RESULT' : `NO FINAL ENTRY (status ${r.status})`;
+  console.log(`outcome:    ${outcome}${r.unconfirmed ? ' (unconfirmed)' : ''}, status ${r.status}${how}; expected ${r.expectOutcome}; answer check: ${r.answerCorrect ? 'PASS' : 'FAIL'}`);
   if (r.answer) console.log(`answer:     ${oneLine(r.answer, 400)}`);
-  if (r.audit) {
-    console.log(`gate:       verdict ${r.audit.verdict}; refused ${r.refusals} finish(es) first; read ${(r.audit.opened || []).map((o) => o.host).join(', ') || 'nothing'}; not opened ${(r.audit.notOpened || []).join(', ') || 'none'}${(r.audit.notes || []).length ? `; notes ${r.audit.notes.map((n) => `${n.code} (${n.severity})`).join(', ')}` : ''}`);
-  }
-  for (const p of r.expectProblems) console.log(`gate check: ${oneLine(p, 300)}`);
+  for (const p of r.expectProblems) console.log(`run check:  ${oneLine(p, 300)}`);
+  if (r.mockFail) console.log(`mock fail:  ${r.mockFail}`);
+  for (const p of r.holdProblems) console.log(`hold:       ${oneLine(p, 300)}`);
+  console.log(`states:     ${r.stateUpdates.count} state update(s) reached the panel port: ${countsText(r.stateUpdates.byStatus)}`);
   for (const e of r.errors) console.log(`error:      ${oneLine(e, 300)}`);
   for (const p of r.probes) console.log(`page check: ${p.url.replace(/^https?:\/\/[^/]+/, '')} net recorder ${p.recorderActive ? 'active' : 'NOT ACTIVE'}, content script ${p.contentScript ? 'answers' : `DOES NOT ANSWER (${p.contentScriptError})`}`);
   for (const e of r.pageErrors) console.log(`page error: ${oneLine(e, 300)}`);
-  console.log(`plan (${r.plan.length}${r.planFallback ? ', generic fallback' : ''}): ${r.planStatus.map((s, i) => `${i + 1}. [${s.status}] ${s.text}`).join(' | ')}`);
-  console.log('steps:');
-  for (const s of r.steps) console.log(`  #${s.step} ${oneLine(s.action, 140)}${s.result ? ` -> ${oneLine(s.result, 100)}` : ''}`);
-  console.log(`wall time:  ${(r.wallMs / 1000).toFixed(1)} s`);
-  console.log(`model calls: ${r.modelCalls}; prompt tokens ${fmtInt(r.promptTokens)}; output tokens ${fmtInt(r.outputTokens)}`);
-  for (const c of r.calls) {
-    console.log(`  call ${c.n}: ${(c.ms / 1000).toFixed(1)} s, status ${c.status}, format ${c.format}, think ${c.think}, system ${fmtInt(c.systemChars)} chars, request ${fmtInt(c.requestBytes)} B, prompt_eval ${fmtInt(c.promptEvalCount)}, eval ${fmtInt(c.evalCount)}, done ${c.doneReason}`);
-    console.log(`          reply: ${oneLine(c.content, 150)}`);
-    if (c.note) console.log(`          mock:  ${c.note}`);
+  console.log(`sites:      ${f.siteEnds.map((s) => `${s.siteId} ${s.status} (${s.findings} finding(s), ${s.stepsUsed} step(s))${s.reason ? `: ${oneLine(s.reason, 100)}` : ''}`).join(' | ') || 'no site ended'}`);
+  console.log(`plan (${f.plan.length}${r.planAccepted === false ? ', the mock plan was NOT accepted' : ''}): ${f.plan.map((s, i) => `${i + 1}. [${s.status}] ${s.text}`).join(' | ')}`);
+  if (r.decisions.length) {
+    console.log('decisions of the harness:');
+    for (const d of r.decisions) console.log(`  +${(d.atMs / 1000).toFixed(1)} s ${d.hold}: ${d.decision} - ${oneLine(d.detail, 200)}`);
+  } else {
+    console.log('decisions of the harness: none (the engine asked for nothing)');
   }
+  for (const reply of r.replies) console.log(`  answer to ${reply.action}: ${oneLine(reply.reply ?? { error: reply.error }, 120)}`);
+  console.log(`steps (${f.steps.length}):`);
+  for (const s of f.steps.slice(0, 12)) console.log(`  #${s.step} ${s.mode || ''} ${s.action ? oneLine(s.action, 130) : `REJECTED, the engine dropped the reply: ${oneLine(s.raw, 100)}`}${s.result ? ` -> ${oneLine(s.result, 100)}` : ''}`);
+  if (f.steps.length > 12) console.log(`  ... ${f.steps.length - 12} more`);
+  console.log(`history rows (${f.rows.length}${f.duplicateRows ? `, ${f.duplicateRows} of them exact copies of an earlier row` : ''}): ${countsText(f.rows.reduce((n, h) => { n[h.type] = (n[h.type] || 0) + 1; return n; }, {}))}`);
+  console.log(`execution results in the history: ${f.executions}`);
+  console.log(`messages the engine sent to the page: ${f.pageMessages ? countsText(f.pageMessages) : 'not counted'}; debugger commands: ${f.cdpCommands ? countsText(f.cdpCommands) : 'not counted'}`);
+  console.log(`wall time:  ${(r.wallMs / 1000).toFixed(1)} s`);
+  console.log(`model calls: ${r.modelCalls} (plan ${f.calls.plan}, policy ${f.calls.policy}${Object.keys(f.calls.policyModes).length ? ` [${countsText(f.calls.policyModes)}]` : ''}, reflect ${f.calls.reflect}); prompt tokens ${fmtInt(r.promptTokens)}; output tokens ${fmtInt(r.outputTokens)}`);
+  for (const line of callLines(r.calls)) console.log(line);
+  // The log of the run (from the START_TASK line on): the tags it carries and how often, then its first and last lines.
+  const tags = r.logLines.reduce((n, line) => { const tag = /\[([A-Z_]+)\]/.exec(line)?.[1] || 'untagged'; n[tag] = (n[tag] || 0) + 1; return n; }, {});
+  console.log(`log of the run (${r.logLines.length} lines): ${countsText(tags)}`);
+  for (const line of r.logLines.length <= 10 ? r.logLines : [...r.logLines.slice(0, 6), `... ${r.logLines.length - 9} more line(s) ...`, ...r.logLines.slice(-3)]) console.log(`  ${line}`);
   if (r.warnings.length) {
     console.log(`warnings (${r.warnings.length}):`);
     for (const w of r.warnings.slice(0, 12)) console.log(`  ${w}`);
@@ -843,9 +1130,16 @@ function printReport(r) {
 function judge(ctx, reports, gate) {
   const failures = [];
   for (const r of reports) {
-    if (!r.finished) failures.push(`${r.task}: the run did not finish (${r.timedOut ? 'timed out' : `status ${r.status}`})`);
-    else if (!r.answerCorrect) failures.push(`${r.task}: the answer is wrong`);
+    if (r.stopped) failures.push(`${r.task}: the harness stopped the run (${r.stopped})${r.loop ? `: the model got the same prompt ${r.loop.calls} times in a row` : ''}`);
+    if (!r.outcome) {
+      if (!r.stopped) failures.push(`${r.task}: the run ended with no final entry (status ${r.status})`);
+    } else if (r.outcome !== r.expectOutcome) {
+      failures.push(`${r.task}: the run ended with a ${r.outcome} entry, expected ${r.expectOutcome}`);
+    } else if (!r.answerCorrect) {
+      failures.push(`${r.task}: the answer is wrong`);
+    }
     for (const p of r.expectProblems) failures.push(`${r.task}: ${p}`);
+    for (const p of r.holdProblems) failures.push(`${r.task}: ${p}`);
     for (const p of r.probes) {
       const where = p.url.replace(/^https?:\/\/[^/]+/, '');
       if (!p.recorderActive) failures.push(`${r.task}: the net recorder (content/net-recorder.js, MAIN world) did not run on ${where}: window.__scoutfox_net_recorder_active is not true`);
@@ -854,10 +1148,12 @@ function judge(ctx, reports, gate) {
     if (r.pageErrors.length) failures.push(`${r.task}: the page logged ${r.pageErrors.length} console error(s) or page error(s): ${oneLine(r.pageErrors[0], 200)}`);
     if (MOCK) {
       // The mock is deterministic and never fails a call, so any of these is a change in the extension.
-      if (r.planFallback) failures.push(`${r.task}: the generic fallback plan was used, the mock's plan reply was not accepted`);
+      if (r.mockFail) failures.push(`${r.task}: the mock could not find what it needs in the prompt: ${r.mockFail}`);
+      if (r.planAccepted === false) failures.push(`${r.task}: the engine did not take the mock's plan (the plan rows are not the sites of its reply, so the generic fallback plan was used or the plan call failed)`);
       if (r.unconfirmed) failures.push(`${r.task}: the run ended with an unconfirmed (auto-wrapped) finish`);
       if (r.errors.length) failures.push(`${r.task}: the run logged ${r.errors.length} error entr${r.errors.length === 1 ? 'y' : 'ies'}: ${oneLine(r.errors[0], 200)}`);
-      if (r.modelCalls !== 1 + r.steps.length) failures.push(`${r.task}: ${r.modelCalls} model calls for ${r.steps.length} step(s), expected 1 plan call plus 1 per step (a call was repeated or added)`);
+      const refused = r.calls.filter((c) => c.status !== 200);
+      if (refused.length) failures.push(`${r.task}: ${refused.length} model call(s) were refused by the mock (HTTP ${[...new Set(refused.map((c) => c.status))].join('/')}): ${oneLine(refused[0].content, 240)}`);
     }
   }
   if (ctx.workerErrors.length) failures.push(`${ctx.workerErrors.length} service worker or driver page error(s)`);
@@ -904,6 +1200,9 @@ async function main() {
   for (const name of names) {
     if (!TASKS[name]) throw new UserError(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
   }
+  // A pending task is skipped with its reason and is never a failure: the engine cannot do what it checks yet.
+  const skipped = names.filter((n) => TASKS[n].pending).map((n) => ({ task: n, reason: TASKS[n].pending }));
+  const runNames = names.filter((n) => !TASKS[n].pending);
 
   const puppeteer = await loadPuppeteer();
   checkChromium();
@@ -936,7 +1235,9 @@ async function main() {
   if (needsModel) {
     if (MOCK) {
       const { startMockOllama } = await import('./lib/mockOllama.mjs');
-      llm = await listen('mock Ollama', () => startMockOllama({ port: PROXY_PORT, models: [MODEL] }));
+      // The models of the mock: the one of the run, and the personas of the tasks (/api/show knows exactly these).
+      const models = [...new Set([MODEL, ...Object.values(TASKS).map((t) => t.mockModel).filter(Boolean)])];
+      llm = await listen('mock Ollama', () => startMockOllama({ port: PROXY_PORT, models }));
     } else {
       llm = await listen('Ollama proxy', () => startOllamaProxy({ port: PROXY_PORT, target: OLLAMA }));
     }
@@ -961,7 +1262,8 @@ async function main() {
   } else {
     await saveSettings(ctx, llm, MODEL);
 
-    for (const name of names) {
+    for (const { task, reason } of skipped) console.log(`\n=== ${task} === SKIPPED (pending): ${reason}`);
+    for (const name of runNames) {
       const report = await runTask(ctx, fixtures, llm, name);
       reports.push(report);
       printReport(report);
@@ -973,8 +1275,10 @@ async function main() {
 
   console.log('\n=== summary ===');
   for (const r of reports) {
-    console.log(`${r.task}: ${r.finished ? 'finished' : 'not finished'}, answer ${r.answerCorrect ? 'right' : 'wrong'}${r.audit ? `, gate ${r.audit.verdict}${r.refusals ? ` after ${r.refusals} refusal(s)` : ''}` : ''}, ${r.steps.length} step(s), ${(r.wallMs / 1000).toFixed(1)} s, ${r.modelCalls} model call(s), ${fmtInt(r.promptTokens)} prompt + ${fmtInt(r.outputTokens)} output tokens`);
+    const sites = r.facts.siteEnds.map((s) => `${s.siteId} ${s.status}`).join(', ') || 'no site ended';
+    console.log(`${r.task}: ${r.outcome || `no final entry (status ${r.status}${r.stopped ? `, stopped: ${r.stopped}` : ''})`}, answer ${r.answerCorrect ? 'right' : 'wrong'}, sites ${sites}, ${r.facts.steps.length} step(s), ${(r.wallMs / 1000).toFixed(1)} s, ${r.modelCalls} model call(s) (plan ${r.facts.calls.plan}, policy ${r.facts.calls.policy}, reflect ${r.facts.calls.reflect}), ${fmtInt(r.promptTokens)} prompt + ${fmtInt(r.outputTokens)} output tokens`);
   }
+  if (!args['dump-snapshots']) for (const { task, reason } of skipped) console.log(`${task}: skipped (pending: ${reason})`);
   console.log(`service worker errors (console, exceptions, CSP violations): ${ctx.workerErrors.length}`);
   if (reports.length) {
     const probes = reports.flatMap((r) => r.probes);
@@ -988,8 +1292,10 @@ async function main() {
 
   const failures = judge(ctx, reports, gate);
   if (args.out) {
+    // A run that loops makes thousands of calls: the report keeps the first five and the last three of each task, and the count.
+    const trimmed = reports.map((r) => ({ ...r, callCount: r.calls.length, calls: r.calls.length <= 8 ? r.calls : [...r.calls.slice(0, 5), ...r.calls.slice(-3)], logLines: r.logLines.length <= 40 ? r.logLines : [...r.logLines.slice(0, 25), ...r.logLines.slice(-15)] }));
     fs.writeFileSync(path.resolve(String(args.out)), JSON.stringify({
-      env, mock: MOCK, tamper: args.tamper || null, model: MODEL, reports, workerErrors: ctx.workerErrors, panel: { ...ctx.panel, gate }, failures
+      env, mock: MOCK, tamper: args.tamper || null, model: MODEL, skipped, reports: trimmed, workerErrors: ctx.workerErrors, panel: { ...ctx.panel, gate }, failures
     }, null, 2));
     console.log(`report saved to ${args.out}`);
   }

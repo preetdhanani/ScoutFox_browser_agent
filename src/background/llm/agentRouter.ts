@@ -22,7 +22,7 @@
  * (watchFetch in factory.ts), together with the removal of what the SDKs add (accept, x-stainless-*). It is NOT in
  * the client's defaultHeaders or in the call options, because LangChain hands those to the callbacks (tracing),
  * and the wire image carries the key. Chromium replaces the User-Agent of every fetch, whatever is set here, so
- * the declarativeNetRequest session rule 8888 in background.js is what really sets it (and x-app) for agentrouter.org.
+ * the declarativeNetRequest session rule 8888 in background.ts is what really sets it (and x-app) for agentrouter.org.
  */
 import { ChatAnthropic } from '@langchain/anthropic';
 import { ChatOpenAICompletions } from '@langchain/openai';

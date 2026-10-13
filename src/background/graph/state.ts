@@ -6,6 +6,9 @@
 // The site worker's private state is in workerState.ts; only siteIn and siteOut cross the border.
 // Erasable TypeScript only (no enums, no parameter properties), so node --test can strip types.
 import { Annotation } from '@langchain/langgraph/web';
+import { EvidenceLedger } from '../agent/evidence.ts';
+import type { EvidenceInput, LedgerSnapshot } from '../agent/evidence.ts';
+import type { FinishAuditRecord } from '../agent/planEvidence.ts';
 import type { SiteIn, SiteOut } from './workerState.ts';
 
 export const MAX_HISTORY = 400;        // same cap as today, enforced by the reducer on every write
@@ -18,7 +21,7 @@ export const MAX_FAILURE_MEMORY = 6;   // per site
 export const MAX_FINDINGS = 200;       // per turn, including superseded ones
 
 // ---------- small unions ----------
-export type RunStatus = 'idle' | 'running' | 'paused' | 'stopped';
+export type RunStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'error';
 export type ModelTier = 'small' | 'large';
 export type Level = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type OrchestratorNode =
@@ -40,7 +43,7 @@ export type PageType =
   | 'error' | 'challenge' | 'cookie_wall' | 'other';
 export type Effect = 'url_changed' | 'dom_changed' | 'value_set' | 'focus_changed' | 'none' | 'unknown';
 export type EndReason =
-  | 'all_subgoals_done' | 'partial' | 'unverified' | 'stopped_early' | 'no_subgoal_completed'
+  | 'all_subgoals_done' | 'goal_achieved' | 'partial' | 'unverified' | 'stopped_early' | 'no_subgoal_completed'
   | 'max_steps' | 'model_unusable' | 'dom_error' | 'plan_rejected' | 'stopped' | 'error';
 
 // ---------- JSON-safe reducer envelopes (pending writes must serialize) ----------
@@ -73,6 +76,17 @@ export const list = <T>(cap: number) =>
   Annotation<T[], ListUpdate<T>>({ reducer: cappedList<T>(cap), default: () => [] });
 export const map = <V>(cap?: number, age?: (v: V) => number) =>
   Annotation<Record<string, V>, MapUpdate<V>>({ reducer: mergeMap<V>(cap, age), default: () => ({}) });
+
+export type EvidenceUpdate = EvidenceInput | EvidenceInput[] | { $reset: LedgerSnapshot };
+export function reduceEvidence(cur: LedgerSnapshot, upd: EvidenceUpdate): LedgerSnapshot {
+  if (upd && typeof upd === 'object' && '$reset' in upd) return (upd as { $reset: LedgerSnapshot }).$reset;
+  const ledger = EvidenceLedger.fromSnapshot(cur);
+  const events = Array.isArray(upd) ? upd : [upd];
+  for (const ev of events) {
+    if (ev) ledger.record(ev);
+  }
+  return ledger.toSnapshot();
+}
 
 // ---------- effort (shared/effort.json) ----------
 export type LadderStep = 'reload' | 'search' | 'alternate_entry' | 'ask_user' | 'mark';
@@ -132,9 +146,12 @@ export interface SiteSpec {              // one plan entry = one worker run
     predicate?: Predicate;               // do sites only; without one the site ends 'unverified'
   };
 }
+
+export type TaskKind = 'research' | 'action' | 'answer';
+
 export interface PlanMeta {
   version: number;                       // 1, then +1 for every accepted revise
-  taskKind: 'research' | 'action' | 'answer';
+  taskKind: TaskKind;
   columns: string[];                     // CODE-normalized: snake_case, deduped, max 5, reserved names removed
   priceLike: boolean;                    // CODE: a column is price/cost/preis -> price detector + extract mode
   searchQuery: string;                   // 2-6 words, never the whole task text
@@ -239,7 +256,7 @@ export type OrchestratorOutcome =        // lastDecision of plan and reflect
   | { kind: 'aborted'; node: 'plan' | 'reflect' };
 export interface ControlSnapshot { pauseRequested: boolean; stopRequested: boolean }
 export interface TrailEntry { node: NodeName; step: number; at: number }
-export interface FinalAnswer { text: string; unconfirmed: boolean; table: FindingsTable | null; partial: boolean }
+export interface FinalAnswer { text: string; unconfirmed: boolean; table: FindingsTable | null; partial: boolean; audit?: FinishAuditRecord }
 export interface Offer { partialSiteIds: string[]; suggestedLevel: Level }
 export interface CdpState { mode: 'off' | 'cdp' | 'synthetic'; reason: string | null; sticky: boolean }
 
@@ -253,7 +270,8 @@ export type HistoryEntry =
   | { type: 'execution_result'; step: number; success: boolean; message?: string; error?: string;
       label?: string; submitted?: boolean; resultData?: unknown;
       via?: 'cdp' | 'synthetic' | 'background' | 'state'; effect?: Effect;
-      verify?: 'ok' | 'no_effect' | 'failed' | 'stuck'; goal?: 'closer' | 'same' | 'away' }
+      verify?: 'ok' | 'no_effect' | 'failed' | 'stuck'; goal?: 'closer' | 'same' | 'away';
+      finishRefused?: boolean }
   | { type: 'error'; step?: number; content: string }
   | { type: 'notice'; step?: number; content: string; level: 'info' | 'warn';
       kind: 'blocked' | 'site' | 'system_nav' | 'cdp' | 'restart' | 'plan' | 'effort' | 'budget'
@@ -266,7 +284,8 @@ export type HistoryEntry =
   | { type: 'site_end'; siteId: string; site: string; status: SiteStatus; reason: string;
       findings: number; stepsUsed: number }
   | { type: 'finish'; answer: string; unconfirmed?: true; partial?: true; table?: FindingsTable;
-      runStats?: RunStats; offer?: Offer; stoppedEarly?: string; findings?: Finding[] }
+      runStats?: RunStats; offer?: Offer; stoppedEarly?: string; findings?: Finding[];
+      audit?: FinishAuditRecord }
   | { type: 'partial_result'; answer: string; table: FindingsTable | null; reason: EndReason;
       runStats?: RunStats; offer?: Offer; findings?: Finding[] };  // never a "Done"
 
@@ -315,6 +334,10 @@ export const AgentState = Annotation.Root({
   priorFindings: last<Finding[]>(() => []),         // the previous research turn's findings
   visited: map<VisitedEntry>(MAX_VISITED, (v) => v.lastStep), // key = normalized url
   blocked: map<BlockedSource>(),                    // key = registrable domain
+  evidence: Annotation<LedgerSnapshot, EvidenceUpdate>({
+    reducer: reduceEvidence,
+    default: () => ({ v: 1, entries: [], visits: [] }),
+  }),
 
   // ---- counters and LLM outcomes ----
   stepCount: last<number>(() => 0),
@@ -333,6 +356,8 @@ export const AgentState = Annotation.Root({
   endReason: last<EndReason | null>(() => null),
   finalAnswer: last<FinalAnswer | null>(() => null),
   offerPayload: last<Offer | null>(() => null),
+  lastRefusedFinish: last<any>(() => null),
+  finishSendBacks: last<number>(() => 0),
 
   // ---- UI-facing ----
   history: list<HistoryEntry>(MAX_HISTORY),

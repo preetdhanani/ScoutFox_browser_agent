@@ -138,7 +138,7 @@ export function evidenceFromActionResult(
         return text.trim() === '' ? null : { kind: 'text', text };
       }
       case 'execute_js': {
-        const value = result.result;
+        const value = result.result ?? (result as any).resultData;
         const text = typeof value === 'string' ? value : typeof value === 'number' || typeof value === 'boolean' ? String(value) : '';
         if (text.trim() === '' || text === 'undefined' || text === 'null' || text === 'navigation triggered') return null;
         const code = typeof action.code === 'string' ? squeeze(action.code) : '';
@@ -414,4 +414,33 @@ export function withoutAcknowledgedGaps(answer: string, audit: AnswerAudit): Ans
  */
 export function answerAcknowledgesEveryGap(answer: string, audit: AnswerAudit): boolean {
   return audit.lies === 0 && audit.gaps > 0 && withoutAcknowledgedGaps(answer, audit).gaps === 0;
+}
+
+/**
+ * Remembers what a type action (also inside a browser_batch) is about to type, when it could launder a fact: a string
+ * with a digit or a link in it.
+ */
+export function noteTypedText(actionObj: any, typedTexts: string[]): void {
+  try {
+    const steps = actionObj && actionObj.action === 'browser_batch' && Array.isArray(actionObj.steps) ? actionObj.steps : [actionObj];
+    for (const step of steps) {
+      if (step && step.action === 'type' && typeof step.text === 'string') {
+        const typed = step.text.trim().slice(0, 300);
+        if (typed.length >= 3 && /\d|https?:|www\./i.test(typed)) typedTexts.push(typed);
+      }
+    }
+    if (typedTexts.length > 50) typedTexts.splice(0, typedTexts.length - 50);
+  } catch {}
+}
+
+/** The text of a page without the strings the model typed, each replaced by a space (case does not matter). */
+export function withoutTypedText(text: string, typedTexts: readonly string[]): string {
+  if (typeof text !== 'string' || text === '' || !typedTexts || typedTexts.length === 0) return text;
+  let out = text;
+  for (const typed of typedTexts) {
+    if (typed) {
+      out = out.replace(new RegExp(typed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
+    }
+  }
+  return out;
 }

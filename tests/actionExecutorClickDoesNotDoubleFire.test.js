@@ -8,23 +8,26 @@
  * fires its own proper click event, plus handles native defaults like checkbox toggling and
  * form submission) be the single source of the actual click.
  *
- * content/actionExecutor.js is a browser IIFE (no module exports, relies on window/document
- * globals), so it is loaded here via new Function against a minimal fake DOM - the same
- * technique used elsewhere in this suite for net-recorder.js.
+ * The executor is the TypeScript module (src/content/actionExecutor.ts, which builds the shipped
+ * content/actionExecutor.js), run here against a minimal fake DOM. The MAIN-world net-recorder.js
+ * is still an IIFE loaded with new Function in its own tests.
  */
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-
-const SRC = fs.readFileSync(new URL('../content/actionExecutor.js', import.meta.url), 'utf8');
+import { ActionExecutor } from '../src/content/actionExecutor.ts';
 
 function loadActionExecutor(fakeEl) {
   const dispatched = [];
 
+  class FakeMouseEvent {
+    constructor(type) { this.type = type; }
+  }
+
   const fakeWindow = {
     domCompressor: { getElement: () => fakeEl },
-    scrollY: 0
+    scrollY: 0,
+    MouseEvent: FakeMouseEvent
   };
 
   const fakeDocument = {
@@ -35,17 +38,12 @@ function loadActionExecutor(fakeEl) {
     querySelector: () => null
   };
 
-  class FakeMouseEvent {
-    constructor(type) { this.type = type; }
-  }
-
   fakeEl.dispatchEvent = (event) => { dispatched.push(event.type); };
   fakeEl.scrollIntoView = () => {};
   fakeEl.style = {};
   fakeEl.getBoundingClientRect = () => ({ top: 0, bottom: 10, left: 0, right: 10 });
 
-  const fn = new Function('window', 'document', 'MouseEvent', `${SRC}\nreturn window.actionExecutorInstance;`);
-  const instance = fn(fakeWindow, fakeDocument, FakeMouseEvent);
+  const instance = new ActionExecutor(fakeDocument, fakeWindow);
   return { instance, dispatched };
 }
 

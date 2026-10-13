@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 /** The folders with code that Node or Vite loads. node_modules and the build output are skipped. */
-const FOLDERS = ['src', 'background', 'sidepanel', 'content', 'scripts', 'shared', 'tests'];
+const FOLDERS = ['src', 'sidepanel', 'content', 'scripts', 'shared', 'tests'];
 
 // `import x from '...'`, `import {\n a,\n b\n} from '...'`, `import '...'`, `export * from '...'`,
 // `export { a } from '...'` (at the start of a line, so a comment or a string does not count) ...
@@ -81,7 +81,7 @@ test('every relative import names an existing file exactly as written (Node cann
   assert.ok(files.length >= 100, `only ${files.length} files were scanned`);
   assert.ok(checked >= 150, `only ${checked} relative imports were checked`);
   assert.ok(files.some((file) => relative(ROOT, file) === join('src', 'background', 'agent', 'parse.ts')));
-  assert.ok(files.some((file) => relative(ROOT, file) === join('background', 'agentEngine.js')));
+  assert.ok(files.some((file) => relative(ROOT, file) === join('src', 'background', 'background.ts')));
 });
 
 test('the scan sees each way the mistake is made, and only that', () => {

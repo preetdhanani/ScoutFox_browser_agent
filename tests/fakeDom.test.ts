@@ -4,8 +4,8 @@
  * A fake that builds the wrong snapshot is worse than no fake: every engine test built on it would
  * pass against a page the real content script never produces. So the first half of this file pins
  * the shape to the real thing, two ways:
- *   - the same page description, run through the REAL content/domCompressor.js (loaded with
- *     new Function against a small fake DOM, like the other domCompressor tests do), must give a
+ *   - the same page description, run through the REAL compressor (src/content/domCompressor.ts,
+ *     which builds the shipped content/domCompressor.js, against a small fake DOM), must give a
  *     deep-equal snapshot, `elements` and all;
  *   - the committed snapshots that tests/e2e/smoke.mjs --dump-snapshots recorded in a real Chromium
  *     (tests/fixtures/snapshots) must come out of a description of the same page, key for key.
@@ -20,12 +20,13 @@ import { fakeChrome } from './helpers/fakeChrome.ts';
 import type { FakeChrome } from './helpers/fakeChrome.ts';
 import { button, fakeDom, input, link, pageSnapshot } from './helpers/fakeDom.ts';
 import type { DomSnapshot, ElementSpec, FakeDom, PageSpec } from './helpers/fakeDom.ts';
+import { DOMCompressor } from '../src/content/domCompressor.ts';
+import { ActionExecutor } from '../src/content/actionExecutor.ts';
+import { withGlobals } from './helpers/contentGlobals.ts';
 
 // ---------------------------------------------------------------------------------------------
 // The real DOMCompressor, against a fake DOM built from the same description
 // ---------------------------------------------------------------------------------------------
-
-const SOURCE = fs.readFileSync(new URL('../content/domCompressor.js', import.meta.url), 'utf8');
 
 interface FakeNode {
   tagName: string;
@@ -45,7 +46,7 @@ interface FakeNode {
 }
 
 /**
- * Runs content/domCompressor.js on a page made of the given elements, all direct children of <body>
+ * Runs the compressor (src/content/domCompressor.ts) on a page made of the given elements, all direct children of <body>
  * (so cssPath is the plain tag path), and returns the real getSnapshot() result. The page needs an
  * explicit pageHeight, because scrollHeight is a fact of the browser that the description has to give.
  */
@@ -117,9 +118,18 @@ function realSnapshot(page: PageSpec, options: { scrollY?: number; maxElements?:
     // The compressor asks for interactive elements with one selector list and for text with another.
     querySelectorAll: (selector: string) => (selector.includes('a[href]') ? nodes : []),
   };
-  const load = new Function('window', 'document', 'Node', 'CSS', `${SOURCE}\nreturn window.domCompressorInstance;`);
-  const compressor = load(fakeWindow, fakeDocument, { ELEMENT_NODE: 1 }, { escape: (s: string) => s });
-  return compressor.getSnapshot(options.maxElements === undefined ? {} : { maxElements: options.maxElements });
+  return withGlobals(
+    {
+      window: fakeWindow,
+      document: fakeDocument,
+      Node: { ELEMENT_NODE: 1 },
+      CSS: { escape: (s: string) => s },
+    },
+    () => {
+      const compressor = new DOMCompressor();
+      return compressor.getSnapshot(options.maxElements === undefined ? {} : { maxElements: options.maxElements });
+    }
+  );
 }
 
 /** A page that uses every branch of the element summary. */
@@ -558,10 +568,8 @@ test('typing into something that is not a text field gives the real content scri
 });
 
 // ---------------------------------------------------------------------------------------------
-// The type action, against the REAL content/actionExecutor.js doType
+// The type action, against the REAL ActionExecutor doType
 // ---------------------------------------------------------------------------------------------
-
-const EXECUTOR_SOURCE = fs.readFileSync(new URL('../content/actionExecutor.js', import.meta.url), 'utf8');
 
 /** setFieldValue reads the native setter from HTMLInputElement.prototype and HTMLTextAreaElement.prototype. */
 class HTMLInputElementStub {
@@ -606,10 +614,18 @@ function typableNode(spec: ElementSpec): Record<string, unknown> {
 /** What the real doType answers for typing `text` into an element like this one. */
 function realTypeReply(spec: ElementSpec, text: unknown, submit: unknown = false): unknown {
   const node = typableNode(spec);
-  const window: Record<string, any> = { domCompressor: { getElement: () => node, elements: [] } };
-  const load = new Function('window', 'document', 'HTMLInputElement', 'HTMLTextAreaElement', 'InputEvent', 'KeyboardEvent', 'MouseEvent', 'CSS', 'setTimeout', EXECUTOR_SOURCE);
-  load(window, { contains: () => true }, HTMLInputElementStub, HTMLTextAreaElementStub, InputEventStub, Event, Event, { escape: (s: string) => s }, () => 0);
-  return window.actionExecutorInstance.doType(1, text, submit);
+  const fakeWindow: Record<string, any> = {
+    domCompressor: { getElement: () => node, elements: [] },
+    HTMLInputElement: HTMLInputElementStub,
+    HTMLTextAreaElement: HTMLTextAreaElementStub,
+    InputEvent: InputEventStub,
+    KeyboardEvent: Event,
+    MouseEvent: Event,
+    CSS: { escape: (s: string) => s }
+  };
+  const fakeDocument = { contains: () => true };
+  const executor = new ActionExecutor(fakeDocument as any, fakeWindow as any);
+  return executor.doType(1, text, submit);
 }
 
 /** What the fake content script answers for the same element, alone on a page. */
@@ -746,15 +762,23 @@ test('scroll moves the page, clamped to its ends, and brings off-screen elements
   assert.equal((await r.send(snapshotMessage)).data.scrollState.scrollY, 0);
 });
 
-/** The real content/actionExecutor.js on a stub window, for the actions that need no element: scrollBy is recorded. */
+/** The real ActionExecutor on a stub window, for the actions that need no element: scrollBy is recorded. */
 function realExecutor(): { run: (payload: Record<string, unknown>) => Promise<any>; scrolled: unknown[] } {
   const scrolled: unknown[] = [];
-  const window: Record<string, any> = { domCompressor: { getElement: () => null, elements: [] }, scrollBy: (options: { top: unknown }) => scrolled.push(options.top) };
-  const document = { contains: () => true, activeElement: { dispatchEvent: () => true }, body: { dispatchEvent: () => true } };
-  const load = new Function('window', 'document', 'HTMLInputElement', 'HTMLTextAreaElement', 'InputEvent', 'KeyboardEvent', 'MouseEvent', 'CSS', 'setTimeout', EXECUTOR_SOURCE);
-  load(window, document, HTMLInputElementStub, HTMLTextAreaElementStub, InputEventStub, Event, Event, { escape: (s: string) => s }, () => 0);
+  const fakeWindow: Record<string, any> = {
+    domCompressor: { getElement: () => null, elements: [] },
+    scrollBy: (options: { top: unknown }) => scrolled.push(options.top),
+    HTMLInputElement: HTMLInputElementStub,
+    HTMLTextAreaElement: HTMLTextAreaElementStub,
+    InputEvent: InputEventStub,
+    KeyboardEvent: Event,
+    MouseEvent: Event,
+    CSS: { escape: (s: string) => s }
+  };
+  const fakeDocument = { contains: () => true, activeElement: { dispatchEvent: () => true }, body: { dispatchEvent: () => true } };
+  const executor = new ActionExecutor(fakeDocument as any, fakeWindow as any);
   // The message crosses the wire as JSON, so a missing value is a missing key.
-  return { run: (payload) => window.actionExecutorInstance.execute(JSON.parse(JSON.stringify(payload))), scrolled };
+  return { run: (payload) => executor.execute(JSON.parse(JSON.stringify(payload))), scrolled };
 }
 
 test('scroll: only a missing direction or amount gets its default, and any other value is used and quoted as it is, like the real doScroll', async () => {
@@ -927,4 +951,68 @@ test('elements of a page description are not changed by what the fake content sc
   assert.deepEqual(pages, before);
   const element: ElementSpec | undefined = r.site.pages[0]?.elements?.[2];
   assert.equal(element?.checked, undefined);
+});
+
+test('real domCompressor.getSnapshot() keys match fakeDom snapshot keys exactly', () => {
+  const real = realSnapshot(KITCHEN_SINK) as Record<string, unknown>;
+  const fake = pageSnapshot(KITCHEN_SINK) as unknown as Record<string, unknown>;
+  const realKeys = Object.keys(real).sort();
+  const fakeKeys = Object.keys(fake).sort();
+  assert.deepStrictEqual(fakeKeys, realKeys);
+
+  // Assert contract values
+  assert.ok(Array.isArray(real.refs), 'refs must be an array');
+  assert.ok(Array.isArray(real.shownRefs), 'shownRefs must be an array');
+  assert.equal(typeof real.domain, 'string');
+  assert.ok((real.domain as string).length > 0, 'domain must be non-empty');
+  assert.deepStrictEqual(real.shownRefs, real.refs, 'shownRefs must equal refs');
+  assert.deepStrictEqual(real.refs, (real.elements as any[]).map((e: any) => e.id), 'refs must match element ids');
+  assert.ok(real.scrollState && typeof real.scrollState === 'object', 'scrollState must exist');
+});
+
+test('rendered element badges never pollute extractPageText()', () => {
+  const badgeContainer = {
+    id: 'scoutfox-badge-container',
+    style: { display: '' },
+    textContent: '1 2 3 4 5 6 7 8 9 10',
+    innerText: '1 2 3 4 5 6 7 8 9 10',
+  };
+  const body = {
+    nodeType: 1,
+    get innerText() {
+      return badgeContainer.style.display === 'none' ? 'Genuine page content only.' : '1 2 3 4 5 6 7 8 9 10 Genuine page content only.';
+    },
+    textContent: 'Genuine page content only.',
+    querySelectorAll: () => [],
+  };
+  const fakeWindow = {
+    location: { href: 'https://shop.test/', hostname: 'shop.test' },
+    innerWidth: 1200,
+    innerHeight: 800,
+    scrollY: 0,
+  };
+  const fakeDocument = {
+    title: 'Shop',
+    contentType: 'text/html',
+    documentElement: { scrollHeight: 800 },
+    body,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    getElementById: (id: string) => (id === 'scoutfox-badge-container' ? badgeContainer : null),
+  };
+  const text = withGlobals(
+    {
+      window: fakeWindow,
+      document: fakeDocument,
+      Node: { ELEMENT_NODE: 1 },
+      CSS: { escape: (s: string) => s },
+    },
+    () => {
+      const compressor = new DOMCompressor();
+      return compressor.extractPageText();
+    }
+  );
+  assert.equal(text, 'Genuine page content only.');
+  assert.doesNotMatch(text, /1 2 3 4 5/);
+  assert.equal(badgeContainer.style.display, '');
 });

@@ -4,7 +4,8 @@ import { fakeChrome } from '../helpers/fakeChrome.ts';
 import { createFakeStorage } from '../helpers/fakeStorageSession.ts';
 import { fakeDom, link } from '../helpers/fakeDom.ts';
 import { AgentRunner } from '../../src/background/runner/AgentRunner.ts';
-import type { LlmPort } from '../../src/background/runner/runtimeRegistry.ts';
+import { Logger } from '../../src/shared/logger.ts';
+import { runtimeRegistry, type LlmPort } from '../../src/background/runner/runtimeRegistry.ts';
 
 const LIST_URL = 'https://shop.test/items';
 const PRODUCT_URL = 'https://shop.test/items/42';
@@ -46,6 +47,7 @@ function setupEnvironment() {
     tabGroups: true,
     storage: store,
     dom: true,
+    scripting: { executeScript: () => [{ result: true }] },
   });
 
   site.attach(fc, 101);
@@ -386,3 +388,112 @@ test('AgentRunner - requestedEffort and effortDefault settings integration', asy
   runner2.dispose();
 });
 
+test('AgentRunner - startTask writes the [START_TASK] line that the e2e smoke harness cuts the run log at', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const runner = new AgentRunner(101, 1, undefined, createScriptedLlm(JSON.stringify({ action: 'finish', answer: 'Done.' })));
+  await runner.restorePromise;
+  Logger.clearLogs();
+
+  // An empty prompt is refused before anything starts, so it writes no marker.
+  const refused = await runner.startTask('   ', 101);
+  assert.equal(refused.success, false);
+  assert.deepEqual(Logger.getLogsHistory().filter((entry) => entry.message.includes('[START_TASK]')), []);
+
+  const started = await runner.startTask('Find item 42 price', 101);
+  assert.equal(started.success, true);
+  const markers = Logger.getLogsHistory().filter((entry) => entry.message.includes('[START_TASK]'));
+  assert.equal(markers.length, 1);
+  assert.equal(markers[0].level, 'INFO');
+  assert.equal(markers[0].module, 'AgentRunner');
+  // tests/e2e/smoke.mjs (logsOfRun) looks for exactly this text, with the tab id of the task.
+  assert.equal(markers[0].message, '[START_TASK] Starting task on tab [101].');
+
+  runner.dispose();
+});
+
+test('AgentRunner - snapshot throws when content script returns success false or empty response', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const runner = new AgentRunner(101, 1);
+  await runner.restorePromise;
+  const runtime = runtimeRegistry.get(String(101))!;
+  assert.ok(runtime);
+
+  const originalSendMessage = globalThis.chrome.tabs.sendMessage;
+  (globalThis.chrome.tabs as any).sendMessage = (_tabId: number, _msg: any, cb: (res: any) => void) => {
+    cb({ success: false, error: 'Target frame detached' });
+  };
+
+  await assert.rejects(
+    async () => runtime.browser.snapshot(101, { showBadges: true, maxElements: 100 }),
+    /Target frame detached/
+  );
+
+  (globalThis.chrome.tabs as any).sendMessage = (_tabId: number, _msg: any, cb: (res: any) => void) => {
+    cb(null);
+  };
+
+  await assert.rejects(
+    async () => runtime.browser.snapshot(101, { showBadges: false, maxElements: 100 }),
+    /No response from content script/
+  );
+
+  (globalThis.chrome.tabs as any).sendMessage = originalSendMessage;
+  runner.dispose();
+});
+
+test('AgentRunner - browser.execute handles navigate with URL comparison and rejects non-http targets', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const runner = new AgentRunner(101, 1);
+  await runner.restorePromise;
+  const runtime = runtimeRegistry.get(String(101))!;
+  assert.ok(runtime);
+
+  // 1. Non-http/https target rejected
+  const fileRes = await runtime.browser.execute(101, { action: 'navigate', url: 'file:///etc/passwd' } as any, { docId: 'doc-1', mode: 'synthetic' });
+  assert.equal(fileRes.success, false);
+  assert.equal(fileRes.via, 'background');
+  assert.match(fileRes.error || '', /Navigate target must be http or https|cannot read file:/);
+
+  const chromeRes = await runtime.browser.execute(101, { action: 'navigate', url: 'chrome://settings' } as any, { docId: 'doc-1', mode: 'synthetic' });
+  assert.equal(chromeRes.success, false);
+  assert.equal(chromeRes.via, 'background');
+
+  // 2. Navigate to different URL reports url_changed
+  const navRes = await runtime.browser.execute(101, { action: 'navigate', url: PRODUCT_URL } as any, { docId: 'doc-1', mode: 'synthetic' });
+  assert.equal(navRes.success, true);
+  assert.equal(navRes.via, 'background');
+  assert.equal(navRes.effect, 'url_changed');
+  assert.equal(navRes.urlAfter, PRODUCT_URL);
+
+  // 3. Navigate to same URL reports honest none
+  const sameRes = await runtime.browser.execute(101, { action: 'navigate', url: PRODUCT_URL } as any, { docId: 'doc-1', mode: 'synthetic' });
+  assert.equal(sameRes.success, true);
+  assert.equal(sameRes.via, 'background');
+  assert.equal(sameRes.effect, 'none');
+
+  runner.dispose();
+});
+
+test('AgentRunner - waitForTabComplete respects AbortSignal', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const runner = new AgentRunner(101, 1);
+  await runner.restorePromise;
+
+  const controller = new AbortController();
+  controller.abort();
+
+  const start = Date.now();
+  await runner.waitForTabComplete(101, 5000, controller.signal);
+  const duration = Date.now() - start;
+  assert.ok(duration < 100, `Expected instant return on aborted signal, took ${duration}ms`);
+
+  runner.dispose();
+});

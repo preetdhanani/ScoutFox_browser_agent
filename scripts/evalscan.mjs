@@ -64,7 +64,7 @@ const DIST = path.join(ROOT, 'dist');
  * entry only with a reason.
  *
  * Every entry but the first names a file under node_modules/. That is what keeps the list from
- * hiding a hit in our own sources: a hit in src/, background/ or content/ has a different file, so
+ * hiding a hit in our own sources: a hit in src/ or content/ has a different file, so
  * no library entry can match it (tests/evalscan.test.js pins that). Never add an entry for our own
  * code, fix the code. A library entry says why the call cannot run or why it is harmless, and names
  * the version that was read. Versions are exact pins, so an entry goes stale loudly (its snippet or
@@ -72,7 +72,7 @@ const DIST = path.join(ROOT, 'dist');
  */
 export const ALLOWLIST = [
   {
-    file: 'background/agentEngine.js',
+    file: 'src/background/browser/executeJs.ts',
     kind: 'new Function(',
     snippet: 'new Function(`return (async () => { ${src} })()`)',
     max: 1,

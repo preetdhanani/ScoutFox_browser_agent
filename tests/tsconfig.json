@@ -4,6 +4,7 @@
   // types, which is why src/ is checked by both projects and only the root one is strict about it.
   "extends": "../tsconfig.json",
   "compilerOptions": {
+    "lib": ["ES2023", "WebWorker", "DOM"],
     "types": ["chrome", "node"]
   },
   // zod ships .test.ts files under tests/e2e/node_modules, which are not ours.

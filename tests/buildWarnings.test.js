@@ -37,7 +37,7 @@ test('does not allow another built-in, another file, or another place for the sa
     external('node:fs', `${SDK}/lib/credentials/new-file.mjs`),
     external('node:fs', `${SDK}/client.mjs`),
     external('node:fs', 'src/background/llm/factory.ts'),
-    external('node:fs', 'background/background.js'),
+    external('node:fs', 'src/background/background.ts'),
     external('node:fs', 'node_modules/openai/index.mjs'),
     external('node:fs', `node_modules/some-lib/node_modules/@anthropic-ai/sdk/lib/credentials/types.mjs`),
     external('fs', `${SDK}/lib/credentials/types.mjs`),

@@ -152,7 +152,7 @@ export const Logger = {
   /**
    * Identical to warn(), except it never invokes the broadcast callback.
    * Use this for any log call made FROM WITHIN the broadcast callback's own call chain
-   * (e.g. background.js's broadcastToSidepanel() diagnosing that it has zero listeners) -
+   * (e.g. background.ts's broadcastToSession() diagnosing that it has zero listeners) -
    * routing that through the normal warn()/addLog() broadcast path calls the same
    * broadcast function again, recursively, since the caller's own de-duplication guard
    * cannot take effect until AFTER this call returns. Still persisted to logsHistory and

@@ -231,7 +231,7 @@ This is a summary of the design, which still waits for Prit's approval.
 
 ### 3.8 Current facts
 - Automated test suite runs with `node --test` across unit and integration tests (see [DEVELOPMENT.md](DEVELOPMENT.md) for details).
-- `npm run check` runs `node --check` on the 7 plain JS source files (see `package.json`).
+- `npm run check` runs `node --check` on the plain JS source files that remain: `content/*.js` and `sidepanel/*.js` (six files today; see `package.json`). The background's plain JS files are gone - that code is TypeScript now and is covered by `npm run typecheck` plus the build's parse checks.
   The TypeScript files are covered by `npm run typecheck`, which runs `tsc --noEmit` on `src/` (`tsconfig.json`) and on the tests with their helpers (`tests/tsconfig.json`).
 - Today the extension is built with Vite (phase P0): `npm run build` writes `dist/`, and you load `dist/` unpacked in Chrome, not the repo folder.
   The shared core, provider integration, input dispatcher, and graph engine in `src/` are TypeScript (phases P1-P5d).

@@ -8,16 +8,13 @@
  * turn feedback (`Action Executed Successfully: ${message}` / `Action Failed: ${error}`) showed
  * it literally the word "undefined".
  *
- * content/actionExecutor.js is a browser IIFE with no exports, loaded here via new Function
- * against a minimal fake DOM - the same technique used in
- * tests/actionExecutorClickDoesNotDoubleFire.test.js, extended to resolve MULTIPLE element ids
- * so a batch can mix succeeding and failing steps.
+ * The executor is the TypeScript module (src/content/actionExecutor.ts, which builds the shipped
+ * content/actionExecutor.js), run against a minimal fake DOM, extended to resolve MULTIPLE element
+ * ids so a batch can mix succeeding and failing steps.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-
-const SRC = fs.readFileSync(new URL('../content/actionExecutor.js', import.meta.url), 'utf8');
+import { ActionExecutor } from '../src/content/actionExecutor.ts';
 
 /** @param {Record<number, object|null>} elementsById - id -> fake clickable element, or null to make that id unresolvable */
 function loadActionExecutor(elementsById) {
@@ -41,8 +38,7 @@ function loadActionExecutor(elementsById) {
     el.style = {};
     el.getBoundingClientRect = () => ({ top: 0, bottom: 10, left: 0, right: 10 });
   }
-  const fn = new Function('window', 'document', 'MouseEvent', `${SRC}\nreturn window.actionExecutorInstance;`);
-  return fn(fakeWindow, fakeDocument, FakeMouseEvent);
+  return new ActionExecutor(fakeDocument, fakeWindow);
 }
 
 test('a batch where every step succeeds reports success with a real message', async () => {

@@ -75,3 +75,21 @@ test('callWithRetry calls onRetry with the attempt number and computed delay bef
   assert.equal(seen[0].message, 'flaky');
   assert.equal(seen[0].delayMs, LLM_RETRY_BASE_DELAY_MS * 1);
 });
+
+test('callWithRetry uses injectable sleep option for backoff delay', async () => {
+  const sleptMs: number[] = [];
+  let calls = 0;
+  const result = await callWithRetry(
+    async (n) => {
+      calls++;
+      if (n < 3) throw new Error('flaky');
+      return 'ok';
+    },
+    {
+      sleep: async (ms) => { sleptMs.push(ms); },
+    }
+  );
+  assert.equal(result, 'ok');
+  assert.equal(calls, 3);
+  assert.deepEqual(sleptMs, [LLM_RETRY_BASE_DELAY_MS * 1, LLM_RETRY_BASE_DELAY_MS * 2]);
+});

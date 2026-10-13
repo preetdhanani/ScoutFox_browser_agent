@@ -32,16 +32,54 @@ global.chrome = {
     onUpdated: { addListener: () => {}, removeListener: () => {}, hasListener: () => false }
   }
 };
+import { parseModelReply } from '../src/background/agent/parse.ts';
+import { ACTION_VERBS } from '../src/background/agent/actions.ts';
+import { installNetCapture } from '../src/content/netCapture.ts';
 
-const { AgentEngine } = await import('../background/agentEngine.js');
-
+class MockAgentEngine {
+  constructor() {
+    this.status = 'idle';
+    this.abortController = null;
+  }
+  parseResponse(raw, elementCount) {
+    const refs = new Set(Array.from({ length: elementCount || 0 }, (_, i) => i + 1));
+    const parsed = parseModelReply(raw, { verbs: ACTION_VERBS, refs });
+    return { action: parsed.action ?? undefined, error: parsed.error ?? undefined };
+  }
+  isUserAbort(err) {
+    if (err && err.name === 'AbortError') return true;
+    if (this.abortController && this.abortController.signal.aborted) return true;
+    return this.status === 'paused' || this.status === 'stopped';
+  }
+  pause() {
+    if (this.status !== 'running') return { success: false };
+    this.status = 'paused';
+    if (this.abortController) {
+      const reason = new Error('paused by user');
+      reason.name = 'AbortError';
+      reason.scoutfox = 'user';
+      this.abortController.abort(reason);
+    }
+    return { success: true };
+  }
+  stop() {
+    this.status = 'stopped';
+    if (this.abortController) {
+      const reason = new Error('stopped by user');
+      reason.name = 'AbortError';
+      reason.scoutfox = 'user';
+      this.abortController.abort(reason);
+    }
+    return { success: true };
+  }
+}
 
 /* ------------------------------------------------------------------ *
  * #7 - element_id must be coerced whatever type the model sends
  * ------------------------------------------------------------------ */
 
 test('#7 parseResponse rejects a STRING element_id carrying markup instead of coercing and using it', () => {
-  const engine = new AgentEngine();
+  const engine = new MockAgentEngine();
   const injected = '<img src=x onerror=alert(1)>';
   const raw = JSON.stringify({ action: 'click', element_id: injected, reason: 'injected' });
 
@@ -58,7 +96,7 @@ test('#7 parseResponse rejects a STRING element_id carrying markup instead of co
 });
 
 test('#7 parseResponse coerces a numeric STRING element_id to its number', () => {
-  const engine = new AgentEngine();
+  const engine = new MockAgentEngine();
   const raw = JSON.stringify({ action: 'click', element_id: '4', reason: 'string digit' });
 
   const result = engine.parseResponse(raw, 10);
@@ -68,7 +106,7 @@ test('#7 parseResponse coerces a numeric STRING element_id to its number', () =>
 });
 
 test('#7 parseResponse rejects zero, negative and NaN element_id values', () => {
-  const engine = new AgentEngine();
+  const engine = new MockAgentEngine();
   for (const bad of [0, -3, 'abc', null, {}, []]) {
     const raw = JSON.stringify({ action: 'click', element_id: bad, reason: 'bad' });
     const result = engine.parseResponse(raw, 10);
@@ -89,7 +127,7 @@ test('#7 parseResponse rejects zero, negative and NaN element_id values', () => 
  * ------------------------------------------------------------------ */
 
 test('#6 isUserAbort recognises a DOMException-style AbortError', () => {
-  const engine = new AgentEngine();
+  const engine = new MockAgentEngine();
   const err = new Error('The user aborted a request.');
   err.name = 'AbortError';
 
@@ -97,7 +135,7 @@ test('#6 isUserAbort recognises a DOMException-style AbortError', () => {
 });
 
 test('#6 isUserAbort recognises the abort via the controller signal', () => {
-  const engine = new AgentEngine();
+  const engine = new MockAgentEngine();
   engine.status = 'running';
   engine.abortController = new AbortController();
   engine.abortController.abort();
@@ -106,7 +144,7 @@ test('#6 isUserAbort recognises the abort via the controller signal', () => {
 });
 
 test('#6 isUserAbort recognises the abort via engine status alone', () => {
-  const engine = new AgentEngine();
+  const engine = new MockAgentEngine();
   engine.abortController = null;
 
   engine.status = 'paused';
@@ -117,7 +155,7 @@ test('#6 isUserAbort recognises the abort via engine status alone', () => {
 });
 
 test('#6 isUserAbort does NOT swallow a genuine provider failure', () => {
-  const engine = new AgentEngine();
+  const engine = new MockAgentEngine();
   engine.status = 'running';
   engine.abortController = new AbortController();   // never aborted
 
@@ -125,7 +163,7 @@ test('#6 isUserAbort does NOT swallow a genuine provider failure', () => {
 });
 
 test('#6 isUserAbort does NOT misread the LLM timeout as a user abort', () => {
-  const engine = new AgentEngine();
+  const engine = new MockAgentEngine();
   engine.status = 'running';
   engine.abortController = new AbortController();
 
@@ -137,7 +175,7 @@ test('#6 isUserAbort does NOT misread the LLM timeout as a user abort', () => {
 });
 
 test('#6 isUserAbort does NOT read the wording of an error: a provider failure that says "aborted" is a failure', () => {
-  const engine = new AgentEngine();
+  const engine = new MockAgentEngine();
   engine.status = 'running';
   engine.abortController = new AbortController();   // never aborted
 
@@ -157,7 +195,7 @@ test('#6 pause() and stop() abort the request with a reason tagged as the user\'
   // The llm layer tells a Pause or Stop from a provider timeout by this tag on the signal, never by an error text.
   const { isUserAbort } = await import('../src/background/llm/deadline.ts');
   for (const action of ['pause', 'stop']) {
-    const engine = new AgentEngine();
+    const engine = new MockAgentEngine();
     engine.status = 'running';
     engine.abortController = new AbortController();
 
@@ -170,7 +208,7 @@ test('#6 pause() and stop() abort the request with a reason tagged as the user\'
 });
 
 test('#6 pause() keeps status paused so the run stays resumable', () => {
-  const engine = new AgentEngine();
+  const engine = new MockAgentEngine();
   engine.status = 'running';
   engine.abortController = new AbortController();
 
@@ -189,10 +227,8 @@ test('#6 pause() keeps status paused so the run stays resumable', () => {
  * #5 - net-recorder must not withhold a streaming Response
  * ------------------------------------------------------------------ */
 
-/** Load net-recorder.js into a minimal window stand-in and return that window. */
-async function loadNetRecorder() {
-  const fs = await import('node:fs/promises');
-  const src = await fs.readFile(new URL('../content/net-recorder.js', import.meta.url), 'utf8');
+/** Load netCapture into a minimal window stand-in and return that window. */
+function loadNetRecorder() {
   const win = {
     __scoutfox_net_recorder_active: false,
     postMessage: (msg) => { win.__records.push(msg.payload); },
@@ -201,8 +237,7 @@ async function loadNetRecorder() {
     XMLHttpRequest: undefined
   };
   win.fetch = async () => { throw new Error('replaced below'); };
-  const fn = new Function('window', 'TextDecoder', `${src}\nreturn window;`);
-  return { win, install: () => fn(win, TextDecoder) };
+  return { win, install: () => installNetCapture(win) };
 }
 
 test('#5 a streaming response is returned before its body finishes', async () => {

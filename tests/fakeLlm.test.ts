@@ -406,3 +406,180 @@ test('the chat model with no reply left rejects, and the mistake is kept', async
   await assert.rejects(fl.chatModel().invoke('anyone there?'), /call 1 \(chatModel, last message "anyone there\?"\) has no scripted reply/);
   assert.equal(fl.violations.length, 1);
 });
+
+// ---------------------------------------------------------------------------------------------
+// port: the stand-in for the graph's LlmPort
+// ---------------------------------------------------------------------------------------------
+
+/** What the graph nodes send to LlmPort.complete, with the parts a test does not care about filled in. */
+function ask(
+  node: 'plan' | 'policy' | 'reflect',
+  extra: { mode?: string; messages?: Array<{ role: 'user' | 'assistant'; content: string }>; schema?: object | null; signal?: AbortSignal; system?: string } = {}
+) {
+  return {
+    node,
+    mode: extra.mode as never,
+    role: (node === 'plan' ? 'planner' : node) as 'policy' | 'planner' | 'reflect',
+    system: extra.system ?? `system of ${node}`,
+    messages: extra.messages ?? [{ role: 'user' as const, content: `message to ${node}` }],
+    schema: extra.schema ?? null,
+    signal: extra.signal ?? new AbortController().signal,
+  };
+}
+
+test('port: complete returns text, provider, model and meta, and records node, mode, role, system, messages, schema and signal', async () => {
+  const fl = fakeLlm(['the reply']);
+  const port = fl.port({ provider: 'test-provider', model: 'test-model' });
+  const controller = new AbortController();
+  const schema = { type: 'object', required: ['action'] };
+  const messages = [{ role: 'user' as const, content: 'Goal: find the price' }];
+
+  const out = await port.complete(ask('policy', { mode: 'browse', messages, schema, signal: controller.signal, system: 'You control one tab.' }));
+
+  assert.deepEqual(out, { text: 'the reply', provider: 'test-provider', model: 'test-model', meta: {} });
+  const call = fl.calls[0] as LlmCall;
+  assert.equal(call.via, 'port');
+  assert.equal(call.node, 'policy');
+  assert.equal(call.mode, 'browse');
+  assert.equal(call.role, 'policy');
+  assert.equal(call.system, 'You control one tab.');
+  assert.equal(call.systemPrompt, 'You control one tab.');
+  assert.deepEqual(call.messages, messages);
+  assert.deepEqual(call.schema, schema);
+  assert.equal(call.signal, controller.signal, 'the signal is kept by reference');
+  assert.equal(call.outcome, 'text');
+  assert.equal(call.reply, 'the reply');
+  fl.assertClean();
+  fl.assertDrained();
+});
+
+test('port: a queue per node and per node:mode answers first, and the plain script answers the rest', async () => {
+  const fl = fakeLlm(['plain 1', 'plain 2']);
+  const port = fl.port({ queues: { plan: ['the plan'], 'policy:browse': ['browse 1', 'browse 2'], policy: ['any policy'] } });
+  const text = async (node: 'plan' | 'policy' | 'reflect', mode?: string) => (await port.complete(ask(node, { mode }))).text;
+
+  assert.equal(await text('policy', 'browse'), 'browse 1', 'node:mode before node');
+  assert.equal(await text('policy', 'extract'), 'any policy', 'another mode falls to the node queue');
+  assert.equal(await text('plan', 'initial'), 'the plan');
+  assert.equal(await text('policy', 'browse'), 'browse 2');
+  assert.equal(await text('reflect'), 'plain 1', 'a node without a queue uses the plain script');
+  assert.equal(await text('reflect', 'revise'), 'plain 2');
+  assert.deepEqual(
+    fl.calls.map((c) => [c.node, c.mode, c.reply]),
+    [['policy', 'browse', 'browse 1'], ['policy', 'extract', 'any policy'], ['plan', 'initial', 'the plan'], ['policy', 'browse', 'browse 2'], ['reflect', undefined, 'plain 1'], ['reflect', 'revise', 'plain 2']]
+  );
+  assert.deepEqual(fl.callsOf('policy').map((c) => c.index), [0, 1, 3]);
+  assert.deepEqual(fl.callsOf('policy', 'browse').map((c) => c.index), [0, 3]);
+  fl.assertClean();
+  fl.assertDrained();
+});
+
+test('port: a queue that is used up is final - the call is a loud test mistake and never takes the plain script', async () => {
+  const fl = fakeLlm(['plain']);
+  const port = fl.port({ queues: { plan: ['only plan'] } });
+
+  await port.complete(ask('plan'));
+  await assert.rejects(port.complete(ask('plan', { mode: 'revise' })), /call 2 \(port plan\/revise, last message "message to plan"\) has no scripted reply - the "plan" queue is empty/);
+  assert.equal(fl.violations.length, 1, 'the mistake is kept, in case the code under test swallows the throw');
+  assert.equal(fl.remaining, 1, 'the plain script was not touched');
+  assert.throws(() => fl.assertClean(), /1 test mistake/);
+
+  // A call that no queue matches and the plain script has no reply for is the same mistake, named by node.
+  await port.complete(ask('policy'));
+  await assert.rejects(port.complete(ask('policy', { mode: 'browse' })), /call 4 \(port policy\/browse, last message .*\) has no scripted reply - the script has only 1 reply/);
+});
+
+test('port: pushFor adds to a queue after the first calls, and a queue name that is not a node is refused', async () => {
+  const fl = fakeLlm();
+  const port = fl.port({ queues: { policy: ['one'] } });
+  assert.equal((await port.complete(ask('policy'))).text, 'one');
+
+  fl.pushFor('policy', 'two', { text: 'three', reasoning: 'thinking' });
+  assert.equal(fl.remaining, 2);
+  assert.equal((await port.complete(ask('policy'))).text, 'two');
+  assert.equal((await port.complete(ask('policy'))).text, '<think>thinking</think>\nthree', 'reasoning comes in front as <think> tags, like generateCompletion');
+
+  assert.throws(() => fl.pushFor('polcy' as never, 'x'), /"polcy" is not a port queue/);
+  assert.throws(() => fl.pushFor('policy:' as never, 'x'), /"policy:" is not a port queue/);
+  assert.throws(() => fl.port({ queues: { plan: [{ txt: 'typo' } as never] } }), /unknown key "txt"/);
+  fl.assertDrained();
+});
+
+test('port: a reply function answers by what the graph asked, and a scripted error rejects the call', async () => {
+  const fl = fakeLlm();
+  const port = fl.port({
+    queues: {
+      policy: [
+        (call) => `saw ${call.messages.length} message(s) in ${call.mode} mode`,
+        { error: 'provider returned 500' },
+        { error: new TypeError('network down') },
+      ],
+    },
+  });
+
+  assert.equal((await port.complete(ask('policy', { mode: 'harvest', messages: [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }, { role: 'user', content: 'c' }] }))).text, 'saw 3 message(s) in harvest mode');
+  await assert.rejects(port.complete(ask('policy')), /provider returned 500/);
+  await assert.rejects(port.complete(ask('policy')), (err) => err instanceof TypeError && err.message === 'network down');
+  assert.deepEqual(fl.calls.map((c) => c.outcome), ['text', 'error', 'error']);
+  fl.assertClean();
+});
+
+test('port: a delayed reply is cut short by an abort and rejects with signal.reason, like fetch', async () => {
+  const fl = fakeLlm();
+  const port = fl.port({ queues: { policy: [{ text: 'too late', delayMs: 60_000 }] } });
+  const controller = new AbortController();
+  // The reason the runner uses for Stop and Pause: an object tagged as the user's, not an Error.
+  const reason = { scoutfox: 'user', reason: 'user_stop' };
+
+  const started = Date.now();
+  const call = port.complete(ask('policy', { signal: controller.signal }));
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort(reason);
+  await assert.rejects(call, (err) => err === reason);
+
+  assert.ok(Date.now() - started < 5_000, 'it did not wait for the 60 s delay');
+  assert.equal(fl.calls[0]?.outcome, 'aborted');
+  assert.equal(fl.calls[0]?.signal, controller.signal);
+  assert.equal(fl.remaining, 0, 'this request was sent, so its reply is used up');
+});
+
+test('port: a signal that is already aborted rejects with its reason and uses no reply', async () => {
+  const fl = fakeLlm();
+  const port = fl.port({ queues: { plan: ['unused'] } });
+  const controller = new AbortController();
+  controller.abort();
+
+  const err = await port.complete(ask('plan', { signal: controller.signal })).then(
+    () => undefined,
+    (e: unknown) => e
+  );
+  assert.equal(err, controller.signal.reason, 'a plain controller.abort() gives a DOMException named AbortError');
+  assert.ok(looksLikeAbort(err));
+  assert.equal(fl.calls[0]?.outcome, 'aborted');
+  assert.equal(fl.remaining, 1, 'the request was never sent, so the reply stays');
+});
+
+test('port: assertDrained counts the port queues and names the ones with replies left', async () => {
+  const fl = fakeLlm();
+  const port = fl.port({ queues: { plan: ['a plan'], policy: ['one', 'two'], reflect: [] } });
+  await port.complete(ask('policy'));
+
+  assert.equal(fl.remaining, 2);
+  assert.throws(() => fl.assertDrained(), /2 scripted reply\(ies\) were never used.*left in the port queues: plan 1, policy 1/);
+  await port.complete(ask('plan'));
+  await port.complete(ask('policy'));
+  fl.assertDrained();
+});
+
+test('port: it shares the call log and the plain script with the other two surfaces, and a function script answers every call', async () => {
+  const fl = fakeLlm(['from generateCompletion', 'from the port']);
+  await fl.generateCompletion(SETTINGS, USER, '');
+  const out = await fl.port().complete(ask('reflect'));
+
+  assert.equal(out.text, 'from the port');
+  assert.deepEqual(fl.calls.map((c) => [c.index, c.via]), [[0, 'generateCompletion'], [1, 'port']]);
+
+  const every = fakeLlm((call) => `${call.via}:${call.node ?? '-'}`);
+  assert.equal((await every.port().complete(ask('policy'))).text, 'port:policy');
+  assert.throws(() => every.port({ queues: { plan: ['x'] } }), /needs a script that is a list of replies/);
+});

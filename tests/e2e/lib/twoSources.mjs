@@ -9,6 +9,9 @@
  * shop-a.test (tests/fixtures/site/shop-a.html), so nothing in the run can ever show a price for
  * shop-b.test: whatever the final answer says about it is invented.
  *
+ * The two-sources tasks are pending until the graph engine has the answer audit gate (plan stage 4b): the smoke run skips them
+ * and prints why (see `pending` in tasks.mjs). The data below stays for the stage that brings them back.
+ *
  * Nothing here is imported by production code. It is plain data plus one pure function.
  */
 
@@ -16,7 +19,7 @@ export const SHOP_A = 'shop-a.test';
 export const SHOP_B = 'shop-b.test';
 
 /**
- * Chromium host rules, so the tab really stands on http://shop-a.test:<port>/ (the engine counts a
+ * Chromium host rules, so the tab really stands on http://shop-a.test:<port>/ (the answer audit counts a
  * site as opened only when the tab's own URL is on it, and 127.0.0.1 is not shop-a.test).
  * shop-b.test is told to fail to resolve, so a run that does try to open it gets a clean
  * "not found" page and never asks a real DNS server.

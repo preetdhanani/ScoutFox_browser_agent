@@ -19,6 +19,12 @@ export interface FindingParams {
   pageText: string;
   domain: string;
   referenceCurrency?: string | null;
+  /**
+   * Allow the loose prose check (proseMatch) for non-money fields: a value whose long words are
+   * substantially on the page is recorded with quality 'unverified' and a value_loose_match check
+   * instead of being dropped. Off by default, so every existing caller stays strict.
+   */
+  allowProseMatch?: boolean;
 }
 
 /**
@@ -48,6 +54,92 @@ export function extractSnippet(pageText: string, value: string, maxLen: number =
   if (start > 0) snippet = '...' + snippet;
   if (end < normPage.length) snippet = snippet + '...';
   return snippet;
+}
+
+// Columns whose values must match the page exactly: money and logistics fields. A loose match is
+// never good enough for them, even on a site that otherwise allows prose.
+const STRICT_FIELD_PATTERN = /price|cost|shipping|delivery|total|preis|versand|liefer|currency/i;
+
+// A prose value needs at least this many distinct long words before the loose check applies, and
+// at least this share of them must appear on the page. The word minimum keeps short values (a
+// price, a single name) on the exact path, where extractSnippet proves them properly.
+const PROSE_MIN_WORDS = 5;
+const PROSE_MATCH_RATIO = 0.7;
+
+// Fields the engine records by itself: every finding stores the address of the page it was read
+// from, so a column named exactly like that page address carries no new information and can never
+// be verified - a URL is not part of the page text, so createFinding rejects it every round while
+// the site's criteria keep demanding it. That combination drove the news.ycombinator.com summarize
+// loop: the model re-sent record_finding with a url field 17+ times, each round still counted as
+// progress through the reworded summary, and neither the corrections nor the no-progress backstop
+// could end the site.
+// The set holds only the exact names of the page the agent is on. Plural or compound names such as
+// article_urls, links, github_link, buy_url or deep_link are collectable data: a plan may genuinely
+// ask the model to gather them, so they must never be filtered out as auto-values.
+export const AUTO_VALUE_FIELDS: ReadonlySet<string> = new Set(['url', 'link', 'href', 'page_url', 'site_url']);
+
+/** True only for a field whose exact name is the address of the page itself - never a model value. */
+export function isAutoValueField(name: string): boolean {
+  return AUTO_VALUE_FIELDS.has(name);
+}
+
+export interface ProseMatchResult {
+  ratio: number;
+  snippet: string;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function longWords(text: string): string[] {
+  return [...new Set((text.toLowerCase().match(/\p{L}{4,}/gu) ?? []))];
+}
+
+/**
+ * Loose page check for prose values (a summary, a description): the value counts as taken from the
+ * page when enough of its long words appear there. This exists for summarize-style columns, where
+ * the model writes its own phrasing that can never be a word-for-word excerpt of the page, so the
+ * strict extractSnippet check would reject every honest answer (ScoutFox record_finding loop).
+ * Words are matched on word boundaries, so "hack" does not match "hacker". Returns null when the
+ * value has too few long words or too few of them appear on the page.
+ */
+export function proseMatch(pageText: string, value: string): ProseMatchResult | null {
+  const normPage = normalizeText(pageText).toLowerCase();
+  if (!normPage) return null;
+  const words = longWords(value);
+  if (words.length < PROSE_MIN_WORDS) return null;
+
+  let hits = 0;
+  let firstIdx = -1;
+  for (const word of words) {
+    const at = normPage.search(new RegExp(`(?<!\\p{L})${escapeRegExp(word)}(?!\\p{L})`, 'u'));
+    if (at >= 0) {
+      hits++;
+      if (firstIdx < 0 || at < firstIdx) firstIdx = at;
+    }
+  }
+  const ratio = hits / words.length;
+  if (ratio < PROSE_MATCH_RATIO) return null;
+
+  const start = Math.max(0, firstIdx - 40);
+  const end = Math.min(normPage.length, firstIdx + 140);
+  let snippet = normPage.slice(start, end).trim();
+  if (start > 0) snippet = '...' + snippet;
+  if (end < normPage.length) snippet = snippet + '...';
+  return { ratio, snippet };
+}
+
+/**
+ * A content fingerprint of a findings list: site, field, raw value and quality. The worker uses it
+ * to see whether a record_finding round actually changed anything - re-sending the same values
+ * with a new finding id must not count as progress.
+ */
+export function findingsContentSignature(findings: Finding[]): string {
+  return findings
+    .map((f) => `${f.siteId}|${f.field}|${String(f.valueRaw)}|${f.quality}`)
+    .sort()
+    .join(';');
 }
 
 /**
@@ -92,8 +184,29 @@ export function createFinding(params: FindingParams): Finding | null {
   const { siteId, field, rawValue, url, title, docId, step, capturedAt, pageText, domain, referenceCurrency } = params;
   if (!rawValue || rawValue.toLowerCase() === 'not shown') return null;
 
-  const snippet = extractSnippet(pageText, rawValue);
-  const valueOnPage = snippet.length > 0;
+  // The tab's <title> is code-sourced, so it counts as page evidence too: the extractor can miss
+  // an h1 the title still names (the HN loop - "GLM-Legal: Advancing Agentic Legal Intelligence"
+  // was the tab title while the 9-element article snapshot never contained it). The title only
+  // proves a value the model copied exactly: matchText (page + title) feeds the exact
+  // extractSnippet path, while the prose path matches against the page text alone, so a loose
+  // match is always page-grounded. Strict fields (money/logistics) never match against the title
+  // at all - either path - so a marketing title cannot verify a price.
+  const isStrictField = STRICT_FIELD_PATTERN.test(field);
+  const titleEvidence = isStrictField ? '' : title;
+  const matchText = titleEvidence ? `${normalizeText(pageText)} ${normalizeText(titleEvidence)}` : pageText;
+
+  const exactSnippet = extractSnippet(matchText, rawValue);
+  let valueOnPage = exactSnippet.length > 0;
+  let looseMatch = false;
+  let snippet = exactSnippet;
+  if (!valueOnPage && params.allowProseMatch === true && !isStrictField) {
+    const prose = proseMatch(pageText, rawValue);
+    if (prose) {
+      valueOnPage = true;
+      looseMatch = true;
+      snippet = prose.snippet;
+    }
+  }
   if (!valueOnPage) return null;
 
   let domainMatches = true;
@@ -114,11 +227,14 @@ export function createFinding(params: FindingParams): Finding | null {
 
   const checks: string[] = [];
   if (valueOnPage) checks.push('value_on_page');
+  if (looseMatch) checks.push('value_loose_match');
   if (domainMatches) checks.push('domain_matches');
   if (currencyOk) checks.push('currency_ok');
   checks.push('title_matches');
 
-  const quality: FindingQuality = (valueOnPage && domainMatches && currencyOk) ? 'verified' : 'unverified';
+  const quality: FindingQuality = looseMatch
+    ? 'unverified'
+    : (valueOnPage && domainMatches && currencyOk) ? 'verified' : 'unverified';
   const timeStr = typeof capturedAt === 'number' ? new Date(capturedAt).toISOString() : String(capturedAt);
 
   return {
@@ -146,6 +262,8 @@ export function createFinding(params: FindingParams): Finding | null {
  * Deduplicates findings for the same site and field.
  * A new verified finding supersedes an existing unverified or older one.
  */
+export const FINDING_QUALITY_RANK: Record<FindingQuality, number> = { unverified: 0, single_source: 1, verified: 2 };
+
 export function deduplicateFindings(existing: Finding[], incoming: Finding): Finding[] {
   const list = [...existing];
   const idx = list.findIndex(
@@ -158,7 +276,13 @@ export function deduplicateFindings(existing: Finding[], incoming: Finding): Fin
   }
 
   const prev = list[idx];
-  const incomingIsBetter = (incoming.quality === 'verified' && prev.quality !== 'verified') || incoming.checks.includes('value_on_page');
+  // Quality never goes down: an unverified rewrite of a value code already verified is churn, not
+  // an improvement (the reword loop manufactured a fresh "new" value every round this way). But an
+  // equal-quality incoming finding is a correction: a verified 129 EUR read after a verified
+  // 149 EUR must replace it, or no field value could ever be corrected after its first save. The
+  // worker's churn guard (nearDuplicateValue) filters paraphrases before dedup runs, so equal-rank
+  // incoming values here are genuine corrections, not paraphrase noise.
+  const incomingIsBetter = (incoming.checks.includes('value_on_page') && FINDING_QUALITY_RANK[incoming.quality] >= FINDING_QUALITY_RANK[prev.quality]);
   if (incomingIsBetter) {
     const updated = {
       ...incoming,
@@ -354,7 +478,9 @@ export function renderTruthTableMarkdown(table: FindingsTable): string {
       }
       return `${cell.value}${flagText}`;
     });
-    lines.push(`| **${row.site}** (${row.role}) | ${cells.join(' | ')} |`);
+    // The site label is a cell like the others: joining [label, ...cells] keeps a table with no columns at one cell per
+    // row (a trailing " | " after the label made a second, empty cell under a one-column header).
+    lines.push(`| ${[`**${row.site}** (${row.role})`, ...cells].join(' | ')} |`);
   }
 
   return lines.join('\n');

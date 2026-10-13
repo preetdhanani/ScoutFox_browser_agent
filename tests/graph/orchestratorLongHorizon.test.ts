@@ -359,3 +359,12 @@ test('Orchestrator produces offer when site ends partial', async () => {
   assert.deepEqual(finalState.offerPayload.partialSiteIds, ['s1']);
   assert.equal(finalState.offerPayload.suggestedLevel, 'high');
 });
+
+// BUG-37: compileNode writes 'goal_achieved' when a site produced a final
+// answer without every subgoal being done. The value used to compile only
+// because the variable was typed `any` - it was not a member of EndReason.
+import type { EndReason } from '../../src/background/graph/state.ts';
+test("EndReason includes the 'goal_achieved' member (BUG-37)", () => {
+  const member: EndReason = 'goal_achieved';
+  assert.equal(member, 'goal_achieved');
+});

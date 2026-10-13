@@ -97,6 +97,8 @@
             <div class="processing-phase-row">
               <span class="processing-phase" id="processingPhaseText">Agent is processing...</span>
               <span class="processing-effort-chip" id="processingEffortBadge" style="display: none;"></span>
+              <!-- The provider and model this run uses (featere/custom-endpoint A6.3) -->
+              <span class="processing-effort-chip processing-model-chip" id="processingModelChip" style="display: none;"></span>
             </div>
             <div class="progress-bar-track">
               <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
@@ -156,7 +158,14 @@
               <option value="openai">OpenAI Official</option>
               <option value="anthropic">Anthropic (Claude)</option>
               <option value="nvidia">NVIDIA NIM (build.nvidia.com)</option>
+              <!-- User-added providers are appended above the trigger option by customProvider.js. -->
             </select>
+          </div>
+
+          <!-- Edit and Delete of the selected user-added provider (hidden for built-ins) -->
+          <div class="form-group" id="customProviderActions" style="display:none;">
+            <button type="button" class="btn btn-secondary btn-xs" id="btnEditCustomProvider">Edit provider</button>
+            <button type="button" class="btn btn-danger btn-xs" id="btnDeleteCustomProvider">Delete provider</button>
           </div>
 
           <!-- Base URL -->
@@ -306,6 +315,93 @@
       </section>
 
     </main>
+
+    <!-- CUSTOM PROVIDER DIALOG (Add/Edit of a user-added endpoint) -->
+    <div class="cp-overlay" id="cpOverlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="cpTitle">
+      <div class="cp-dialog" id="cpDialog">
+        <div class="cp-heading">
+          <div class="cp-title" id="cpTitle">Custom model API</div>
+          <div class="cp-subtitle">Connect a relay, a self-hosted server, or any other OpenAI- or Anthropic-compatible endpoint by its base URL, protocol, and models.</div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="cpIdInput">Provider ID</label>
+          <input type="text" id="cpIdInput" class="form-input" placeholder="acme-gateway" maxlength="32" autocomplete="off" spellcheck="false">
+          <span class="cp-hint">Lowercase letters, digits and dashes, starting with a letter, up to 32 characters. It names this provider in requests and as its credential name.</span>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="cpNameInput">Display name</label>
+          <input type="text" id="cpNameInput" class="form-input" placeholder="Display name" maxlength="64">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="cpBaseUrlInput">Base URL</label>
+          <input type="text" id="cpBaseUrlInput" class="form-input" placeholder="https://gateway.example/v1" autocomplete="off" spellcheck="false">
+          <div class="cp-preview" id="cpPreview"></div>
+          <span class="cp-warning" id="cpHttpWarning" style="display:none;"></span>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" id="cpProtocolLabel">API protocol</label>
+          <div class="cp-segmented" role="radiogroup" aria-labelledby="cpProtocolLabel">
+            <button type="button" class="cp-segment selected" id="cpProtocolOpenai" role="radio" aria-checked="true">
+              <span class="cp-segment-title">OpenAI Chat Completions</span>
+              <span class="cp-segment-sub">POST {base}/chat/completions &middot; Authorization: Bearer</span>
+            </button>
+            <button type="button" class="cp-segment" id="cpProtocolAnthropic" role="radio" aria-checked="false">
+              <span class="cp-segment-title">Anthropic Messages</span>
+              <span class="cp-segment-sub">POST {base}/v1/messages &middot; x-api-key</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="cpApiKeyInput">API key</label>
+          <div class="input-with-toggle">
+            <input type="password" id="cpApiKeyInput" class="form-input" placeholder="Enter your API key" autocomplete="off" spellcheck="false">
+            <button type="button" class="btn-toggle-visibility" id="cpToggleKey" title="Show/Hide API Key">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+          <span class="cp-hint">Optional for local and allowlisted servers. No Authorization header is sent when it is empty.</span>
+          <span class="cp-warning" id="cpKeyClearedNote" style="display:none;"></span>
+        </div>
+
+        <div class="form-group">
+          <div class="label-row">
+            <label class="form-label">Models</label>
+            <button type="button" class="btn btn-secondary btn-xs" id="btnCpFetchModels">Fetch available models</button>
+          </div>
+          <div class="cp-model-list" id="cpModelsList"></div>
+          <div class="cp-model-add">
+            <input type="text" id="cpModelAddInput" class="form-input" placeholder="Add model" autocomplete="off" spellcheck="false">
+            <button type="button" class="btn btn-secondary btn-xs" id="btnCpAddModel">Add model</button>
+          </div>
+          <span class="cp-hint" id="cpModelsHint">No models will be shown in the selector. Unlisted IDs can still be sent directly.</span>
+          <span class="subtext-hint" id="cpFetchStatus"></span>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="cpTimeoutInput">LLM timeout (ms)</label>
+          <input type="number" id="cpTimeoutInput" class="form-input" min="5000" placeholder="120000">
+          <span class="cp-hint">Optional. Empty uses the global timeout from Settings.</span>
+        </div>
+
+        <div class="cp-test-row">
+          <button type="button" class="btn btn-secondary btn-xs" id="btnCpTest">Test</button>
+          <span class="subtext-hint" id="cpTestStatus"></span>
+        </div>
+        <span class="cp-hint">Test is optional. Add works without it - a failing Test is still worth reading before you save.</span>
+
+        <div class="cp-error" id="cpError" style="display:none;"></div>
+
+        <div class="cp-actions">
+          <button type="button" class="btn btn-primary" id="btnCpSave">Add provider</button>
+          <button type="button" class="btn btn-secondary" id="btnCpCancel">Cancel</button>
+        </div>
+      </div>
+    </div>
 
     <!-- TOAST NOTIFICATIONS -->
     <div class="toast-container" id="toastContainer"></div>

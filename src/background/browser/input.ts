@@ -12,6 +12,8 @@ import { Logger } from '../../shared/logger.ts';
 export interface DispatchOptions {
   docId?: string;
   signal?: AbortSignal;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  control?: { stopRequested?: boolean; pauseRequested?: boolean; signal?: AbortSignal };
 }
 
 export interface DispatchResult {
@@ -24,6 +26,7 @@ export interface DispatchResult {
   results?: unknown;
   via: 'cdp' | 'synthetic' | 'background';
   effect?: string;
+  urlAfter?: string;
   stale?: boolean;
   obscuredBy?: string;
 }
@@ -67,9 +70,9 @@ export class InputDispatcher {
     actionPayload: Record<string, any>,
     options: DispatchOptions = {}
   ): Promise<DispatchResult> {
-    const { signal, docId } = options;
+    const { signal, docId, sleep, control } = options;
 
-    if (signal?.aborted) {
+    if (signal?.aborted || control?.stopRequested || control?.pauseRequested) {
       return {
         success: false,
         error: 'Action aborted before execution.',
@@ -81,10 +84,10 @@ export class InputDispatcher {
 
     switch (action) {
       case 'click':
-        return await this.handleClick(tabId, actionPayload, docId, signal);
+        return await this.handleClick(tabId, actionPayload, docId, signal, sleep, control);
 
       case 'type':
-        return await this.handleType(tabId, actionPayload, docId, signal);
+        return await this.handleType(tabId, actionPayload, docId, signal, sleep, control);
 
       case 'select':
         // Native <select> menus always use synthetic DOM setter to avoid OS popup locks
@@ -92,7 +95,7 @@ export class InputDispatcher {
 
       case 'press_key':
       case 'keypress':
-        return await this.handlePressKey(tabId, actionPayload, signal);
+        return await this.handlePressKey(tabId, actionPayload, signal, control);
 
       default:
         // scroll, wait, navigate, go_back, go_forward, browser_batch, read_page_text, etc.
@@ -107,7 +110,9 @@ export class InputDispatcher {
     tabId: number,
     payload: Record<string, any>,
     docId?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    sleep?: (ms: number, signal?: AbortSignal) => Promise<void>,
+    control?: { stopRequested?: boolean; pauseRequested?: boolean; signal?: AbortSignal }
   ): Promise<DispatchResult> {
     const targetId = payload.element_id ?? payload.index ?? payload.elementId;
     if (targetId === undefined || targetId === null) {
@@ -118,9 +123,25 @@ export class InputDispatcher {
       };
     }
 
+    let urlBefore = '';
+    try {
+      const tab = await this.getTab(tabId);
+      urlBefore = tab?.url || '';
+    } catch (_) {}
+
     const canUseCDP = await this.ensureCdpAttached(tabId);
     if (!canUseCDP) {
-      return await this.fallbackToSynthetic(tabId, payload);
+      const res = await this.fallbackToSynthetic(tabId, payload);
+      let urlAfter = '';
+      try {
+        const tab = await this.getTab(tabId);
+        urlAfter = tab?.url || '';
+      } catch (_) {}
+      if (urlAfter && urlBefore !== urlAfter) {
+        res.effect = 'url_changed';
+        res.urlAfter = urlAfter;
+      }
+      return res;
     }
 
     const resolveRes = await this.resolvePoint(tabId, targetId, docId);
@@ -134,30 +155,76 @@ export class InputDispatcher {
           via: 'cdp'
         };
       }
-      return await this.fallbackToSynthetic(tabId, payload);
+      const res = await this.fallbackToSynthetic(tabId, payload);
+      let urlAfter = '';
+      try {
+        const tab = await this.getTab(tabId);
+        urlAfter = tab?.url || '';
+      } catch (_) {}
+      if (urlAfter && urlBefore !== urlAfter) {
+        res.effect = 'url_changed';
+        res.urlAfter = urlAfter;
+      }
+      return res;
     }
 
     // Native <select> elements should not receive CDP clicks to prevent native OS popup lock
     if (resolveRes.tag === 'select') {
-      return await this.fallbackToSynthetic(tabId, payload);
+      const res = await this.fallbackToSynthetic(tabId, payload);
+      let urlAfter = '';
+      try {
+        const tab = await this.getTab(tabId);
+        urlAfter = tab?.url || '';
+      } catch (_) {}
+      if (urlAfter && urlBefore !== urlAfter) {
+        res.effect = 'url_changed';
+        res.urlAfter = urlAfter;
+      }
+      return res;
     }
 
     await this.safeProbeBegin(tabId);
 
     try {
-      await this.clickCoordinates(tabId, resolveRes.point.x, resolveRes.point.y, signal);
+      await this.clickCoordinates(tabId, resolveRes.point.x, resolveRes.point.y, signal, sleep, control);
     } catch (err: any) {
-      if (signal?.aborted) {
+      if (signal?.aborted || control?.stopRequested || control?.pauseRequested) {
         return {
           success: false,
           error: err.message || 'Action aborted',
           via: 'cdp'
         };
       }
-      return await this.fallbackToSynthetic(tabId, payload);
+      const res = await this.fallbackToSynthetic(tabId, payload);
+      let urlAfter = '';
+      try {
+        const tab = await this.getTab(tabId);
+        urlAfter = tab?.url || '';
+      } catch (_) {}
+      if (urlAfter && urlBefore !== urlAfter) {
+        res.effect = 'url_changed';
+        res.urlAfter = urlAfter;
+      }
+      return res;
     }
 
-    const effect = await this.safeProbeEnd(tabId);
+    // Deliverable 4: The click effect probe END is sent about 300 ms after the click, on the injectable clock
+    if (sleep) {
+      await sleep(300, signal);
+    } else {
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    let effect = await this.safeProbeEnd(tabId);
+    let urlAfter = '';
+    try {
+      const tab = await this.getTab(tabId);
+      urlAfter = tab?.url || '';
+    } catch (_) {}
+    if (urlAfter && urlBefore !== urlAfter) {
+      effect = 'url_changed';
+    }
+
     const label = resolveRes.text || null;
     const message = `Clicked element [${targetId}]${label ? ` ("${label}")` : ''}`;
 
@@ -166,6 +233,7 @@ export class InputDispatcher {
       label,
       message,
       effect,
+      urlAfter: urlAfter || undefined,
       via: 'cdp'
     };
   }
@@ -177,7 +245,9 @@ export class InputDispatcher {
     tabId: number,
     payload: Record<string, any>,
     docId?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    sleep?: (ms: number, signal?: AbortSignal) => Promise<void>,
+    control?: { stopRequested?: boolean; pauseRequested?: boolean; signal?: AbortSignal }
   ): Promise<DispatchResult> {
     const targetId = payload.element_id ?? payload.index ?? payload.elementId;
     const text = payload.text == null ? '' : String(payload.text);
@@ -191,9 +261,25 @@ export class InputDispatcher {
       };
     }
 
+    let urlBefore = '';
+    try {
+      const tab = await this.getTab(tabId);
+      urlBefore = tab?.url || '';
+    } catch (_) {}
+
     const canUseCDP = await this.ensureCdpAttached(tabId);
     if (!canUseCDP) {
-      return await this.fallbackToSynthetic(tabId, payload);
+      const res = await this.fallbackToSynthetic(tabId, payload);
+      let urlAfter = '';
+      try {
+        const tab = await this.getTab(tabId);
+        urlAfter = tab?.url || '';
+      } catch (_) {}
+      if (urlAfter && urlBefore !== urlAfter) {
+        res.effect = 'url_changed';
+        res.urlAfter = urlAfter;
+      }
+      return res;
     }
 
     const resolveRes = await this.resolvePoint(tabId, targetId, docId);
@@ -209,57 +295,84 @@ export class InputDispatcher {
 
     // Native select tags receiving a type command must use synthetic setter
     if (resolveRes.tag === 'select') {
-      return await this.fallbackToSynthetic(tabId, payload);
+      const res = await this.fallbackToSynthetic(tabId, payload);
+      let urlAfter = '';
+      try {
+        const tab = await this.getTab(tabId);
+        urlAfter = tab?.url || '';
+      } catch (_) {}
+      if (urlAfter && urlBefore !== urlAfter) {
+        res.effect = 'url_changed';
+        res.urlAfter = urlAfter;
+      }
+      return res;
     }
 
     await this.safeProbeBegin(tabId);
 
     try {
       // 1. Focus element by clicking it
-      await this.clickCoordinates(tabId, resolveRes.point.x, resolveRes.point.y, signal);
+      await this.clickCoordinates(tabId, resolveRes.point.x, resolveRes.point.y, signal, sleep, control);
 
-      if (signal?.aborted) throw new Error('Action aborted');
+      if (signal?.aborted || control?.stopRequested || control?.pauseRequested) throw new Error('Action aborted');
 
       // 2. Select all existing text via selectAll command
-      await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
-        type: 'rawKeyDown',
-        key: 'a',
-        code: 'KeyA',
-        windowsVirtualKeyCode: 65,
-        text: 'a',
-        unmodifiedText: 'a',
-        commands: ['selectAll']
-      });
+      let selectAllDownSent = false;
+      try {
+        await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+          type: 'rawKeyDown',
+          key: 'a',
+          code: 'KeyA',
+          windowsVirtualKeyCode: 65,
+          text: 'a',
+          unmodifiedText: 'a',
+          commands: ['selectAll']
+        }, control);
+        selectAllDownSent = true;
+      } finally {
+        if (selectAllDownSent) {
+          try {
+            await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+              type: 'keyUp',
+              key: 'a',
+              code: 'KeyA',
+              windowsVirtualKeyCode: 65
+            }, control);
+          } catch (_) {}
+        }
+      }
 
-      await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
-        type: 'keyUp',
-        key: 'a',
-        code: 'KeyA',
-        windowsVirtualKeyCode: 65
-      });
-
-      if (signal?.aborted) throw new Error('Action aborted');
+      if (signal?.aborted || control?.stopRequested || control?.pauseRequested) throw new Error('Action aborted');
 
       // 3. Insert new text using Input.insertText
-      await this.cdp.sendCommand(tabId, 'Input.insertText', { text });
+      await this.cdp.sendCommand(tabId, 'Input.insertText', { text }, control);
 
       // 4. Submit if requested
       if (submit) {
-        if (signal?.aborted) throw new Error('Action aborted');
-        await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
-          type: 'rawKeyDown',
-          key: 'Enter',
-          code: 'Enter',
-          windowsVirtualKeyCode: 13,
-          text: '\r',
-          unmodifiedText: '\r'
-        });
-        await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
-          type: 'keyUp',
-          key: 'Enter',
-          code: 'Enter',
-          windowsVirtualKeyCode: 13
-        });
+        if (signal?.aborted || control?.stopRequested || control?.pauseRequested) throw new Error('Action aborted');
+        let enterDownSent = false;
+        try {
+          await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+            type: 'rawKeyDown',
+            key: 'Enter',
+            code: 'Enter',
+            windowsVirtualKeyCode: 13,
+            text: '\r',
+            unmodifiedText: '\r'
+          }, control);
+          enterDownSent = true;
+        } finally {
+          if (enterDownSent) {
+            try {
+              await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: 'Enter',
+                code: 'Enter',
+                windowsVirtualKeyCode: 13
+              }, control);
+            } catch (_) {}
+          }
+        }
       }
     } catch (err: any) {
       return {
@@ -269,7 +382,24 @@ export class InputDispatcher {
       };
     }
 
-    const effect = await this.safeProbeEnd(tabId);
+    if (submit) {
+      if (sleep) {
+        await sleep(300, signal);
+      } else {
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+
+    let effect = await this.safeProbeEnd(tabId);
+    let urlAfter = '';
+    try {
+      const tab = await this.getTab(tabId);
+      urlAfter = tab?.url || '';
+    } catch (_) {}
+    if (urlAfter && urlBefore !== urlAfter) {
+      effect = 'url_changed';
+    }
+
     const label = resolveRes.text || null;
     const message = `Typed "${text}" into element [${targetId}]${label ? ` ("${label}")` : ''}`;
 
@@ -279,6 +409,7 @@ export class InputDispatcher {
       submitted: submit,
       message,
       effect,
+      urlAfter: urlAfter || undefined,
       via: 'cdp'
     };
   }
@@ -289,7 +420,8 @@ export class InputDispatcher {
   private async handlePressKey(
     tabId: number,
     payload: Record<string, any>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    control?: { stopRequested?: boolean; pauseRequested?: boolean; signal?: AbortSignal }
   ): Promise<DispatchResult> {
     const key = payload.key;
     if (!key) {
@@ -308,7 +440,7 @@ export class InputDispatcher {
     await this.safeProbeBegin(tabId);
 
     try {
-      await this.sendKey(tabId, key, signal);
+      await this.sendKey(tabId, key, signal, control);
     } catch (err: any) {
       return {
         success: false,
@@ -332,8 +464,19 @@ export class InputDispatcher {
    * so event listeners in modern frameworks process the interaction reliably.
    * Ensures mouseReleased is dispatched in a finally block if mousePressed succeeded.
    */
-  async clickCoordinates(tabId: number, x: number, y: number, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) throw new Error('Action aborted');
+  async clickCoordinates(
+    tabId: number,
+    x: number,
+    y: number,
+    signal?: AbortSignal,
+    sleep?: (ms: number, signal?: AbortSignal) => Promise<void>,
+    control?: { stopRequested?: boolean; pauseRequested?: boolean; signal?: AbortSignal }
+  ): Promise<void> {
+    if (signal?.aborted || control?.stopRequested || control?.pauseRequested) throw new Error('Action aborted');
+
+    const doSleep = sleep
+      ? (ms: number) => sleep(ms, signal)
+      : (ms: number) => new Promise((r) => setTimeout(r, ms));
 
     // Trigger visual cursor ripple in content script
     try {
@@ -346,11 +489,11 @@ export class InputDispatcher {
       type: 'mouseMoved',
       x,
       y
-    });
+    }, control);
 
     // Realistic hover settle delay (30ms)
-    await new Promise((r) => setTimeout(r, 30));
-    if (signal?.aborted) throw new Error('Action aborted');
+    await doSleep(30);
+    if (signal?.aborted || control?.stopRequested || control?.pauseRequested) throw new Error('Action aborted');
 
     let mousePressed = false;
     try {
@@ -361,12 +504,12 @@ export class InputDispatcher {
         clickCount: 1,
         x,
         y
-      });
+      }, control);
       mousePressed = true;
 
       // Realistic press hold duration (50ms) before release
-      await new Promise((r) => setTimeout(r, 50));
-      if (signal?.aborted) throw new Error('Action aborted');
+      await doSleep(50);
+      if (signal?.aborted || control?.stopRequested || control?.pauseRequested) throw new Error('Action aborted');
     } finally {
       if (mousePressed) {
         try {
@@ -377,7 +520,7 @@ export class InputDispatcher {
             clickCount: 1,
             x,
             y
-          });
+          }, control);
         } catch (_) {
           // Non-fatal if target tab closed or detached
         }
@@ -388,8 +531,13 @@ export class InputDispatcher {
   /**
    * Dispatches key down and key up events for a key string.
    */
-  async sendKey(tabId: number, key: string, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) throw new Error('Action aborted');
+  async sendKey(
+    tabId: number,
+    key: string,
+    signal?: AbortSignal,
+    control?: { stopRequested?: boolean; pauseRequested?: boolean; signal?: AbortSignal }
+  ): Promise<void> {
+    if (signal?.aborted || control?.stopRequested || control?.pauseRequested) throw new Error('Action aborted');
 
     const def = SPECIAL_KEYS[key] || {
       code: key.length === 1 ? `Key${key.toUpperCase()}` : key,
@@ -407,16 +555,22 @@ export class InputDispatcher {
     if (def.text) downParams.text = def.text;
     if (def.unmodifiedText) downParams.unmodifiedText = def.unmodifiedText;
 
-    await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', downParams);
-
-    if (signal?.aborted) throw new Error('Action aborted');
-
-    await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      key,
-      code: def.code,
-      windowsVirtualKeyCode: def.windowsVirtualKeyCode
-    });
+    let keyDownSent = false;
+    try {
+      await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', downParams, control);
+      keyDownSent = true;
+    } finally {
+      if (keyDownSent) {
+        try {
+          await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+            type: 'keyUp',
+            key,
+            code: def.code,
+            windowsVirtualKeyCode: def.windowsVirtualKeyCode
+          }, control);
+        } catch (_) {}
+      }
+    }
   }
 
   /**
@@ -481,7 +635,7 @@ export class InputDispatcher {
       });
       return res?.effect || 'none';
     } catch (_) {
-      return 'none';
+      return 'unknown';
     }
   }
 
@@ -508,6 +662,21 @@ export class InputDispatcher {
         via: 'synthetic'
       };
     }
+  }
+
+  /**
+   * Helper to retrieve tab details safely.
+   */
+  private getTab(tabId: number): Promise<chrome.tabs.Tab | null> {
+    if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.get) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime?.lastError || !tab) resolve(null);
+        else resolve(tab);
+      });
+    });
   }
 
   /**

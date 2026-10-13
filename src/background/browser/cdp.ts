@@ -133,21 +133,58 @@ export class CDPManager {
     await Promise.allSettled(tabIds.map((tabId) => this.detach(tabId)));
   }
 
+  private activeControl?: { signal?: AbortSignal; stopRequested?: boolean; pauseRequested?: boolean };
+
+  setActiveControl(control?: { signal?: AbortSignal; stopRequested?: boolean; pauseRequested?: boolean }): void {
+    this.activeControl = control;
+  }
+
   /**
    * Send a CDP command to the attached tab.
    */
-  async sendCommand(tabId: number, method: string, params: Record<string, unknown> = {}): Promise<any> {
+  async sendCommand(
+    tabId: number,
+    method: string,
+    params: Record<string, unknown> = {},
+    control?: { signal?: AbortSignal; stopRequested?: boolean; pauseRequested?: boolean }
+  ): Promise<any> {
     if (!this.hasDebugger()) {
       throw new Error('chrome.debugger API is not available.');
+    }
+
+    const isExempt =
+      (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') ||
+      (method === 'Input.dispatchKeyEvent' && params?.type === 'keyUp');
+
+    const effectiveControl = control ?? this.activeControl;
+
+    if (!isExempt) {
+      if (effectiveControl?.signal?.aborted || effectiveControl?.stopRequested || effectiveControl?.pauseRequested) {
+        throw new Error(`CDP command ${method} aborted: stop or pause requested.`);
+      }
     }
 
     return await chrome.debugger.sendCommand({ tabId }, method, params);
   }
 
+  private clockSleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+
+  setClockSleep(fn: (ms: number, signal?: AbortSignal) => Promise<void>): void {
+    this.clockSleep = fn;
+  }
+
+  private async sleepDelay(ms: number, signal?: AbortSignal): Promise<void> {
+    if (this.clockSleep) {
+      await this.clockSleep(ms, signal);
+    } else {
+      await new Promise((r) => setTimeout(r, ms));
+    }
+  }
+
   /**
    * Pause handler: starts a 30-minute timer to detach the debugger if still paused.
    */
-  startPauseTimer(tabId: number, onDetachCallback?: () => void): void {
+  startPauseTimer(tabId: number, onDetachCallback?: () => void, timeoutMs = 30 * 60 * 1000): void {
     const info = this.attachedTabs.get(tabId);
     if (!info) return;
 
@@ -155,13 +192,15 @@ export class CDPManager {
       clearTimeout(info.pauseTimer);
     }
 
-    const THIRTY_MINUTES_MS = 30 * 60 * 1000;
     info.pauseTimer = setTimeout(async () => {
       await this.detach(tabId);
       if (onDetachCallback) {
         onDetachCallback();
       }
-    }, THIRTY_MINUTES_MS);
+    }, timeoutMs);
+    if (typeof (info.pauseTimer as any)?.unref === 'function') {
+      (info.pauseTimer as any).unref();
+    }
   }
 
   /**
@@ -226,11 +265,11 @@ export class CDPManager {
     const TIMEOUT_MS = 1500;
 
     while (Date.now() - start < TIMEOUT_MS) {
-      await new Promise(r => setTimeout(r, 100));
+      await this.sleepDelay(100);
       const current = await readHeight();
       if (current > 0 && current < initialHeight) {
         // Yellow bar appeared and caused a height drop; wait 250ms for layout to settle
-        await new Promise(r => setTimeout(r, 250));
+        await this.sleepDelay(250);
         return;
       }
     }

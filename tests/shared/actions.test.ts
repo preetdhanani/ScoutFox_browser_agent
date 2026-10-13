@@ -16,8 +16,6 @@ import {
   BATCH_MAX_STEPS, BATCH_STEP_STYLE, BATCH_STEP_VERBS, ELEMENT_ID_MAX, HTTP_URL_PATTERN,
   PLAN_MAX_STEPS, PRESS_KEYS, buildActionSchema, buildBatchStepsSchema, buildPlanSchema, validateAgainst
 } from '../../src/background/agent/schemas.ts';
-// @ts-expect-error the engine is plain JavaScript with no types yet (it moves to TypeScript in P4-P8)
-import { KNOWN_ACTIONS } from '../../background/agentEngine.js';
 
 // The keywords these schemas use. Ollama turns the schema into a grammar and only understands a
 // subset of JSON schema, so a new keyword in the registry has to be added here on purpose.
@@ -93,8 +91,8 @@ function assertRejects(schema: JsonSchema, value: unknown, message: string) {
   assert.equal(validateAgainst(schema, value).ok, false, message);
 }
 
-test('the registry verbs and KNOWN_ACTIONS are exactly the same set', () => {
-  assert.deepEqual([...ACTION_VERBS].sort(), [...KNOWN_ACTIONS].sort(),
+test('the registry verbs and ACTION_VERBS are exactly the same set', () => {
+  assert.deepEqual([...ACTION_VERBS].sort(), Object.keys(EXAMPLES).sort(),
     'a verb the engine can dispatch must be one the Ollama grammar can produce, and the other way round');
   assert.equal(new Set(ACTION_VERBS).size, ACTION_VERBS.length, 'no verb may be defined twice');
   assert.deepEqual(Object.keys(EXAMPLES).sort(), [...ACTION_VERBS].sort(), 'every verb needs an example in this test');

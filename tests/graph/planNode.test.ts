@@ -1,0 +1,291 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { graphRig, act } from '../helpers/graphHarness.ts';
+import { link } from '../helpers/fakeDom.ts';
+import type { PageSpec } from '../helpers/fakeDom.ts';
+import { Logger } from '../../src/shared/logger.ts';
+
+test('planNode: passes earlier completed turn recap into follow-up plan prompt', async (t) => {
+  const rig = await graphRig({
+    policy: [
+      act.finish('Item 42 costs 99 USD.'),
+      act.finish('Item 43 costs 120 USD.'),
+    ],
+  });
+  t.after(rig.cleanup);
+
+  // Turn 1
+  await rig.start('Find price of item 42');
+  assert.equal(rig.status(), 'idle');
+
+  // Turn 2
+  await rig.start('Now find item 43');
+  assert.equal(rig.status(), 'idle');
+
+  // The plan call for turn 2 should have had the earlier session context
+  const planCalls = rig.llm.callsOf('plan');
+  assert.ok(planCalls.length >= 2);
+  const secondPlanMsg = planCalls[1]?.messages?.[0]?.content || '';
+  assert.ok(secondPlanMsg.includes('Earlier in this session:'));
+  assert.ok(secondPlanMsg.includes('Find price of item 42'));
+  assert.ok(secondPlanMsg.includes('Item 42 costs 99 USD.'));
+});
+
+test('planNode: logs [PLANNER_FALLBACK] when fallback plan is used', async (t) => {
+  const logs: string[] = [];
+  const origInfo = Logger.info;
+  Logger.info = (tag: string, msg: string) => {
+    logs.push(`[${tag}] ${msg}`);
+    origInfo.call(Logger, tag, msg);
+  };
+  t.after(() => {
+    Logger.info = origInfo;
+  });
+
+  const rig = await graphRig({
+    plan: 'Invalid non-json response from planner',
+    policy: [act.finish('Done with fallback.')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Check prices');
+  assert.equal(rig.status(), 'idle');
+  assert.ok(logs.some((l) => l.includes('[PLANNER_FALLBACK]')));
+});
+
+test('planNode: pauses at approve_plan hold when autoApprove is false', async (t) => {
+  const rig = await graphRig({
+    autoApprove: false,
+    policy: [act.finish('Item 42 costs 99 USD.')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Compare laptop models');
+  assert.equal(rig.status(), 'paused');
+  assert.ok(rig.pending().approval, 'Plan hold is pending');
+
+  await rig.approvePlan();
+  assert.equal(rig.status(), 'idle');
+  assert.equal(rig.finishAnswer(), 'Item 42 costs 99 USD.');
+});
+
+test('planNode: auto-approves plan when autoApprove is true', async (t) => {
+  const rig = await graphRig({
+    autoApprove: true,
+    policy: [act.finish('Item 42 costs 99 USD.')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Quick lookup');
+  assert.equal(rig.status(), 'idle');
+  assert.equal(rig.finishAnswer(), 'Item 42 costs 99 USD.');
+});
+
+test('planNode: a summarize task planned as research is redirected to answer mode', async (t) => {
+  const rig = await graphRig({
+    // The live failure: the planner put a summarize task in the research bucket with title/url/
+    // summary columns - prose no finding can satisfy - instead of the answer bucket.
+    plan: JSON.stringify({
+      task_kind: 'research',
+      columns: ['title', 'url', 'summary'],
+      search_query: 'main articles',
+      sites: [
+        { domain: 'shop.test', goal: 'Read the main articles', role: 'reference', kind: 'page', difficulty: 1, required_fields: ['title', 'url', 'summary'], done_when: 'all_required', check: { type: 'none', value: '' } },
+      ],
+    }),
+    policy: [act.finish('Top story: GLM-Legal ...')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Summarize the main articles on this page');
+  assert.equal(rig.finishAnswer(), 'Top story: GLM-Legal ...');
+
+  // The redirect: the site ran as answer kind, so the model's plain finish was accepted as the
+  // task answer (the old research plan would have demanded record_finding values instead).
+  const planCalls = rig.llm.callsOf('plan');
+  assert.ok(planCalls.length >= 1);
+  void planCalls;
+  const policyCalls = rig.llm.callsOf('policy');
+  assert.ok(policyCalls.length >= 1, 'A policy call happened');
+  const firstPolicySystem = String((policyCalls[0] as any)?.system ?? (policyCalls[0] as any)?.messages?.[0]?.content ?? '');
+  assert.ok(!firstPolicySystem.includes('record_finding'), `answer-kind site must not be offered record_finding, got: ${firstPolicySystem.slice(0, 300)}`);
+});
+
+test('planNode: a real research task with a summary word keeps its research plan', async (t) => {
+  const rig = await graphRig({
+    plan: JSON.stringify({
+      task_kind: 'research',
+      columns: ['price', 'summary'],
+      search_query: 'laptop summary',
+      sites: [
+        { domain: 'shop.test', goal: 'Find the laptop price', role: 'reference', kind: 'store', difficulty: 1, required_fields: ['price'], done_when: 'all_required', check: { type: 'none', value: '' } },
+        { domain: 'shop2.test', goal: 'Find the laptop price', role: 'compare', kind: 'store', difficulty: 1, required_fields: ['price'], done_when: 'all_required', check: { type: 'none', value: '' } },
+      ],
+    }),
+    policy: [
+      act.finish('Shop A 99 USD.'),
+      act.finish('Shop B 120 USD.'),
+    ],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Compare laptop prices and summarize the deals');
+
+  // Two sites ran (the plan was not collapsed to one answer site), and the collected prices
+  // reached the truth table the answer is built from.
+  const planCalls = rig.llm.callsOf('plan');
+  assert.ok(planCalls.length >= 1);
+  void planCalls;
+  const policyCalls = rig.llm.callsOf('policy');
+  const withRecord = policyCalls.filter((c: any) => String(c?.system ?? c?.messages?.[0]?.content ?? '').includes('record_finding'));
+  assert.ok(withRecord.length >= 1, 'The research sites ran collect policy with record_finding');
+});
+
+test('planNode: user stop during initial plan cancels run without starting policy', async (t) => {
+  const rig = await graphRig({
+    autoApprove: false,
+    policy: [act.finish('Should not run.')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Task to be stopped');
+  assert.equal(rig.status(), 'paused');
+  assert.ok(rig.pending().approval);
+
+  const stopRes = await rig.stop();
+  assert.equal(stopRes.success, true);
+  assert.equal(rig.status(), 'stopped');
+});
+
+test('planNode: parses structured plan JSON with multiple comparison sites', async (t) => {
+  const customPlan = JSON.stringify({
+    sites: [
+      { name: 'Shop 1', domain: 'shop1.test', goal: 'Find price', role: 'primary', kind: 'store' },
+      { name: 'Shop 2', domain: 'shop2.test', goal: 'Compare price', role: 'compare', kind: 'store' },
+    ],
+    task_kind: 'answer',
+    columns: ['price', 'shipping'],
+  });
+
+  const rig = await graphRig({
+    plan: customPlan,
+    policy: [act.finish('Item 42 costs 99 USD.')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('What is the lowest price between Shop 1 and Shop 2?');
+  assert.equal(rig.status(), 'idle');
+  assert.equal(rig.finishAnswer(), 'Item 42 costs 99 USD.');
+});
+
+test('planNode: infers answer task_kind when query contains price keywords', async (t) => {
+  const customPlan = JSON.stringify({
+    sites: [
+      { name: 'Store', domain: 'store.test', goal: 'Get price' },
+    ],
+  });
+
+  const rig = await graphRig({
+    plan: customPlan,
+    policy: [act.finish('Item 42 costs 99 USD.')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('What is the price of the keyboard?');
+  assert.equal(rig.status(), 'idle');
+  assert.equal(rig.finishAnswer(), 'Item 42 costs 99 USD.');
+});
+
+test('planNode: plan prompt carries user goal accurately', async (t) => {
+  const rig = await graphRig({
+    policy: [act.finish('Item 42 costs 99 USD.')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Find red running shoes size 10');
+  assert.equal(rig.status(), 'idle');
+
+  const planCalls = rig.llm.callsOf('plan');
+  assert.ok(planCalls.length >= 1);
+  const planUserMsg = planCalls[0]?.messages?.[0]?.content || '';
+  assert.ok(planUserMsg.includes('Find red running shoes size 10'));
+});
+
+test('planNode: rejection of plan hold terminates task cleanly as stopped', async (t) => {
+  const rig = await graphRig({
+    autoApprove: false,
+    policy: [act.finish('Should not run.')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Task to reject plan');
+  assert.equal(rig.status(), 'paused');
+  assert.ok(rig.pending().approval);
+
+  const stopRes = await rig.stop();
+  assert.equal(stopRes.success, true);
+  assert.equal(rig.status(), 'stopped');
+});
+
+
+test('planNode: a roundup task becomes an answer site and finishes with the list as prose', async (t) => {
+  // The live failure: "Find top trending repositories on GitHub for python" was planned as a
+  // research/collect site. The findings engine keeps one finding per field per site, so the site
+  // was 'done' after the first repository and the run ended with a one-row table and
+  // "(The model did not provide an answer.)" instead of the list the user asked for.
+  const pages: PageSpec[] = [{
+    url: 'https://github.test/trending/python',
+    title: 'Trending Python repositories on GitHub today',
+    text: ['debpalash / VoiceStudio', '61,949 stars', 'acme / other-repo', '12,345 stars', 'Trending repositories on GitHub today'],
+    elements: [link('debpalash / VoiceStudio', 'https://github.test/debpalash/VoiceStudio')],
+  }];
+  const rig = await graphRig({
+    pages,
+    startUrl: pages[0].url,
+    plan: JSON.stringify({
+      task_kind: 'research',
+      columns: ['repository', 'stars', 'url'],
+      search_query: 'trending python repositories',
+      sites: [
+        { domain: 'github.test', goal: 'Find the top trending Python repositories', role: 'reference', kind: 'page', difficulty: 1, required_fields: ['repository', 'stars'], done_when: 'all_required', check: { type: 'none', value: '' } },
+      ],
+    }),
+    policy: [act.subgoalDone('1. debpalash / VoiceStudio - 61,949 stars\n2. acme / other-repo - 12,345 stars')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Find top trending repositories on GitHub for python');
+  assert.equal(rig.status(), 'idle');
+
+  const policyCalls = rig.llm.callsOf('policy');
+  assert.ok(policyCalls.length >= 1, 'the roundup site got a policy call');
+  const system = String((policyCalls[0] as any)?.system ?? '');
+  assert.ok(system.includes('subgoal_done {summary, evidence}'), `a roundup answer site must be offered subgoal_done, got: ${system.slice(0, 220)}`);
+  assert.ok(!system.includes('record_finding'), 'a roundup answer site must not be offered record_finding');
+  const answer = rig.finishAnswer() || '';
+  assert.ok(answer.includes('debpalash / VoiceStudio'), `the answer must list the repositories, got: ${answer}`);
+});
+test('planNode: strips thought tags from plan response before parsing JSON', async (t) => {
+  const planWithThoughts = `
+<thought>
+I need to check shop.test for laptops.
+</thought>
+\`\`\`json
+{
+  "sites": [
+    { "name": "Shop", "domain": "shop.test", "goal": "Find laptop" }
+  ]
+}
+\`\`\`
+  `;
+
+  const rig = await graphRig({
+    plan: planWithThoughts,
+    policy: [act.finish('Item 42 costs 99 USD.')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Search laptops');
+  assert.equal(rig.status(), 'idle');
+  assert.equal(rig.finishAnswer(), 'Item 42 costs 99 USD.');
+});

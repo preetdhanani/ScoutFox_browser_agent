@@ -19,20 +19,22 @@ global.chrome = {
   tabs: { get: (id, cb) => cb({ id, groupId: -1, url: 'https://example.com' }), query: async () => [] }
 };
 
-const { AgentEngine } = await import('../background/agentEngine.js');
 const { ACTION_VERBS, buildActionPromptLines } = await import('../src/background/agent/actions.ts');
 const { buildActionSchema, buildBatchStepsSchema, buildPlanSchema } = await import('../src/background/agent/schemas.ts');
+// The prompt cases replay the REAL production builders (BUG-28): the old cases
+// snapshotted copies of the deleted legacy engine's builders that lived in this
+// test file, so any change to the production prompt text passed unnoticed.
+const { buildPlanSystemPrompt, buildPolicySystemPrompt } = await import('../src/background/agent/prompts.ts');
 
 const FIXTURE = JSON.parse(readFileSync(new URL('../shared/fixtures/action-schemas.json', import.meta.url), 'utf8'));
-const engine = new AgentEngine();
 
 const FUNCTIONS = {
   buildActionSchema,
   buildBatchStepsSchema,
   buildPlanSchema,
   buildActionPromptLines,
-  buildCompactSystemPrompt: (identity) => engine.buildCompactSystemPrompt(identity),
-  buildSystemPrompt: (identity, provider) => engine.buildSystemPrompt(identity, provider)
+  buildPlanSystemPrompt,
+  buildPolicySystemPrompt
 };
 
 /** A null argument in the fixture means the argument was not passed. */

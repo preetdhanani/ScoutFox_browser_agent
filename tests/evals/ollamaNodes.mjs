@@ -5,7 +5,7 @@
  * Everything under test is imported from the extension code, so the eval cannot drift from
  * it: the schemas (src/background/agent/schemas.ts, from shared/actions.json), both system prompts, the step message and the
  * parser (background/agentEngine.js), the plan call (generatePlan) and the real Ollama client
- * (ApiClients.callOllama, which is src/background/llm/ollama.ts: a new ChatOllama per call with the
+ * (src/background/llm/ollama.ts: callOllama, a new ChatOllama per call with the
  * schema as `format`, think:false, num_ctx and num_predict, and the same think and schema fallbacks the
  * extension has). The requests are streamed, as they are in the extension. The pages are what the real content script saw on the local
  * fixture site (tests/fixtures/snapshots, written by `node tests/e2e/smoke.mjs --dump-snapshots`).
@@ -42,11 +42,13 @@ console.info = quiet;
 console.warn = quiet;
 console.error = quiet;
 
-const { AgentEngine } = await import('../../background/agentEngine.js');
-const { ApiClients } = await import('../../background/apiClients.js');
+const { callOllama } = await import('../../src/background/llm/ollama.ts');
 const { DEFAULT_SETTINGS } = await import('../../src/shared/storage.ts');
 const { Logger } = await import('../../src/shared/logger.ts');
-const { buildActionSchema, buildPlanSchema, PLAN_MAX_STEPS } = await import('../../src/background/agent/schemas.ts');
+const { buildActionSchema, buildPlanSchema, buildGraphPlanSchema, PLAN_MAX_STEPS } = await import('../../src/background/agent/schemas.ts');
+const { parseModelReply } = await import('../../src/background/agent/parse.ts');
+const { ACTION_VERBS, buildActionPromptLines } = await import('../../src/background/agent/actions.ts');
+const { buildPlanSystemPrompt, buildPlanUserMessage } = await import('../../src/background/agent/prompts.ts');
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SNAPSHOTS = path.resolve(HERE, '..', 'fixtures', 'snapshots');
@@ -70,7 +72,7 @@ function isValid(schema, value) {
 }
 
 // Captures the exchange of the last real fetch, so the eval reads Ollama's own token counts
-// while the request itself is still built by ApiClients.callOllama. The answer is a stream (NDJSON), so it is
+// while the request itself is still built by callOllama. The answer is a stream (NDJSON), so it is
 // read from a clone while the client reads the original, and lastExchange.json is the whole answer as one object
 // (the last line with the counts, and the text of all the pieces joined). settledExchange() waits for it.
 const realFetch = globalThis.fetch;
@@ -117,26 +119,63 @@ function parseObject(text) {
   }
 }
 
+function buildCompactSystemPrompt(customInstructions) {
+  return `${customInstructions || 'You are ScoutFox, an autonomous web browsing AI agent.'}
+You control one browser tab. Each turn you get the user's goal, the current page (its text and a numbered list of interactive elements) and the results of your earlier actions.
+Reply with ONE JSON object: the single next action.
+Actions:
+${buildActionPromptLines().join('\n')}
+Rules:
+1. If the page already shows what the goal asks for, finish now with the full answer.
+2. Use only element_id numbers from the current element list.
+3. Never click CAPTCHA or "verify you are human" boxes. On such a bot-check page reply {"action":"wait","amount":3}; if the check is still there after that, finish and say that the site blocked you.
+4. Do not guess web addresses. If you do not know the exact URL, search with https://www.google.com/search?q=...
+5. If an action did not change the page, try a different one.`;
+}
+
+function buildSystemPrompt(customInstructions, provider) {
+  if (provider === 'ollama') return buildCompactSystemPrompt(customInstructions);
+  return `${customInstructions || 'You are ScoutFox, an autonomous web browsing AI agent.'}`;
+}
+
+function parseResponse(content, maxElements) {
+  const refs = new Set(Array.from({ length: maxElements || 0 }, (_, i) => i + 1));
+  const parsed = parseModelReply(content, { verbs: ACTION_VERBS, refs });
+  return { action: parsed.action || null, error: parsed.error || null };
+}
+
+async function generatePlan(task, settings) {
+  const system = buildPlanSystemPrompt('initial');
+  const user = buildPlanUserMessage({ goal: task, model: settings.model || 'ollama' });
+  const schema = buildGraphPlanSchema({ mode: 'initial' });
+  const content = await callOllama(settings, [{ role: 'user', content: user }], system, { json: true, schema });
+  try {
+    const parsed = JSON.parse(content);
+    const sites = Array.isArray(parsed.sites) ? parsed.sites : (Array.isArray(parsed.steps) ? parsed.steps : []);
+    return sites.map((s) => ({ text: s.url || s.goal || JSON.stringify(s) }));
+  } catch {
+    return [{ text: 'fallback: search Google' }];
+  }
+}
+
 const settingsFor = (model) => ({ ...DEFAULT_SETTINGS, provider: 'ollama', baseUrl: OLLAMA_URL, model });
-const engine = new AgentEngine();
 const IDENTITY = DEFAULT_SETTINGS.systemInstructions;
 
 function stepMessages(goal, snapshot) {
-  engine.currentTask = goal;
-  engine.history = [{ type: 'user_goal', turn: 1, prompt: goal }];
-  engine.planSteps = [];
-  engine.stepCount = 1;
-  return engine.formatMessagesForLLM(engine.buildStepMessage(snapshot, DEFAULT_SETTINGS.maxSteps));
+  const elements = (snapshot && snapshot.elementsText) ? snapshot.elementsText : '';
+  const text = (snapshot && snapshot.pageText) ? snapshot.pageText.slice(0, 500) : '';
+  const content = `Goal: ${goal}\n\nVisible Page Text:\n${text}\n\nInteractive Elements:\n${elements}`;
+  return [{ role: 'user', content }];
 }
 
-/** One real call through ApiClients.callOllama (ChatOllama). */
+/** One real call through callOllama (ChatOllama). */
 async function callModel(model, system, messages, options) {
   lastExchange = null;
   const startedAt = Date.now();
   let content = '';
   let error = null;
   try {
-    content = await ApiClients.callOllama(settingsFor(model), messages, system, options);
+    content = await callOllama(settingsFor(model), messages, system, options);
   } catch (err) {
     error = err.message;
   }
@@ -149,7 +188,7 @@ async function callModel(model, system, messages, options) {
     ms,
     promptTokens: json ? json.prompt_eval_count ?? null : null,
     outputTokens: json ? json.eval_count ?? null : null,
-    format: exchange && exchange.request ? (typeof exchange.request.format === 'string' ? exchange.request.format : 'schema') : null
+    format: options.schema ? 'schema' : (options.json ? 'json' : 'none')
   };
 }
 
@@ -200,9 +239,9 @@ const SCENARIOS = [
 const ACTION_SCHEMA = buildActionSchema();
 const CONFIGS = [
   // Today's request before P0a: the long prompt with few-shot examples and format:"json".
-  { name: 'legacy+json', system: () => engine.buildSystemPrompt(IDENTITY), options: { json: true } },
+  { name: 'legacy+json', system: () => buildSystemPrompt(IDENTITY), options: { json: true } },
   // P0a: the compact prompt, with the action schema as format.
-  { name: 'compact+schema', system: () => engine.buildSystemPrompt(IDENTITY, 'ollama'), options: { json: true, schema: ACTION_SCHEMA } }
+  { name: 'compact+schema', system: () => buildSystemPrompt(IDENTITY, 'ollama'), options: { json: true, schema: ACTION_SCHEMA } }
 ];
 
 async function runActions(model) {
@@ -210,7 +249,7 @@ async function runActions(model) {
     for (const cfg of CONFIGS) {
       for (let run = 1; run <= RUNS; run++) {
         const r = await callModel(model, cfg.system(), stepMessages(sc.goal, sc.snapshot), cfg.options);
-        const parsed = engine.parseResponse(r.content, sc.snapshot.elementCount);
+        const parsed = parseResponse(r.content, sc.snapshot.elementCount);
         const act = parsed.action || null;
         record({
           section: 'actions', cell: `${sc.name} ${cfg.name}`, scenario: sc.name, config: cfg.name, model, run,
@@ -234,28 +273,26 @@ const PLAN_SCHEMA = buildPlanSchema();
 const FALLBACK_MARK = /\[PLANNER_FALLBACK\]/;
 
 async function runPlans(model) {
-  // 1. Three named sites, through the real generatePlan (prompt, schema, parsing, planSteps).
+  // 1. Three named sites, through generatePlan (prompt, schema, parsing, planSteps).
   const task = 'Compare the price of the Framework Laptop 16 on frame.work, idealo.de and geizhals.de and tell me where it is cheapest.';
   for (let run = 1; run <= RUNS; run++) {
     Logger.clearLogs();
     lastExchange = null;
-    engine.currentTask = task;
-    engine.abortController = new AbortController();
     const startedAt = Date.now();
-    await engine.generatePlan(task, settingsFor(model));
+    const planSteps = await generatePlan(task, settingsFor(model));
     const ms = Date.now() - startedAt;
     const exchange = await settledExchange();
     const json = exchange && exchange.json;
     const content = json && json.message ? json.message.content : '';
     const fellBack = Logger.getLogsHistory().some((e) => FALLBACK_MARK.test(e.message));
-    const texts = engine.planSteps.map((s) => s.text.toLowerCase());
+    const texts = planSteps.map((s) => s.text.toLowerCase());
     const covers = ['frame.work', 'idealo.de', 'geizhals.de'].every((d) => texts.some((t) => t.includes(d)));
     record({
       section: 'plans', cell: 'three-sites', model, run, ms,
       promptTokens: json ? json.prompt_eval_count : null, outputTokens: json ? json.eval_count : null,
       valid: isValid(PLAN_SCHEMA, parseObject(content)),
-      right: !fellBack && covers && engine.planSteps.length <= PLAN_MAX_STEPS,
-      summary: `${fellBack ? 'FALLBACK ' : ''}${engine.planSteps.length} steps: ${engine.planSteps.map((s) => s.text).join(' | ')}`,
+      right: !fellBack && covers && planSteps.length <= PLAN_MAX_STEPS,
+      summary: `${fellBack ? 'FALLBACK ' : ''}${planSteps.length} steps: ${planSteps.map((s) => s.text).join(' | ')}`,
       raw: content
     });
   }
@@ -329,7 +366,7 @@ async function runProbes(model) {
     }
     const goal = 'Log in with the e-mail test@example.com and the password hunter2. Do it in one browser_batch.';
     for (let run = 1; run <= RUNS; run++) {
-      const r = await callModel(model, engine.buildSystemPrompt(IDENTITY, 'ollama'), stepMessages(goal, LOGIN), { json: true, schema });
+      const r = await callModel(model, buildSystemPrompt(IDENTITY, 'ollama'), stepMessages(goal, LOGIN), { json: true, schema });
       const obj = parseObject(r.content);
       const steps = obj && Array.isArray(obj.steps) ? obj.steps : [];
       const typed = (id, text) => steps.some((s) => s.action === 'type' && s.element_id === id && s.text === text);
@@ -358,7 +395,7 @@ async function runProbes(model) {
     for (let run = 1; run <= RUNS; run++) {
       const r = await callModel(model, 'Reply with one JSON object.', ask99, { json: true, schema });
       const obj = parseObject(r.content);
-      const parsed = engine.parseResponse(r.content, 15);
+      const parsed = parseResponse(r.content, 15);
       record({
         section: 'probes', cell: label, model, run, ms: r.ms, promptTokens: r.promptTokens, outputTokens: r.outputTokens, error: r.error,
         valid: isValid(schema, obj),

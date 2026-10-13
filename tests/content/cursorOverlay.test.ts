@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-
-const SRC = fs.readFileSync(new URL('../../content/actionExecutor.js', import.meta.url), 'utf8');
+import { ActionExecutor } from '../../src/content/actionExecutor.ts';
 
 function createFakeDOM() {
   const elements = new Map<string, any>();
@@ -53,8 +51,7 @@ function createFakeDOM() {
     constructor(type: string) { this.type = type; }
   }
 
-  const fn = new Function('window', 'document', 'MouseEvent', `${SRC}\nreturn window.actionExecutorInstance;`);
-  const executor = fn(window, document, FakeMouseEvent);
+  const executor = new ActionExecutor(document, window);
 
   return { executor, document, elements, appendedToBody };
 }
@@ -126,4 +123,24 @@ test('highlightElement applies outline and outlineOffset to target', () => {
 
   assert.equal(el.style.outline, '3px solid #ff7a00');
   assert.equal(el.style.outlineOffset, '2px');
+});
+
+test('highlighting the same element twice restores the pre-highlight style, not the ring (BUG-29)', async () => {
+  const { executor } = createFakeDOM();
+  const el: any = { style: { outline: '1px solid blue', outlineOffset: '0px', transition: 'opacity 1s' } };
+
+  executor.highlightElement(el);
+  assert.equal(el.style.outline, '3px solid #ff7a00');
+
+  // The CDP path highlights via RESOLVE_ELEMENT_POINT, then a synthetic
+  // fallback highlights the same element again within the 1.2 s window.
+  executor.highlightElement(el);
+  assert.equal(el.style.outline, '3px solid #ff7a00');
+
+  // After the timer, the element must be back to its ORIGINAL style - the
+  // second call must not have captured the orange ring as the original.
+  await new Promise((resolve) => setTimeout(resolve, 1250));
+  assert.equal(el.style.outline, '1px solid blue');
+  assert.equal(el.style.outlineOffset, '0px');
+  assert.equal(el.style.transition, 'opacity 1s');
 });

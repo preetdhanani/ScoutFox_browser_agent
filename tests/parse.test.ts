@@ -325,17 +325,14 @@ test('markup words in the strings of an action are content: an answer about tool
 
 test('a rejected element_id: the design text by default, the old wording when the old engine asks for it', () => {
   const design = 'Element [99] is not in the current element list (it may be from an older view of the page). Use an id from the list.';
-  const legacy = 'Selected element_id 99 does not exist on this page (valid range: 1-10). Re-check the numbered element list and choose a real one.';
   const single = '{"action":"click","element_id":99}';
   const batch = '{"action":"browser_batch","steps":[{"action":"click","element_id":99}]}';
   assert.equal(parseModelReply(single, ALL).error, design);
-  assert.equal(parseModelReply(single, { ...ALL, legacyElementIdError: true }).error, legacy);
-  assert.equal(parseModelReply(single, { ...ALL, legacyElementIdError: true }).kind, 'bad_element_id');
+  assert.equal(parseModelReply(single, ALL).kind, 'bad_element_id');
   assert.equal(parseModelReply(single, { verbs: ACTION_VERBS }).error, undefined, 'with no list of ids any id of 1 or more is fine');
-  assert.equal(parseModelReply('{"action":"click","element_id":0}', { verbs: ACTION_VERBS, legacyElementIdError: true }).error, 'Selected element_id 0 does not exist on this page (valid ids start at 1). Re-check the numbered element list and choose a real one.');
+  assert.equal(parseModelReply('{"action":"click","element_id":0}', { verbs: ACTION_VERBS }).error, 'Element [0] is not in the current element list (it may be from an older view of the page). Use an id from the list.');
   // A batch step has the design text either way, so one reply never mixes two texts for the same rule under the default.
   assert.equal(parseModelReply(batch, ALL).error, design);
-  assert.equal(parseModelReply(batch, { ...ALL, legacyElementIdError: true }).error, design);
   // The id is shown the way the model wrote it: a number, a numeric string as a number, anything else in quotes.
   assert.equal(parseModelReply('{"action":"click","element_id":"99"}', ALL).error, design);
   assert.match(parseModelReply('{"action":"click","element_id":"abc"}', ALL).error ?? '', /^Element \["abc"\] is not in the current element list/);

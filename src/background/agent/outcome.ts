@@ -12,10 +12,12 @@
  * 2. parseResponse's freeform-prose guardrail (stage 6) turns any garbled non-JSON reply into
  *    an invented {action:'finish'}. It still has to end the run - the model has nothing
  *    parseable left to say - but it must not claim a deliberate, confirmed completion. Its
- *    action object carries `autoWrapped: true` (agentEngine.js parseResponse), and this module
+ *    action object carries `autoWrapped: true` (parseResponse), and this module
  *    turns that into an `unconfirmed` flag on the history entry so the panel can say so instead
  *    of showing the same "Done" card as a real finish.
  */
+
+import { answerValueToMarkdown } from './answerValue.ts';
 
 /** The part of a parsed `finish` action that this module reads. */
 export interface FinishAction {
@@ -51,7 +53,12 @@ export function coerceAnswerText(answer: unknown): string {
   if (typeof answer === 'string') return answer;
   if (answer === null || answer === undefined) return '';
   try {
-    if (Array.isArray(answer)) return answer.map((item) => (typeof item === 'string' ? item : coerceAnswerText(item))).join('\n');
+    if (Array.isArray(answer)) {
+      // A list of records is shown as a table when answerValue.ts can make one; anything else keeps the old text.
+      const table = answerValueToMarkdown(answer);
+      if (table !== null) return table;
+      return answer.map((item) => (typeof item === 'string' ? item : coerceAnswerText(item))).join('\n');
+    }
     if (typeof answer === 'object') return JSON.stringify(answer, null, 2) ?? '';
     return String(answer);
   } catch {

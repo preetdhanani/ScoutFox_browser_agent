@@ -30,9 +30,14 @@ import type { SlowServer } from '../helpers/slowServer.ts';
 
 const MESSAGES = [{ role: 'user', content: 'hi' }];
 const TIMEOUT_MS = 500;
-/** The deadline text for TIMEOUT_MS, which rounds to one second. */
-const timeoutText = (provider: string) =>
-  `Provider [${provider}] did not respond within 1s. The request was abandoned - check that the provider is reachable, or raise llmTimeoutMs in settings.`;
+/**
+ * The deadline text for TIMEOUT_MS, which rounds to one second. The source in parentheses is the
+ * second half of B3.3: the message says where the timeout came from. The fixtures set llmTimeoutMs
+ * themselves, so the source is the global setting; a direct withDeadline call without a source
+ * (below) gets no parenthetical, hence the empty-string escape hatch.
+ */
+const timeoutText = (provider: string, source = 'the global timeout setting') =>
+  `Provider [${provider}] did not respond within 1s${source ? ` (${source})` : ''}. The request was abandoned - check that the provider is reachable, or raise llmTimeoutMs in settings.`;
 
 const PROVIDERS = [
   { name: 'openai', host: null, settings: { provider: 'openai', apiKey: 'sk-test-123', model: 'gpt-4o-mini' } },
@@ -235,7 +240,7 @@ test('withDeadline: after the deadline fired, the timeout error wins over whatev
   });
   const error = await failureOf(withDeadline({ provider: 'openai', timeoutMs: 50 }, sdkAbort));
   assert.ok(error instanceof ProviderTimeoutError);
-  assert.equal((error as Error).message, timeoutText('openai').replace('1s', '0s'));
+  assert.equal((error as Error).message, timeoutText('openai', '').replace('1s', '0s'), 'no source given to withDeadline, no parenthetical');
 
   // An error from the provider with nobody aborting is not touched.
   const boom = Object.assign(new Error('502 bad gateway'), { status: 502 });

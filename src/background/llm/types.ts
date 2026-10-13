@@ -5,6 +5,7 @@
  * { role, content } turns and get a string back. Nothing LangChain-shaped leaks out of llm/.
  */
 import type { Callbacks } from '@langchain/core/callbacks/manager';
+import type { CustomProviders } from '../../shared/storage.ts';
 
 /** One turn as the engine keeps it. Only 'user' and 'assistant' occur; anything else is read as 'user'. */
 export interface ChatTurn {
@@ -19,6 +20,8 @@ export interface LlmSettings {
   apiKey?: string;
   model?: string;
   providerConfigs?: Record<string, { baseUrl?: string; apiKey?: string; model?: string; llmTimeoutMs?: number } | undefined>;
+  /** User-added third-party providers, keyed by id. A provider id outside this map and the built-in set is unsupported. */
+  customProviders?: CustomProviders;
   temperature?: number;
   llmTimeoutMs?: number;
   /** Anthropic and AgentRouter max_tokens. No settings screen sets it, so it is 8192 unless someone stored a value. */

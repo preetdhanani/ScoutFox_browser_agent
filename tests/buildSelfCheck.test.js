@@ -13,7 +13,7 @@ const RUNTIME = '//#region \\0rolldown/runtime.js\nvar __create = Object.create;
 const BOOT = '//#region src/background/boot/zodJitless.ts\n/** doc */\nglobalThis.__zod_globalConfig = { jitless: true };\n//#endregion';
 const LOGGER = '//#region src/shared/logger.ts\nconst Logger = {};\n//#endregion';
 const ZOD = '//#region node_modules/zod/v4/core/core.js\nvar globalConfig = globalThis.__zod_globalConfig;\n//#endregion';
-const APP = '//#region background/background.js\nself.addEventListener("error", () => {});\n//#endregion';
+const APP = '//#region src/background/background.ts\nself.addEventListener("error", () => {});\n//#endregion';
 
 /** The problems of one built script, the way build.mjs asks for them. */
 function problemsOf(code, staticImports = 0) {

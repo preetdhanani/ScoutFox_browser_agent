@@ -25,6 +25,7 @@ import type {
   VisitedEntry,
 } from './state.ts';
 import type { ExecResult } from '../runner/runtimeRegistry.ts';
+import type { EvidenceInput, LedgerSnapshot } from '../agent/evidence.ts';
 
 export interface SiteIn {                // written by sched; read-only in the worker
   site: SiteSpec; index: number; total: number;          // 'site 2 of 3'
@@ -41,6 +42,8 @@ export interface SiteIn {                // written by sched; read-only in the w
   earlierSites: string[];                // one line per finished site, from siteSummaries
   recap: string[];                       // earlier turns (agent/previousTurns.ts)
   priorFindings: string[];               // the previous research turn, one line per site
+  ledgerPrior?: LedgerSnapshot;
+  planTexts?: string[];
 }
 
 // ---------- perception ----------
@@ -77,7 +80,7 @@ export interface PageSnapshot {
   priceHits: number;
   priceCandidates: PriceCandidate[];     // CODE: max 8, deduped by value, 60 chars of context each
   consentHint: string | null;            // 'A cookie banner is open; [12] "Nur notwendige" closes it.'
-  hash: string;                          // fnv1a(url + elementsText + pageText), for suppressExtract
+  hash: string;                          // fnv1a of the first 2000 characters of the page text (no url, no elements); suppressExtract keys it with the url
   frames: { total: number; crossOrigin: number };
   step: number;
   capturedBootId: string;                // worker incarnation that read the page
@@ -184,29 +187,36 @@ export interface SiteRun {               // Revision 2's siteRun; its step recor
   strategyHint?: string;
   findings: Finding[];                   // this site's accepted findings
   criteriaMet: boolean;
-  suppressExtract: string[];             // page hashes where the model chose continue_browsing
+  suppressExtract: string[];             // pages (url|hash) where the model chose continue_browsing in extract mode, max 20
   visited: VisitedEntry[];               // this site's visits; summary merges them
   blockedNew: BlockedSource[];           // domains this site marked blocked
   approvedNew: string[];                 // domains the user allowed with remember:'site'
   anomalies: string[];
   lastProgressStep: number;              // a new finding or a page-type step forward (slack rule)
+  noProgressRecords: number;             // barren rounds in a row: a record_finding that changed no finding value, or an empty answer on an answer site
   consecutiveParseErrors: number; parseErrors: number; everParsedOk: boolean;
   systemActions: number; modelCalls: number; tokensIn?: number; tokensOut?: number;
   cdp: CdpState;
   finalAnswer?: FinalAnswer;             // answer sites
-  exit?: { status: SiteStatus; reason: string; fatal?: 'model_unusable' | 'dom_error' | 'hard_cap' };
+  exit?: { status: SiteStatus; reason: string; fatal?: 'model_unusable' | 'dom_error' | 'hard_cap' | 'tab_gone' | 'out_of_scope' };
   midSiteReflected?: boolean;
   softCapReached?: boolean;
+  finishSendBacks?: number;
+  lastRefusedFinish?: any;
 }
 
 export interface SiteOut {               // built by the site wrapper from the worker's final state
   siteId: string; status: SiteStatus; criteriaMet: boolean; reason: string;
-  fatal?: 'model_unusable' | 'dom_error' | 'hard_cap';
+  fatal?: 'model_unusable' | 'dom_error' | 'hard_cap' | 'tab_gone' | 'out_of_scope';
   findings: Finding[]; blocked: BlockedSource[]; visited: VisitedEntry[]; approvedDomains: string[];
   used: number; extendedBy: number; systemActions: number; parseErrors: number; everParsedOk: boolean;
   modelCalls: number; tokensIn?: number; tokensOut?: number;
   failures: StepFailure[]; anomalies: string[]; userAnswered: boolean; notes: string;
   finalAnswer?: FinalAnswer; cdp: CdpState; activeTabId: number | null;
+  evidenceEvents?: EvidenceInput[];
+  evidenceBase?: LedgerSnapshot | null;
+  lastRefusedFinish?: any;
+  finishSendBacks?: number;
 }
 
 export const WorkerState = Annotation.Root({
@@ -226,6 +236,13 @@ export const WorkerState = Annotation.Root({
   ctl: last<ControlSnapshot>(() => ({ pauseRequested: false, stopRequested: false })),
   history: list<HistoryEntry>(MAX_HISTORY),        // this site's new timeline rows; the wrapper appends them
   nodeTrail: list<TrailEntry>(MAX_TRAIL),          // worker nodes of this site
+  evidenceEvents: list<EvidenceInput>(100),
+  // The ledger folded from ledgerPrior + every evidence event of this site so
+  // far. The 100-event cap evicts the earliest events on long sites, which used
+  // to make the finish audit see early-opened pages as never opened (BUG-23);
+  // meter folds the accumulated events into this self-capping snapshot, so the
+  // rebuilds below never depend on the capped list alone.
+  evidenceBase: last<LedgerSnapshot | null>(() => null),
 });
 export type WorkerStateT = typeof WorkerState.State;
 export type WorkerUpdate = typeof WorkerState.Update;

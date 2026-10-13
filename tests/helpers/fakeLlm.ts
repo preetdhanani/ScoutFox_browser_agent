@@ -36,13 +36,32 @@
  *                 of the above (or a promise of one). Use it to answer by what the model was shown.
  *   fakeLlm(fn) alone answers every call with fn, so there is no script to run out of.
  *
- * Two surfaces share one script and one call log:
+ * Three surfaces share one script and one call log:
  *   fl.generateCompletion(settings, messages, systemPrompt, { signal, json, schema }) -> string
  *     is what today's engine calls. fl.install(ApiClients) puts it in place and returns the
  *     function that puts back what was there.
  *   fl.chatModel() -> a LangChain BaseChatModel. invoke(messages, { signal }) returns an AIMessage.
  *     The system message becomes systemPrompt, and ChatOllama's `format` call option is recorded
  *     as the schema.
+ *   fl.port({ queues }) -> an LlmPort (src/background/runner/runtimeRegistry.ts), the seam of the
+ *     graph engine: complete({ node, mode, role, system, messages, schema, signal }) returns
+ *     { text, provider, model, meta }. The call is recorded with via 'port' and the extra fields
+ *     node, mode, role and system. Where the reply comes from, in this order:
+ *       1. the queue of "node:mode" (e.g. 'policy:browse'), when the test made one,
+ *       2. the queue of "node" ('plan', 'policy' or 'reflect'), when the test made one,
+ *       3. the plain ordered script of the fake (what the other two surfaces use).
+ *     A queue that exists is final: when it is empty the call is a test mistake, it does NOT fall
+ *     through to the next one, so a run that makes one plan call more than expected is loud.
+ *     Make queues with fl.port({ queues: { plan: [...], policy: [...] } }) or fl.pushFor('plan', ...)
+ *     after a pause. A reply may be a function of the recorded call, so it can answer by what the
+ *     graph asked. The abort rule below is the same as for the other surfaces.
+ *   Example:
+ *     const fl = fakeLlm();
+ *     const runner = new AgentRunner(101, 1, undefined, fl.port({ queues: {
+ *       plan: [JSON.stringify({ taskKind: 'action', sites: [...] })],
+ *       policy: [JSON.stringify({ action: 'finish', answer: 'done' })],
+ *     } }));
+ *     fl.calls.filter((c) => c.node === 'policy')[0]?.system;   // what the policy node told the model
  *
  * Abort: a call whose signal is already aborted fails at once and uses NO reply (the request would
  * never have been sent). An abort while a delayed reply is waiting ends the call. Both fail with
@@ -65,6 +84,7 @@ import type { BaseChatModelCallOptions, BaseChatModelParams } from '@langchain/c
 import { AIMessage } from '@langchain/core/messages';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { ChatResult } from '@langchain/core/outputs';
+import type { LlmPort } from '../../src/background/runner/runtimeRegistry.ts';
 
 // ---------------------------------------------------------------------------------------------
 // Types
@@ -86,9 +106,9 @@ export type ReplySpec = string | ReplyObject;
 
 /** One call, as recorded. `outcome` is 'pending' until the call settles. */
 export interface LlmCall {
-  /** 0-based position among all calls of this fake, on either surface. */
+  /** 0-based position among all calls of this fake, on any surface. */
   index: number;
-  via: 'generateCompletion' | 'chatModel';
+  via: 'generateCompletion' | 'chatModel' | 'port';
   /** generateCompletion only: the settings object it was given (a copy). undefined for the chat model. */
   settings: unknown;
   /** Every message except the system one(s), as { role, content }. Roles are user, assistant or tool. */
@@ -110,6 +130,26 @@ export interface LlmCall {
   reply: string | undefined;
   /** What the call threw. */
   error: unknown;
+  /** port() only: which graph node asked ('plan', 'policy' or 'reflect'). */
+  node?: 'plan' | 'policy' | 'reflect';
+  /** port() only: the mode of the node (a policy mode, or 'initial' or 'revise' for the plan). undefined when the request had none. */
+  mode?: string;
+  /** port() only: which model setting the request picks ('policy', 'planner' or 'reflect'). */
+  role?: 'policy' | 'planner' | 'reflect';
+  /** port() only: the system prompt, the same text as systemPrompt. */
+  system?: string;
+}
+
+export type PortNode = 'plan' | 'policy' | 'reflect';
+/** The name of a port() queue: a node ('plan'), or a node and its mode ('policy:browse'). */
+export type PortKey = PortNode | `${PortNode}:${string}`;
+
+export interface PortOptions {
+  /** Ordered replies per node or per "node:mode". See the header comment for which queue answers a call. */
+  queues?: { [key in PortKey]?: ReplyEntry[] };
+  /** What complete() reports as the provider and the model. Default 'fake-llm' and 'fake-model'. */
+  provider?: string;
+  model?: string;
 }
 
 export type ReplyEntry = ReplySpec | ((call: LlmCall) => ReplySpec | Promise<ReplySpec>);
@@ -136,12 +176,18 @@ export interface FakeLlm {
   chatModel(params?: BaseChatModelParams): BaseChatModel<FakeChatCallOptions>;
   /** Put generateCompletion on target (ApiClients). Returns the function that puts back what was there. */
   install(target: { generateCompletion: unknown }): () => void;
+  /** A stand-in for the graph's LlmPort over the same script and call log. See the header comment. */
+  port(options?: PortOptions): LlmPort;
   /** Every call so far, in order. */
   readonly calls: LlmCall[];
-  /** Replies not used yet (always 0 for a script that is one function). */
+  /** The calls port() answered for one node (and one mode when given), in order. */
+  callsOf(node: PortNode, mode?: string): LlmCall[];
+  /** Replies not used yet, in the plain script and in every port() queue (always 0 for a script that is one function). */
   readonly remaining: number;
   /** Add replies at the end of the script, e.g. after a pause. Not for a script that is one function. */
   push(...entries: ReplyEntry[]): void;
+  /** Add replies at the end of one port() queue ("plan", "policy:browse"...), making the queue when it is new. */
+  pushFor(key: PortKey, ...entries: ReplyEntry[]): void;
   resetCalls(): void;
   /** Test mistakes that were thrown to the code under test (also thrown by assertClean). */
   readonly violations: Error[];
@@ -247,7 +293,8 @@ function preview(messages: LlmMessage[]): string {
 // The chat model
 // ---------------------------------------------------------------------------------------------
 
-type CallInput = Pick<LlmCall, 'via' | 'settings' | 'messages' | 'systemPrompt' | 'schema' | 'json' | 'signal'>;
+type CallInput = Pick<LlmCall, 'via' | 'settings' | 'messages' | 'systemPrompt' | 'schema' | 'json' | 'signal'> &
+  Partial<Pick<LlmCall, 'node' | 'mode' | 'role' | 'system'>>;
 type Run = (input: CallInput) => Promise<Answer>;
 
 const ROLES: Record<string, string> = { human: 'user', ai: 'assistant', system: 'system', tool: 'tool' };
@@ -293,11 +340,29 @@ class FakeChatModel extends BaseChatModel<FakeChatCallOptions> {
 // The fake
 // ---------------------------------------------------------------------------------------------
 
+const PORT_NODES: readonly string[] = ['plan', 'policy', 'reflect'];
+
+/** A port() queue name must be a node, or a node and a mode, so a typo ("polcy") fails at the line that wrote it. */
+function checkPortKey(key: string): PortKey {
+  const [node, mode, ...rest] = key.split(':');
+  if (!PORT_NODES.includes(node ?? '') || rest.length > 0 || mode === '') {
+    throw new FakeLlmError(`fakeLlm: "${key}" is not a port queue - use a node (${PORT_NODES.join(', ')}) or a node and a mode like "policy:browse"`);
+  }
+  return key as PortKey;
+}
+
+/** What a call is named in a message: the surface, and for the port the node and mode too. */
+function labelOf(call: Pick<LlmCall, 'via' | 'node' | 'mode'>): string {
+  return call.via === 'port' ? `port ${call.node}${call.mode ? `/${call.mode}` : ''}` : call.via;
+}
+
 export function fakeLlm(script: LlmScript = []): FakeLlm {
   const calls: LlmCall[] = [];
   const violations: Error[] = [];
   const always = typeof script === 'function' ? script : undefined;
   const queue: ReplyEntry[] = [];
+  /** The port() queues. A queue that exists is final for the calls it matches, even when it is empty. */
+  const keyed = new Map<PortKey, ReplyEntry[]>();
   let scripted = 0;
 
   /** Test setup: a plain reply is checked now, so a typo fails at the line that wrote it. */
@@ -310,6 +375,30 @@ export function fakeLlm(script: LlmScript = []): FakeLlm {
   };
   if (!always) enqueue(script as ReplyEntry[]);
 
+  const enqueueFor = (rawKey: string, entries: ReplyEntry[]) => {
+    if (always) throw new Error('fakeLlm: a port() queue needs a script that is a list of replies (or no script), but this fake answers every call with one function');
+    const key = checkPortKey(rawKey);
+    const target = keyed.get(key) ?? [];
+    entries.forEach((entry, i) => {
+      if (typeof entry !== 'function') toAnswer(entry, `reply ${target.length + i + 1} of the "${key}" queue`);
+    });
+    target.push(...entries);
+    keyed.set(key, target);
+  };
+
+  /** The queue that answers this port call: "node:mode" first, then "node". undefined when the test made neither. */
+  const queueFor = (call: LlmCall): { key: PortKey; list: ReplyEntry[] } | undefined => {
+    if (call.via !== 'port' || !call.node) return undefined;
+    const keys: PortKey[] = call.mode ? [`${call.node}:${call.mode}`, call.node] : [call.node];
+    for (const key of keys) {
+      const list = keyed.get(key);
+      if (list) return { key, list };
+    }
+    return undefined;
+  };
+
+  const keyedRemaining = (): number => [...keyed.values()].reduce((sum, list) => sum + list.length, 0);
+
   /** A test mistake met while a call runs: kept, and thrown to the code under test. */
   const violation = (message: string): FakeLlmError => {
     const error = new FakeLlmError(message);
@@ -320,12 +409,24 @@ export function fakeLlm(script: LlmScript = []): FakeLlm {
   const next = async (call: LlmCall): Promise<Answer> => {
     let entry: ReplyEntry | undefined = always;
     if (!entry) {
-      entry = queue.shift();
-      if (entry === undefined) {
-        throw violation(
-          `fakeLlm: call ${call.index + 1} (${call.via}, last message ${preview(call.messages)}) has no scripted reply - ` +
-            `the script has only ${scripted} reply(ies). Add a reply to the script, or use a function that answers every call`
-        );
+      const own = queueFor(call);
+      if (own) {
+        entry = own.list.shift();
+        if (entry === undefined) {
+          throw violation(
+            `fakeLlm: call ${call.index + 1} (${labelOf(call)}, last message ${preview(call.messages)}) has no scripted reply - ` +
+              `the "${own.key}" queue is empty (a queue that exists is final, the plain script is not used for this call). ` +
+              `Add a reply with pushFor('${own.key}', ...)`
+          );
+        }
+      } else {
+        entry = queue.shift();
+        if (entry === undefined) {
+          throw violation(
+            `fakeLlm: call ${call.index + 1} (${labelOf(call)}, last message ${preview(call.messages)}) has no scripted reply - ` +
+              `the script has only ${scripted} reply(ies). Add a reply to the script, or use a function that answers every call`
+          );
+        }
       }
     }
     let spec: ReplySpec;
@@ -383,6 +484,30 @@ export function fakeLlm(script: LlmScript = []): FakeLlm {
     return asString(answer);
   };
 
+  const port = (options: PortOptions = {}): LlmPort => {
+    for (const [key, entries] of Object.entries(options.queues ?? {})) enqueueFor(key, entries ?? []);
+    const provider = options.provider ?? 'fake-llm';
+    const model = options.model ?? 'fake-model';
+    return {
+      complete: async (req) => {
+        const answer = await run({
+          via: 'port',
+          settings: (req as any).settings ?? { provider, model },
+          node: req.node,
+          mode: req.mode,
+          role: req.role,
+          system: req.system,
+          systemPrompt: req.system,
+          messages: copy(req.messages),
+          schema: req.schema ?? null,
+          json: false,
+          signal: req.signal ?? null,
+        });
+        return { text: asString(answer), provider, model, meta: {} };
+      },
+    };
+  };
+
   return {
     generateCompletion,
     chatModel: (params) => new FakeChatModel(run, params),
@@ -393,13 +518,18 @@ export function fakeLlm(script: LlmScript = []): FakeLlm {
         target.generateCompletion = previous;
       };
     },
+    port,
     calls,
+    callsOf: (node, mode) => calls.filter((c) => c.via === 'port' && c.node === node && (mode === undefined || c.mode === mode)),
     get remaining() {
-      return queue.length;
+      return queue.length + keyedRemaining();
     },
     push: (...entries) => {
       if (always) throw new Error('fakeLlm: push() needs a script that is a list of replies, but this fake answers every call with one function');
       enqueue(entries);
+    },
+    pushFor: (key, ...entries) => {
+      enqueueFor(key, entries);
     },
     resetCalls: () => {
       calls.length = 0;
@@ -411,8 +541,10 @@ export function fakeLlm(script: LlmScript = []): FakeLlm {
       }
     },
     assertDrained: () => {
-      if (queue.length > 0) {
-        throw new Error(`fakeLlm: ${queue.length} scripted reply(ies) were never used - the code under test made ${calls.length} call(s), fewer than the test expected`);
+      const left = [...keyed.entries()].filter(([, list]) => list.length > 0);
+      if (queue.length > 0 || left.length > 0) {
+        const detail = left.length > 0 ? ` (left in the port queues: ${left.map(([key, list]) => `${key} ${list.length}`).join(', ')}${queue.length > 0 ? `; in the plain script: ${queue.length}` : ''})` : '';
+        throw new Error(`fakeLlm: ${queue.length + keyedRemaining()} scripted reply(ies) were never used - the code under test made ${calls.length} call(s), fewer than the test expected${detail}`);
       }
     },
   };

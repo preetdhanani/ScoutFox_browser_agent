@@ -115,8 +115,12 @@ browser_batch {steps, stopOnError} - up to 8 click/type/scroll/press_key/wait st
 open_window {url} - open a new browser window\n`
     : '';
 
+  // Answer sites browse while budget remains, so they are offered `subgoal_done` with a prose
+  // summary; the record node stores that summary as the site's finalAnswer (worker.ts). Without
+  // that, an answer site ended on subgoal_done with no finalAnswer and the panel showed
+  // "(The model did not provide an answer.)".
   const stateActions = goalKind === 'collect'
-    ? `record_finding {${colList}} - save the values you SEE on this page for the current site; write "not shown" if the page does not say it
+    ? `record_finding {${colList}} - save the values you SEE on this page for the current site, copied word-for-word from the page text (a value you wrote yourself, such as a summary, is dropped); write "not shown" if the page does not say it
 mark_not_found {reason} - this site does not have the thing you look for
 mark_blocked {reason} - this site cannot be used (login wall, region lock)\n`
     : `subgoal_done {summary, evidence} - the current step is done; evidence = exact text on the page that proves it\n`;
@@ -130,8 +134,8 @@ type {element_id, text, submit} - replace the text in field [element_id]; submit
 scroll {direction} - "down" or "up"
 navigate {url} - open a full https:// URL
 go_back {} / go_forward {} - browser history back / forward
-press_key {key} - Enter, Escape, Tab, ArrowDown, ArrowUp, PageDown, PageUp, Backspace, Space
-wait {seconds} - 1 to 5, only while the page is still loading
+press_key {key} - Enter, Escape, Tab, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, PageDown, PageUp, Home, End, Backspace, Delete
+wait {amount} - 1 to 5, only while the page is still loading
 read_page_text {} - read more text of this page
 ask_user {question} - only if you cannot continue without the user
 ${stateActions}${largeActions}Rules:
@@ -150,6 +154,8 @@ export interface PolicyUserMessageParams {
   role: string;
   goal: string;
   columns?: string[];
+  /** The goal kind of the site. Only a collect site SAVES the columns; the others (answer, do) write them into the answer. */
+  goalKind?: 'collect' | 'answer' | 'do';
   usedSteps: number;
   allocSteps: number;
   meterMode: 'normal' | 'warn' | 'harvest' | 'end';
@@ -166,6 +172,11 @@ export interface PolicyUserMessageParams {
   elementsText: string;
   priceCandidates?: Array<string | { id?: string; text?: string; value?: number; currency?: string; context?: string }>;
   correction?: string | null;
+  netErrors?: string;
+  userAnswers?: string[];
+  oneShotContext?: string | null;
+  evidenceBlock?: string;
+  planBlock?: string;
 }
 
 export function buildPolicyUserMessage(params: PolicyUserMessageParams): string {
@@ -177,7 +188,11 @@ export function buildPolicyUserMessage(params: PolicyUserMessageParams): string 
   );
 
   if (params.columns && params.columns.length > 0) {
-    parts.push(`NEEDED: ${params.columns.join(', ')}`);
+    // "NEEDED: stars, forks" on an answer site nudged small models to record_finding, a verb that site does not offer
+    // (the site then ended "done" with no answer). Same columns, said as what the written answer must cover.
+    parts.push(params.goalKind && params.goalKind !== 'collect'
+      ? `INCLUDE IN YOUR ANSWER: ${params.columns.join(', ')}`
+      : `NEEDED: ${params.columns.join(', ')}`);
   }
 
   if (params.meterMode === 'warn') {
@@ -219,11 +234,29 @@ export function buildPolicyUserMessage(params: PolicyUserMessageParams): string 
     parts.push(`PRICE CANDIDATES:\n${rendered.join('\n')}`);
   }
 
+  if (params.planBlock) {
+    parts.push(params.planBlock);
+  }
+
+  if (params.evidenceBlock) {
+    parts.push(params.evidenceBlock);
+  }
+
   parts.push(`PAGE TEXT:\n"""\n${params.pageText.slice(0, 3000)}\n"""`);
   parts.push(`ELEMENTS:\n${params.elementsText}`);
 
   if (params.correction) {
     parts.push(`CORRECTION: ${params.correction}`);
+  }
+
+  if (params.userAnswers && params.userAnswers.length > 0) {
+    for (const ans of params.userAnswers) {
+      parts.push(`You asked a question and the user answered: "${ans}". Continue the task using this answer.`);
+    }
+  }
+
+  if (params.oneShotContext) {
+    parts.push(params.oneShotContext);
   }
 
   parts.push('Reply with the JSON for the next action.');

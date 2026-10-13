@@ -1,10 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { DOMCompressor } from '../../src/content/domCompressor.ts';
+import { withGlobals } from '../helpers/contentGlobals.ts';
 
-const DOM_COMPRESSOR_SRC = fs.readFileSync(new URL('../../content/domCompressor.js', import.meta.url), 'utf8');
+// The hit-test lives INLINE in the shipping content script (content/content.js);
+// the port-time copy src/content/point.ts was dead code that had already drifted
+// from it, so it was deleted (BUG-30). This test evaluates the real shipping
+// bytes, so a change to the live hit-test logic is caught here.
+const CONTENT_SRC = fs.readFileSync(new URL('../../content/content.js', import.meta.url), 'utf8');
+const HIT_TEST_START = CONTENT_SRC.indexOf('function isAcceptedHit');
+const HIT_TEST_END = CONTENT_SRC.indexOf('function hashString');
+assert.ok(HIT_TEST_START > 0 && HIT_TEST_END > HIT_TEST_START, 'content.js no longer has the expected isAcceptedHit block - update this test');
+// The live function reads the global `window` for getComputedStyle; the sandbox
+// provides the small slice of it the function uses (the browser contract).
+const fakeWindowForHitTest = {
+  getComputedStyle: (hit: any) => ({ pointerEvents: hit?.style?.pointerEvents ?? 'auto' }),
+};
+const liveIsAcceptedHit = new Function('window', `${CONTENT_SRC.slice(HIT_TEST_START, HIT_TEST_END)}; return isAcceptedHit;`)(fakeWindowForHitTest) as (target: any, hit: any) => boolean;
 
-function loadCompressor(interactiveEls: any[], attachedSet: Set<any>) {
+function createEnv(interactiveEls: any[], attachedSet: Set<any>) {
   const fakeWindow: any = {
     location: { href: 'https://example.com', hostname: 'example.com' },
     crypto: {
@@ -27,8 +42,27 @@ function loadCompressor(interactiveEls: any[], attachedSet: Set<any>) {
   };
   const fakeNode = { ELEMENT_NODE: 1 };
   const fakeCSS = { escape: (s: string) => s };
-  const fn = new Function('window', 'document', 'Node', 'CSS', `${DOM_COMPRESSOR_SRC}\nreturn window.domCompressorInstance;`);
-  return fn(fakeWindow, fakeDocument, fakeNode, fakeCSS);
+  return { fakeWindow, fakeDocument, fakeNode, fakeCSS };
+}
+
+function loadCompressor(interactiveEls: any[], attachedSet: Set<any>) {
+  const env = createEnv(interactiveEls, attachedSet);
+  const compressor = new DOMCompressor();
+  return {
+    getSnapshot: () =>
+      withGlobals(
+        { window: env.fakeWindow, document: env.fakeDocument, Node: env.fakeNode, CSS: env.fakeCSS },
+        () => compressor.getSnapshot()
+      ),
+    get docId() {
+      return compressor.docId;
+    },
+    resolveElementWithStatus: (id: any, expectedDocId?: string) =>
+      withGlobals(
+        { window: env.fakeWindow, document: env.fakeDocument, Node: env.fakeNode, CSS: env.fakeCSS },
+        () => compressor.resolveElementWithStatus(id, expectedDocId)
+      )
+  };
 }
 
 function makeButton(id: string) {
@@ -87,7 +121,7 @@ test('resolveElementWithStatus rejects stale element on docId mismatch', () => {
   const res = compressor.resolveElementWithStatus(1, 'old-doc-id-999');
   assert.equal(res.success, false);
   assert.equal(res.stale, true);
-  assert.match(res.error, /Document navigated/);
+  assert.match(res.error || '', /Document navigated/);
 });
 
 test('resolveElementWithStatus rejects element detached from document', () => {
@@ -104,33 +138,11 @@ test('resolveElementWithStatus rejects element detached from document', () => {
   const res = compressor.resolveElementWithStatus(1, docId);
   assert.equal(res.success, false);
   assert.equal(res.stale, true);
-  assert.match(res.error, /no longer attached/);
+  assert.match(res.error || '', /no longer attached/);
 });
 
-test('Hit-testing acceptance logic correctly validates target points', () => {
-  function isAcceptedHit(target: any, hit: any) {
-    if (!hit || !target) return false;
-    if (hit === target) return true;
-    if (typeof target.contains === 'function' && target.contains(hit)) return true;
-    if (typeof hit.contains === 'function' && hit.contains(target)) return true;
-    if (hit.shadowRoot && typeof hit.shadowRoot.contains === 'function' && hit.shadowRoot.contains(target)) return true;
-    if (hit.tagName === 'IFRAME') return true;
-
-    const interactiveSel = 'a, button, [role="button"], [role="link"], label, select, input, textarea, summary';
-    if (typeof target.closest === 'function' && typeof hit.closest === 'function') {
-      const targetParent = target.closest(interactiveSel);
-      const hitParent = hit.closest(interactiveSel);
-      if (targetParent && hitParent && (targetParent === hitParent || targetParent.contains(hitParent) || hitParent.contains(targetParent))) {
-        return true;
-      }
-    }
-
-    if (hit.style && hit.style.pointerEvents === 'none') {
-      return true;
-    }
-
-    return false;
-  }
+test('Hit-testing acceptance logic correctly validates target points (live content.js copy, BUG-30)', () => {
+  const isAcceptedHit = liveIsAcceptedHit;
 
   const targetBtn = {
     tagName: 'BUTTON',
