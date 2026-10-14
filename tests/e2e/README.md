@@ -47,7 +47,7 @@ If the sources are newer than `dist/`, it prints a warning to build again (or to
 | --- | --- |
 | `--mock` | Uses the offline mock instead of Ollama, and runs the mock's own self-test first. |
 | `--build` | Runs `npm run build` first, so `dist/` is fresh. |
-| `--task=a,b` | Runs only these tasks: `store-price`, `span-price`, `cheapest-offer`, `bot-check`, `two-sources-lie`, `two-sources-honest-retry`. A pending task is skipped (see "Pending tasks"). |
+| `--task=a,b` | Runs only these tasks: `store-price`, `span-price`, `cheapest-offer`, `bot-check`, `two-sources-lie`, `two-sources-honest-retry`, `bot-check-after-store-price` (mock only: the store price task, then the bot check as a follow-up in the same tab). A pending task is skipped (see "Pending tasks"). |
 | `--model=name` | The model name (default `qwen3.5:9b`, or `mock-agent` with `--mock`). The honest variant of the two-sources task always uses `mock-agent-honest` with `--mock`. |
 | `--max-steps=n` | The engine's hard step cap for a task (default 30). The graph engine builds its step budget from it. |
 | `--timeout=ms` | The time limit for one task (default 360000, or 60000 with `--mock`). |

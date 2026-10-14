@@ -19,6 +19,7 @@ export const RAW_RESPONSE_CAP = 2000;  // the full raw output still goes to Logg
 export const MAX_SITES = 8;            // per turn: up to 6 from the first plan, the rest from revisions
 export const MAX_FAILURE_MEMORY = 6;   // per site
 export const MAX_FINDINGS = 200;       // per turn, including superseded ones
+export const MAX_PRIOR_FINDINGS = 40;  // findings handed from a finished task to the next one, newest kept
 
 // ---------- small unions ----------
 export type RunStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'error';
@@ -212,6 +213,8 @@ export interface Finding {
   quality: 'verified' | 'single_source' | 'unverified';
   supersedes?: string;                   // id of the finding this one replaced; that one stays, but is not shown
 }
+/** A finding of an earlier task on the same thread, handed to the next task as history (never as live task state). */
+export type PriorFinding = Finding & { turn: number };
 export interface TableCell { value: string; url: string; capturedAt: string; snippet: string; quality: Finding['quality']; flag?: string }
 export interface FindingsTable {
   columns: string[];
@@ -329,13 +332,13 @@ export const AgentState = Annotation.Root({
   activeSiteId: last<string | null>(() => null),
   siteIn: last<SiteIn | null>(() => null),          // written by sched: the worker's only input
   siteOut: last<SiteOut | null>(() => null),        // written by the site wrapper, read by summary
-  approvedDomains: last<string[]>(() => []),        // from the approved plan; grows only through approval
+  approvedDomains: last<string[]>(() => []),        // from the approved plan; grows only through approval; reset per task by intake
   replan: last<{ count: number; lastReason?: string; approvedByUser?: boolean }>(() => ({ count: 0 })),
   reflectResult: last<ReflectResult | null>(() => null),
 
   // ---- long-horizon memory ----
   findings: last<Finding[]>(() => []),              // merged by summary with the dedupe key, max MAX_FINDINGS
-  priorFindings: last<Finding[]>(() => []),         // the previous research turn's findings
+  priorFindings: last<PriorFinding[]>(() => []),    // the previous research turn's findings, tagged with their turn (written by intake)
   visited: map<VisitedEntry>(MAX_VISITED, (v) => v.lastStep), // key = normalized url
   blocked: map<BlockedSource>(),                    // key = registrable domain
   evidence: Annotation<LedgerSnapshot, EvidenceUpdate>({

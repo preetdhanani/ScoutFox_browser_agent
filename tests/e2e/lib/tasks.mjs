@@ -38,6 +38,9 @@
  *               no entry matches fails the run, the harness never makes up an answer
  *   pending     a reason: the task is skipped and does not count as a failure. Its data stays for the stage that
  *               brings it back
+ *   before      a task ({page, prompt, check, expectOutcome?, expectMock?}) that runs to its end in the same tab first.
+ *               The tab then goes to `page` and this task is the follow-up, in the same session and thread, as when a
+ *               user keeps the side panel open. Its problems are reported as this task's problems
  */
 import { judgeTwoSourcesAnswer, SHOP_A, SHOP_A_PAGE, SHOP_B } from './twoSources.mjs';
 
@@ -278,5 +281,21 @@ export const TASKS = {
     prompt: TWO_SOURCES_PROMPT,
     check: ({ answer }) => judgeTwoSourcesAnswer(answer).ok,
     expectMock: (run) => twoSourcesFacts(run)
+  }
+};
+
+// A follow-up task in the SAME tab (per-turn-state-leak). The store price task records the price, the shipping and the
+// delivery for its site s1; then the user asks about a shop behind a bot check in the same tab. Site ids restart at s1
+// with every plan, so before the per-turn reset the bot-check run inherited the store's findings: its "Not finished"
+// card showed the store's price table for a shop that was never read, and the bot-check check (no money amount in the
+// answer) failed. Everything about the follow-up is judged like the bot-check task on its own.
+TASKS['bot-check-after-store-price'] = {
+  ...TASKS['bot-check'],
+  mockOnly: true,
+  before: {
+    page: TASKS['store-price'].page,
+    prompt: TASKS['store-price'].prompt,
+    check: TASKS['store-price'].check,
+    expectMock: TASKS['store-price'].expectMock
   }
 };

@@ -13,8 +13,10 @@ import {
   type HistoryEntry,
   type EndReason,
   type Offer,
+  MAX_PRIOR_FINDINGS,
   MAX_SITES,
   type PlanMeta,
+  type PriorFinding,
   type Predicate,
   type ReflectResult,
   type RunStats,
@@ -132,6 +134,82 @@ function overridePlanToAnswer(state: AgentStateT, plan: PlanMeta | null): PlanMe
   };
 }
 
+/**
+ * The finished task's findings, handed to the next task as `priorFindings`: only the shown ones (a
+ * finding another one superseded is dropped), each tagged with the turn it was recorded in, the newest
+ * MAX_PRIOR_FINDINGS kept. A finished task with no findings (an answer or action task) keeps the list
+ * of the research task before it, so a follow-up like "which one was cheapest?" still has the last
+ * table. This is the only writer of `priorFindings`.
+ */
+export function carryPriorFindings(state: Pick<AgentStateT, 'findings' | 'priorFindings' | 'turnIndex'>): PriorFinding[] {
+  const finished = state.findings ?? [];
+  if (finished.length === 0) return state.priorFindings ?? [];
+  const superseded = new Set(finished.map((f) => f.supersedes).filter((id): id is string => Boolean(id)));
+  const turn = state.turnIndex ?? 0;
+  return finished
+    .filter((f) => !superseded.has(f.id))
+    .map((f) => ({ ...f, turn }))
+    .slice(-MAX_PRIOR_FINDINGS);
+}
+
+/**
+ * One prior-task finding as the worker gets it in `siteIn.priorFindings`. Site ids restart at s1 with
+ * every plan, so the line names the turn and the finding's own site (from its URL), never the site id.
+ */
+export function priorFindingLine(f: PriorFinding): string {
+  let site = f.siteId;
+  try {
+    site = new URL(f.url).hostname || site;
+  } catch {}
+  return `[turn ${f.turn}, ${site}] ${f.field}: ${f.valueRaw}${f.url ? ` (${f.url})` : ''}`;
+}
+
+/** Blocked entries that describe the browser or the search engines, not the task: they outlive a task. */
+const LASTING_BLOCKED_KINDS: ReadonlySet<BlockedSource['kind']> = new Set(['restricted', 'search_engine']);
+
+/**
+ * The per-turn reset of intake. A new task on the same tab reuses the thread (the thread id is the tab
+ * id), and site ids restart at s1 with every plan, so anything the previous task left in a channel is
+ * read as if it belonged to the new one: its s1 value in the FINDINGS block and in the table cell, an
+ * offer for a site that is not in the new plan, a used-up replan count, a stale resume route. Without
+ * this, a stale 'replan' decision hijacks the next task's plan (BUG-17), allocNode starts revision mode
+ * on the old budget (BUG-18), and compile can present the previous turn's refused answer (BUG-25).
+ *
+ * Safety state is per task too: the domains approved on a confirm card ("Remember <domain> for this
+ * task") or with a plan are dropped, so the new plan's approval is the only grant. ScoutFox keeps no
+ * remembered-site list across tasks, so nothing else is carried. Resuming a PAUSED run never comes
+ * here (it resumes the interrupted node), so a pause keeps every grant of its task.
+ *
+ * What is kept on purpose: the history (the transcript), `visited`, the evidence ledger (the worker
+ * gets it as `ledgerPrior`, and the answer audit of a follow-up may cite a page read before), and the
+ * blocked entries of the LASTING_BLOCKED_KINDS. The finished task's findings move to `priorFindings`.
+ */
+export function newTurnReset(state: AgentStateT): Partial<AgentUpdate> {
+  const lastingBlocked: Record<string, BlockedSource> = {};
+  for (const [domain, entry] of Object.entries(state.blocked ?? {})) {
+    if (LASTING_BLOCKED_KINDS.has(entry.kind)) lastingBlocked[domain] = entry;
+  }
+  return {
+    reflectResult: null,
+    planPrev: null,
+    sites: { $reset: {} },
+    siteSummaries: { $reset: [] },
+    siteOut: null,
+    budget: { hardCap: 0, workingTotal: 0, reserve: 0, slack: 0, used: 0, sites: {} },
+    replan: { count: 0 },
+    lastRefusedFinish: null,
+    finishSendBacks: 0,
+    findings: [],
+    priorFindings: carryPriorFindings(state),
+    approvedDomains: [],
+    blocked: { $reset: lastingBlocked },
+    resumeRoute: null,
+    endReason: null,
+    finalAnswer: null,
+    offerPayload: null,
+  };
+}
+
 const intakeNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'intake', async (state, config) => {
   const runtime = getRuntime(config);
   const task = state.task;
@@ -166,20 +244,8 @@ const intakeNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator',
     parseErrorsThisTurn: 0,
     everParsedOk: false,
     history: [userGoalEntry],
-    // Per-turn reset list (BUG-17, BUG-18, BUG-25): a new task on the same
-    // tab/thread must not inherit the previous turn's reflect decision, plan
-    // revision, spend or refused-finish bookkeeping. Without this, a stale
-    // 'replan' decision hijacks the next task's plan (the planner is never
-    // called), allocNode starts revision mode on the old budget, and compile can
-    // present the previous turn's refused answer. siteOut is reset so compile's
-    // stopped branch cannot fire from the previous turn's stopped site.
-    reflectResult: null,
-    planPrev: null,
-    sites: { $reset: {} },
-    budget: { hardCap: 0, workingTotal: 0, reserve: 0, slack: 0, used: 0, sites: {} },
-    lastRefusedFinish: null,
-    finishSendBacks: 0,
-    siteOut: null,
+    // Everything the previous task left in the per-turn channels (see newTurnReset).
+    ...newTurnReset(state),
   };
 });
 
@@ -725,7 +791,7 @@ const schedNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 
     findingsLines,
     earlierSites: (state.siteSummaries ?? []).map((s) => `${s.siteId}: ${s.status} (${s.findings} findings)`),
     recap: previousTurnsSummary(state.history ?? []),
-    priorFindings: (state.priorFindings ?? []).map((f) => `${f.siteId}: ${f.field} = ${f.valueRaw}`),
+    priorFindings: (state.priorFindings ?? []).map(priorFindingLine),
     ledgerPrior: compactLedgerSnapshot(state.evidence),
     planTexts: (state.planMeta?.sites ?? []).map((s) => s.goal || s.name),
   };

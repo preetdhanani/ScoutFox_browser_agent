@@ -41,7 +41,7 @@ export interface SiteIn {                // written by sched; read-only in the w
   findingsLines: string[];               // the FINDINGS block, one line per site
   earlierSites: string[];                // one line per finished site, from siteSummaries
   recap: string[];                       // earlier turns (agent/previousTurns.ts)
-  priorFindings: string[];               // the previous research turn, one line per site
+  priorFindings: string[];               // the previous research task, one line per finding (priorFindingLine: "[turn N, site] field: value (url)")
   ledgerPrior?: LedgerSnapshot;
   planTexts?: string[];
 }

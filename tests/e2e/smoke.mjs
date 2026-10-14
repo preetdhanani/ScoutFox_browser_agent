@@ -911,23 +911,19 @@ function planAccepted(calls, plan) {
   return Array.isArray(sites) && plan.length === sites.length && sites.every((s, i) => plan[i].text === `${s.domain}: ${s.goal}`);
 }
 
-async function runTask(ctx, fixtures, llm, name) {
-  const task = TASKS[name];
-  if (!task) throw new Error(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
-  const model = modelOf(name);
-  if (ctx.model !== model) await saveSettings(ctx, llm, model);
-  const url = `${originFor(fixtures, task.host)}/${task.page}`;
+/** How many user_goal entries a history has: one per task started in the tab. */
+const goalsIn = (state) => ((state && state.history) || []).filter((h) => h.type === 'user_goal').length;
 
-  const page = await ctx.browser.newPage();
-  const pageErrors = [];
-  watchFixturePage(page, pageErrors);
-  await page.goto(url, { waitUntil: 'load' });
-  await page.bringToFront();
-  const tabId = await tabIdFor(ctx.driver, url);
-  // Before the run: the page as loaded. After the run (below): the page the task ended on, which
-  // is a new document when a click navigated.
-  const probes = [await probePage(ctx, page, tabId)];
-
+/**
+ * Starts one task in the tab the way the side panel does (START_TASK), answers its holds like a user, and waits until
+ * the run has ended. Returns what the run left behind. A task that has a `before` task runs in a tab that already ran
+ * a task (same tab id, so the same session and thread), which is why the start of the run is a NEW user_goal entry and
+ * not just any user_goal in the history.
+ *
+ * @param {object} task  the task (or its `before` task): its answers to questions are used for the holds
+ * @param {{name: string, dir: string, list: object[]} | null} shot  where the mid-run panel screenshot goes, or null
+ */
+async function driveTask(ctx, llm, task, tabId, hosts, shot) {
   // Listen like a side panel attached to that tab would: same port name, same messages.
   await ctx.driver.evaluate((id) => {
     window.__logs = [];
@@ -950,6 +946,9 @@ async function runTask(ctx, fixtures, llm, name) {
     });
   }, tabId);
 
+  const getState = () => ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE', tabId: id }), tabId);
+  const stop = () => ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'STOP_TASK', tabId: id }), tabId);
+  const goalsBefore = goalsIn(await getState());
   const firstCall = llm.calls.length;
   const tallyBefore = await readTally(ctx);
   const startedAt = Date.now();
@@ -963,15 +962,8 @@ async function runTask(ctx, fixtures, llm, name) {
   // status that is neither "running" nor "paused" AFTER the run started ("paused" is a hold: a confirmation,
   // a question, a challenge, a budget question). A fast run (the mock answers in milliseconds) can begin and end between
   // two polls, so "started" is also read from the history: the turn's user_goal entry is written right after
-  // the status becomes "running". Each task has a fresh tab and so a fresh session, which means any
-  // user_goal in it is this run's.
-  const shotName = `${name}-${model.replace(/[^a-z0-9.]+/gi, '_')}`;
-  const shotDir = args['panel-screenshots'] ? path.resolve(String(args['panel-screenshots'])) : null;
-  const screenshots = [];
-  const hosts = fixtureHostsOf(fixtures, task);
+  // the status becomes "running", and this run's is the one after the goalsBefore entries the tab already had.
   const run = { startedAt, decisions: [], problems: [], armed: { plan: true, confirm: true, question: true, challenge: true, budget: true }, stopped: null, loop: null };
-  const getState = () => ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE', tabId: id }), tabId);
-  const stop = () => ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'STOP_TASK', tabId: id }), tabId);
   let state = null;
   let seenRunning = false;
   let liveShotTaken = false;
@@ -981,13 +973,13 @@ async function runTask(ctx, fixtures, llm, name) {
     state = await getState();
     const holds = holdsOf(state);
     const running = state.status === 'running';
-    const begun = seenRunning || running || holds.length > 0 || (state.history || []).some((h) => h.type === 'user_goal');
+    const begun = seenRunning || running || holds.length > 0 || goalsIn(state) > goalsBefore;
     if (running) {
       seenRunning = true;
       // The plan checklist is only drawn while a run is live, so catch it once mid-run.
-      if (shotDir && !liveShotTaken && (state.planSteps || []).length) {
+      if (shot && shot.dir && !liveShotTaken && (state.planSteps || []).length) {
         liveShotTaken = true;
-        screenshots.push(...await panelScreenshots(ctx, tabId, `${shotName}-live`, shotDir, ['light']));
+        shot.list.push(...await panelScreenshots(ctx, tabId, `${shot.name}-live`, shot.dir, ['light']));
       }
     } else if (begun && state.status !== 'paused') {
       break;
@@ -1063,14 +1055,74 @@ async function runTask(ctx, fixtures, llm, name) {
 
   const calls = llm.calls.slice(firstCall);
   const tally = tallyDelta(await readTally(ctx), tallyBefore);
-  // What the engine did, as facts (lib/tasks.mjs): the final entry, the sites and how they ended, the steps, the calls per node.
+  // What the engine did, as facts (lib/tasks.mjs): the final entry of the LAST turn, the sites and how they ended, the
+  // steps, the calls per node.
   const facts = runFacts({ history: state.history || [], planSteps: state.planSteps || [], calls, tally });
+  return { state, run, timedOut, wallMs, logs, replies, states, stateStatuses, calls, facts };
+}
+
+/**
+ * The problems of a task's `before` task: it must end as it expects, with a right answer, like any task. The follow-up
+ * task is only meaningful when the task before it really left its state (its findings, its plan) behind.
+ */
+function beforeTaskProblems(before, done) {
+  const label = `the first task in the tab ("${oneLine(before.prompt, 60)}")`;
+  const problems = [];
+  const expectOutcome = before.expectOutcome || 'finish';
+  if (done.run.stopped) problems.push(`${label}: the harness stopped it (${done.run.stopped})`);
+  if (done.facts.outcome !== expectOutcome) problems.push(`${label} ended with a ${done.facts.outcome || 'missing'} entry, expected ${expectOutcome}`);
+  else if (!done.facts.answer || !before.check(done.facts)) problems.push(`${label}: the answer is wrong: ${oneLine(done.facts.answer, 200)}`);
+  if (MOCK && before.expectMock) problems.push(...before.expectMock(done.facts).map((p) => `${label}: ${p}`));
+  if (MOCK) {
+    const mockFail = findMockFail(done.facts, done.calls);
+    if (mockFail) problems.push(`${label}: the mock could not find what it needs in the prompt: ${mockFail}`);
+  }
+  problems.push(...done.run.problems.map((p) => `${label}: ${p}`));
+  return problems;
+}
+
+async function runTask(ctx, fixtures, llm, name) {
+  const task = TASKS[name];
+  if (!task) throw new Error(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
+  const model = modelOf(name);
+  if (ctx.model !== model) await saveSettings(ctx, llm, model);
+  const url = `${originFor(fixtures, task.host)}/${task.page}`;
+  const firstUrl = task.before ? `${originFor(fixtures, task.host)}/${task.before.page}` : url;
+
+  const page = await ctx.browser.newPage();
+  const pageErrors = [];
+  watchFixturePage(page, pageErrors);
+  await page.goto(firstUrl, { waitUntil: 'load' });
+  await page.bringToFront();
+  const tabId = await tabIdFor(ctx.driver, firstUrl);
+  // Before the run: the page as loaded. After the run (below): the page the task ended on, which
+  // is a new document when a click navigated.
+  const probes = [await probePage(ctx, page, tabId)];
+
+  const hosts = fixtureHostsOf(fixtures, task);
+  const beforeProblems = [];
+  if (task.before) {
+    // The task before runs to its end in this tab. Then the same tab (same id, so the same session and thread) goes to
+    // the page of the task itself, and the task is the follow-up of a user who keeps the side panel open.
+    const done = await driveTask(ctx, llm, task.before, tabId, hosts, null);
+    beforeProblems.push(...beforeTaskProblems(task.before, done));
+    await page.goto(url, { waitUntil: 'load' });
+    const sameTab = await tabIdFor(ctx.driver, url);
+    if (sameTab !== tabId) throw new Error(`The follow-up page opened in tab ${sameTab}, not in the tab of the first task (${tabId}).`);
+    probes.push(await probePage(ctx, page, tabId));
+  }
+
+  const shotName = `${name}-${model.replace(/[^a-z0-9.]+/gi, '_')}`;
+  const shotDir = args['panel-screenshots'] ? path.resolve(String(args['panel-screenshots'])) : null;
+  const screenshots = [];
+  const { state, run, timedOut, wallMs, logs, replies, states, stateStatuses, calls, facts } =
+    await driveTask(ctx, llm, task, tabId, hosts, { name: shotName, dir: shotDir, list: screenshots });
   const answer = facts.answer;
   // Before the tab closes: closing it ends its session, and the panel would show nothing.
   if (shotDir) screenshots.push(...await panelScreenshots(ctx, tabId, shotName, shotDir));
   const cardProblems = task.expectCard ? await readPanelCard(ctx, tabId, task.expectCard) : [];
   // Chromium's own error page (a host that does not resolve) never gets content scripts, so there is nothing to probe there.
-  if (page.url() !== probes[0].url && !page.url().startsWith('chrome-error://')) probes.push(await probePage(ctx, page, tabId));
+  if (page.url() !== probes[probes.length - 1].url && !page.url().startsWith('chrome-error://')) probes.push(await probePage(ctx, page, tabId));
   await sleep(300); // late page errors
   await page.close();
 
@@ -1089,7 +1141,7 @@ async function runTask(ctx, fixtures, llm, name) {
     unconfirmed: facts.unconfirmed,
     answer,
     answerCorrect: answer ? !!task.check(facts) : false,
-    expectProblems: [...(MOCK && task.expectMock ? task.expectMock(facts) : []), ...cardProblems],
+    expectProblems: [...beforeProblems, ...(MOCK && task.expectMock ? task.expectMock(facts) : []), ...cardProblems],
     holdProblems: run.problems,
     stateUpdates: { count: states.length, byStatus: stateStatuses },
     mockFail: MOCK ? findMockFail(facts, calls) : null,
