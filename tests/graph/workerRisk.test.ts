@@ -387,3 +387,64 @@ test('worker risk gate - reject after prior execution bans denied action, not pr
   assert.ok(workerState.siteRun.banned.includes('click|1|'), 'Denied action [1] must be banned');
   assert.ok(!workerState.siteRun.banned.some(sig => sig.includes('navigate')), 'Prior executed navigate must not be banned');
 });
+
+// safety/risk-gate-coverage-holes: the worker hands the snapshot's focused element and gate labels to the gate.
+function contactSnapshot(extra: Record<string, unknown> = {}) {
+  return async () => ({
+    docId: 'doc-risk-contact',
+    tabId: 101,
+    url: 'https://shop.test/kontakt',
+    domain: 'shop.test',
+    title: 'Kontakt',
+    scrollY: 0,
+    pageHeight: 1000,
+    viewportHeight: 800,
+    elementCount: 2,
+    refs: [1, 2],
+    elementsText: '[1] textarea "Nachricht"\n[2] input[submit] "element" (value="Registrieren")',
+    elementInfo: {
+      '1': { role: 'textbox', label: 'Nachricht', formKind: 'other', fieldKind: 'text' },
+      '2': { role: 'button', label: 'element', gateLabel: 'Registrieren', formKind: 'other', submitControl: true },
+    },
+    pageText: 'Kontakt Nachricht',
+    capturedAt: Date.now(),
+    ...extra,
+  });
+}
+
+async function firstHold(threadId: string, reply: string, snapshot: () => Promise<any>) {
+  const base = createMockRuntime(threadId);
+  createMockRuntime(threadId, {
+    // The action once, then done: on a gate that misses the action, the run ends with no card instead of looping.
+    llm: (() => {
+      let calls = 0;
+      const done = '{"thought": "done", "action": "subgoal_done", "subgoal": "contact"}';
+      return { complete: async () => ({ text: calls++ === 0 ? reply : done, provider: 'mock', model: 'mock-model', meta: {} }) };
+    })(),
+    browser: { ...base.browser, tabInfo: async () => ({ url: 'https://shop.test/kontakt', title: 'Kontakt', windowId: 1, groupId: 0, status: 'complete' }), snapshot },
+  });
+  const graph = buildWorkerGraph(new MemorySaver());
+  const cfg = { configurable: { thread_id: threadId } };
+  await graph.invoke({ siteIn: makeSiteIn({ startUrl: 'https://shop.test/kontakt' }) }, cfg);
+  return ((await graph.getState(cfg)).values as WorkerStateT).pendingHold;
+}
+
+test('worker risk gate - press_key Enter in a focused contact field raises a submit card', async () => {
+  const hold = await firstHold(
+    'test-worker-risk-enter-focused',
+    '{"thought": "send", "action": "press_key", "key": "Enter"}',
+    contactSnapshot({ focused: { role: 'textbox', label: 'Nachricht', formKind: 'other', fieldKind: 'text' } }),
+  );
+  assert.equal(hold?.kind, 'confirm_action');
+  assert.equal(hold?.variant, 'submit');
+});
+
+test('worker risk gate - an input submit named only by its value raises a card', async () => {
+  const hold = await firstHold(
+    'test-worker-risk-input-submit-value',
+    '{"thought": "register", "action": "click", "elementId": 2}',
+    contactSnapshot({ focused: null }),
+  );
+  assert.equal(hold?.kind, 'confirm_action');
+  assert.equal(hold?.variant, 'submit');
+});

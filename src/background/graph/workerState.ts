@@ -58,6 +58,10 @@ export interface ElementInfo {           // CODE, from the content script, for r
   formKind?: 'search' | 'login' | 'checkout' | 'other';
   fieldKind?: 'password' | 'cc' | 'otp' | 'email' | 'address' | 'search' | 'text';
   hrefDomain?: string;                   // registrable domain of a link target
+  gateLabel?: string;                    // risk gate only: visible text + accessible name, when it adds to label
+  submitControl?: boolean;               // clicking it submits its form
+  formActionHost?: string;               // the form sends to this other host
+  formMethod?: 'get';                    // the form says method="get"
 }
 
 export interface PageSig {
@@ -78,6 +82,7 @@ export interface PageSnapshot {
   shownRefs: number[];                   // ids rendered in this step's prompt (the small tier shows fewer)
   elementsText: string;                  // today's line format with stable ids, max 120 lines
   elementInfo: Record<string, ElementInfo>; // key = String(stable id)
+  focused?: ElementInfo | null;          // what has focus (press_key acts on it); null none, missing = not reported
   pageText: string;                      // today's extractor, max 4500 chars
   verdict: PageVerdict; verdictReason: string | null;
   pageType: PageType;                    // CODE heuristic (agent/pageType.ts)

@@ -186,6 +186,8 @@ export interface DomSnapshot {
   refs: number[];
   shownRefs: number[];
   elementInfo: Record<string, any>;
+  /** What has focus, as risk facts (content/perception.ts getFocusedElementInfo()). A described page has no focus: null. */
+  focused: Record<string, any> | null;
   pageText: string;
 }
 
@@ -452,6 +454,33 @@ function summarize(el: ElementSpec, id: number, nth: number, scrollY: number, vi
   };
 }
 
+/**
+ * The risk-gate facts content/perception.ts computeElementInfo() adds, for what a description can say: gateLabel
+ * (visible text and accessible name, when that adds to the label) and submitControl. A described form has no action
+ * or method, so formActionHost and formMethod never appear.
+ */
+function gateFacts(el: ElementSpec, label: string): { gateLabel?: string; submitControl?: true } {
+  const tagName = el.tag.toLowerCase();
+  const type = (el.type ?? '').toLowerCase();
+  const text = collapse(el.text ?? '').slice(0, ELEMENT_TEXT_LIMIT);
+  const value = collapse(el.value ?? '');
+  const name = collapse(el.label ?? '')
+    || (tagName === 'input' && (type === 'submit' || type === 'button' || type === 'reset') ? value : '')
+    || text;
+  const parts: string[] = [];
+  for (const part of [text, name]) {
+    const c = part.slice(0, 120);
+    if (c && !parts.some((p) => p.toLowerCase() === c.toLowerCase())) parts.push(c);
+  }
+  const gate = parts.join(' | ');
+  const facts: { gateLabel?: string; submitControl?: true } = {};
+  if (gate && gate !== label) facts.gateLabel = gate;
+  if (el.form && ((tagName === 'button' && (type === '' || type === 'submit')) || (tagName === 'input' && (type === 'submit' || type === 'image')))) {
+    facts.submitControl = true;
+  }
+  return facts;
+}
+
 function computeFieldKind(el: ElementSpec): string | undefined {
   const tagName = el.tag.toLowerCase();
   if (tagName !== 'input' && tagName !== 'textarea') return undefined;
@@ -495,6 +524,7 @@ function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElem
       formKind: el?.form,
       fieldKind: el ? computeFieldKind(el) : undefined,
       hrefDomain: el ? hrefDomainOf(el, page.url) : undefined,
+      ...(el ? gateFacts(el, s.text) : {}),
     };
   }
   return {
@@ -510,6 +540,7 @@ function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElem
       refs,
       shownRefs,
       elementInfo,
+      focused: null,
       pageText: formatPageText(page.text),
     },
   };

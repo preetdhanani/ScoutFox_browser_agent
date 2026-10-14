@@ -35,5 +35,6 @@
       "hrefDomain": "127.0.0.1"
     }
   },
+  "focused": null,
   "pageText": "Diese Seite ist gerade nicht verfügbar\nFehler 503: Der Dienst ist vorübergehend überlastet. Bitte versuche es in ein paar Minuten noch einmal.\nFehler-ID: 7f3a-91c2\nNeu laden\nZur Startseite"
 }

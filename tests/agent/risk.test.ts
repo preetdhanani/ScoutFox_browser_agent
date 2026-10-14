@@ -294,3 +294,199 @@ test('risk: browser_batch fails closed on uninspectable element steps (BUG-19)',
   });
   assert.equal(nonElementSteps.level, 'safe');
 });
+
+// ---------------------------------------------------------------------------------------------
+// safety/risk-gate-coverage-holes: controls the gate could not see or did not know
+// ---------------------------------------------------------------------------------------------
+
+const click = (info: any, extra: Record<string, unknown> = {}) =>
+  evaluateActionRisk({ action: { action: 'click', element_id: 1 }, elementInfo: info, pageUrl: 'https://shop.de/p/1', approvedDomains: ['shop.de'], ...extra });
+
+test('risk: an input submit whose only label is its value is judged by that value', () => {
+  // perception.ts gives the model-facing label "element" here; the gate label carries the value.
+  const buy = click({ role: 'button', label: 'element', gateLabel: 'Buy now' });
+  assert.equal(buy.level, 'risky');
+  assert.equal(buy.variant, 'purchase');
+
+  const order = click({ role: 'button', label: 'element', gateLabel: 'Kostenpflichtig bestellen' });
+  assert.equal(order.level, 'risky');
+  assert.equal(order.variant, 'purchase');
+
+  // An icon-only button named by its title or image alt.
+  const icon = click({ role: 'button', label: 'element', gateLabel: 'Konto erstellen' });
+  assert.equal(icon.level, 'risky');
+  assert.equal(icon.variant, 'submit');
+});
+
+test('risk: a click on the submit control of a generic form is risky, a plain button in it is not', () => {
+  const submit = click({ role: 'button', label: 'Weiter', formKind: 'other', submitControl: true });
+  assert.equal(submit.level, 'risky');
+  assert.equal(submit.variant, 'submit');
+  assert.match(submit.reason, /submit/i);
+
+  // type="button" controls in the same form (quantity steppers, tabs) do not submit it.
+  const stepper = click({ role: 'button', label: '+', formKind: 'other' });
+  assert.equal(stepper.level, 'safe');
+
+  // An explicit method="get" form on the same site only builds a URL (filters, sorting): no card.
+  const filter = click({ role: 'button', label: 'Filter anwenden', formKind: 'other', submitControl: true, formMethod: 'get' });
+  assert.equal(filter.level, 'safe');
+
+  // ...but a GET form that sends to another site is not exempt.
+  const crossGet = click({ role: 'button', label: 'Go', formKind: 'other', submitControl: true, formMethod: 'get', formActionHost: 'tracker.example' });
+  assert.equal(crossGet.level, 'risky');
+
+  // Add to cart stays the explicit safe exemption even as a form's submit button.
+  const cart = click({ role: 'button', label: 'In den Warenkorb', formKind: 'other', submitControl: true });
+  assert.equal(cart.level, 'safe');
+});
+
+test('risk: press_key Enter is judged against the focused element', () => {
+  const enter = (focusedElementInfo: any) =>
+    evaluateActionRisk({ action: { action: 'press_key', key: 'Enter' }, focusedElementInfo, pageUrl: 'https://shop.de/kontakt', approvedDomains: ['shop.de'] });
+
+  const contact = enter({ role: 'textbox', label: 'Nachricht', formKind: 'other', fieldKind: 'text' });
+  assert.equal(contact.level, 'risky');
+  assert.equal(contact.variant, 'submit');
+
+  const login = enter({ role: 'textbox', label: 'E-Mail', formKind: 'login', fieldKind: 'email' });
+  assert.equal(login.level, 'risky');
+  assert.equal(login.variant, 'login');
+
+  const checkout = enter({ role: 'textbox', label: 'Gutscheincode', formKind: 'checkout', fieldKind: 'text' });
+  assert.equal(checkout.level, 'risky');
+  assert.equal(checkout.variant, 'purchase');
+
+  // Enter on a focused "Jetzt kaufen" button activates it like a click.
+  const buyButton = enter({ role: 'button', label: 'Jetzt kaufen' });
+  assert.equal(buyButton.level, 'risky');
+  assert.equal(buyButton.variant, 'purchase');
+
+  // A search box, a field outside any form and an empty focus stay safe.
+  assert.equal(enter({ role: 'searchbox', label: 'Suche', formKind: 'search', fieldKind: 'search' }).level, 'safe');
+  assert.equal(enter({ role: 'textbox', label: 'Menge', fieldKind: 'text' }).level, 'safe');
+  assert.equal(enter(null).level, 'safe');
+
+  // Fail closed: when the snapshot did not say what has focus, Enter needs a card.
+  const unknown = enter(undefined);
+  assert.equal(unknown.level, 'risky');
+  assert.match(unknown.reason, /focus/i);
+
+  // Other keys never submit.
+  const escape = evaluateActionRisk({ action: { action: 'press_key', key: 'Escape' } });
+  assert.equal(escape.level, 'safe');
+});
+
+test('risk: press_key Enter inside a batch is judged against the element the batch just typed into', () => {
+  const resolve = (id: number): any =>
+    id === 4 ? { role: 'textbox', label: 'Name', formKind: 'other', fieldKind: 'text' }
+      : id === 5 ? { role: 'searchbox', label: 'Suche', formKind: 'search', fieldKind: 'search' }
+        : null;
+
+  const contactBatch = evaluateActionRisk({
+    action: { action: 'browser_batch', steps: [{ action: 'type', element_id: 4, text: 'Max' }, { action: 'press_key', key: 'Enter' }] },
+    resolveElementInfo: resolve,
+    focusedElementInfo: null,
+    pageUrl: 'https://shop.de/kontakt',
+    approvedDomains: ['shop.de'],
+  });
+  assert.equal(contactBatch.level, 'risky');
+  assert.match(contactBatch.reason, /Batch step 2 risky/);
+
+  const searchBatch = evaluateActionRisk({
+    action: { action: 'browser_batch', steps: [{ action: 'type', element_id: 5, text: 'laptop' }, { action: 'press_key', key: 'Enter' }] },
+    resolveElementInfo: resolve,
+    focusedElementInfo: null,
+    pageUrl: 'https://shop.de/',
+    approvedDomains: ['shop.de'],
+  });
+  assert.equal(searchBatch.level, 'safe');
+});
+
+test('risk: sign-up, account, booking, confirm, apply, donate and post controls are risky in English and German', () => {
+  const risky = [
+    'Sign up', 'Sign up for free', 'Register', 'Create account', 'Create an account', 'Join now', 'Join',
+    'Registrieren', 'Jetzt registrieren', 'Konto erstellen', 'Kundenkonto anlegen', 'Mitglied werden',
+    'Book now', 'Book', 'Jetzt buchen', 'Termin buchen', 'Reserve', 'Reserve a table', 'Reservieren', 'Jetzt reservieren',
+    'Confirm', 'Confirm booking', 'Bestätigen', 'Buchung bestätigen',
+    'Apply now', 'Apply for this job', 'Jetzt bewerben', 'Bewerbung absenden',
+    'Donate', 'Donate now', 'Spenden', 'Jetzt spenden',
+    'Post', 'Post comment', 'Kommentar posten', 'Bewertung abschicken',
+    'Submit', 'Absenden',
+  ];
+  for (const label of risky) {
+    const verdict = click({ role: 'button', label });
+    assert.equal(verdict.level, 'risky', `"${label}" must need a card`);
+    assert.equal(verdict.variant, 'submit', `"${label}" is a submit card`);
+  }
+
+  // The purchase wording German shops use.
+  for (const label of ['Jetzt kaufen', 'Zur Kasse', 'Kostenpflichtig bestellen', 'Zahlungspflichtig bestellen', 'Kauf abschließen', 'Complete purchase']) {
+    const verdict = click({ role: 'button', label });
+    assert.equal(verdict.level, 'risky', `"${label}" must need a card`);
+    assert.equal(verdict.variant, 'purchase', `"${label}" is a purchase card`);
+  }
+});
+
+test('risk: everyday shop controls stay free of cards (false positives)', () => {
+  const safe = [
+    'Add to wishlist', 'Auf den Merkzettel', 'Merken', 'Compare', 'Vergleichen', 'Read more', 'Weiter lesen', 'Mehr erfahren',
+    // A bare "Apply" is how filter panels close; job applications say "Apply now" or "Apply for".
+    'Apply', 'Apply filters', 'Filter anwenden', 'Gutschein einlösen', 'Auswahl bestätigen', 'Confirm my choices', 'Alle akzeptieren',
+    'E-Book Reader', 'Notebooks', 'Bookmark', 'Facebook', 'Registrierung', 'Reservierung ansehen', 'DHL Post Versand',
+    'Spendenquittung herunterladen', 'Jobs & Karriere', 'Next', 'Weiter',
+  ];
+  for (const label of safe) {
+    const verdict = click({ role: 'button', label });
+    assert.equal(verdict.level, 'safe', `"${label}" must not need a card (${verdict.reason})`);
+  }
+
+  // A long product title link that happens to contain "buy" or "kaufen" opens the product page.
+  for (const label of [
+    'Framework Laptop 13 DIY Edition - best notebook to buy for students 2026',
+    'Lenovo ThinkPad X1 Carbon Gen 12 günstig kaufen bei uns im Shop',
+  ]) {
+    const verdict = click({ role: 'link', label });
+    assert.equal(verdict.level, 'safe', `product link "${label}" must not need a card`);
+  }
+  // A short link or any button with the same word is still a purchase control.
+  assert.equal(click({ role: 'link', label: 'Jetzt kaufen' }).level, 'risky');
+  assert.equal(click({ role: 'button', label: 'Lenovo ThinkPad X1 Carbon Gen 12 günstig kaufen bei uns im Shop' }).level, 'risky');
+});
+
+test('risk: the search exemption needs a same-site form and no purchase wording', () => {
+  // A Buy button inside a form whose class says "search" is still a purchase.
+  const buyInSearch = click({ role: 'button', label: 'Buy now', formKind: 'search', submitControl: true });
+  assert.equal(buyInSearch.level, 'risky');
+  assert.equal(buyInSearch.variant, 'purchase');
+
+  // Same-site search form: typing and submitting stays safe.
+  const sameSite = evaluateActionRisk({
+    action: { action: 'type', element_id: 2, text: 'laptop', submit: true },
+    elementInfo: { role: 'searchbox', label: 'Suche', formKind: 'search', fieldKind: 'search', formActionHost: 'suche.shop.de' },
+    pageUrl: 'https://www.shop.de/',
+    approvedDomains: ['shop.de'],
+  });
+  assert.equal(sameSite.level, 'safe');
+
+  // A "search" form that posts to another host is a generic form submit.
+  const crossHost = evaluateActionRisk({
+    action: { action: 'type', element_id: 2, text: 'max@example.com', submit: true },
+    elementInfo: { role: 'textbox', label: 'Search', formKind: 'search', fieldKind: 'text', formActionHost: 'collect.evil.example' },
+    pageUrl: 'https://www.shop.de/',
+    approvedDomains: ['shop.de'],
+  });
+  assert.equal(crossHost.level, 'risky');
+  assert.equal(crossHost.variant, 'submit');
+
+  // The search form's own submit button on the same site is safe.
+  const searchButton = click({ role: 'button', label: 'Suchen', formKind: 'search', submitControl: true });
+  assert.equal(searchButton.level, 'safe');
+});
+
+test('risk: an unknown verb keeps the default-safe fallback, because sanitize rejects it first', async () => {
+  const { sanitizeAction } = await import('../../src/background/agent/sanitize.ts');
+  const sanitized = sanitizeAction({ action: 'buy_item', element_id: 1 }, { verbs: ['click', 'type'] } as any);
+  assert.equal(sanitized.invalidAction, 'buy_item', 'an unoffered verb never reaches the gate');
+  assert.equal(evaluateActionRisk({ action: { action: 'buy_item', element_id: 1 }, elementInfo: { role: 'button', label: 'Weiter' } }).level, 'safe');
+});

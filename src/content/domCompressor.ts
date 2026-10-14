@@ -25,6 +25,7 @@ import {
   computeFormKind,
   computeHrefDomain,
   getElementSummary as formatElementSummary,
+  getFocusedElementInfo,
   type FormattedElement,
   type ElementInfoRecord
 } from './perception.ts';
@@ -57,6 +58,8 @@ export interface DomSnapshot {
   refs: number[];
   shownRefs: number[];
   elementInfo: Record<string | number, ElementInfoRecord>;
+  /** What has focus (press_key acts on it), for the risk gate; null when nothing does. */
+  focused: ElementInfoRecord | null;
   pageText: string;
 }
 
@@ -135,6 +138,7 @@ export class DOMCompressor {
       refs,
       shownRefs,
       elementInfo: this.elementInfo || {},
+      focused: getFocusedElementInfo(doc, win),
       pageText: this.extractPageText()
     };
   }

@@ -2,6 +2,7 @@
 // Erasable TypeScript (no enums, no parameter properties).
 
 import type { ElementInfo } from '../graph/workerState.ts';
+import { siteOf } from './evidence.ts';
 import RISK_DATA from '../../../shared/risk.json' with { type: 'json' };
 
 export type RiskLevel = 'safe' | 'risky' | 'forbidden';
@@ -39,6 +40,11 @@ export interface RiskEvaluationInput {
    * risky labels, login/submit detection) are blind inside every batch.
    */
   resolveElementInfo?: (elementId: number) => ElementInfo | null | undefined;
+  /**
+   * The element that has focus, which is what press_key acts on (it has no element id). Null: nothing has focus.
+   * Undefined: the snapshot did not say, so an Enter fails closed to risky.
+   */
+  focusedElementInfo?: ElementInfo | null;
 }
 
 /**
@@ -47,6 +53,25 @@ export interface RiskEvaluationInput {
  * page must not be able to slip an action past the gate by omitting context.
  */
 const ELEMENT_TARGETING_VERBS = new Set(['click', 'type', 'select_option']);
+
+/** Focus roles the content script reports when it cannot read the focused element (a frame, or an error). */
+const UNREADABLE_FOCUS_ROLES = new Set(['iframe', 'unknown']);
+
+/** Roles that Enter activates like a click when they have focus. */
+const ACTIVATED_BY_ENTER_ROLES = new Set(['button', 'link', 'menuitem']);
+
+/**
+ * A link label longer than this many words is a product or article title, not a control: it opens a page. Its
+ * words ("... günstig kaufen bei uns") do not make it a purchase. Buttons are never exempt.
+ */
+const TITLE_LINK_MIN_WORDS = 9;
+
+/** Words that make a control commit something for the user: send, delete, register, book, donate, post. */
+const SUBMIT_WORDS: string[] = [
+  ...(RISK_DATA.submitWords || []),
+  ...(RISK_DATA.accountWords || []),
+  ...(RISK_DATA.commitWords || []),
+];
 
 /**
  * Extracts and normalizes the hostname from a URL string.
@@ -111,28 +136,73 @@ function containsAnyWord(text: string, words: string[]): boolean {
     const w = word.toLowerCase().trim();
     if (!w) continue;
 
-    // Direct substring or word boundary match
-    if (w.includes(' ')) {
-      if (lower.includes(w)) return true;
-    } else {
-      const regex = new RegExp(`(^|[^a-z0-9äöüß])${w}([^a-z0-9äöüß]|$)`, 'i');
-      if (regex.test(lower)) return true;
-    }
+    // Word boundary match, for phrases too: "book a" must not match "notebook ansehen".
+    const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`(^|[^a-z0-9äöüß])${escaped}([^a-z0-9äöüß]|$)`, 'i');
+    if (regex.test(lower)) return true;
   }
   return false;
+}
+
+/**
+ * Whether one of the labels is exactly one of the words, ignoring case, spacing and decoration around it
+ * ("Confirm ›"). For words that are a control only when they are the whole label: "Book" but not "E-Book Reader",
+ * "Confirm" but not "Confirm my choices".
+ */
+function isExactlyAnyWord(labels: string[], words: string[]): boolean {
+  const wanted = new Set(words.map((w) => w.toLowerCase().trim()).filter(Boolean));
+  return labels.some((l) => {
+    const core = l.toLowerCase().replace(/^[^a-z0-9äöüß]+|[^a-z0-9äöüß]+$/g, '').replace(/\s+/g, ' ');
+    return wanted.has(core);
+  });
+}
+
+/** Whether the form host is another site than the page (no page URL: it cannot be shown to be the same). */
+function isCrossSiteForm(formActionHost: string | undefined, pageUrl: string): boolean {
+  if (!formActionHost) return false;
+  const pageSite = siteOf(pageUrl);
+  return !pageSite || siteOf(`https://${formActionHost}`) !== pageSite;
 }
 
 /**
  * Evaluates the risk of a proposed action according to ScoutFox Risk Gate rules.
  */
 export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdict {
-  const { action, elementInfo, pageType, pageUrl = '', approvedDomains = [], resolveElementInfo } = input;
+  const { action, pageType, pageUrl = '', approvedDomains = [], resolveElementInfo, focusedElementInfo } = input;
   const actionVerb = action.action;
-  const label = (elementInfo?.label || '').trim();
-  const formKind = elementInfo?.formKind;
-  const fieldKind = elementInfo?.fieldKind;
+  const isEnter = actionVerb === 'press_key' && action.key === 'Enter';
 
+  // press_key has no element id: Enter acts on whatever has focus, so the gate judges that element.
+  const elementInfo = input.elementInfo ?? (isEnter ? focusedElementInfo : null);
   const actionSummary = describeAction(action, elementInfo);
+
+  // Fail closed: an Enter whose target cannot be known may submit any form on the page.
+  if (isEnter && !input.elementInfo && (focusedElementInfo === undefined || UNREADABLE_FOCUS_ROLES.has(focusedElementInfo?.role ?? ''))) {
+    return {
+      level: 'risky',
+      variant: 'submit',
+      reason: 'Pressing Enter where the risk gate cannot tell which element has focus; it may submit a form.',
+      actionSummary,
+    };
+  }
+
+  const label = (elementInfo?.label || '').trim();
+  // The gate reads the fuller gate label (visible text plus accessible name) when the content script set one.
+  const gateLabel = (elementInfo?.gateLabel || label).trim();
+  const gateParts = [label, ...gateLabel.split(' | ')].filter(Boolean);
+  const fieldKind = elementInfo?.fieldKind;
+  const crossSiteForm = isCrossSiteForm(elementInfo?.formActionHost, pageUrl);
+  // A "search" form that sends to another site is a generic form: the search exemption is for the site's own search.
+  const formKind = elementInfo?.formKind === 'search' && crossSiteForm ? 'other' : elementInfo?.formKind;
+
+  // A click, or Enter on a focused button or link, activates the control.
+  const activates = actionVerb === 'click' || (isEnter && !!elementInfo && (
+    !!elementInfo.submitControl || ACTIVATED_BY_ENTER_ROLES.has(elementInfo.role)
+  ));
+  // A long link label is a title (a product, an article), not a control: its words do not gate it.
+  const isTitleLink = elementInfo?.role === 'link' && !elementInfo.submitControl &&
+    gateLabel.split(/\s+/).filter(Boolean).length >= TITLE_LINK_MIN_WORDS;
+  const wordsApply = activates && !isTitleLink;
 
   // execute_js runs arbitrary page code: risky
   if (actionVerb === 'execute_js') {
@@ -161,6 +231,10 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
       actionSummary,
     };
 
+    // What has focus as the batch runs: a step that types into or clicks an element moves focus there, and a later
+    // press_key acts on that element, not on what had focus when the page was read.
+    let focus: ElementInfo | null | undefined = focusedElementInfo;
+
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
       const stepVerb = typeof step?.action === 'string' ? step.action : '';
@@ -187,6 +261,7 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
         if (worstVerdict.level !== 'risky') {
           worstVerdict = uninspectable;
         }
+        focus = undefined;
         continue;
       }
 
@@ -197,7 +272,9 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
         pageUrl,
         approvedDomains,
         resolveElementInfo,
+        focusedElementInfo: focus,
       });
+      if (stepInfo && (stepVerb === 'type' || stepVerb === 'click')) focus = stepInfo;
 
       if (stepVerdict.level === 'forbidden') {
         return {
@@ -239,8 +316,8 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
 
   // 2. SAFE EXEMPTION: Add to cart is explicitly safe
   const isAddToCart =
-    containsAnyWord(label, ['in den warenkorb', 'add to cart', 'in shopping cart', 'zum warenkorb hinzufügen']) &&
-    !containsAnyWord(label, ['kasse', 'checkout', 'jetzt kaufen', 'buy now']);
+    containsAnyWord(gateLabel, ['in den warenkorb', 'add to cart', 'in shopping cart', 'zum warenkorb hinzufügen']) &&
+    !containsAnyWord(gateLabel, ['kasse', 'checkout', 'jetzt kaufen', 'buy now']);
 
   if (isAddToCart) {
     return {
@@ -251,8 +328,11 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
     };
   }
 
-  // 3. SAFE EXEMPTION: Search box with submit is always safe
-  if (formKind === 'search' || fieldKind === 'search') {
+  const hasPurchaseWords = wordsApply && containsAnyWord(gateLabel, RISK_DATA.purchaseWords || []);
+
+  // 3. SAFE EXEMPTION: the site's own search box with submit is safe. Not a cross-site form (formKind is 'other'
+  // then), and not a purchase control that only sits inside a form whose class or id says "search".
+  if ((formKind === 'search' || (fieldKind === 'search' && !crossSiteForm)) && !hasPurchaseWords) {
     return {
       level: 'safe',
       reason: 'Search forms and queries are safe operations.',
@@ -265,21 +345,20 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
   const isCheckoutPage = pageType === 'checkout';
   const isCheckoutForm = formKind === 'checkout';
   const isCheckoutContext = isCheckoutPage || isCheckoutForm;
-  const hasPurchaseWords = containsAnyWord(label, RISK_DATA.purchaseWords || []);
 
-  if (actionVerb === 'click' && (hasPurchaseWords || isCheckoutContext)) {
+  if (activates && (hasPurchaseWords || isCheckoutContext)) {
     return {
       level: 'risky',
       variant: 'purchase',
       reason: isCheckoutContext
         ? (isCheckoutPage ? 'Action targets an active checkout or payment page.' : 'Action targets a checkout or payment form.')
-        : `Element label contains purchase or order words ("${label}").`,
+        : `Element label contains purchase or order words ("${gateLabel}").`,
       actionSummary,
       elementLabel: label || undefined,
     };
   }
 
-  if (isCheckoutContext && (actionVerb === 'type' || actionVerb === 'select_option' || action.submit || (actionVerb === 'press_key' && action.key === 'Enter'))) {
+  if (isCheckoutContext && (actionVerb === 'type' || actionVerb === 'select_option' || action.submit || isEnter)) {
     return {
       level: 'risky',
       variant: 'purchase',
@@ -295,7 +374,7 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
   const isLoginPage = pageType === 'login';
   const isLoginForm = formKind === 'login';
 
-  if ((isLoginPage || isLoginForm) && (actionVerb === 'click' || action.submit || actionVerb === 'press_key' && action.key === 'Enter')) {
+  if ((isLoginPage || isLoginForm) && (actionVerb === 'click' || action.submit || isEnter)) {
     return {
       level: 'risky',
       variant: 'login',
@@ -307,17 +386,25 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
     };
   }
 
-  // 6. RISKY: Submit (delete, send, publish, subscribe, or other non-search form submit)
-  const isSubmitForm = formKind === 'other' && (action.submit || (actionVerb === 'press_key' && action.key === 'Enter'));
-  const hasSubmitWords = actionVerb === 'click' && containsAnyWord(label, RISK_DATA.submitWords || []);
+  // 6. RISKY: Submit (delete, send, register, book, donate, post, or any other non-search form submit). A click on
+  // the form's submit control submits it like Enter does. An explicit method="get" form on the same site only builds
+  // a URL (filters, sorting), so it is not a submit.
+  const submitsForm = action.submit || isEnter || (actionVerb === 'click' && !!elementInfo?.submitControl);
+  const isGetForm = elementInfo?.formMethod === 'get' && !crossSiteForm;
+  const isSubmitForm = formKind === 'other' && submitsForm && !isGetForm;
+  const hasSubmitWords = wordsApply && (
+    containsAnyWord(gateLabel, SUBMIT_WORDS) || isExactlyAnyWord(gateParts, RISK_DATA.exactLabelWords || [])
+  );
 
   if (isSubmitForm || hasSubmitWords) {
     return {
       level: 'risky',
       variant: 'submit',
       reason: hasSubmitWords
-        ? `Element label contains submission or destructive keywords ("${label}").`
-        : 'Submitting an external web form.',
+        ? `Element label contains submission, account or commitment keywords ("${gateLabel}").`
+        : crossSiteForm
+          ? `Submitting a web form that sends to another site ("${elementInfo?.formActionHost}").`
+          : 'Submitting an external web form.',
       actionSummary,
       elementLabel: label || undefined,
     };
@@ -341,7 +428,7 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
     if (action.url) {
       candidateNavDomain = extractCleanHostname(action.url);
     }
-  } else if (actionVerb === 'click') {
+  } else if (activates) {
     if (elementInfo?.hrefDomain) {
       candidateNavDomain = extractCleanHostname(elementInfo.hrefDomain);
     }

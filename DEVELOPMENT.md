@@ -292,6 +292,12 @@ Heuristic evaluation avoids LLM latency and nondeterminism for safety-critical c
 - `risky`: purchase or checkout actions (clicks on purchase words or on checkout pages or forms, typing or submitting in checkout contexts), login form submissions, sensitive or personal field entry (emails, addresses, phone numbers), form submissions with destructive or submit words, and unapproved external navigations pause execution in `holdNode` for human confirmation (`confirm_action`).
 - `safe`: ordinary browsing and navigation on approved domains proceed directly to `executeNode`.
 
+The gate reads `gateLabel` (visible text plus accessible name: input value, `aria-labelledby`, image alt, title) when the content script sets one, so an input submit or icon-only button with a risky name is not hidden behind the model-facing label "element".
+A click on a form's submit control (`submitControl`), `type` with `submit`, and `press_key` Enter all count as submitting a generic form; an explicit `method="get"` form on the same site does not.
+`press_key` Enter is judged against the focused element the snapshot reports in `focused`; when the snapshot does not say what has focus, Enter is risky.
+The search exemption applies only to the site's own search: a form whose action goes to another site (`formActionHost`) is a generic form, and purchase words inside a search form still raise a purchase card.
+Account, booking, confirmation, application, donation and posting words in German and English (`accountWords`, `commitWords`, `exactLabelWords`) raise a submit card; words like "Book", "Confirm" and "Post" count only as the whole label, and a link label of nine or more words is treated as a title, not a control.
+
 DOM compression in `content/domCompressor.js` and `content/content.js` annotates element metadata (`fieldKind`, `formKind`, `elementInfo`) to detect sensitive inputs and forms.
 When an action is denied by the user or fails policy, `recoverNode` in `src/background/graph/worker.ts` records the failure in failure memory and permanently bans that action signature (`verb|target|value`) to prevent retry loops.
 Tests in `tests/agent/risk.test.ts` and `tests/graph/workerRisk.test.ts` cover risk classification, checkout forms, and banned action recovery.

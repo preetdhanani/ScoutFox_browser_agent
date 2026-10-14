@@ -50,7 +50,8 @@
     "3": {
       "role": "button",
       "label": "Suchen",
-      "formKind": "search"
+      "formKind": "search",
+      "submitControl": true
     },
     "4": {
       "role": "link",
@@ -91,5 +92,6 @@
       "hrefDomain": "127.0.0.1"
     }
   },
+  "focused": null,
   "pageText": "Zurück zu den Suchergebnissen\nFramework Laptop 16 DIY Edition (AMD Ryzen 7040)\n4 Angebote, Preise inkl. MwSt.\nSortieren: Preis aufsteigend\nNur versandkostenfrei\nPreisalarm setzen\nShop | Preis | Versand | Gesamt | Lieferung\nNotebookWelt | 1.379,00 EUR | 9,90 EUR | 1.388,90 EUR | 1-2 Wochen | Zum Shop\nFramework Store (Hersteller) | 1.399,00 EUR | versandkostenfrei | 1.399,00 EUR | 5-7 Werktage | Zum Shop\nTechHaus24 | 1.449,00 EUR | 4,99 EUR | 1.453,99 EUR | 2-3 Werktage | Zum Shop\nMegaElektro | 1.529,90 EUR | versandkostenfrei | 1.529,90 EUR | sofort lieferbar | Zum Shop"
 }

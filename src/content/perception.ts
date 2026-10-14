@@ -36,6 +36,18 @@ export interface ElementInfoRecord {
   formKind?: string;
   fieldKind?: string;
   hrefDomain?: string;
+  /**
+   * For the risk gate only, never shown to the model: the visible text plus the accessible name, set only when the
+   * name adds something the label lacks (an input submit with only a value, an icon-only button named by alt,
+   * aria-labelledby or title). The model-facing label keeps its short source order.
+   */
+  gateLabel?: string;
+  /** Set (true) only when clicking the element submits the form it is in. */
+  submitControl?: boolean;
+  /** Set only when the form sends to another host than the page (form action, or the control's formaction). */
+  formActionHost?: string;
+  /** Set only when the form (or the control's formmethod) says method="get" explicitly. */
+  formMethod?: 'get';
 }
 
 /**
@@ -105,6 +117,137 @@ export function computeFormKind(el: Element): string | undefined {
   return 'other';
 }
 
+const clean = (v: unknown): string => (typeof v === 'string' ? v.trim().replace(/\s+/g, ' ') : '');
+
+/**
+ * Whether clicking the element submits its form: a <button> without a type or with type submit, or an input of type
+ * submit or image. Outside a form nothing is submitted.
+ */
+export function isSubmitControl(el: Element, tagName: string, type: string): boolean {
+  if (typeof el.closest !== 'function' || !el.closest('form')) return false;
+  const t = (type || '').toLowerCase();
+  if (tagName === 'button') return t === '' || t === 'submit';
+  return tagName === 'input' && (t === 'submit' || t === 'image');
+}
+
+/**
+ * Where and how the element's form sends, for the risk gate: formActionHost only when the action (or the control's
+ * formaction) is an http(s) URL on another host than the page, formMethod only when "get" is written explicitly.
+ */
+export function computeFormTarget(el: Element, pageUrl?: string): { formActionHost?: string; formMethod?: 'get' } {
+  const form = typeof el.closest === 'function' ? el.closest('form') : null;
+  if (!form) return {};
+  const out: { formActionHost?: string; formMethod?: 'get' } = {};
+  const action = clean(el.getAttribute('formaction')) || clean(form.getAttribute('action'));
+  if (action) {
+    try {
+      const base = new URL(pageUrl || 'https://localhost/');
+      const url = new URL(action, base);
+      if ((url.protocol === 'http:' || url.protocol === 'https:') && url.hostname.toLowerCase() !== base.hostname.toLowerCase()) {
+        out.formActionHost = url.hostname.toLowerCase();
+      }
+    } catch {
+      // An action that is no URL sends nowhere else.
+    }
+  }
+  const method = (clean(el.getAttribute('formmethod')) || clean(form.getAttribute('method'))).toLowerCase();
+  if (method === 'get') out.formMethod = 'get';
+  return out;
+}
+
+/**
+ * The accessible name of a control, roughly as a screen reader reads it: aria-labelledby, aria-label, the value of an
+ * input button, image alt (its own or, with no text, of its images), and title only when nothing else names it.
+ */
+export function computeAccessibleName(el: Element, tagName: string, type: string, text: string): string {
+  const labelledBy = clean(el.getAttribute('aria-labelledby'));
+  if (labelledBy) {
+    const doc = (el as any).ownerDocument || (typeof document !== 'undefined' ? document : null);
+    const parts = labelledBy.split(' ').map((id) => clean(doc && typeof doc.getElementById === 'function' ? doc.getElementById(id)?.textContent : ''));
+    const joined = parts.filter(Boolean).join(' ');
+    if (joined) return joined;
+  }
+  const ariaLabel = clean(el.getAttribute('aria-label'));
+  if (ariaLabel) return ariaLabel;
+  const t = (type || '').toLowerCase();
+  if (tagName === 'input' && (t === 'submit' || t === 'button' || t === 'reset')) {
+    const value = clean((el as HTMLInputElement).value) || clean(el.getAttribute('value'));
+    if (value) return value;
+  }
+  if ((tagName === 'input' && t === 'image') || tagName === 'img') {
+    const alt = clean(el.getAttribute('alt'));
+    if (alt) return alt;
+  }
+  if (!text && typeof (el as any).querySelectorAll === 'function') {
+    const alts = Array.from((el as any).querySelectorAll('img[alt]') as ArrayLike<Element>).map((img) => clean(img.getAttribute('alt'))).filter(Boolean);
+    if (alts.length) return alts.join(' ');
+  }
+  if (text) return text;
+  return clean(el.getAttribute('title'));
+}
+
+/**
+ * The label the risk gate reads: the visible text and the accessible name, each once. Undefined when that says no
+ * more than the model-facing label, so ordinary elements carry no extra field.
+ */
+export function computeGateLabel(el: Element, tagName: string, type: string, text: string, label: string): string | undefined {
+  const parts: string[] = [];
+  for (const part of [text, computeAccessibleName(el, tagName, type, text)]) {
+    const c = clean(part).slice(0, 120);
+    if (c && !parts.some((p) => p.toLowerCase() === c.toLowerCase())) parts.push(c);
+  }
+  const gate = parts.join(' | ');
+  return gate && gate !== label ? gate : undefined;
+}
+
+/**
+ * The risk facts of one element: what elementInfo holds for it.
+ */
+export function computeElementInfo(el: Element, labelText: string, text: string, win?: Window | null): ElementInfoRecord {
+  const tagName = el.tagName.toLowerCase();
+  const type = el.getAttribute('type') || '';
+  const pageUrl = win && win.location ? win.location.href : undefined;
+  const info: ElementInfoRecord = {
+    role: computeRole(el, tagName, type),
+    label: labelText,
+    formKind: computeFormKind(el),
+    fieldKind: computeFieldKind(el, tagName, type),
+    hrefDomain: computeHrefDomain(el, tagName, pageUrl)
+  };
+  const gateLabel = computeGateLabel(el, tagName, type, text, labelText);
+  if (gateLabel) info.gateLabel = gateLabel;
+  if (isSubmitControl(el, tagName, type)) info.submitControl = true;
+  Object.assign(info, computeFormTarget(el, pageUrl));
+  return info;
+}
+
+/**
+ * The element that has focus, which is what press_key acts on, as risk facts. Null when nothing (or only the page
+ * itself) has focus. Follows focus into open shadow roots. A focused frame reports role "iframe" (its document cannot be
+ * read from here) and a focus that cannot be read reports role "unknown"; the risk gate treats both as unknown.
+ */
+export function getFocusedElementInfo(
+  doc: Document | null | undefined = typeof document !== 'undefined' ? document : null,
+  win: Window | null | undefined = typeof window !== 'undefined' ? window : null
+): ElementInfoRecord | null {
+  try {
+    let active: any = doc ? doc.activeElement : null;
+    while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;
+    if (!active || typeof active.tagName !== 'string' || typeof active.getAttribute !== 'function') return null;
+    const tagName = active.tagName.toLowerCase();
+    if (tagName === 'body' || tagName === 'html' || active === (doc && doc.body)) return null;
+    const text = clean(active.innerText || active.textContent).slice(0, 60);
+    const label = text || clean(active.getAttribute('aria-label')) || clean(active.getAttribute('placeholder')) || 'element';
+    if (tagName === 'iframe' || tagName === 'frame' || tagName === 'object' || tagName === 'embed') {
+      return { role: 'iframe', label };
+    }
+    return computeElementInfo(active as Element, label, text, win);
+  } catch {
+    // Something has focus but it cannot be read: say so, the risk gate treats it as unknown.
+    return { role: 'unknown', label: 'element' };
+  }
+}
+
 /**
  * Extract destination domain for links.
  */
@@ -158,7 +301,6 @@ export function getElementSummary(
     : '';
 
   const fieldKind = computeFieldKind(el, tagName, type);
-  const formKind = computeFormKind(el);
   const hrefDomain = computeHrefDomain(el, tagName, win && win.location ? win.location.href : undefined);
   const isForbidden = fieldKind === 'password' || fieldKind === 'cc' || fieldKind === 'otp';
 
@@ -204,13 +346,7 @@ export function getElementSummary(
     }
   };
 
-  const info: ElementInfoRecord = {
-    role,
-    label: labelText,
-    formKind,
-    fieldKind,
-    hrefDomain
-  };
+  const info = computeElementInfo(el, labelText, text, win);
 
   const formatted = `[${id}] ${tagName}${type ? `[${type}]` : ''} "${labelText}"${extraAttrs ? ` (${extraAttrs.trim()})` : ''}${inViewport ? '' : ' [off-screen]'}`;
 

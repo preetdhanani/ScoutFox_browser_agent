@@ -52,7 +52,8 @@
     "3": {
       "role": "button",
       "label": "Suchen",
-      "formKind": "search"
+      "formKind": "search",
+      "submitControl": true
     },
     "4": {
       "role": "button",
@@ -99,5 +100,6 @@
       "hrefDomain": "127.0.0.1"
     }
   },
+  "focused": null,
   "pageText": "Suchergebnisse für \"framework laptop 16\"\n6 Treffer\nSortieren: Relevanz\nNur Laptops\nAnzeige\nGaming-Laptops bis zu 50% reduziert\nFramework Laptop 13 DIY Edition (Intel Core Ultra)\nNotebook, 13,5 Zoll, 9 Angebote, ab 1.049,00 EUR\nFramework Laptop 16 DIY Edition (AMD Ryzen 7040)\nNotebook, 16 Zoll, 4 Angebote, ab 1.379,00 EUR\nFramework Laptop 16 Grafikmodul AMD Radeon RX 7700S\nZubehör, 3 Angebote, ab 449,00 EUR\nFramework Laptop 16 Tastatur-Modul (Deutsch)\nZubehör, 2 Angebote, ab 99,00 EUR\nFramework Laptop 16 Netzteil 180 W\nZubehör, 5 Angebote, ab 79,00 EUR\nWeiter"
 }

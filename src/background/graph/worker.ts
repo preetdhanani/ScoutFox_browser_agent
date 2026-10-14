@@ -414,6 +414,7 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
     shownRefs: snapshot.shownRefs ?? snapshot.refs ?? [],
     elementsText: snapshot.elementsText ?? '',
     elementInfo: snapshot.elementInfo ?? {},
+    ...(snapshot.focused !== undefined ? { focused: snapshot.focused } : {}),
     pageText,
     verdict,
     verdictReason: verdict !== 'ok' ? `Page classified as ${verdict}` : null,
@@ -1166,6 +1167,8 @@ const riskNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'risk
     // Batch steps resolve their element per step against the page snapshot
     // (BUG-19: without this, a browser_batch bypassed the whole risk gate).
     resolveElementInfo: (id) => state.page?.elementInfo?.[id] ?? null,
+    // press_key acts on the focused element; undefined (not reported) makes an Enter fail closed.
+    focusedElementInfo: state.page?.focused,
   });
   const signature = `${action.action}|${action.element_id ?? ''}|${action.url ?? ''}`;
 
