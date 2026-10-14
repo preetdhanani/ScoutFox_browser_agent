@@ -1303,7 +1303,14 @@ const finalizeNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator
   await runtime.browser.cdp.detachAll().catch(() => {});
 
   if (state.runStats) {
-    Logger.info('Orchestrator', `[RUN_STATS] Task completed: level=${state.runStats.level}, steps=${state.runStats.stepsUsed}, sitesDone=${state.runStats.sitesDone}, sitesPartial=${state.runStats.sitesPartial}, elapsed=${state.runStats.elapsedMs}ms`);
+    // The words say how the run really ended (a partial or blocked run used to log "Task completed"); the tag and the
+    // fields after the colon stay the same for log parsers.
+    const outcome = state.ctl?.stopRequested || state.endReason === 'stopped'
+      ? 'Task stopped'
+      : (state.endReason === 'all_subgoals_done' || state.endReason === 'goal_achieved') && state.finalAnswer?.partial !== true
+        ? 'Task finished'
+        : `Task ended partial (${state.endReason ?? 'unknown'})`;
+    Logger.info('Orchestrator', `[RUN_STATS] ${outcome}: level=${state.runStats.level}, steps=${state.runStats.stepsUsed}, sitesDone=${state.runStats.sitesDone}, sitesPartial=${state.runStats.sitesPartial}, elapsed=${state.runStats.elapsedMs}ms`);
   }
 
   const runStatus = state.ctl?.stopRequested ? 'stopped' : 'idle';

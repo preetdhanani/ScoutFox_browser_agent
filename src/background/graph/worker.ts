@@ -1649,6 +1649,119 @@ function emptyAnswerRound(siteRun: NonNullable<WorkerStateT['siteRun']>, mode: s
   };
 }
 
+/**
+ * The finish pipeline for an answer: audit it against the pages read, ask the finish policy when it is not verified
+ * (with the send-back counter and the clamps), then end the site with the answer as it is, annotated or replaced, and
+ * the audit record on its finalAnswer - or refuse it with a send-back. Both ways an answer site can end go through
+ * here: `finish` (answer mode) and `subgoal_done` (browse mode, the summary is the answer). Before, subgoal_done stored
+ * its summary unaudited and the panel showed a summary with a number no page showed as a confirmed "Done".
+ *
+ * `answer` is already prepared (prepareAnswer) and not empty. `action` is the model's reply: its autoWrapped or
+ * unconfirmed flag turns off the send-back and marks the answer unconfirmed. A send-back keeps the reply as
+ * lastRefusedFinish with the answer under `answer`, which compile reads when the run hits the step cap.
+ */
+function finishThroughAudit(
+  state: WorkerStateT,
+  runtime: ReturnType<typeof getRuntime>,
+  siteRun: NonNullable<WorkerStateT['siteRun']>,
+  siteIn: NonNullable<WorkerStateT['siteIn']>,
+  answer: string,
+  action: any
+): Partial<WorkerUpdate> {
+  const refusedAction = action.action === 'finish' ? action : { ...action, answer };
+  const ledger = workerLedger(state);
+
+  const audit = auditAnswer({
+    goal: siteIn.task || '',
+    answer,
+    ledger,
+    planTexts: siteIn.planTexts ?? [],
+  });
+
+  const sendBacks = siteRun.finishSendBacks ?? 0;
+  const auditRec = auditRecordOf(audit, sendBacks);
+  Logger.info(
+    'Worker',
+    `[FINISH_AUDIT] verdict=${audit.verdict} lies=${audit.lies} gaps=${audit.gaps} softs=${audit.softs}`,
+    auditRec.notes.length > 0 ? auditRec.notes.map((n: any) => ({ code: n.code, severity: n.severity, text: n.text })) : null
+  );
+
+  const updatedUsed = (siteRun.used ?? 0) + 1;
+
+  if (audit.verdict === 'verified') {
+    return {
+      siteRun: {
+        ...siteRun,
+        used: updatedUsed,
+        criteriaMet: true,
+        exit: { status: 'done', reason: answer || 'Goal achieved' },
+        finalAnswer: { text: answer, unconfirmed: false, table: null, partial: false, audit: auditRec },
+        lastRefusedFinish: undefined,
+      },
+    };
+  }
+
+  const totalHardCap = (state as any).limits?.maxSteps ?? (siteIn.limits as any)?.maxSteps ?? 12;
+  const currentTotalSteps = (siteIn.stepBase ?? 0) + updatedUsed;
+  const stepsLeft = Math.max(0, totalHardCap - currentTotalSteps);
+  const ctx = gateContextOf(audit, sendBacks, stepsLeft);
+  let noSendBack: string | undefined;
+  if (action.autoWrapped || (action as any).unconfirmed) noSendBack = NO_SEND_BACK_PLAIN_TEXT;
+  else if (sendBacks >= 1 && answerAcknowledgesEveryGap(answer, audit)) noSendBack = NO_SEND_BACK_ACKNOWLEDGED;
+
+  const finishPolicy = runtime.finishPolicy ?? decideOnFailedAudit;
+  const resolved = resolveGateDecision(finishPolicy, ctx, { noSendBack });
+  if (resolved.clamped) {
+    const clampLog = gateClampLog(resolved, { sendBacks, verdict: audit.verdict });
+    if (clampLog) Logger[clampLog.level === 'warn' ? 'warn' : 'info']('Worker', clampLog.message);
+  }
+
+  if (resolved.decision === 'send_back') {
+    const message = formatSendBack(audit);
+    Logger.info('Worker', `[FINISH_SENT_BACK] Send-back #${sendBacks + 1}: ${message.replace(/\n+/g, ' ')}`);
+    const execResultFailure: HistoryEntry = {
+      type: 'execution_result',
+      step: updatedUsed,
+      success: false,
+      error: message,
+      finishRefused: true,
+    };
+    return {
+      siteRun: {
+        ...siteRun,
+        used: updatedUsed,
+        finishSendBacks: sendBacks + 1,
+        lastRefusedFinish: refusedAction,
+      },
+      pendingCorrection: message,
+      history: [execResultFailure],
+    };
+  }
+
+  // annotate or replace
+  let finalAnswerText = answer;
+  if (resolved.decision === 'annotate') {
+    finalAnswerText = annotateAnswer(answer, withoutAcknowledgedGaps(answer, audit));
+    const cutLinks = audit.notes?.some((n: any) => n.code === 'fabricated_url');
+    Logger.info('Worker', `[FINISH_ANNOTATED] Finished with the model's answer marked ${audit.verdict}. ${finalAnswerText === answer ? 'The text is unchanged: it already says which sites were not checked.' : `${cutLinks ? 'Links that were never opened were cut out. ' : ''}A warning line and a verification section were added.`}`);
+  } else if (resolved.decision === 'replace') {
+    finalAnswerText = buildEvidenceReport(audit);
+    Logger.info('Worker', '[FINISH_REPLACED] Model answer replaced with code-generated evidence report.');
+  }
+
+  const isUnconfirmed = Boolean(action.autoWrapped || (action as any).unconfirmed);
+  return {
+    siteRun: {
+      ...siteRun,
+      used: updatedUsed,
+      criteriaMet: true,
+      exit: { status: 'done', reason: finalAnswerText },
+      finalAnswer: { text: finalAnswerText, unconfirmed: isUnconfirmed, table: null, partial: false, audit: auditRec },
+      lastRefusedFinish: undefined,
+    },
+  };
+}
+
 const recordNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'record', (state, config) => {
   const runtime = getRuntime(config);
   if (state.lastDecision?.kind !== 'state') return {};
@@ -1664,97 +1777,7 @@ const recordNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 're
     const answer = prepareAnswer(rawAnswer);
     // An empty answer on an answer site is a barren round, decided before the audit looks at it.
     if (isAnswerSite(siteIn) && answer.trim() === '') return emptyAnswerRound(siteRun, siteRun.mode ?? 'browse', 'finish');
-    const ledger = workerLedger(state);
-
-    const audit = auditAnswer({
-      goal: siteIn.task || '',
-      answer,
-      ledger,
-      planTexts: siteIn.planTexts ?? [],
-    });
-
-    const sendBacks = siteRun.finishSendBacks ?? 0;
-    const auditRec = auditRecordOf(audit, sendBacks);
-    Logger.info(
-      'Worker',
-      `[FINISH_AUDIT] verdict=${audit.verdict} lies=${audit.lies} gaps=${audit.gaps} softs=${audit.softs}`,
-      auditRec.notes.length > 0 ? auditRec.notes.map((n: any) => ({ code: n.code, severity: n.severity, text: n.text })) : null
-    );
-
-    const updatedUsed = (siteRun.used ?? 0) + 1;
-
-    if (audit.verdict === 'verified') {
-      return {
-        siteRun: {
-          ...siteRun,
-          used: updatedUsed,
-          criteriaMet: true,
-          exit: { status: 'done', reason: answer || 'Goal achieved' },
-          finalAnswer: { text: answer, unconfirmed: false, table: null, partial: false, audit: auditRec },
-          lastRefusedFinish: undefined,
-        },
-      };
-    }
-
-    const totalHardCap = (state as any).limits?.maxSteps ?? (siteIn.limits as any)?.maxSteps ?? 12;
-    const currentTotalSteps = (siteIn.stepBase ?? 0) + updatedUsed;
-    const stepsLeft = Math.max(0, totalHardCap - currentTotalSteps);
-    const ctx = gateContextOf(audit, sendBacks, stepsLeft);
-    let noSendBack: string | undefined;
-    if (action.autoWrapped || (action as any).unconfirmed) noSendBack = NO_SEND_BACK_PLAIN_TEXT;
-    else if (sendBacks >= 1 && answerAcknowledgesEveryGap(answer, audit)) noSendBack = NO_SEND_BACK_ACKNOWLEDGED;
-
-    const finishPolicy = runtime.finishPolicy ?? decideOnFailedAudit;
-    const resolved = resolveGateDecision(finishPolicy, ctx, { noSendBack });
-    if (resolved.clamped) {
-      const clampLog = gateClampLog(resolved, { sendBacks, verdict: audit.verdict });
-      if (clampLog) Logger[clampLog.level === 'warn' ? 'warn' : 'info']('Worker', clampLog.message);
-    }
-
-    if (resolved.decision === 'send_back') {
-      const message = formatSendBack(audit);
-      Logger.info('Worker', `[FINISH_SENT_BACK] Send-back #${sendBacks + 1}: ${message.replace(/\n+/g, ' ')}`);
-      const execResultFailure: HistoryEntry = {
-        type: 'execution_result',
-        step: updatedUsed,
-        success: false,
-        error: message,
-        finishRefused: true,
-      };
-      return {
-        siteRun: {
-          ...siteRun,
-          used: updatedUsed,
-          finishSendBacks: sendBacks + 1,
-          lastRefusedFinish: action,
-        },
-        pendingCorrection: message,
-        history: [execResultFailure],
-      };
-    }
-
-    // annotate or replace
-    let finalAnswerText = answer;
-    if (resolved.decision === 'annotate') {
-      finalAnswerText = annotateAnswer(answer, withoutAcknowledgedGaps(answer, audit));
-      const cutLinks = audit.notes?.some((n: any) => n.code === 'fabricated_url');
-      Logger.info('Worker', `[FINISH_ANNOTATED] Finished with the model's answer marked ${audit.verdict}. ${finalAnswerText === answer ? 'The text is unchanged: it already says which sites were not checked.' : `${cutLinks ? 'Links that were never opened were cut out. ' : ''}A warning line and a verification section were added.`}`);
-    } else if (resolved.decision === 'replace') {
-      finalAnswerText = buildEvidenceReport(audit);
-      Logger.info('Worker', '[FINISH_REPLACED] Model answer replaced with code-generated evidence report.');
-    }
-
-    const isUnconfirmed = Boolean(action.autoWrapped || (action as any).unconfirmed);
-    return {
-      siteRun: {
-        ...siteRun,
-        used: updatedUsed,
-        criteriaMet: true,
-        exit: { status: 'done', reason: finalAnswerText },
-        finalAnswer: { text: finalAnswerText, unconfirmed: isUnconfirmed, table: null, partial: false, audit: auditRec },
-        lastRefusedFinish: undefined,
-      },
-    };
+    return finishThroughAudit(state, runtime, siteRun, siteIn, answer, action);
   }
 
   // 2. record_finding
@@ -1916,15 +1939,19 @@ const recordNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 're
     if (isAnswerSite(siteIn) && !prepareAnswer(action.summary).trim() && !prepareAnswer(action.evidence).trim()) {
       return emptyAnswerRound(siteRun, siteRun.mode ?? 'browse', 'subgoal_done');
     }
+    // An answer site ends with subgoal_done; its summary IS the answer the user asked for (the evidence when there is
+    // no summary). It goes through the same audit, finish policy and send-back counter as a finish, and ends as the
+    // site's finalAnswer with the audit record, or compile has nothing to show and the panel displays
+    // "(The model did not provide an answer.)".
+    if (isAnswerSite(siteIn)) {
+      const summary = prepareAnswer(action.summary).trim();
+      return finishThroughAudit(state, runtime, siteRun, siteIn, summary || prepareAnswer(action.evidence).trim(), action);
+    }
     const criteriaRes = evaluateSiteCriteria(siteIn.site, siteRun.findings ?? [], {
       url: page.url,
       pageText: page.pageText,
       elementTexts: [page.elementsText]
     });
-    // An answer site ends with subgoal_done; its summary IS the answer the user asked for. Store it
-    // as the site's finalAnswer, or compile has nothing to show and the panel displays
-    // "(The model did not provide an answer.)".
-    const answerSite = isAnswerSite(siteIn);
     const summaryText = coerceAnswerText(action.summary).trim() || coerceAnswerText(action.evidence).trim();
     // A collect site that ends with a summary but nothing recorded ("Search Google for X" after the
     // results page loaded) used to throw the summary away: no findings, no finalAnswer, and the card
@@ -1932,7 +1959,7 @@ const recordNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 're
     // summary is kept as the site's summaryReport, which compile shows when there is no real answer
     // and no table. It must NOT become a finalAnswer: summaryRouter reads finalAnswer as "the goal
     // is achieved" and would skip every remaining site of the plan.
-    const collectSummary = !answerSite && Boolean(summaryText) && (siteRun.findings ?? []).length === 0
+    const collectSummary = Boolean(summaryText) && (siteRun.findings ?? []).length === 0
       ? summaryText
       : undefined;
     return {
@@ -1940,9 +1967,6 @@ const recordNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 're
         ...siteRun,
         used: (siteRun.used ?? 0) + 1,
         criteriaMet: criteriaRes.met,
-        ...(answerSite && summaryText
-          ? { finalAnswer: { text: summaryText, unconfirmed: false, table: null, partial: false } }
-          : {}),
         ...(collectSummary ? { summaryReport: collectSummary } : {}),
         exit: { status: criteriaRes.status, reason: action.summary || criteriaRes.reason }
       }

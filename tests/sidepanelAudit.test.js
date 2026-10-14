@@ -547,6 +547,18 @@ test('the other action rows are what they were, and a finish that ended the turn
   assert.equal(describeAction({ action: 'finish' }, { success: true }).text, 'Gave the final answer');
 });
 
+test('a record_finding row is readable: the field and value it saved, escaped, not the raw label "record_finding"', () => {
+  const one = describeAction({ action: 'record_finding', field: 'price', value: '1.399,00 EUR' }, { success: true });
+  assert.equal(one.text, 'Saved <em>price</em>: <em>1.399,00 EUR</em>');
+  assert.ok(one.icon && one.icon.startsWith('<svg'), 'an existing icon, not the fallback dot');
+  const many = describeAction({ action: 'record_finding', values: { price: '9 EUR', shipping: 'free' } }, null);
+  assert.equal(many.text, 'Saved <em>price</em>, <em>shipping</em>');
+  assert.equal(describeAction({ action: 'record_finding' }, null).text, 'Saved a finding');
+  const xss = describeAction({ action: 'record_finding', field: XSS, value: XSS }, null).text;
+  assert.ok(!xss.includes('<img'), 'a model-written field or value never reaches the page as markup');
+  assert.ok(xss.includes('&lt;img'));
+});
+
 test('a refused finish followed by the accepted one: one warning row and one settled row', () => {
   const history = [goal('g'), finishAction(), refusedResult(SEND_BACK), finishAction(), { type: 'finish', answer: 'Honest answer.', audit: PARTIAL }];
   const html = renderTurns(history, 'idle', [], '', '');

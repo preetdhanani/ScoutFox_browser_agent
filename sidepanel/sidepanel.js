@@ -1677,6 +1677,15 @@ function describeAction(action, outcome) {
       return outcome && outcome.finishRefused
         ? { icon: ICONS.warning, text: 'Finish not accepted', detail: firstSentence(outcome.error) }
         : { icon: ICONS.complete, text: 'Gave the final answer' };
+    case 'record_finding': {
+      // The model's own words (field names and values): quote() escapes them.
+      if (action.field) {
+        const value = action.value == null ? '' : (typeof action.value === 'string' ? action.value : JSON.stringify(action.value));
+        return { icon: ICONS.doc, text: value ? `Saved ${quote(action.field)}: ${quote(value)}` : `Saved ${quote(action.field)}` };
+      }
+      const fields = action.values && typeof action.values === 'object' ? Object.keys(action.values) : [];
+      return { icon: ICONS.doc, text: fields.length ? `Saved ${fields.map(quote).join(', ')}` : 'Saved a finding' };
+    }
     default:              return { icon: ICONS.dot, text: escapeHtml(action.action || 'Acted') };
   }
 }
