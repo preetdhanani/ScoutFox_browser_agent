@@ -666,7 +666,12 @@ export class AgentRunner {
     this.pauseReason = null;
     this.notifyStateChange();
 
-    await this.drive(new Command({ resume: { kind: 'approve', ...decision } }));
+    // Deny on a revision hold (the add-domain card) is not an approval: the hold node turns it
+    // into a continue on the existing plan without the added domain.
+    const resume = decision?.decision === 'deny'
+      ? { kind: 'deny_add' }
+      : { kind: 'approve', ...decision };
+    await this.drive(new Command({ resume }));
   }
 
   async confirmAction(decision: 'approve' | 'reject', remember?: 'site') {
@@ -1042,10 +1047,11 @@ export class AgentRunner {
    *   - a Pause that is pending (`pauseRequested`): answering the hold again and again would loop for ever (the hold node
    *     shows the plan hold for every orchestrator pause, and the scheduler routes a pending pause back to it), with the
    *     status 'running' and Resume refused. The run is paused, for the user's reason.
-   *   - a worker restart (`restoring`): it must not start a graph drive from the constructor, and the command would be
-   *     dropped anyway. A restored PLAN hold has no card in the product, so it is left paused with the reason
-   *     'worker_restart', and the user's Resume continues it (the hold node reads a plain resume on a plan hold as the
-   *     approval). A restored confirmation is never auto-approved: it keeps its card, and the user decides.
+    *   - a worker restart (`restoring`): it must not start a graph drive from the constructor, and the command would be
+    *     dropped anyway. A restored FIRST plan hold has no card in the product, so it is left paused with the reason
+    *     'worker_restart', and the user's Resume continues it (the hold node reads a plain resume on a plan hold as the
+    *     approval). A restored revision hold keeps its add-domain card, and a restored confirmation is never
+    *     auto-approved: the user decides.
    */
   private async deriveStatus(snapshot: StateSnapshot, opts: { restoring?: boolean } = {}): Promise<Command | null> {
     if (this.runtime.control.stopRequested) {
@@ -1060,9 +1066,19 @@ export class AgentRunner {
     if (interruptedTask) {
       const interrupt = interruptedTask.interrupts[0]?.value as any;
 
+      // approve_plan is answered by the runner only for the FIRST plan (version 1, no planPrev):
+      // a revision hold grows the plan's scope, and a domain the model added on its own must be
+      // approved by the user, never by the runner (replan-domain-auto-approved).
+      const approvalPlanMeta = interrupt?.kind === 'approve_plan'
+        ? (interrupt.planMeta ?? snapshot.values?.planMeta ?? snapshot.values?.plan)
+        : null;
+      const isFirstPlan = !approvalPlanMeta
+        || approvalPlanMeta.version === 1
+        || snapshot.values?.planPrev == null;
+
       const pausePending = this.runtime.control.pauseRequested;
       const autoAnswered = !pausePending && (
-        (interrupt?.kind === 'approve_plan' && this.autoApprovePlan) ||
+        (interrupt?.kind === 'approve_plan' && this.autoApprovePlan && isFirstPlan) ||
         (interrupt?.kind === 'confirm_action' && this.autoConfirmAction && !opts.restoring)
       );
       if (autoAnswered) {
@@ -1085,12 +1101,20 @@ export class AgentRunner {
         // The runner would have approved this plan itself: the only reason it is paused is the user's pending Pause.
         if (this.autoApprovePlan && pausePending) this.pauseReason = 'user';
         const rootValues = snapshot.values ?? {};
+        const planMeta = interrupt.planMeta ?? rootValues.planMeta ?? rootValues.plan;
+        const approvedDomains: string[] = rootValues.approvedDomains ?? [];
+        // The domains the revision adds over the approved set: what the add-domain card asks about.
+        const addedDomains = (planMeta?.sites ?? [])
+          .map((s: any) => s?.domain)
+          .filter((d: any) => d && d !== 'this_page' && !approvedDomains.includes(d));
         this.pendingApproval = {
           kind: 'approve_plan',
-          planMeta: interrupt.planMeta ?? rootValues.planMeta ?? rootValues.plan,
+          planMeta,
           budget: rootValues.budget,
           effortProfile: rootValues.effortProfile ?? this.effortProfile,
           budgetEstimate: interrupt.budgetEstimate,
+          addedDomains,
+          replanReason: rootValues.replan?.lastReason ?? null,
         };
       } else if (interrupt?.kind === 'ask_user') {
         this.pendingQuestion = interrupt.question ?? 'The agent needs more information.';

@@ -201,6 +201,7 @@ export interface ReflectResult {
   by: 'llm' | 'fast_path' | 'code';
   dropSites?: string[];
   addSites?: SiteSpec[];
+  unapprovedAddDomains?: string[];       // added domains grounded neither in the task nor in a read page: they need the user's approval
 }
 
 // ---------- findings with provenance ----------

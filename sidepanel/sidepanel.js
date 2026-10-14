@@ -11,6 +11,7 @@ import {
   renderActionConfirmationCard,
   renderChallengeHelpCard,
   renderContinueBudgetCard,
+  renderReplanApprovalCard,
   renderProvenanceFindingsTable
 } from './cards.js';
 import { updateLiveGraphView } from './graphStrip.js';
@@ -2126,8 +2127,15 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
       : '';
 
     // Plans are approved automatically by the runner (background.ts passes autoApprove:true),
-    // so a plan hold is never surfaced here. The old Plan Approval card - and its in-card effort
-    // picker - is gone from the product; effort is resolved by the engine's own heuristic.
+    // so a first-plan hold is never surfaced here. The old Plan Approval card - and its in-card
+    // effort picker - is gone from the product; effort is resolved by the engine's own heuristic.
+    // A plan REVISION that adds a domain is different: the runner never answers that hold itself,
+    // so the add-domain card is the one plan card the user still sees.
+    const replanPrompt = (isLive && status === 'paused' && pendingApproval
+      && (pendingApproval.planMeta?.version ?? 1) > 1
+      && (pendingApproval.addedDomains?.length ?? 0) > 0)
+      ? renderReplanApprovalCard(pendingApproval)
+      : '';
 
     const confirmPrompt = (isLive && status === 'paused' && pendingConfirm)
       ? renderActionConfirmationCard(pendingConfirm)
@@ -2152,6 +2160,7 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
       ${sessionDivider}
       ${turn.goal ? `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(turn.goal)}</div>` : ''}
       ${confirmPrompt ? confirmPrompt : ''}
+      ${replanPrompt ? replanPrompt : ''}
       ${challengePrompt ? challengePrompt : ''}
       ${budgetPrompt ? budgetPrompt : ''}
       ${count || turn.entries.length ? `<div class="act-group${open ? ' open' : ''}">
@@ -2224,8 +2233,35 @@ function initTimelineInteraction() {
     const sendBtn = e.target.closest('.ask-user-send');
     if (sendBtn) { sendAnswer(sendBtn.closest('.ask-user-prompt')); return; }
 
-    // The Plan Approval card (with its effort chips) is never rendered - plans are approved
-    // automatically - so there is no click handling for it here.
+    // The old Plan Approval card (with its effort chips) is still not rendered - first plans are
+    // approved automatically. Only the revision add-domain card above is rendered now.
+
+    // The add-domain card of a plan revision: Allow runs the new site, Deny continues without it.
+    const allowReplanBtn = e.target.closest('.btn-approve-replan');
+    if (allowReplanBtn) {
+      allowReplanBtn.disabled = true;
+      sendBgMessage({ action: 'APPROVE_PLAN', payload: { decision: 'approve' } }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          allowReplanBtn.disabled = false;
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to approve the new domain.');
+        }
+      });
+      return;
+    }
+
+    const denyReplanBtn = e.target.closest('.btn-deny-replan');
+    if (denyReplanBtn) {
+      denyReplanBtn.disabled = true;
+      sendBgMessage({ action: 'APPROVE_PLAN', payload: { decision: 'deny' } }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          denyReplanBtn.disabled = false;
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to deny the new domain.');
+        }
+      });
+      return;
+    }
 
     const allowBtn = e.target.closest('.btn-confirm-allow');
     if (allowBtn) {

@@ -8,6 +8,8 @@ import {
   parseReflectResponse,
   isValidExternalUrl,
   getHighestSiteIndex,
+  buildGroundingText,
+  domainIsGrounded,
 } from '../../src/background/agent/reflectPrompt.ts';
 import type { SiteSpec } from '../../src/background/graph/state.ts';
 
@@ -188,4 +190,49 @@ test('reflectPrompt: parseReflectResponse clamps site additions to maxSites', ()
   const replan = parseReflectResponse(raw, mockSites, 3);
   assert.equal(replan.addSites?.length, 1);
   assert.equal(replan.addSites?.[0].domain, 'one.test');
+});
+
+test('reflectPrompt: grounding marks added domains that neither the task nor a read page mentions', () => {
+  const grounding = buildGroundingText({
+    task: 'Compare laptop prices',
+    visited: [{ url: 'https://frame.work/products', domain: 'frame.work', title: 'Framework Store' }],
+    findings: [{ valueRaw: '1.200 EUR', evidence: { snippet: 'costs 1.200 EUR at frame.work' } }],
+  });
+  const replan = parseReflectResponse(JSON.stringify({
+    decision: 'replan',
+    reason: 'Add another source',
+    add_sites: [
+      { name: 'Alt', domain: 'altstore.de' },
+      { name: 'Named', domain: 'frame.work' },
+    ],
+  }), mockSites, 4, grounding);
+  assert.deepEqual(replan.unapprovedAddDomains, ['altstore.de']);
+  assert.equal(replan.addSites?.length, 2, 'the ungrounded site is still planned, it only needs approval');
+});
+
+test('reflectPrompt: a domain named in the task text is grounded and needs no approval', () => {
+  const grounding = buildGroundingText({ task: 'Compare laptop prices on altstore.de' });
+  const replan = parseReflectResponse(JSON.stringify({
+    decision: 'replan',
+    reason: 'Add the named shop',
+    add_sites: [{ name: 'Alt', domain: 'altstore.de' }],
+  }), mockSites, 4, grounding);
+  assert.deepEqual(replan.unapprovedAddDomains, []);
+});
+
+test('reflectPrompt: without grounding text every added domain needs approval (fail closed)', () => {
+  const replan = parseReflectResponse(JSON.stringify({
+    decision: 'replan',
+    reason: 'Add',
+    add_sites: [{ domain: 'one.test' }],
+  }), mockSites, 4);
+  assert.deepEqual(replan.unapprovedAddDomains, ['one.test']);
+});
+
+test('reflectPrompt: domainIsGrounded is a plain case-insensitive substring check', () => {
+  assert.equal(domainIsGrounded('altstore.de', 'visit ALTSTORE.de today'), true);
+  assert.equal(domainIsGrounded('altstore.de', 'visit altstore.com instead'), false);
+  assert.equal(domainIsGrounded('altstore.de', ''), false);
+  assert.equal(domainIsGrounded('altstore.de', undefined), false);
+  assert.equal(domainIsGrounded('', 'anything'), false);
 });

@@ -7,6 +7,7 @@ import { runtimeRegistry, type RunRuntime } from '../../src/background/runner/ru
 import { SessionStorageSaver } from '../../src/background/checkpoint/SessionStorageSaver.ts';
 import { createFakeStorage } from '../helpers/fakeStorageSession.ts';
 import { previousTurnsSummary } from '../../src/background/agent/previousTurns.ts';
+import { graphRig, act, shopPages } from '../helpers/graphHarness.ts';
 
 interface MockRuntimeOptions {
   customPlan?: any;
@@ -479,5 +480,159 @@ test('orchestratorReflect: Reflect LLM failure gracefully continues existing pla
   assert.equal(step.sites?.s1?.status, 'done');
   assert.equal(step.sites?.s2?.status, 'done');
   assert.ok(step.history.some((h: any) => h.type === 'finish'));
+});
+
+// ---------------------------------------------------------------------------
+// The replan add-domain gate, driven through the REAL AgentRunner.
+//
+// A revision that adds a domain grows the agent's scope: the runner must never
+// answer that hold by itself, even with autoApprovePlan. The user gets a card
+// ("The agent wants to add <domain>: <reason>") with Allow and Deny, where Deny
+// continues the run on the existing plan without the new domain. A domain the
+// task text itself names (or a page the run read) is grounded and needs no card.
+//
+// The script: s1 (a collect site) records its price and ends with subgoal_done -
+// a finish on the first site would set the final answer and compile the run
+// before reflect ever runs. s2 (competitor.test) exists but is unreachable (a
+// 500): the site ends blocked, reflect runs, and the reflect reply replans with
+// the ungrounded altshop.test.
+// ---------------------------------------------------------------------------
+
+const ALTSHOP_PAGE = {
+  url: 'https://altshop.test/item',
+  title: 'Alt Shop Item',
+  text: ['Price: 95 USD'],
+  elements: [],
+};
+
+const TWO_SITE_PLAN_REPLY = {
+  text: JSON.stringify({
+    taskKind: 'research',
+    searchQuery: 'laptop price',
+    columns: ['price'],
+    sites: [
+      { id: 's1', name: 'Shop', domain: 'shop.test', role: 'reference', kind: 'page', goal: 'Find the price' },
+      { id: 's2', name: 'Competitor', domain: 'competitor.test', role: 'compare', kind: 'store', goal: 'Find the competitor price' },
+    ],
+  }),
+};
+
+const REPLAN_ADD_ALTSHOP = {
+  text: JSON.stringify({
+    decision: 'replan',
+    reason: 'The competitor shop is unreachable, try the alternate shop',
+    changes: 'Drop s2, add the alternate shop',
+    drop_sites: ['s2'],
+    add_sites: [
+      {
+        name: 'Alt Shop',
+        domain: 'altshop.test',
+        startUrl: 'https://altshop.test/item',
+        goal: 'Find the price on the alternate shop',
+        role: 'compare',
+        kind: 'store',
+        difficulty: 1,
+      },
+    ],
+  }),
+};
+
+/** record_finding with a page-backed value, so s1 ends done with its criteria met. */
+function recordFinding(field: string, value: string): string {
+  return JSON.stringify({ action: 'record_finding', field, value });
+}
+
+const COMPETITOR_PAGE = {
+  url: 'https://competitor.test/item',
+  title: 'Internal Server Error',
+  text: ['500 Internal Server Error - The server had an error.'],
+  elements: [],
+};
+
+function replanRigOptions() {
+  return {
+    autoApprove: true,
+    plan: TWO_SITE_PLAN_REPLY,
+    reflect: [REPLAN_ADD_ALTSHOP],
+    policy: [
+      recordFinding('price', '99 USD'),
+      act.subgoalDone('Found the price on the shop: 99 USD', 'Item 42 available for 99 USD'),
+      act.navigate('https://altshop.test/item'),
+      act.finish('The alt shop price is 95 USD.'),
+    ],
+    pages: [...shopPages(), ALTSHOP_PAGE, COMPETITOR_PAGE],
+  };
+}
+
+test('orchestratorReflect: a replan that adds a domain the task never named and no page read pauses with an approval card instead of being auto-approved', async (t) => {
+  const rig = await graphRig(replanRigOptions());
+  t.after(rig.cleanup);
+
+  await rig.start('Compare laptop prices', { effort: 'medium' });
+
+  assert.equal(rig.status(), 'paused', 'a scope-growing replan must wait for the user, not be auto-approved');
+  const approval = rig.pending().approval as any;
+  assert.ok(approval, 'the revision hold is pending as an approval card');
+  assert.equal(approval.kind, 'approve_plan');
+  assert.equal(approval.planMeta?.version, 2);
+  assert.deepEqual(approval.addedDomains, ['altshop.test']);
+  assert.match(String(approval.replanReason), /alternate shop/);
+  rig.assertClean();
+});
+
+test('orchestratorReflect: denying the add-domain card continues the run on the existing plan without the new domain', async (t) => {
+  const rig = await graphRig(replanRigOptions());
+  t.after(rig.cleanup);
+
+  await rig.start('Compare laptop prices', { effort: 'medium' });
+  assert.equal(rig.status(), 'paused');
+
+  await rig.approvePlan({ decision: 'deny' });
+
+  assert.equal(rig.status(), 'idle');
+  assert.ok(rig.finishAnswer(), 'the run finished on the existing plan');
+  assert.equal(rig.pending().approval, null);
+  const planSteps = rig.state().planSteps as Array<{ id: string; status: string }>;
+  assert.ok(!planSteps.some((s) => s.id === 's3'), 'the denied site is out of the plan');
+  assert.equal(planSteps.find((s) => s.id === 's1')?.status, 'completed');
+  assert.ok(
+    rig.history().some((h) => h.type === 'notice' && /denied/i.test(String(h.content))),
+    'the panel is told the added domain was denied',
+  );
+  assert.equal(rig.llm.callsOf('plan').length, 1, 'a deny never re-plans: the revision is applied by code, and so is the deny');
+  rig.assertClean();
+});
+
+test('orchestratorReflect: allowing the add-domain card runs the new site', async (t) => {
+  const rig = await graphRig(replanRigOptions());
+  t.after(rig.cleanup);
+
+  await rig.start('Compare laptop prices', { effort: 'medium' });
+  assert.equal(rig.status(), 'paused');
+
+  await rig.approvePlan({ decision: 'approve' });
+
+  assert.equal(rig.status(), 'idle');
+  assert.equal(rig.pending().approval, null);
+  const planSteps = rig.state().planSteps as Array<{ id: string; status: string }>;
+  assert.equal(planSteps.find((s) => s.id === 's3')?.status, 'completed', 'the allowed site ran');
+  rig.assertClean();
+});
+
+test('orchestratorReflect: a replan may add a domain the task itself names without an extra approval card', async (t) => {
+  const rig = await graphRig(replanRigOptions());
+  t.after(rig.cleanup);
+
+  const seen: string[] = [];
+  rig.runner.setStateChangeCallback((state) => { seen.push(String(state.status)); });
+
+  await rig.start('Compare laptop prices on altshop.test', { effort: 'medium' });
+
+  assert.equal(rig.status(), 'idle');
+  assert.equal(rig.pending().approval, null);
+  assert.ok(!seen.includes('paused'), `a grounded added domain never pauses the run (${[...new Set(seen)].join(', ')})`);
+  const planSteps = rig.state().planSteps as Array<{ id: string; status: string }>;
+  assert.equal(planSteps.find((s) => s.id === 's3')?.status, 'completed', 'the grounded site ran without a card');
+  rig.assertClean();
 });
 

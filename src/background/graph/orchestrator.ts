@@ -36,7 +36,7 @@ import { computeSiteBase, computeSiteAlloc, computeWorkingTotal, computeUsableBu
 import { deduplicateFindings, compileTruthTable, renderTruthTableMarkdown, isAutoValueField } from '../agent/findings.ts';
 import { buildPlanSystemPrompt, buildPlanUserMessage } from '../agent/prompts.ts';
 import { getEffortProfile, suggestEffortLevel, calculatePlanEstimate } from '../agent/profile.ts';
-import { buildReflectSystemPrompt, buildReflectUserMessage, parseReflectResponse } from '../agent/reflectPrompt.ts';
+import { buildReflectSystemPrompt, buildReflectUserMessage, buildGroundingText, parseReflectResponse } from '../agent/reflectPrompt.ts';
 import { previousTurnsSummary, lastCompletedTurn } from '../agent/previousTurns.ts';
 import { Logger } from '../../shared/logger.ts';
 import { resolveModelTier } from '../agent/tier.ts';
@@ -315,6 +315,18 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
       sitesMapUpdates[newSite.id] = { status: 'pending', criteriaMet: false };
     }
 
+    // A domain the task text names or a page the run read is grounded: register it like the
+    // initial plan registers its domains, so no approval card is needed. A domain the model
+    // invented alone stays unapproved: planRouter sends the revision to the hold and the
+    // runner shows the add-domain card (replan-domain-auto-approved).
+    const unapprovedDomains = new Set(reflect.unapprovedAddDomains ?? addSites.map((s) => s.domain));
+    const approved = new Set(state.approvedDomains ?? []);
+    for (const newSite of addSites) {
+      if (newSite.domain && newSite.domain !== 'this_page' && !unapprovedDomains.has(newSite.domain)) {
+        approved.add(newSite.domain);
+      }
+    }
+
     const newVersion = (oldMeta.version ?? 1) + 1;
     const newPlanMeta: PlanMeta = {
       ...oldMeta,
@@ -339,6 +351,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
         lastReason: reflect.reason,
       },
       sites: { $set: sitesMapUpdates },
+      approvedDomains: Array.from(approved),
       history: [noticeEntry],
       // The revision consumed the reflect decision - clear it so it can never
       // fire twice or leak into the next turn (BUG-17).
@@ -633,6 +646,38 @@ const holdNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
   }
   if (resume?.kind === 'reject') {
     return { resumeRoute: 'finalize', endReason: 'plan_rejected', pendingHold: null };
+  }
+  // Deny on a revision hold (the add-domain card): not a rejection of the whole run and not an
+  // approval - the decision becomes a continue on the existing plan without the added domain.
+  // The added sites are the plan's sites whose domain was never registered as approved.
+  if (resume?.kind === 'deny_add') {
+    const approved = new Set<string>(state.approvedDomains ?? []);
+    const deniedSites = (state.planMeta?.sites ?? []).filter(
+      (s) => s.domain && s.domain !== 'this_page' && !approved.has(s.domain)
+    );
+    const deniedIds = new Set(deniedSites.map((s) => s.id));
+    const sitesUpdates: Record<string, any> = {};
+    for (const s of deniedSites) {
+      sitesUpdates[s.id] = { status: 'skipped', criteriaMet: false, reason: 'New domain denied by user' };
+    }
+    const deniedList = deniedSites.map((s) => s.domain).join(', ');
+    const noticeEntry: HistoryEntry = {
+      type: 'notice',
+      level: 'info',
+      kind: 'replan',
+      content: deniedList
+        ? `New domain denied (${deniedList}) - continuing with the existing plan.`
+        : 'New domain denied - continuing with the existing plan.',
+    };
+    return {
+      planMeta: state.planMeta
+        ? { ...state.planMeta, sites: state.planMeta.sites.filter((s) => !deniedIds.has(s.id)) }
+        : state.planMeta,
+      sites: { $set: sitesUpdates },
+      resumeRoute: 'alloc',
+      pendingHold: null,
+      history: [noticeEntry],
+    };
   }
   if (resume?.kind === 'stop') {
     return { resumeRoute: 'finalize', endReason: 'stopped', pendingHold: null };
@@ -1082,7 +1127,20 @@ const reflectNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
       }
     );
 
-    const reflectDecision = parseReflectResponse(res.text || '', state.planMeta.sites, MAX_SITES);
+    const reflectDecision = parseReflectResponse(
+      res.text || '',
+      state.planMeta.sites,
+      MAX_SITES,
+      // What the task and the pages the run read say: an added domain grounded in it was named
+      // by the user or read off a page, one invented by the model alone needs the user's approval.
+      buildGroundingText({
+        task: state.task,
+        visited: Object.values(state.visited ?? {}),
+        findings: state.findings ?? [],
+        siteSummaries: state.siteSummaries ?? [],
+        blockedDomains: Object.keys(state.blocked ?? {}),
+      })
+    );
 
     if (reflectDecision.decision === 'replan') {
       const pendingIds = new Set(pendingSites.map((s) => s.id));

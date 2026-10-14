@@ -140,6 +140,45 @@ export function renderPlanApprovalCard(approval, planSteps = [], effortProfile =
   `;
 }
 
+/**
+ * Render the add-domain card of a plan revision (HITL interrupt: approve_plan on a revision).
+ * The runner only answers the FIRST plan itself; a revision that adds a domain grows the agent's
+ * scope, so the user decides: Allow runs the new site, Deny continues without it.
+ */
+export function renderReplanApprovalCard(approval) {
+  if (!approval) return '';
+
+  const domains = Array.isArray(approval.addedDomains) ? approval.addedDomains.filter(Boolean) : [];
+  const version = approval.planMeta?.version || 2;
+  const reason = approval.replanReason || '';
+  const domainLabel = domains.length > 0 ? domains.join(', ') : 'a new domain';
+
+  return `
+    <div class="approval-card replan-approval-card">
+      <div class="card-header">
+        <div class="card-title-group">
+          <span class="card-icon">➕</span>
+          <span class="card-title">Plan Revision</span>
+        </div>
+        <span class="version-badge">v${version}</span>
+      </div>
+
+      <div class="card-body">
+        <p class="plan-summary-lead">The agent wants to add <strong>${escapeHtml(domainLabel)}</strong>${reason ? `: ${escapeHtml(reason)}` : ''}</p>
+      </div>
+
+      <div class="card-actions">
+        <button type="button" class="btn btn-primary btn-sm btn-approve-replan">
+          Allow
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm btn-deny-replan">
+          Deny
+        </button>
+      </div>
+    </div>
+  `;
+}
+
 /** The host of a URL, or '' for one that does not parse. */
 function hostOf(url) {
   try {

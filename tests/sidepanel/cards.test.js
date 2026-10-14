@@ -4,6 +4,7 @@ import {
   escapeHtml,
   formatTime,
   renderPlanApprovalCard,
+  renderReplanApprovalCard,
   renderActionConfirmationCard,
   renderChallengeHelpCard,
   renderContinueBudgetCard,
@@ -81,6 +82,40 @@ test('cards: renderPlanApprovalCard shows revision and overbudget warning', () =
   assert.ok(html.includes('plan-overbudget-banner'), 'Should display overbudget warning');
   assert.ok(html.includes('exceeding the limit of 250 steps'), 'Should state overbudget limit');
   assert.ok(html.includes('btn-level-chip active" data-level="high"'), 'High should be active');
+});
+
+// replan-domain-auto-approved: a revision that adds a domain gets its own card.
+
+test('cards: renderReplanApprovalCard returns empty string on null', () => {
+  assert.equal(renderReplanApprovalCard(null), '');
+});
+
+test('cards: renderReplanApprovalCard names the added domain and the reason, with Allow and Deny', () => {
+  const html = renderReplanApprovalCard({
+    kind: 'approve_plan',
+    planMeta: { version: 2, sites: [{ id: 's3', domain: 'altshop.test', goal: 'Find the price' }] },
+    addedDomains: ['altshop.test'],
+    replanReason: 'The competitor shop is unreachable, try the alternate shop',
+  });
+  assert.ok(html.includes('replan-approval-card'), 'own card class');
+  assert.ok(html.includes('The agent wants to add'), 'the ticket wording');
+  assert.ok(html.includes('altshop.test'), 'the added domain');
+  assert.ok(html.includes('The competitor shop is unreachable, try the alternate shop'), 'the replan reason');
+  assert.ok(html.includes('btn-approve-replan'), 'Allow button');
+  assert.ok(html.includes('btn-deny-replan'), 'Deny button');
+  assert.ok(html.includes('Allow'), 'Allow label');
+  assert.ok(html.includes('Deny'), 'Deny label');
+});
+
+test('cards: renderReplanApprovalCard escapes the domain and reason and falls back without them', () => {
+  const html = renderReplanApprovalCard({
+    kind: 'approve_plan',
+    planMeta: { version: 2, sites: [] },
+    addedDomains: ['<script>alert(1)</script>'],
+    replanReason: '',
+  });
+  assert.ok(!html.includes('<script>alert(1)'), 'no raw markup from the domain');
+  assert.ok(html.includes('&lt;script&gt;'), 'the domain, escaped');
 });
 
 test('cards: renderActionConfirmationCard renders variants and details', () => {

@@ -32,6 +32,41 @@ export interface ReflectDecision {
   changes: string;
   dropSites?: string[];
   addSites?: SiteSpec[];
+  unapprovedAddDomains?: string[];
+}
+
+/**
+ * What the run read, as one text: the task and every page source the reflect model saw.
+ * A domain grounded in it was named by the user or read off a page, so adding it does not
+ * grow the agent's scope silently. Everything else needs the user's approval.
+ */
+export interface GroundingParts {
+  task: string;
+  visited?: Array<{ url?: string; domain?: string; title?: string }>;
+  findings?: Array<{ valueRaw?: string; evidence?: { snippet?: string } | null }>;
+  siteSummaries?: Array<{ blockers?: string[]; notes?: string }>;
+  blockedDomains?: string[];
+}
+
+export function buildGroundingText(parts: GroundingParts): string {
+  const chunks: string[] = [parts.task ?? ''];
+  for (const v of parts.visited ?? []) {
+    chunks.push(v.url ?? '', v.domain ?? '', v.title ?? '');
+  }
+  for (const f of parts.findings ?? []) {
+    chunks.push(f.valueRaw ?? '', f.evidence?.snippet ?? '');
+  }
+  for (const s of parts.siteSummaries ?? []) {
+    chunks.push(...(s.blockers ?? []), s.notes ?? '');
+  }
+  chunks.push(...(parts.blockedDomains ?? []));
+  return chunks.filter(Boolean).join('\n');
+}
+
+/** A plain case-insensitive substring check: the whole domain must appear in the text. */
+export function domainIsGrounded(domain: string, groundingText: string | undefined): boolean {
+  if (!domain || !groundingText) return false;
+  return groundingText.toLowerCase().includes(domain.toLowerCase());
 }
 
 const RESTRICTED_SCHEMES = [
@@ -133,11 +168,18 @@ export function getHighestSiteIndex(sites: SiteSpec[]): number {
 
 /**
  * Parse and sanitize the LLM's reflection response.
+ *
+ * `groundingText` is what the task and the pages the run read say (buildGroundingText). An added
+ * domain that appears nowhere in it was invented by the model alone, so it is marked as needing
+ * the user's approval: the plan keeps the site, but the domain is not registered as approved and
+ * the runner shows the add-domain card instead of answering the hold itself. Without a grounding
+ * text every added domain needs approval (fail closed).
  */
 export function parseReflectResponse(
   rawText: string,
   existingSites: SiteSpec[],
-  maxSites = 8
+  maxSites = 8,
+  groundingText?: string
 ): ReflectDecision {
   let parsed: any;
   try {
@@ -197,6 +239,7 @@ export function parseReflectResponse(
 
   let nextIndex = getHighestSiteIndex(existingSites);
   const sanitizedAddSites: SiteSpec[] = [];
+  const unapprovedAddDomains: string[] = [];
   const currentTotal = existingSites.length - validDropSites.length;
 
   for (const raw of rawAdd) {
@@ -252,6 +295,9 @@ export function parseReflectResponse(
     };
 
     sanitizedAddSites.push(newSite);
+    if (!domainIsGrounded(domain, groundingText)) {
+      unapprovedAddDomains.push(domain);
+    }
   }
 
   return {
@@ -260,5 +306,6 @@ export function parseReflectResponse(
     changes: changes || `Dropped ${validDropSites.length} site(s), added ${sanitizedAddSites.length} site(s).`,
     dropSites: validDropSites,
     addSites: sanitizedAddSites,
+    unapprovedAddDomains,
   };
 }
