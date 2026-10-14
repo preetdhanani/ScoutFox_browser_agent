@@ -8,6 +8,7 @@
     "viewportHeight": 779
   },
   "elementCount": 16,
+  "omittedCount": 0,
   "elementsText": "[1] a \"Framework\"\n[2] a \"Laptops\"\n[3] a \"Marketplace\"\n[4] a \"Support\"\n[5] input[search] \"Suche\" (placeholder=\"Suche\" label=\"Suche\")\n[6] button[button] \"Warenkorb (0)\"\n[7] button[button] \"Land: Deutschland\"\n[8] button[button] \"AMD Ryzen 7 7840HS\"\n[9] button[button] \"AMD Ryzen 9 7940HS\"\n[10] button[button] \"Ohne Grafikmodul\"\n[11] button[button] \"Mit Grafikmodul AMD Radeon RX 7700S\"\n[12] button[button] \"In den Warenkorb\"\n[13] a \"Technische Daten\" [off-screen]\n[14] a \"Versand & Rückgabe\" [off-screen]\n[15] a \"Impressum\" [off-screen]\n[16] a \"Datenschutz\" [off-screen]",
   "refs": [
     1,

@@ -152,6 +152,7 @@ function createMockRuntime(threadId: string, overrides: Partial<RunRuntime> = {}
           url: currentUrl,
           title: 'Store Product Page',
           elementCount: 20,
+          omittedCount: 0,
           interactiveHash: 'hash-interactive',
           textHash: 'hash-text',
           scrollY: 0,

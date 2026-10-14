@@ -8,6 +8,7 @@
     "viewportHeight": 779
   },
   "elementCount": 2,
+  "omittedCount": 0,
   "elementsText": "[1] input[checkbox] \"Verify you are human\" (label=\"Verify you are human\" value=\"on\")\n[2] a \"Cloudflare\"",
   "refs": [
     1,

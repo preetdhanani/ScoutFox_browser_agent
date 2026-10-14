@@ -82,3 +82,44 @@ export function findInteractiveElements(
   const candidates = Array.from(doc.querySelectorAll(INTERACTIVE_SELECTOR));
   return candidates.filter((el) => isVisible(el));
 }
+
+/**
+ * Where an element sits relative to the viewport: inside it, or how many pixels its nearest edge
+ * is away from it. The same containment test perception.ts uses for the [off-screen] marker, so
+ * the ordering and the marker never disagree. An element whose rect cannot be read counts as
+ * in-viewport, like the marker does.
+ */
+export function viewportPosition(
+  el: Element,
+  win?: Window | null
+): { inViewport: boolean; distance: number } {
+  try {
+    const rect = el.getBoundingClientRect();
+    const vw = (win && win.innerWidth) || 0;
+    const vh = (win && win.innerHeight) || 0;
+    if (rect.bottom > 0 && rect.right > 0 && rect.top < vh && rect.left < vw) {
+      return { inViewport: true, distance: 0 };
+    }
+    const distance = rect.bottom <= 0 ? -rect.bottom : rect.top - vh;
+    return { inViewport: false, distance: Number.isFinite(distance) ? distance : Number.MAX_SAFE_INTEGER };
+  } catch {
+    return { inViewport: true, distance: 0 };
+  }
+}
+
+/**
+ * The element window order: the elements inside the viewport in document order first, then the
+ * off-screen ones ordered by their distance to the viewport. The list cap cuts this order, so
+ * scrolling moves the window instead of the cap always keeping the top of the document.
+ */
+export function orderByViewport(elements: Element[], win?: Window | null): Element[] {
+  const inside: Element[] = [];
+  const outside: Array<{ el: Element; distance: number }> = [];
+  for (const el of elements) {
+    const pos = viewportPosition(el, win);
+    if (pos.inViewport) inside.push(el);
+    else outside.push({ el, distance: pos.distance });
+  }
+  outside.sort((a, b) => a.distance - b.distance);
+  return [...inside, ...outside.map((o) => o.el)];
+}

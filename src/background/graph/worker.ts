@@ -383,6 +383,7 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
     url: snapshot.url ?? '',
     title: snapshot.title ?? '',
     elementCount: snapshot.elementCount ?? snapshot.refs?.length ?? 0,
+    omittedCount: snapshot.omittedCount ?? 0,
     interactiveHash,
     textHash,
     scrollY,
@@ -396,9 +397,11 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
     const urlChanged = prevSig.url !== currentSig.url ? 'URL changed' : 'URL same';
     const countDiff = currentSig.elementCount - prevSig.elementCount;
     const elemChange = countDiff !== 0 ? `${Math.abs(countDiff)} ${countDiff > 0 ? 'new' : 'fewer'} elements` : 'same elements';
+    const omittedDiff = currentSig.omittedCount - prevSig.omittedCount;
+    const omittedChange = omittedDiff !== 0 ? `, ${Math.abs(omittedDiff)} ${omittedDiff > 0 ? 'more' : 'fewer'} not listed` : '';
     const textChanged = prevSig.textHash !== currentSig.textHash ? 'text changed' : 'text same';
     const typeChange = prevSig.pageType !== currentSig.pageType ? `${prevSig.pageType} -> ${currentSig.pageType}` : currentSig.pageType;
-    diffLine = `${urlChanged}, ${elemChange}, ${textChanged}, page type ${typeChange}`;
+    diffLine = `${urlChanged}, ${elemChange}${omittedChange}, ${textChanged}, page type ${typeChange}`;
   }
 
   const page = {
@@ -411,6 +414,7 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
     pageHeight,
     viewportHeight,
     elementCount: snapshot.elementCount ?? snapshot.refs?.length ?? 0,
+    omittedCount: snapshot.omittedCount ?? 0,
     refs: snapshot.refs ?? [],
     shownRefs: snapshot.shownRefs ?? snapshot.refs ?? [],
     elementsText: snapshot.elementsText ?? '',

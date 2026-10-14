@@ -12,6 +12,7 @@ function sig(textHash: string, scrollY = 0, url = 'https://example.com'): PageSi
     url,
     title: 'Example',
     elementCount: 20,
+    omittedCount: 0,
     interactiveHash: 'hash-abc',
     textHash,
     scrollY,

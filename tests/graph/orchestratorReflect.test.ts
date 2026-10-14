@@ -110,6 +110,7 @@ function createMockRuntime(threadId: string, options: MockRuntimeOptions = {}): 
           url: 'https://frame.work',
           title: 'Framework Laptop',
           elementCount: 15,
+          omittedCount: 0,
           interactiveHash: 'hash-interactive',
           textHash: 'hash-text',
           scrollY: 0,

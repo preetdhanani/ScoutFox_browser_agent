@@ -87,6 +87,7 @@ function createMockRuntime(threadId: string, customPlan?: any): RunRuntime {
           url: 'https://frame.work',
           title: 'Framework Laptop',
           elementCount: 15,
+          omittedCount: 0,
           interactiveHash: 'hash-interactive',
           textHash: 'hash-text',
           scrollY: 0,

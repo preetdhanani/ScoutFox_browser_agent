@@ -8,6 +8,7 @@
     "viewportHeight": 779
   },
   "elementCount": 3,
+  "omittedCount": 0,
   "elementsText": "[1] a \"PreisFuchs\"\n[2] button[button] \"Neu laden\"\n[3] a \"Zur Startseite\"",
   "refs": [
     1,

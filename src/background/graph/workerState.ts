@@ -68,6 +68,7 @@ export interface ElementInfo {           // CODE, from the content script, for r
 
 export interface PageSig {
   url: string; title: string; elementCount: number;
+  omittedCount: number;                  // elements found but cut by the list cap, not listed
   interactiveHash: string;               // hash of role + label of the visible interactive elements
   textHash: string;                      // hash of the normalised main text (first 2,000 chars)
   scrollY: number; pageType: PageType;
@@ -80,9 +81,10 @@ export interface PageSnapshot {
   tabId: number; url: string; domain: string; title: string;
   scrollY: number; pageHeight: number; viewportHeight: number;
   elementCount: number;                  // interactive elements found before the list cap
+  omittedCount: number;                  // of those, how many the cap cut (the elementsText marker counts them)
   refs: number[];                        // stable ids listed by the content script = the validation set
-  shownRefs: number[];                   // ids rendered in this step's prompt (the small tier shows fewer)
-  elementsText: string;                  // today's line format with stable ids, max 120 lines
+  shownRefs: number[];                   // ids rendered in this step's prompt (today always the same list as refs)
+  elementsText: string;                  // today's line format with stable ids, max 120 element lines plus the omitted marker when the cap cut
   elementInfo: Record<string, ElementInfo>; // key = String(stable id)
   focused?: ElementInfo | null;          // what has focus (press_key acts on it); null none, missing = not reported
   pageText: string;                      // today's extractor, max 4500 chars

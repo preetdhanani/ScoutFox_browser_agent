@@ -32,7 +32,8 @@ import {
 import {
   getCssPath,
   findInteractiveElements,
-  isVisible
+  isVisible,
+  orderByViewport
 } from './snapshot.ts';
 
 export interface SnapshotOptions {
@@ -53,6 +54,8 @@ export interface DomSnapshot {
   domain: string;
   scrollState: ScrollState;
   elementCount: number;
+  /** How many of the elementCount elements the list cap cut; 0 when everything fit. */
+  omittedCount: number;
   elementsText: string;
   elements: FormattedElement[];
   refs: number[];
@@ -61,6 +64,11 @@ export interface DomSnapshot {
   /** What has focus (press_key acts on it), for the risk gate; null when nothing does. */
   focused: ElementInfoRecord | null;
   pageText: string;
+}
+
+/** The last line of elementsText when the cap cut elements: the size of what is missing. */
+export function omittedElementsNote(omitted: number): string {
+  return `[+${omitted} more interactive elements not listed - scroll to bring them into view]`;
 }
 
 export class DOMCompressor {
@@ -88,12 +96,20 @@ export class DOMCompressor {
     this.counter = 0;
     this.docId = this.docId || this.generateDocId();
 
+    const doc = typeof document !== 'undefined' ? document : undefined;
+    const win = typeof window !== 'undefined' ? window : undefined;
+
     const interactiveElements = this.findInteractiveElements();
+    // Viewport-first window: in-viewport elements in document order, then the off-screen ones by
+    // distance to the viewport, cut at the cap. Scrolling moves the window instead of the cap
+    // always keeping the top of the document (docs/langgraph-design.md, element window order).
+    const ordered = orderByViewport(interactiveElements, win);
+    const listed = ordered.slice(0, maxElements);
+    const omittedCount = ordered.length - listed.length;
+
     const formattedElements: FormattedElement[] = [];
 
-    for (const el of interactiveElements) {
-      if (this.counter >= maxElements) break;
-
+    for (const el of listed) {
       this.counter++;
       const id = this.counter;
       if (typeof WeakRef !== 'undefined') {
@@ -106,9 +122,6 @@ export class DOMCompressor {
       const info = this.getElementSummary(el, id);
       formattedElements.push(info);
     }
-
-    const doc = typeof document !== 'undefined' ? document : undefined;
-    const win = typeof window !== 'undefined' ? window : undefined;
 
     const title = (doc && doc.title) || 'Untitled Page';
     const url = (win && win.location && win.location.href) || '';
@@ -127,13 +140,19 @@ export class DOMCompressor {
       // Ignored
     }
 
+    const elementLines = formattedElements.map((e) => e.formatted);
+    const elementsText = omittedCount > 0
+      ? [...elementLines, omittedElementsNote(omittedCount)].join('\n')
+      : elementLines.join('\n');
+
     return {
       title,
       url,
       domain,
       scrollState: { scrollY, pageHeight, viewportHeight },
-      elementCount: formattedElements.length,
-      elementsText: formattedElements.map((e) => e.formatted).join('\n'),
+      elementCount: interactiveElements.length,
+      omittedCount,
+      elementsText,
       elements: formattedElements,
       refs,
       shownRefs,

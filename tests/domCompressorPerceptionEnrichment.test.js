@@ -100,3 +100,36 @@ test('an element inside the current viewport carries no off-screen marker', () =
   assert.equal(info.inViewport, true);
   assert.doesNotMatch(info.formatted, /off-screen/);
 });
+
+test('the element window is viewport-first: an in-viewport element late in the DOM is listed before off-screen ones', () => {
+  const earlyOffscreen = makeEl({ tagName: 'BUTTON', innerText: 'Early off-screen', getBoundingClientRect: () => ({ width: 50, height: 20, top: 5000, left: 10, bottom: 5020, right: 60 }) });
+  const lateOffscreen = makeEl({ tagName: 'BUTTON', innerText: 'Later off-screen', getBoundingClientRect: () => ({ width: 50, height: 20, top: 9000, left: 10, bottom: 9020, right: 60 }) });
+  const inView = makeEl({ tagName: 'BUTTON', innerText: 'Late in view' });
+  const snapshot = getSnapshotForEls([earlyOffscreen, lateOffscreen, inView]);
+  assert.deepEqual(snapshot.elements.map((e) => e.text), ['Late in view', 'Early off-screen', 'Later off-screen']);
+});
+
+test('off-screen elements are ordered by their distance to the viewport, nearest first', () => {
+  const farBelow = makeEl({ tagName: 'BUTTON', innerText: 'Far below', getBoundingClientRect: () => ({ width: 50, height: 20, top: 9000, left: 10, bottom: 9020, right: 60 }) });
+  const nearBelow = makeEl({ tagName: 'BUTTON', innerText: 'Near below', getBoundingClientRect: () => ({ width: 50, height: 20, top: 900, left: 10, bottom: 920, right: 60 }) });
+  const justAbove = makeEl({ tagName: 'BUTTON', innerText: 'Just above', getBoundingClientRect: () => ({ width: 50, height: 20, top: -100, left: 10, bottom: -80, right: 60 }) });
+  const snapshot = getSnapshotForEls([farBelow, nearBelow, justAbove]);
+  assert.deepEqual(snapshot.elements.map((e) => e.text), ['Just above', 'Near below', 'Far below']);
+});
+
+test('a snapshot over the cap ends with the omitted-count marker line and reports the pre-cap count', () => {
+  const els = Array.from({ length: 130 }, (_, i) => makeEl({ tagName: 'BUTTON', innerText: `Btn ${i}` }));
+  const snapshot = getSnapshotForEls(els);
+  assert.equal(snapshot.elementCount, 130, 'elementCount counts what was found, before the cap');
+  assert.equal(snapshot.elements.length, 120, 'the cap itself is unchanged');
+  assert.equal(snapshot.omittedCount, 10);
+  assert.match(snapshot.elementsText, /\n\[\+10 more interactive elements not listed[^\]]*\]$/);
+});
+
+test('under the cap there is no marker line and omittedCount is 0', () => {
+  const els = Array.from({ length: 3 }, (_, i) => makeEl({ tagName: 'BUTTON', innerText: `Btn ${i}` }));
+  const snapshot = getSnapshotForEls(els);
+  assert.equal(snapshot.elementCount, 3);
+  assert.equal(snapshot.omittedCount, 0);
+  assert.doesNotMatch(snapshot.elementsText, /not listed/);
+});

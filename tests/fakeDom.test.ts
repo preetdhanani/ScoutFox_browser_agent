@@ -197,7 +197,11 @@ test('scrolled, the off-screen markers and the scroll state still match the real
   const snap = fake;
   assert.equal(snap.scrollState.scrollY, 1800);
   assert.match(snap.elements.find((e) => e.text === 'Far down')?.formatted ?? '', /^\[\d+\] a "Far down"$/, 'now in view');
-  assert.match(snap.elements[0]?.formatted ?? '', /\[off-screen\]$/, 'the header scrolled out of view');
+  assert.match(snap.elements[0]?.formatted ?? '', /"Far down"$/, 'the in-viewport element is listed first, not the first in document order');
+  assert.match(snap.elements.find((e) => e.text === 'Home')?.formatted ?? '', /\[off-screen\]$/, 'the header scrolled out of view');
+  const farDown = snap.elements.findIndex((e) => e.text === 'Far down');
+  const footer = snap.elements.findIndex((e) => e.text === 'Footer');
+  assert.ok(farDown > -1 && farDown < footer, 'the nearer off-screen element is listed before the farther one');
 });
 
 test('maxElements cuts the list like the real one, and the ids run 1..n', () => {
@@ -205,8 +209,49 @@ test('maxElements cuts the list like the real one, and the ids run 1..n', () => 
   const fake = pageSnapshot(KITCHEN_SINK, { maxElements: 5 });
 
   assert.deepStrictEqual(fake, real);
-  assert.equal(fake.elementCount, 5);
+  assert.equal(fake.elementCount, 27, 'elementCount counts what was found, before the cap');
+  assert.equal(fake.omittedCount, 22);
   assert.deepEqual(fake.elements.map((e) => e.id), [1, 2, 3, 4, 5]);
+  assert.match(fake.elementsText, /\[\+22 more interactive elements not listed[^\]]*\]$/);
+});
+
+test('under the cap nothing is omitted: no marker line and omittedCount 0', () => {
+  const real = realSnapshot(KITCHEN_SINK) as DomSnapshot;
+  assert.equal(real.omittedCount, 0);
+  assert.doesNotMatch(real.elementsText, /not listed/);
+  assert.equal(real.elementsText.split('\n').length, 27);
+});
+
+/**
+ * A listing page the way the gap describes it: 150 header and sidebar links first in the DOM, then
+ * 150 product links far below the fold. Scrolled to the products, the window must start with the
+ * in-viewport product elements, not with the header links that only come first in document order.
+ */
+const LISTING: PageSpec = {
+  url: 'https://listing.test/',
+  title: 'Listing',
+  viewportHeight: 800,
+  pageHeight: 13000,
+  elements: [
+    ...Array.from({ length: 150 }, (_, i) => link(`Header ${i}`, undefined, { y: i * 20 })),
+    ...Array.from({ length: 150 }, (_, i) => link(`Product ${i}`, undefined, { y: 10000 + i * 20 })),
+  ],
+};
+
+test('scrolled to the products, the in-viewport product elements are listed first and the marker names the omitted count', () => {
+  const real = realSnapshot(LISTING, { scrollY: 10000 });
+  const fake = pageSnapshot(LISTING, { scrollY: 10000 });
+  assert.deepStrictEqual(fake, real);
+
+  const snap = real as DomSnapshot;
+  assert.equal(snap.elementCount, 300, 'elementCount counts every interactive element found, before the cap');
+  assert.equal(snap.refs.length, 120, 'the cap itself is unchanged');
+  assert.equal(snap.omittedCount, 180);
+  assert.match(snap.elementsText, /\[\+180 more interactive elements not listed[^\]]*\]$/);
+  assert.match(snap.elements[0].formatted, /"Product 0"$/, 'the window starts with an in-viewport product');
+  assert.match(snap.elements[39].formatted, /"Product 39"$/, 'the last in-viewport product');
+  assert.match(snap.elements[40].formatted, /"Product 40" \[off-screen\]$/, 'off-screen products follow, nearest first');
+  assert.doesNotMatch(snap.elementsText, /"Header /, 'no header link uses the window while products are cut');
 });
 
 /** A name for number i made of letters only (0 is "q", 10 is "a"...), so that no two are the same after masking digits. */
@@ -506,7 +551,10 @@ test('GET_DOM_SNAPSHOT answers { success, data } with the snapshot of the page t
 test('maxElements in the payload cuts the list', async () => {
   const r = rig();
   const answer = await r.send({ action: 'GET_DOM_SNAPSHOT', payload: { maxElements: 2 } });
-  assert.equal(answer.data.elementCount, 2);
+  assert.equal(answer.data.elementCount, 5, 'the count is what was found, before the cap');
+  assert.equal(answer.data.omittedCount, 3);
+  assert.equal(answer.data.elementsText.split('\n').length, 3, 'two element lines plus the marker line');
+  assert.match(answer.data.elementsText, /\[\+3 more interactive elements not listed/);
 });
 
 test('a click on a link answers first, then the tab opens the page and tabs.onUpdated fires after the reply', async () => {
@@ -761,8 +809,8 @@ test('scroll moves the page, clamped to its ends, and brings off-screen elements
   assert.deepEqual(await r.send(act({ action: 'scroll', direction: 'down', amount: 1000 })), { success: true, message: 'Scrolled down by 1000px' });
   const middle = (await r.send(snapshotMessage)).data;
   assert.equal(middle.scrollState.scrollY, 1000);
-  assert.match(middle.elementsText, /\[5\] a "Impressum"$/, 'in view now');
-  assert.match(middle.elementsText, /\[1\] a "Laptops" \[off-screen\]/, 'the top scrolled away');
+  assert.match(middle.elementsText, /^\[1\] a "Impressum"$/m, 'in view now, and listed first');
+  assert.match(middle.elementsText, /\[2\] a "Laptops" \[off-screen\]/, 'the top scrolled away');
 
   await r.send(act({ action: 'scroll' }));
   await r.send(act({ action: 'scroll', amount: 5000 }));

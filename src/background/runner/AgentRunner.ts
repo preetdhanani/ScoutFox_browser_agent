@@ -294,6 +294,7 @@ export class AgentRunner {
                 url: d.url,
                 title: d.title,
                 elementCount: d.elementCount,
+                omittedCount: d.omittedCount ?? 0,
                 interactiveHash: d.interactiveHash,
                 textHash: d.textHash,
                 scrollY: d.scrollY,
@@ -307,7 +308,7 @@ export class AgentRunner {
         const info = await browser.tabInfo(tabId);
         if (!info) return null;
         return {
-          sig: { url: info.url, title: info.title, elementCount: 0, interactiveHash: '', textHash: '', scrollY: 0 },
+          sig: { url: info.url, title: info.title, elementCount: 0, omittedCount: 0, interactiveHash: '', textHash: '', scrollY: 0 },
           priceHits: 0,
           found: [],
         };

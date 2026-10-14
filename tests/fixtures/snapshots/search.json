@@ -8,6 +8,7 @@
     "viewportHeight": 779
   },
   "elementCount": 12,
+  "omittedCount": 0,
   "elementsText": "[1] a \"PreisFuchs\"\n[2] input[search] \"Suche\" (label=\"Suche\" value=\"framework laptop 16\")\n[3] button[submit] \"Suchen\"\n[4] button[button] \"Sortieren: Relevanz\"\n[5] input[checkbox] \"Nur Laptops\" (label=\"Nur Laptops\" value=\"on\")\n[6] a \"Gaming-Laptops bis zu 50% reduziert\"\n[7] a \"Framework Laptop 13 DIY Edition (Intel Core Ultra)\"\n[8] a \"Framework Laptop 16 DIY Edition (AMD Ryzen 7040)\"\n[9] a \"Framework Laptop 16 Grafikmodul AMD Radeon RX 7700S\"\n[10] a \"Framework Laptop 16 Tastatur-Modul (Deutsch)\"\n[11] a \"Framework Laptop 16 Netzteil 180 W\"\n[12] a \"Weiter\"",
   "refs": [
     1,

@@ -51,8 +51,12 @@
  *            "first ... last (N similar entries)", and this fake does not. A description just gives
  *            the text the model should see, whatever it is, so describe such a page already collapsed.
  *            (Pieces that differ in more than digits are never collapsed.)
- *   elements the interactive elements in document order (see ElementSpec). Only these appear in the
- *            list the model sees, numbered 1, 2, 3... from the top on every snapshot, first 120.
+ *   elements the interactive elements in document order (see ElementSpec). Only these appear in
+ *            the list the model sees, numbered 1, 2, 3... on every snapshot, viewport-first: the
+ *            elements inside the viewport in document order, then the off-screen ones by distance
+ *            to the viewport, cut at 120. A cut list ends with the marker line
+ *            "[+N more interactive elements not listed - ...]", and elementCount counts what was
+ *            found before the cap.
  * An element (ElementSpec): tag, text, type, role, placeholder, label (the aria-label), id, name,
  *   testId, value, disabled, checked, expanded, editable (contenteditable), form (the kind of the form it is in), y (top edge in px from the
  *   page top, default 0), goes (the URL that a click, or typing with submit, leads to), cssPath. The role, the label, the value
@@ -98,6 +102,7 @@
 // The cut, the note and the paging are the real content script's own pure functions, so the fake cannot drift from them.
 import { clipWithNote } from '../../src/shared/clip.ts';
 import { capPageText as realCapPageText, pageTextPart } from '../../src/content/pageText.ts';
+import { omittedElementsNote } from '../../src/content/domCompressor.ts';
 
 // ---------------------------------------------------------------------------------------------
 // Types
@@ -181,6 +186,8 @@ export interface DomSnapshot {
   domain: string;
   scrollState: { scrollY: number; pageHeight: number; viewportHeight: number };
   elementCount: number;
+  /** How many of the elementCount elements the list cap cut; 0 when everything fit. */
+  omittedCount: number;
   elementsText: string;
   elements: SnapshotElement[];
   refs: number[];
@@ -498,17 +505,37 @@ function computeFieldKind(el: ElementSpec): string | undefined {
   return 'text';
 }
 
-/** The snapshot of a page as it stands, and which elements got an id (element N is listed[N - 1]). */
+/**
+ * The snapshot of a page as it stands, and which elements got an id (element N is listed[N - 1]).
+ * The element window is viewport-first, like the real compressor: the in-viewport elements in
+ * document order, then the off-screen ones by distance to the viewport, cut at the cap.
+ */
 function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElements: number): { snapshot: DomSnapshot; listed: ElementSpec[] } {
   const viewportHeight = page.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT;
-  const listed = elements.slice(0, maxElements);
-  const seen = new Map<string, number>();
-  const summaries = listed.map((el, i) => {
+  const inside: ElementSpec[] = [];
+  const outside: Array<{ el: ElementSpec; distance: number }> = [];
+  for (const el of elements) {
+    const top = (el.y ?? 0) - scrollY;
+    // The horizontal half of the containment test is always true for a described element (left 10,
+    // right 60, viewport 1200), so the y test alone decides, like summarize() below.
+    if (top + ELEMENT_HEIGHT > 0 && top < viewportHeight) inside.push(el);
+    else outside.push({ el, distance: top + ELEMENT_HEIGHT <= 0 ? -(top + ELEMENT_HEIGHT) : top - viewportHeight });
+  }
+  outside.sort((a, b) => a.distance - b.distance);
+  const ordered = [...inside, ...outside.map((o) => o.el)];
+  const listed = ordered.slice(0, maxElements);
+  const omittedCount = elements.length - listed.length;
+  // The nth-of-type of a cssPath counts same-tag siblings in DOM order, whatever order the window
+  // lists them in, so it is computed before the window is cut and reordered.
+  const nthOf = new Map<ElementSpec, number>();
+  const nthSeen = new Map<string, number>();
+  for (const el of elements) {
     const tag = el.tag.toLowerCase();
-    const nth = (seen.get(tag) ?? 0) + 1;
-    seen.set(tag, nth);
-    return summarize(el, i + 1, nth, scrollY, viewportHeight, page.url);
-  });
+    const nth = (nthSeen.get(tag) ?? 0) + 1;
+    nthSeen.set(tag, nth);
+    nthOf.set(el, nth);
+  }
+  const summaries = listed.map((el, i) => summarize(el, i + 1, nthOf.get(el) ?? 1, scrollY, viewportHeight, page.url));
   const refs = summaries.map((e) => e.id);
   const shownRefs = refs.slice();
   let domain = '';
@@ -527,6 +554,10 @@ function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElem
       ...(el ? gateFacts(el, s.text) : {}),
     };
   }
+  const elementLines = summaries.map((e) => e.formatted);
+  const elementsText = omittedCount > 0
+    ? [...elementLines, omittedElementsNote(omittedCount)].join('\n')
+    : elementLines.join('\n');
   return {
     listed,
     snapshot: {
@@ -534,8 +565,9 @@ function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElem
       url: normalizeUrl(page.url),
       domain,
       scrollState: { scrollY: Math.round(scrollY), pageHeight: Math.round(pageHeightOf(page, viewportHeight)), viewportHeight },
-      elementCount: summaries.length,
-      elementsText: summaries.map((e) => e.formatted).join('\n'),
+      elementCount: elements.length,
+      omittedCount,
+      elementsText,
       elements: summaries,
       refs,
       shownRefs,

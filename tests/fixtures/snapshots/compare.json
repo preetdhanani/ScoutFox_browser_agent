@@ -8,6 +8,7 @@
     "viewportHeight": 779
   },
   "elementCount": 11,
+  "omittedCount": 0,
   "elementsText": "[1] a \"PreisFuchs\"\n[2] input[search] \"Suche\" (label=\"Suche\" value=\"framework laptop 16\")\n[3] button[submit] \"Suchen\"\n[4] a \"Zurück zu den Suchergebnissen\"\n[5] button[button] \"Sortieren: Preis aufsteigend\"\n[6] input[checkbox] \"Nur versandkostenfrei\" (label=\"Nur versandkostenfrei\" value=\"on\")\n[7] button[button] \"Preisalarm setzen\"\n[8] a \"Zum Shop\"\n[9] a \"Zum Shop\"\n[10] a \"Zum Shop\"\n[11] a \"Zum Shop\"",
   "refs": [
     1,
