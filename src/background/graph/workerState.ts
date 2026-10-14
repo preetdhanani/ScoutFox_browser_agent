@@ -164,7 +164,7 @@ export type Decision =
 
 export interface PendingAction {         // written by risk
   action: PageAction;
-  signature: string;                     // 'verb|target|url', the same key the stuck check and the bans use
+  signature: string;                     // 'verb|target|url|extra', the same key the stuck check and the bans use (actionSignature.ts)
   journalKey: string;                    // '<runId>:<step>'
   risk: { level: 'safe' | 'risky' | 'forbidden';
           variant?: 'submit' | 'purchase' | 'login' | 'form' | 'navigate' | 'script'; reason: string; targetDomain?: string };
@@ -192,12 +192,14 @@ export interface SiteRun {               // Revision 2's siteRun; its step recor
   meterMode: 'normal' | 'warn' | 'harvest';
   mode: PolicyMode;
   pageSigs: PageSig[];                   // the last 5, for the diff and stuck detection
-  actionSigs: string[];                  // the last 5 'verb|target|url', compared by field, never by substring
+  actionSigs: string[];                  // the last 5 action signatures (actionSignature.ts), compared by field, never by substring
   failureMemory: StepFailure[];          // max 6, deduplicated by signature and kind, with count
   banned: string[];                      // action signatures that code rejects on this site
   blockedHits: number;                   // challenge and error-page hits on this site
   ladder: { waits: number; reloads: number; searchTried: boolean; searchEngine: 'google' | 'duckduckgo' | null };
   stuckLevel: 0 | 1 | 2 | 3;
+  readPartNext?: number;                 // the part index the next full-page read returns (paged read_page_text)
+  readPartKey?: string;                  // 'url|textHash' of the page the last full-page read happened on
   pendingAction?: PendingAction;         // with its risk classification and journal key
   userAnswers: string[];
   strategyHint?: string;

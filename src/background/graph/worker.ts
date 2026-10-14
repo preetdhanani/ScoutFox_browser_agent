@@ -27,7 +27,8 @@ import { buildPolicySchema } from '../agent/schemas.ts';
 import { evaluateMeterMode, calculateSlackDraw } from '../agent/budget.ts';
 import { classifyPageType } from '../agent/pageType.ts';
 import { evaluatePageVerdict, executeBlockedLadder } from '../agent/blockedPolicy.ts';
-import { detectStuck } from '../agent/stuck.ts';
+import { detectStuck, pageSignatureChanged, decayStuckLevel } from '../agent/stuck.ts';
+import { actionSignatureOf, nextReadPart } from '../agent/actionSignature.ts';
 import { recordFailure, isSignatureBanned } from '../agent/failureMemory.ts';
 import { createFinding, parsePrice, deduplicateFindings, findingsContentSignature, isAutoValueField, FINDING_QUALITY_RANK } from '../agent/findings.ts';
 import { evaluateSiteCriteria } from '../agent/criteria.ts';
@@ -488,11 +489,18 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
     Logger.info('Worker', `[EVIDENCE_RECORDED] page read on ${siteOf(evidenceEvent.url) || '(no site)'}: ${evidenceEvent.url}`);
   }
 
+  // The page changed since the last perceive, so the action before it changed the page: that is
+  // progress, and it decays one stuck level. stuckLevel used to never decrease inside a site run,
+  // so one early stuck event escalated to partial even after the model found a working approach.
+  const stuckLevelAfterDecay = state.siteRun && prevSig && pageSignatureChanged(prevSig, currentSig)
+    ? decayStuckLevel(state.siteRun.stuckLevel ?? 0)
+    : (state.siteRun?.stuckLevel ?? 0);
+
   return {
     page,
     perceiveError: null,
     // From state.siteRun, not the local copy: a successful read never wrote the tab switch above, and still does not.
-    ...(state.siteRun ? { siteRun: { ...state.siteRun, visited: withVisit(state.siteRun.visited ?? [], page, state.siteRun.siteId, evidenceEvent.step + 1) } } : {}),
+    ...(state.siteRun ? { siteRun: { ...state.siteRun, stuckLevel: stuckLevelAfterDecay, visited: withVisit(state.siteRun.visited ?? [], page, state.siteRun.siteId, evidenceEvent.step + 1) } } : {}),
     history: isDuplicateStepStart ? [] : [stepStartEntry],
     evidenceEvents: [evidenceEvent],
   };
@@ -913,7 +921,7 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
 
   if (parsed.action) {
     action = parsed.action as any;
-    const sig = `${action.action}|${action.element_id ?? ''}|${action.url ?? ''}`;
+    const sig = actionSignatureOf(action, nextReadPart(siteRun, page));
 
     // Enforce banned signatures
     if (isSignatureBanned(siteRun.banned ?? [], sig)) {
@@ -1184,7 +1192,7 @@ const riskNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'risk
     // press_key acts on the focused element; undefined (not reported) makes an Enter fail closed.
     focusedElementInfo: state.page?.focused,
   });
-  const signature = `${action.action}|${action.element_id ?? ''}|${action.url ?? ''}`;
+  const signature = actionSignatureOf(action, nextReadPart(state.siteRun, state.page));
 
   // A domain another site (or an earlier task, for the lasting kinds) marked blocked is refused here, in code: the
   // DO NOT OPEN block alone is only a request to the model. A forbidden verdict routes to recover, which bans the
@@ -1579,11 +1587,31 @@ const verifyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 've
   const pageSigs = state.siteRun?.pageSigs ?? [];
   const currentSig = state.page?.sig;
   const allPageSigs = currentSig ? [...pageSigs, currentSig] : pageSigs;
-  const stuckRes = detectStuck(actionRecords, allPageSigs);
+
+  // A full-page read that moved to a new part made progress even when the page signature stayed
+  // equal, so a paging read must not count as a loop. The part note names the position; the
+  // re-read hint ("whole text already shown") does not, so a re-read stays punishable.
+  const readNote = verb === 'read_page_text' && (action as any)?.element_id === undefined
+    ? String((exec?.result as any)?.oneShot?.note ?? '')
+    : '';
+  const readNewText = /part \d+ of \d+/.test(readNote) && !readNote.includes('whole text already shown');
+
+  const stuckRes = detectStuck(actionRecords, allPageSigs, { readNewText });
   let stuckLevel = state.siteRun?.stuckLevel ?? 0;
   if (stuckRes.isStuck) {
     stuckLevel = (stuckLevel + 1) as any;
     outcome = 'stuck';
+  }
+
+  // Track the read part the next full-page read returns, so the risk node can sign the read with
+  // it and consecutive paging reads never share a signature. A re-read or a single-part read
+  // resets the prediction to 0.
+  let readPartNext = state.siteRun?.readPartNext ?? 0;
+  let readPartKey = state.siteRun?.readPartKey ?? '';
+  if (readNote) {
+    const m = /part (\d+) of (\d+)/.exec(readNote);
+    readPartNext = m && readNewText ? (Number(m[1]) < Number(m[2]) ? Number(m[1]) : 0) : 0;
+    readPartKey = `${state.page?.url ?? ''}|${state.page?.sig?.textHash ?? ''}`;
   }
 
   const used = (state.siteRun?.used ?? 0) + 1;
@@ -1605,7 +1633,8 @@ const verifyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 've
           stuckLevel,
           noProgressRecords: 0, // an executed action is the model trying something else
           actionSigs: newActionSigs,
-          pageSigs: newPageSigs
+          pageSigs: newPageSigs,
+          ...(readNote ? { readPartNext, readPartKey } : {})
         }
       : null,
   };
