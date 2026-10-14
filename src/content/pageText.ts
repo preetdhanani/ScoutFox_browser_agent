@@ -3,6 +3,8 @@
  * Pure text processing functions and scroll-aware body text extraction.
  */
 
+import { clipWithNote, splitIntoParts, PAGE_TEXT_MORE_HINT } from '../shared/clip.ts';
+
 export const PAGE_TEXT_CAP = 4500;
 export const PAGE_TEXT_SCAN_LIMIT = 1000000;
 export const REPEAT_MIN_RUN = 4;
@@ -112,22 +114,55 @@ export function collapseRepeatedRuns(text: string): string {
   return current;
 }
 
+/** How the model sees more of a page text that was narrowed to the blocks around the viewport. */
+const PAGE_TEXT_WINDOW_HINT = 'only the text around the scroll position; call read_page_text to read the whole page in parts';
+
 /**
- * Cuts the text at the cap. A text that is cut ends with a marker line.
+ * Cuts the text at the cap, at a line boundary. A text that is cut, or that is a part of a longer text of total
+ * characters, ends with a note line naming the shown and the full size.
  */
-export function capPageText(text: string, cap = PAGE_TEXT_CAP, cutEarlier = false): string {
-  if (text.length > cap) {
-    return `${text.slice(0, cap)}\n[page text truncated at ${cap} characters]`;
-  }
-  return cutEarlier ? `${text}\n[page text truncated]` : text;
+export function capPageText(text: string, cap = PAGE_TEXT_CAP, total = text.length, hint = PAGE_TEXT_MORE_HINT): string {
+  return clipWithNote(text, cap, { what: 'page text', total, hint });
+}
+
+/** The text with its repeated runs collapsed, and the full size to report: the collapsed size, plus what the scan limit left out. */
+function collapsePageText(text: string): { text: string; total: number } {
+  const scanned = text.length > PAGE_TEXT_SCAN_LIMIT ? text.slice(0, PAGE_TEXT_SCAN_LIMIT) : text;
+  const collapsed = collapseRepeatedRuns(scanned);
+  return { text: collapsed, total: collapsed.length + (text.length - scanned.length) };
 }
 
 /**
  * Collapses the repeated text of a rendered page, then applies the cap.
  */
-export function finishPageText(text: string): string {
-  const scanned = text.length > PAGE_TEXT_SCAN_LIMIT ? text.slice(0, PAGE_TEXT_SCAN_LIMIT) : text;
-  return capPageText(collapseRepeatedRuns(scanned), PAGE_TEXT_CAP, scanned.length < text.length);
+export function finishPageText(text: string, cap = PAGE_TEXT_CAP): string {
+  const collapsed = collapsePageText(text);
+  return capPageText(collapsed.text, cap, collapsed.total);
+}
+
+/** The size of one part of a paged read_page_text: the whole page text is read in parts of at most this many characters. */
+export const PAGE_TEXT_PART = 3000;
+
+/** One part of a paged read: its text and the note that says where it is ("12000 chars, part 2 of 4, chars 3001-6000"). */
+export interface PageTextPart { text: string; note: string; last: boolean }
+
+/** Said when a read starts over after the last part, so the model stops reading a page it has whole. */
+export const PAGE_TEXT_REREAD_HINT = 'whole text already shown - do not read this page again, act on the ELEMENTS list or open a specific result';
+
+/**
+ * Part index (0-based) of the text split into PAGE_TEXT_PART parts at line boundaries. The note always states the
+ * size; with more than one part it states the position, and the last part says it is the end. A read that starts
+ * over after the end (again) says the whole text was already shown instead of a position.
+ */
+export function pageTextPart(text: string, index: number, again = false): PageTextPart & { count: number } {
+  const parts = splitIntoParts(text, PAGE_TEXT_PART);
+  const i = Math.min(Math.max(0, index), parts.length - 1);
+  const { start, end } = parts[i];
+  const last = i === parts.length - 1;
+  let position = '';
+  if (again && text.length > 0) position = `, ${PAGE_TEXT_REREAD_HINT}`;
+  else if (parts.length > 1) position = `, part ${i + 1} of ${parts.length}, chars ${start + 1}-${end}${last ? ', end of the text' : ''}`;
+  return { text: text.slice(start, end), note: `${text.length} chars${position}`, last, count: parts.length };
 }
 
 /** Shown instead of a page text under PAGE_TEXT_MIN_CHARS, so the model knows the page has no readable text. Kept short: the page verdict reads a text under 120 characters as a blank page. */
@@ -217,12 +252,27 @@ function markIfEmpty(text: string): string {
 /**
  * The page text the model reads: the visible text of the page's content block, any element type, with repeated
  * runs collapsed and the cap applied. A page scrolled down whose text is longer than the cap is narrowed to the
- * blocks around the viewport first.
+ * blocks around the viewport first. A cut or narrowed text ends with a note naming the full size.
  */
 export function extractPageTextFromDocument(
   doc: Document = typeof document !== 'undefined' ? document : (null as unknown as Document),
   win: Window = typeof window !== 'undefined' ? window : (null as unknown as Window)
 ): string {
+  return extractText(doc, win, false);
+}
+
+/**
+ * The whole page text that read_page_text pages through: the same content block, collapsed the same way, with no
+ * cap and no window, so every part of the page can be read.
+ */
+export function extractFullPageTextFromDocument(
+  doc: Document = typeof document !== 'undefined' ? document : (null as unknown as Document),
+  win: Window = typeof window !== 'undefined' ? window : (null as unknown as Window)
+): string {
+  return extractText(doc, win, true);
+}
+
+function extractText(doc: Document, win: Window, full: boolean): string {
   if (!doc) return '';
   const badgeContainer = doc.getElementById ? doc.getElementById('scoutfox-badge-container') : null;
   let prevDisplay = '';
@@ -240,24 +290,31 @@ export function extractPageTextFromDocument(
     );
     if (hostname.includes('raw.githubusercontent.com') || rawContentType) {
       const rawText = doc.body ? ((doc.body as HTMLElement).innerText || doc.body.textContent || '') : '';
-      return markIfEmpty(capPageText(rawText.trim()));
+      return markIfEmpty(full ? rawText.trim() : capPageText(rawText.trim()));
     }
 
     const chosen = chooseContainer(doc);
     if (!chosen) return PAGE_TEXT_EMPTY_MARKER;
 
-    let finished = finishPageText(chosen.text);
+    const whole = collapsePageText(chosen.text);
+    if (full) return markIfEmpty(whole.text);
+    let finished = capPageText(whole.text, PAGE_TEXT_CAP, whole.total);
     const scrollY = win ? win.scrollY : 0;
     const vHeight = (win && win.innerHeight) ? win.innerHeight : 800;
-    // Only a scrolled page whose text does not fit (finishPageText added its truncation line) is narrowed.
-    if (scrollY > 200 && finished.length > PAGE_TEXT_CAP) {
+    // Only a scrolled page whose text does not fit the cap is narrowed. The narrowed text is a part of the page,
+    // so its note names the size of the whole page text and says it is the part around the scroll position.
+    if (scrollY > 200 && whole.text.length > PAGE_TEXT_CAP) {
       const near = windowedText(chosen.container, vHeight);
-      if (near.length >= PAGE_TEXT_MIN_CHARS) finished = finishPageText(near);
+      if (near.length >= PAGE_TEXT_MIN_CHARS) {
+        const narrowed = collapsePageText(near);
+        finished = capPageText(narrowed.text, PAGE_TEXT_CAP, Math.max(whole.total, narrowed.total), PAGE_TEXT_WINDOW_HINT);
+      }
     }
 
     return markIfEmpty(finished);
   } catch {
-    return markIfEmpty(capPageText(doc.body ? ((doc.body as HTMLElement).innerText || doc.body.textContent || '') : '', 3000));
+    const bodyText = doc.body ? ((doc.body as HTMLElement).innerText || doc.body.textContent || '') : '';
+    return markIfEmpty(full ? bodyText : capPageText(bodyText, 3000));
   } finally {
     if (badgeContainer && badgeContainer.style) {
       badgeContainer.style.display = prevDisplay;

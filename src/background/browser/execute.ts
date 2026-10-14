@@ -335,7 +335,10 @@ export async function executeAction(
     let oneShot: OneShot | undefined = undefined;
     if (verb === 'read_page_text' && res.success) {
       const pageText = res.result?.pageText ?? res.pageText ?? res.message ?? '';
-      oneShot = { label: 'Page Text', text: pageText, step: action.step ?? 0 };
+      // The part note ("12000 chars, part 2 of 4, ...") and the stop hint go in the label the model
+      // reads, not only in the raw message, or the model never learns which part it has.
+      const note = typeof res.result?.note === 'string' && res.result.note ? res.result.note : undefined;
+      oneShot = { label: note ? `Page Text (${note})` : 'Page Text', text: pageText, step: action.step ?? 0, ...(note ? { note } : {}) };
     }
 
     return {

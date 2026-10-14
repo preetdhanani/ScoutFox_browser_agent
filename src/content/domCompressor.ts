@@ -6,6 +6,7 @@
 
 import {
   extractPageTextFromDocument,
+  extractFullPageTextFromDocument,
   finishPageText,
   collapseRepeatedRuns,
   capPageText,
@@ -144,6 +145,13 @@ export class DOMCompressor {
     return extractPageTextFromDocument(doc, win);
   }
 
+  /** The whole page text, with no cap and no window: what read_page_text pages through. */
+  extractFullPageText(): string {
+    const doc = typeof document !== 'undefined' ? document : undefined;
+    const win = typeof window !== 'undefined' ? window : undefined;
+    return extractFullPageTextFromDocument(doc, win);
+  }
+
   finishPageText(text: string): string {
     return finishPageText(text);
   }
@@ -152,8 +160,8 @@ export class DOMCompressor {
     return collapseRepeatedRuns(text);
   }
 
-  capPageText(text: string, cap = PAGE_TEXT_CAP, cutEarlier = false): string {
-    return capPageText(text, cap, cutEarlier);
+  capPageText(text: string, cap = PAGE_TEXT_CAP, total = text.length): string {
+    return capPageText(text, cap, total);
   }
 
   getElement(id: number | string): Element | null {

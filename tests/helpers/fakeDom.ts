@@ -39,8 +39,8 @@
  *   text     the visible text (what innerText of the page's content block gives). A string is the text itself; a list is
  *            one block per piece, each on its own line, { heading } as its plain text. Either way the
  *            whitespace is normalised like the real extractor does (one space inside a line, no blank
- *            lines, nothing at the ends), the text is cut at 4500 characters, and a text that is cut
- *            ends with the line "[page text truncated at 4500 characters]", like the real one. A page
+ *            lines, nothing at the ends), the text is cut at 4500 characters at a line boundary, and a text
+ *            that is cut ends with the real note line "[page text truncated: showing N of M characters - ...]". A page
  *            with fewer than 10 characters of text (no text at all included) gets the line
  *            "[no readable text on this page]". Two things of the real extractor are NOT modelled,
  *            because a description has no positions: on a page scrolled more than 200 px whose text
@@ -70,7 +70,8 @@
  *                direction or amount gets its default, and a value that is not a number ("300") is used as it is
  *   navigate     opens that page (its URL must be declared)
  *   go_back, go_forward   walk the pages this fake opened on that tab
- *   read_page_text, extract_page_text   the text, cut at 1500 characters
+ *   read_page_text, extract_page_text   the whole text (no cap) in numbered parts, like the real one;
+ *                with element_id that element's text, cut at 2000 characters with a note
  *   press_key, wait      answer the real message (a missing key is Enter, any other value is quoted as it is).
  *                wait does not really wait
  *   Anything else with a real content-script meaning (browser_batch, or typing into a <select>) is a
@@ -93,6 +94,10 @@
  * The shape is pinned to the real thing in tests/fakeDom.test.ts: the same page description gives
  * exactly what the real DOMCompressor returns, and what the committed recorded snapshots contain.
  */
+
+// The cut, the note and the paging are the real content script's own pure functions, so the fake cannot drift from them.
+import { clipWithNote } from '../../src/shared/clip.ts';
+import { capPageText as realCapPageText, pageTextPart } from '../../src/content/pageText.ts';
 
 // ---------------------------------------------------------------------------------------------
 // Types
@@ -254,16 +259,13 @@ export interface FakeDom {
 const DEFAULT_VIEWPORT_HEIGHT = 800;
 const ELEMENT_HEIGHT = 20;
 const MAX_ELEMENTS = 120;
-const PAGE_TEXT_LIMIT = 4500;
-/** The last line of a page text that was cut at the limit (content/domCompressor.js capPageText). */
-const PAGE_TEXT_MARKER = `[page text truncated at ${PAGE_TEXT_LIMIT} characters]`;
 /** The page text of a page with fewer than 10 characters of visible text (src/content/pageText.ts PAGE_TEXT_EMPTY_MARKER). */
 const PAGE_TEXT_EMPTY_MARKER = '[no readable text on this page]';
 const PAGE_TEXT_MIN_CHARS = 10;
 const ELEMENT_TEXT_LIMIT = 60;
-const READ_TEXT_LIMIT = 1500;
+const ELEMENT_READ_LIMIT = 2000;
 /** Read position of read_page_text per fake document, mirroring the real content script's module state. */
-const readStateByDoc = new Map<any, { text: string; offset: number; exhausted: boolean }>();
+const readStateByDoc = new Map<any, { text: string; next: number; exhausted: boolean }>();
 const LABEL_LIMIT = 48;
 const ELEMENT_KEYS = ['tag', 'text', 'type', 'role', 'placeholder', 'label', 'id', 'name', 'testId', 'value', 'disabled', 'checked', 'expanded', 'editable', 'form', 'y', 'goes', 'cssPath'];
 const PAGE_KEYS = ['url', 'title', 'text', 'elements', 'viewportHeight', 'pageHeight', 'scrollY'];
@@ -338,9 +340,9 @@ export function input(type: string, extra: Partial<ElementSpec> = {}): ElementSp
 // Snapshots
 // ---------------------------------------------------------------------------------------------
 
-/** content/domCompressor.js capPageText(): a text over the limit is cut there and ends with a marker line. */
+/** src/content/pageText.ts capPageText(): a text over the limit is cut at a line boundary and ends with a note line. */
 function capPageText(text: string): string {
-  return text.length > PAGE_TEXT_LIMIT ? `${text.slice(0, PAGE_TEXT_LIMIT)}\n${PAGE_TEXT_MARKER}` : text;
+  return realCapPageText(text);
 }
 
 /** src/content/pageText.ts normalizePageText(): one space inside a line, table cells (tabs) apart as " | ", no blank lines, nothing at the ends. */
@@ -352,17 +354,25 @@ function normalizeLines(text: string): string {
     .join('\n');
 }
 
-/** content/domCompressor.js extractPageText(): the visible text, normalised, cut, and marked when it is under 10 characters. */
-function formatPageText(text: PageText | undefined): string {
-  const lines = text === undefined
+/** src/content/pageText.ts extractFullPageTextFromDocument(): the visible text, normalised, not cut. */
+function fullPageText(text: PageText | undefined): string {
+  return text === undefined
     ? ''
     : typeof text === 'string'
       ? normalizeLines(text)
       // Every piece is one block of the page: a line of its own, a heading as plain text, like innerText.
       : normalizeLines(text.map((piece) => (typeof piece === 'string' ? piece : piece.heading)).join('\n'));
-  const capped = capPageText(lines);
-  if (capped.length >= PAGE_TEXT_MIN_CHARS) return capped;
-  return capped ? `${capped}\n${PAGE_TEXT_EMPTY_MARKER}` : PAGE_TEXT_EMPTY_MARKER;
+}
+
+/** A text under 10 characters is replaced by (or followed by) the empty marker, like the real markIfEmpty(). */
+function markIfEmpty(text: string): string {
+  if (text.length >= PAGE_TEXT_MIN_CHARS) return text;
+  return text ? `${text}\n${PAGE_TEXT_EMPTY_MARKER}` : PAGE_TEXT_EMPTY_MARKER;
+}
+
+/** content/domCompressor.js extractPageText(): the visible text, normalised, cut, and marked when it is under 10 characters. */
+function formatPageText(text: PageText | undefined): string {
+  return markIfEmpty(capPageText(fullPageText(text)));
 }
 
 function pageHeightOf(page: PageSpec, viewportHeight: number): number {
@@ -690,36 +700,29 @@ export function fakeDom(options: FakeDomOptions): FakeDom {
           const el = element(doc, requestedId);
           if (!el) return gone(requestedId);
           const elText = String(el.text ?? '');
+          const shown = clipWithNote(elText, ELEMENT_READ_LIMIT, { what: 'element text', hint: 'read a smaller element inside it by its element_id' });
           return {
             success: true,
-            message: `Text of element [${String(requestedId)}] (${elText.length} chars):\n"""\n${elText.slice(0, 2000)}\n"""`,
-            result: { pageText: elText.slice(0, 2000) },
+            message: `Text of element [${String(requestedId)}] (${elText.length} chars):\n"""\n${shown}\n"""`,
+            result: { pageText: shown },
           };
         }
-        const text = formatPageText(doc.page.text);
-        // Mirrors the real content script (src/content/actions.ts): a repeated read of the same
-        // text returns the NEXT chunk, and a read after the end says the whole text was shown.
+        // Mirrors the real content script (src/content/actions.ts): the whole text, not the capped
+        // snapshot, in numbered parts; a repeated read of the same text returns the NEXT part, and a
+        // read after the end says the whole text was shown.
+        const text = markIfEmpty(fullPageText(doc.page.text));
         const cached = readStateByDoc.get(doc);
         if (!cached || cached.text !== text) {
-          readStateByDoc.set(doc, { text, offset: 0, exhausted: false });
+          readStateByDoc.set(doc, { text, next: 0, exhausted: false });
         }
         const state = readStateByDoc.get(doc)!;
-        const start = state.offset;
-        const wasExhausted = state.exhausted;
-        const end = Math.min(start + READ_TEXT_LIMIT, text.length);
-        const chunk = text.slice(start, end);
-        const reachedEnd = end >= text.length;
-        state.offset = reachedEnd ? 0 : end;
-        if (reachedEnd) state.exhausted = true;
-        const partNote = start === 0
-          ? (wasExhausted && text.length > 0
-            ? ', whole text already shown - do not read this page again, act on the ELEMENTS list or open a specific result'
-            : '')
-          : `, part ${Math.floor(start / READ_TEXT_LIMIT) + 1}, chars ${start + 1}-${end}${reachedEnd ? ', end of the text' : ''}`;
+        const part = pageTextPart(text, state.next, state.next === 0 && state.exhausted);
+        state.next = part.last ? 0 : state.next + 1;
+        if (part.last) state.exhausted = true;
         return {
           success: true,
-          message: `Extracted text snippet (${text.length} chars${partNote}):\n"""\n${chunk}\n"""`,
-          result: { pageText: chunk },
+          message: `Extracted text snippet (${part.note}):\n"""\n${part.text}\n"""`,
+          result: { pageText: part.text, note: part.note },
         };
       }
       case 'browser_batch':

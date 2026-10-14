@@ -2,6 +2,12 @@
 // Model-facing memory records and prompt context blocks.
 import type { StepRecord, OneShot } from '../graph/workerState.ts';
 import type { HistoryEntry } from '../graph/state.ts';
+import { clipWithNote } from '../../shared/clip.ts';
+
+/** A detail in a one-line step record is cut at this many characters, with an inline marker. */
+const RECORD_DETAIL_CAP = 80;
+/** A read_page_text part note is longer (it carries the stop hint), so it gets more room. */
+const RECORD_NOTE_CAP = 160;
 
 /**
  * Formats a single action execution into a StepRecord one-liner.
@@ -26,6 +32,8 @@ export interface BuildStepRecordParams {
   success?: boolean;
   error?: string;
   message?: string;
+  /** The part note of a read_page_text ("12000 chars, part 2 of 4, ..."), shown instead of the effect. */
+  note?: string;
 }
 
 export function buildStepRecord(params: BuildStepRecordParams): StepRecord {
@@ -37,7 +45,9 @@ export function buildStepRecord(params: BuildStepRecordParams): StepRecord {
 
   let effectText = 'no visible change';
   if (params.success === false) {
-    effectText = params.error ? `failed: ${params.error.slice(0, 80)}` : 'failed';
+    effectText = params.error ? `failed: ${clipWithNote(params.error, RECORD_DETAIL_CAP, { inline: true })}` : 'failed';
+  } else if (params.note) {
+    effectText = `read ${clipWithNote(params.note, RECORD_NOTE_CAP, { inline: true })}`;
   } else if (params.effect === 'url_changed') {
     effectText = 'URL changed';
   } else if (params.effect === 'value_set') {
@@ -45,7 +55,7 @@ export function buildStepRecord(params: BuildStepRecordParams): StepRecord {
   } else if (params.effect === 'dom_changed') {
     effectText = 'page updated';
   } else if (params.message) {
-    effectText = params.message.slice(0, 80);
+    effectText = clipWithNote(params.message, RECORD_DETAIL_CAP, { inline: true });
   }
 
   const line = `${stepNum} ${verb}${target ? ` ${target}` : ''} -> ${effectText}`.trim();

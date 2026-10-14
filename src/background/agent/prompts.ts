@@ -5,6 +5,7 @@
 import type { GoalKind, ModelTier, PolicyMode, StepFailure } from '../graph/state.ts';
 import type { PageSig } from '../graph/workerState.ts';
 import { renderFailureMemory } from './failureMemory.ts';
+import { clipWithNote, PAGE_TEXT_MORE_HINT } from '../../shared/clip.ts';
 
 export interface PlanUserMessageParams {
   task: string;
@@ -169,6 +170,8 @@ export interface PolicyUserMessageParams {
   pageType: string;
   scrollY: number;
   pageText: string;
+  /** How many characters of the page text the prompt shows (see PAGE_TEXT_BUDGET); a longer text is cut with a note. */
+  pageTextBudget?: number;
   elementsText: string;
   priceCandidates?: Array<string | { id?: string; text?: string; value?: number; currency?: string; context?: string }>;
   correction?: string | null;
@@ -178,6 +181,13 @@ export interface PolicyUserMessageParams {
   evidenceBlock?: string;
   planBlock?: string;
 }
+
+/**
+ * The characters of page text the policy prompt shows, per model tier. A large model takes the whole snapshot text
+ * (the content script cuts it at 4500); a small one gets less. A text over the budget is cut with a note that names
+ * the full size and read_page_text, so the model never takes the head of a long page for the whole page.
+ */
+export const PAGE_TEXT_BUDGET: Record<ModelTier, number> = { small: 3000, large: 4500 };
 
 export function buildPolicyUserMessage(params: PolicyUserMessageParams): string {
   const parts: string[] = [];
@@ -242,7 +252,8 @@ export function buildPolicyUserMessage(params: PolicyUserMessageParams): string 
     parts.push(params.evidenceBlock);
   }
 
-  parts.push(`PAGE TEXT:\n"""\n${params.pageText.slice(0, 3000)}\n"""`);
+  const pageText = clipWithNote(params.pageText, params.pageTextBudget ?? PAGE_TEXT_BUDGET.small, { what: 'page text', hint: PAGE_TEXT_MORE_HINT });
+  parts.push(`PAGE TEXT:\n"""\n${pageText}\n"""`);
   parts.push(`ELEMENTS:\n${params.elementsText}`);
 
   if (params.correction) {

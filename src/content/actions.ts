@@ -3,6 +3,9 @@
  * Executes click, type, scroll, press_key, navigate, browser_batch primitives.
  */
 
+import { clipWithNote } from '../shared/clip.ts';
+import { pageTextPart } from './pageText.ts';
+
 export interface ActionExecutionContext {
   doc?: Document;
   win?: Window & typeof globalThis;
@@ -376,11 +379,13 @@ export async function doBrowserBatch(
  * Execute action requested by agent
  */
 
-// The read position of read_page_text on the current page. Module state on purpose: the action
-// executor lives for the lifetime of the page, so a navigation resets it with the page itself.
-interface PageReadState { url: string; text: string; offset: number; exhausted: boolean }
+// The read position of read_page_text on the current page, with the whole extracted text it pages
+// through. Module state on purpose: the action executor lives for the lifetime of the page, so a
+// navigation resets it with the page itself.
+interface PageReadState { url: string; text: string; next: number; exhausted: boolean }
 let pageReadState: PageReadState | null = null;
-const PAGE_TEXT_CHUNK = 1500;
+/** An element text over this is cut, with a note naming its full size. */
+const ELEMENT_TEXT_CAP = 2000;
 
 export async function execute(
   actionPayload: any,
@@ -422,44 +427,40 @@ export async function execute(
           return { success: false, error: `Element [${String(requestedId)}] is not on this page's element list. Use an element_id from the last snapshot, or read_page_text without element_id for the next part of the page text.` };
         }
         const elText = ((el as HTMLElement).innerText || (el as Element).textContent || '').trim();
+        const shown = clipWithNote(elText, ELEMENT_TEXT_CAP, { what: 'element text', hint: 'read a smaller element inside it by its element_id' });
         return {
           success: true,
-          message: `Text of element [${String(requestedId)}] (${elText.length} chars):\n"""\n${elText.slice(0, 2000)}\n"""`,
-          result: { pageText: elText.slice(0, 2000) },
+          message: `Text of element [${String(requestedId)}] (${elText.length} chars):\n"""\n${shown}\n"""`,
+          result: { pageText: shown },
         };
       }
+      // The whole page text, not the snapshot's capped one, so paging reaches past the snapshot cap.
       const pageText =
-        compressor && typeof compressor.extractPageText === 'function'
-          ? compressor.extractPageText()
-          : doc && doc.body
-            ? (doc.body as HTMLElement).innerText || doc.body.textContent || ''
-            : '';
+        compressor && typeof compressor.extractFullPageText === 'function'
+          ? compressor.extractFullPageText()
+          : compressor && typeof compressor.extractPageText === 'function'
+            ? compressor.extractPageText()
+            : doc && doc.body
+              ? (doc.body as HTMLElement).innerText || doc.body.textContent || ''
+              : '';
       const url = win && win.location ? win.location.href : '';
       // The prompt promises "read more text of this page". A repeated read of the SAME text must
-      // move forward, or the model re-reads the same first chunk forever (it did exactly that on
+      // move forward, or the model re-reads the same first part forever (it did exactly that on
       // an arXiv feed page: five identical reads, no progress, run ended without the answer).
       // A different URL, or a text that changed under the same URL, starts the read over.
       if (!pageReadState || pageReadState.url !== url || pageReadState.text !== pageText) {
-        pageReadState = { url, text: pageText, offset: 0, exhausted: false };
+        pageReadState = { url, text: pageText, next: 0, exhausted: false };
       }
-      const start = pageReadState.offset;
-      const wasExhausted = pageReadState.exhausted;
-      const end = Math.min(start + PAGE_TEXT_CHUNK, pageText.length);
-      const chunk = pageText.slice(start, end);
-      const reachedEnd = end >= pageText.length;
-      pageReadState.offset = reachedEnd ? 0 : end;
-      if (reachedEnd) pageReadState.exhausted = true;
       // After the end, the read starts over - but the model must know it is re-reading, or it burns
       // steps on text it already has (it did: a full wrap-around read after "end of the text").
-      const partNote = start === 0
-        ? (wasExhausted && pageText.length > 0
-          ? ', whole text already shown - do not read this page again, act on the ELEMENTS list or open a specific result'
-          : '')
-        : `, part ${Math.floor(start / PAGE_TEXT_CHUNK) + 1}, chars ${start + 1}-${end}${reachedEnd ? ', end of the text' : ''}`;
+      const again = pageReadState.next === 0 && pageReadState.exhausted;
+      const part = pageTextPart(pageText, pageReadState.next, again);
+      pageReadState.next = part.last ? 0 : pageReadState.next + 1;
+      if (part.last) pageReadState.exhausted = true;
       return {
         success: true,
-        message: `Extracted text snippet (${pageText.length} chars${partNote}):\n"""\n${chunk}\n"""`,
-        result: { pageText: chunk },
+        message: `Extracted text snippet (${part.note}):\n"""\n${part.text}\n"""`,
+        result: { pageText: part.text, note: part.note },
       };
     }
     case 'browser_batch':

@@ -93,7 +93,7 @@ export interface PerceiveError {
   kind: 'tab_gone' | 'out_of_scope' | 'restricted' | 'unreadable'; tries: number;
 }
 
-export interface OneShot { label: string; text: string; step: number } // read_page_text or tool output, shown once in full
+export interface OneShot { label: string; text: string; step: number; note?: string } // read_page_text or tool output, shown once in full; note = which part of the page text it is (and the stop hint)
 
 // ---------- memory records (model-facing) ----------
 export interface StepRecord {

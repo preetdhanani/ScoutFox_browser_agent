@@ -253,3 +253,24 @@ test('executeAction wait is interrupted by an aborted step signal (BUG-36)', asy
   assert.equal(res.success, false);
   assert.equal(res.error, 'Action aborted');
 });
+
+// silent-truncation-no-marker: the part note and the stop hint were only in the raw result message; the one-shot
+// the model reads carried the bare chunk, so the model never learnt which part it had or that it had them all.
+test('executeAction - read_page_text one-shot carries the part note', async () => {
+  const res = await executeAction(
+    101,
+    { action: 'read_page_text', step: 4 },
+    {
+      dispatchAction: async () => ({
+        success: true,
+        message: 'Extracted text snippet (12000 chars, part 2 of 4, chars 3001-6000):\n"""\nchunk two\n"""',
+        result: { pageText: 'chunk two', note: '12000 chars, part 2 of 4, chars 3001-6000' },
+      }),
+    } as any
+  );
+  assert.equal(res.success, true);
+  assert.ok(res.oneShot);
+  assert.match(res.oneShot.label, /part 2 of 4, chars 3001-6000/);
+  assert.equal(res.oneShot.note, '12000 chars, part 2 of 4, chars 3001-6000');
+  assert.equal(res.oneShot.text, 'chunk two');
+});

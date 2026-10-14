@@ -34,7 +34,9 @@ import { fakeDocument, fakeWindow, parseHtml } from './helpers/fakeElementTree.t
 const FIXTURE = fs.readFileSync(new URL('./fixtures/site/configurator.html', import.meta.url), 'utf8');
 
 const CAP = 4500;
-const MARKER = `[page text truncated at ${CAP} characters]`;
+// The note a cut page text ends with names the shown and the full size and how to read the rest
+// (src/shared/clip.ts; silent-truncation-no-marker). It used to be "[page text truncated at 4500 characters]".
+const NOTE = /\n\[page text truncated: showing (\d+) of (\d+) characters - call read_page_text to read the whole page in parts\]$/;
 
 // ---------------------------------------------------------------------------------------------
 // The real compressor against a fake DOM
@@ -242,17 +244,20 @@ test('a text that is cut at the cap ends with a marker that says so', () => {
   const full = paragraphs.join('\n');
   assert.ok(full.length > CAP, 'the paragraphs must be longer than the cap for this test to mean anything');
   const text = pageTextOf(...paragraphs);
-  assert.ok(text.endsWith(`\n${MARKER}`), 'the marker is the last line');
-  assert.equal(text.split(MARKER).length, 2, 'and it is there once');
-  const kept = text.slice(0, -`\n${MARKER}`.length);
+  const note = text.match(NOTE);
+  assert.ok(note, 'the marker is the last line');
+  assert.equal(text.split('page text truncated').length, 2, 'and it is there once');
+  const kept = text.slice(0, note.index);
   assert.ok(kept.length <= CAP);
-  assert.ok(full.startsWith(kept), 'what comes before the marker is the start of the page text, unchanged');
+  assert.equal(Number(note[1]), kept.length, 'the note names the shown size');
+  assert.equal(Number(note[2]), full.length, 'and the full size');
+  assert.ok(full.startsWith(`${kept}\n`), 'what comes before the marker is the start of the page text, unchanged, cut at a line boundary');
 });
 
 test('a text that fits the cap has no marker, also exactly at the cap', () => {
   assert.equal(pageTextOf('a'.repeat(CAP)), 'a'.repeat(CAP));
   assert.equal(pageTextOf('A short page text that is long enough to count.'), 'A short page text that is long enough to count.');
-  assert.equal(pageTextOf('a'.repeat(CAP + 1)), `${'a'.repeat(CAP)}\n${MARKER}`);
+  assert.equal(pageTextOf('a'.repeat(CAP + 1)), `${'a'.repeat(CAP)}\n[page text truncated: showing ${CAP} of ${CAP + 1} characters - call read_page_text to read the whole page in parts]`);
 });
 
 test('collapsing first means the cap is spent on real content', () => {
@@ -270,7 +275,10 @@ test('a raw text page is never collapsed, it is the content itself, but it is ca
 
   const many = batches(1, 1000).join('\n');
   const rawMany = loadCompressor({ contentType: 'text/plain', innerText: many }).extractPageText();
-  assert.equal(rawMany, `${many.slice(0, CAP)}\n${MARKER}`);
+  const note = rawMany.match(NOTE);
+  assert.ok(note);
+  assert.equal(Number(note[2]), many.length);
+  assert.ok(many.startsWith(`${rawMany.slice(0, note.index)}\n`), 'cut at a line boundary, not collapsed');
 
   const github = loadCompressor({ hostname: 'raw.githubusercontent.com', innerText: few }).extractPageText();
   assert.equal(github, few);
@@ -281,10 +289,10 @@ test('a huge page text is handled in bounded time, and a cut before the cap is s
   const distinct = distinctWords(200_000).join(' ');
   assert.ok(distinct.length > 1_000_000);
   const text = pageTextOf(distinct);
-  assert.ok(text.endsWith(`\n${MARKER}`));
+  assert.equal(Number(text.match(NOTE)?.[2]), distinct.length, 'the note names the size of the whole page');
 
   // 1.2 million characters of one repeated word: it all collapses, but the page was cut, so it says so.
   const repeated = 'spam '.repeat(240_000);
   const collapsed = pageTextOf(repeated);
-  assert.match(collapsed, /^spam \(repeated \d+ times\)\s*\n\[page text truncated\]$/);
+  assert.match(collapsed, /^spam \(repeated \d+ times\)\s*\n\[page text truncated: showing \d+ of \d+ characters - [^\]]+\]$/);
 });

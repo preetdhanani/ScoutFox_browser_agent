@@ -147,3 +147,25 @@ test('memory: formatPendingCorrection prefixes correction', () => {
     'CORRECTION: Element ID 999 is invalid.'
   );
 });
+
+// silent-truncation-no-marker: the step record cut an error at 80 characters with no sign that it was cut, and a
+// read_page_text step said "page updated" instead of which part of the text it read.
+test('memory: a long error in a step record is cut with a marker that names the full size', () => {
+  const error = `Element [12] is covered by another element: ${'div.cookie-banner > button.accept '.repeat(6)}`.trim();
+  const rec = buildStepRecord({ step: 4, node: 'policy', verb: 'click', elementId: 12, success: false, error });
+  assert.match(rec.line, new RegExp(`failed: Element \\[12\\] is covered.* \\[truncated, \\d+ of ${error.length} chars\\]$`));
+  assert.doesNotMatch(rec.line, /\n/);
+});
+
+test('memory: a read_page_text step record carries the part note and the stop hint', () => {
+  const part = buildStepRecord({
+    step: 5, node: 'policy', verb: 'read_page_text', success: true, effect: 'dom_changed',
+    note: '12000 chars, part 2 of 4, chars 3001-6000',
+  });
+  assert.match(part.line, /^#5 read_page_text -> read 12000 chars, part 2 of 4, chars 3001-6000$/);
+  const again = buildStepRecord({
+    step: 6, node: 'policy', verb: 'read_page_text', success: true, effect: 'dom_changed',
+    note: '12000 chars, whole text already shown - do not read this page again, act on the ELEMENTS list or open a specific result',
+  });
+  assert.match(again.line, /whole text already shown - do not read this page again/);
+});

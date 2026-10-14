@@ -77,7 +77,8 @@ test('capPageText applies cap and appends truncation marker', () => {
   const longText = 'a'.repeat(100);
   const capped = capPageText(longText, 50);
   assert.equal(capped.slice(0, 50), 'a'.repeat(50));
-  assert.match(capped, /\[page text truncated at 50 characters\]/);
+  // The note names the shown and the full size (silent-truncation-no-marker); it used to be "[page text truncated at 50 characters]".
+  assert.match(capped, /\n\[page text truncated: showing 50 of 100 characters - [^\]]+\]$/);
 });
 
 test('resolveElementWithStatus detects navigated document and detached element', () => {

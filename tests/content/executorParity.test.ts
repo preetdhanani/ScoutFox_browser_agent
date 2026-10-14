@@ -256,38 +256,41 @@ test('6. read_page_text continues where the last read stopped instead of repeati
   // The live failure: a model on an arXiv feed page called read_page_text five times and got the
   // same first 1500 chars every time, because the prompt says "read more text of this page" while
   // the tool always returned the head of the text. The run burned 23 steps and never answered.
-  const longText = Array.from({ length: 200 }, (_, i) => `Line ${i + 1} of the page text`).join('. ');
+  const longText = Array.from({ length: 300 }, (_, i) => `Line ${i + 1} of the page text`).join('. ');
   const fakeWindow = {
     location: { href: 'https://export.arxiv.test/api/query?x=1' },
     domCompressor: { extractPageText: () => longText },
   };
   const executor = new ActionExecutor(undefined, fakeWindow as any);
 
+  // The parts are line-bounded (here: cut at a space, the text is one line) and numbered "part i of n"
+  // (silent-truncation-no-marker); the old reads were unnumbered 1500-character slices.
   const first = await executor.execute({ action: 'read_page_text' });
   assert.equal(first.success, true);
-  assert.match(first.message, /^Extracted text snippet \(\d+ chars\):/, 'the first read keeps the legacy wrapper');
+  const firstPos = first.message.match(/^Extracted text snippet \(\d+ chars, part 1 of (\d+), chars 1-(\d+)\):/);
+  assert.ok(firstPos, `the first read says it is part 1 of n: ${first.message.slice(0, 80)}`);
+  const count = Number(firstPos[1]);
+  assert.equal(count, 3, 'an 8000-character text is read in three parts of at most 3000');
   assert.ok(first.message.includes('Line 1 of the page text'));
-  assert.equal(first.result.pageText, longText.slice(0, 1500));
+  assert.equal(first.result.pageText, longText.slice(0, Number(firstPos[2])));
 
   const second = await executor.execute({ action: 'read_page_text' });
-  assert.match(second.message, /part 2, chars 1501-3000/);
-  assert.equal(second.result.pageText, longText.slice(1500, 3000));
+  const secondPos = second.message.match(/part 2 of 3, chars (\d+)-(\d+)\)/);
+  assert.ok(secondPos, second.message.slice(0, 120));
+  assert.doesNotMatch(second.message, /end of the text/, 'part 2 is not the end');
+  assert.equal(second.result.pageText, longText.slice(Number(secondPos[1]) - 1, Number(secondPos[2])));
   assert.notEqual(second.result.pageText, first.result.pageText, 'the second read shows new text');
 
   const third = await executor.execute({ action: 'read_page_text' });
-  assert.match(third.message, /part 3, chars 3001-4500\)/);
-  assert.doesNotMatch(third.message, /end of the text/, 'part 3 is not the end of a 200-line text');
-  assert.equal(third.result.pageText, longText.slice(3000, 4500));
-
-  const fourth = await executor.execute({ action: 'read_page_text' });
-  assert.match(fourth.message, /part 4, chars 4501-\d+, end of the text/);
-  assert.equal(fourth.result.pageText, longText.slice(4500));
+  assert.match(third.message, new RegExp(`part 3 of 3, chars \\d+-${longText.length}, end of the text`));
+  assert.ok(longText.endsWith(third.result.pageText));
+  assert.equal([first, second, third].map((r) => r.result.pageText).join(' '), longText, 'the parts are the whole text');
 
   // After the end, the read starts over - and says so, or the model burns steps re-reading.
-  const fifth = await executor.execute({ action: 'read_page_text' });
-  assert.match(fifth.message, /whole text already shown/, 'a wrapped read says the text was already shown');
-  assert.doesNotMatch(fifth.message, /part \d/, 'a wrapped read is not numbered as a next part');
-  assert.equal(fifth.result.pageText, longText.slice(0, 1500));
+  const fourth = await executor.execute({ action: 'read_page_text' });
+  assert.match(fourth.message, /whole text already shown/, 'a wrapped read says the text was already shown');
+  assert.doesNotMatch(fourth.message, /part \d/, 'a wrapped read is not numbered as a next part');
+  assert.equal(fourth.result.pageText, first.result.pageText);
 
   // A different URL starts the read over.
   const otherWindow = {
@@ -296,9 +299,9 @@ test('6. read_page_text continues where the last read stopped instead of repeati
   };
   const otherExecutor = new ActionExecutor(undefined, otherWindow as any);
   const other = await otherExecutor.execute({ action: 'read_page_text' });
-  assert.doesNotMatch(other.message, /part \d/);
+  assert.match(other.message, /part 1 of 3/);
   assert.doesNotMatch(other.message, /whole text already shown/);
-  assert.equal(other.result.pageText, longText.slice(0, 1500));
+  assert.equal(other.result.pageText, first.result.pageText);
 });
 
 test('7. read_page_text with element_id returns only that element\'s text', async () => {
@@ -333,4 +336,50 @@ test('7. read_page_text with element_id returns only that element\'s text', asyn
   const pageRead = await executor.execute({ action: 'read_page_text' });
   assert.equal(pageRead.success, true);
   assert.match(pageRead.message, /^Extracted text snippet/);
+});
+
+// silent-truncation-no-marker: read_page_text paged the snapshot text, which the extractor had already cut at 4500
+// characters, so nothing past 4500 could ever be read, and the parts did not say how many there were.
+test('8. read_page_text pages the whole extracted text, past the snapshot cap, and every part states its position', async () => {
+  const full = Array.from({ length: 400 }, (_, i) => `Offer ${i + 1}: seller name, price and shipping line`).join('\n');
+  assert.ok(full.length > 12000);
+  const capped = `${full.slice(0, 4500)}\n[page text truncated at 4500 characters]`;
+  const fakeWindow = {
+    location: { href: 'https://offers.test/list' },
+    domCompressor: { extractPageText: () => capped, extractFullPageText: () => full },
+  };
+  const executor = new ActionExecutor(undefined, fakeWindow as any);
+
+  const chunks: string[] = [];
+  let total = 0;
+  for (let i = 1; i <= 40; i++) {
+    const res = await executor.execute({ action: 'read_page_text' });
+    assert.equal(res.success, true);
+    const m = res.message.match(/part (\d+) of (\d+), chars (\d+)-(\d+)/);
+    assert.ok(m, `part ${i} states its position: ${res.message.slice(0, 120)}`);
+    assert.equal(Number(m[1]), i);
+    total = Number(m[2]);
+    assert.equal(res.result.note, res.message.match(/^Extracted text snippet \((.*)\):\n/)?.[1], 'the note travels with the result');
+    chunks.push(res.result.pageText);
+    if (/end of the text/.test(res.message)) break;
+  }
+  assert.equal(chunks.length, total, 'the read stops at the last part');
+  assert.equal(chunks.join('\n'), full, 'every character of the page is reachable');
+  assert.ok(chunks.join('\n').includes('Offer 400:'), 'the end of the page is reachable');
+
+  const wrapped = await executor.execute({ action: 'read_page_text' });
+  assert.match(wrapped.message, /whole text already shown - do not read this page again/);
+  assert.match(wrapped.result.note, /whole text already shown/);
+});
+
+test('9. read_page_text with element_id marks a cut element text with its full size', async () => {
+  const long = Array.from({ length: 120 }, (_, i) => `Result ${i + 1} title and abstract words`).join('\n');
+  assert.ok(long.length > 2000);
+  const elements = new Map<number, any>([[3, { innerText: long }]]);
+  const fakeWindow = { location: { href: 'https://arxiv.test/search' }, domCompressor: { getElement: (id: number) => elements.get(id) || null } };
+  const executor = new ActionExecutor({ contains: () => true } as any, fakeWindow as any);
+  const scoped = await executor.execute({ action: 'read_page_text', element_id: 3 });
+  assert.equal(scoped.success, true);
+  assert.match(scoped.result.pageText, new RegExp(`\\n\\[element text truncated: showing \\d+ of ${long.length} characters - [^\\]]+\\]$`));
+  assert.ok(scoped.message.includes('[element text truncated: showing'));
 });

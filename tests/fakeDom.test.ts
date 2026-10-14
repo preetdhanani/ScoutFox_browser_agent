@@ -236,7 +236,9 @@ test('a page whose text is one string is trimmed like the real extractor trims i
   const padded: PageSpec = { url: 'https://raw.test/b', pageHeight: 800, text: `${' '.repeat(1000)}${words}` };
   const paddedFake = pageSnapshot(padded);
   assert.deepStrictEqual(paddedFake, realSnapshot(padded));
-  assert.equal(paddedFake.pageText, `${words.slice(0, 4500)}\n[page text truncated at 4500 characters]`);
+  // Cut at a word boundary, with the note naming the shown and the full size (silent-truncation-no-marker).
+  const cut = words.lastIndexOf(' ', 4500);
+  assert.equal(paddedFake.pageText, `${words.slice(0, cut)}\n[page text truncated: showing ${cut} of ${words.length} characters - call read_page_text to read the whole page in parts]`);
 });
 
 test('a page text that is a list is read whole, one line per piece, short pieces and headings included, like the real extractor', () => {
@@ -403,10 +405,12 @@ test('defaults: no title is "Untitled Page", the page is as tall as its lowest e
 });
 
 test('a page text is cut at 4500 characters, in either form, and a cut text ends with the marker line', () => {
-  const marker = '\n[page text truncated at 4500 characters]';
+  // The cut is at a line or word boundary and the note names the shown and the full size (silent-truncation-no-marker).
+  const marker = (shown: number, total: number) => `\n[page text truncated: showing ${shown} of ${total} characters - call read_page_text to read the whole page in parts]`;
   const long = Array.from({ length: 2000 }, (_, i) => `w${letters(i)}`).join(' ');
-  assert.equal(pageSnapshot({ url: 'https://a.test/', text: long }).pageText, `${long.slice(0, 4500)}${marker}`);
-  assert.equal(pageSnapshot({ url: 'https://a.test/', text: [long, long] }).pageText, `${long.slice(0, 4500)}${marker}`);
+  const cut = long.lastIndexOf(' ', 4500);
+  assert.equal(pageSnapshot({ url: 'https://a.test/', text: long }).pageText, `${long.slice(0, cut)}${marker(cut, long.length)}`);
+  assert.equal(pageSnapshot({ url: 'https://a.test/', text: [long, long] }).pageText, `${long.slice(0, cut)}${marker(cut, long.length * 2 + 1)}`);
   // Exactly at the limit is not cut, so it has no marker.
   assert.equal(pageSnapshot({ url: 'https://a.test/', text: 'a'.repeat(4500) }).pageText, 'a'.repeat(4500));
   assert.equal(pageSnapshot({ url: 'https://a.test/', text: ['a'.repeat(4500)] }).pageText, 'a'.repeat(4500));
@@ -845,7 +849,8 @@ test('read_page_text, press_key and wait answer like the real ones, and wait doe
   assert.deepEqual(await r.send(act({ action: 'read_page_text' })), {
     success: true,
     message: 'Extracted text snippet (37 chars):\n"""\nFramework Laptop 16 - ab 1.399,00 EUR\n"""',
-    result: { pageText: 'Framework Laptop 16 - ab 1.399,00 EUR' },
+    // The note travels with the result, so the model-facing one-shot and step record carry it (silent-truncation-no-marker).
+    result: { pageText: 'Framework Laptop 16 - ab 1.399,00 EUR', note: '37 chars' },
   });
   assert.equal((await r.send(act({ action: 'extract_page_text' }))).success, true);
   assert.deepEqual(await r.send(act({ action: 'press_key', key: 'Escape' })), { success: true, message: 'Pressed key [Escape]' });

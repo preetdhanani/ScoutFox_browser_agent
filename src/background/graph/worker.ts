@@ -31,7 +31,7 @@ import { detectStuck } from '../agent/stuck.ts';
 import { recordFailure, isSignatureBanned } from '../agent/failureMemory.ts';
 import { createFinding, deduplicateFindings, findingsContentSignature, isAutoValueField, FINDING_QUALITY_RANK } from '../agent/findings.ts';
 import { evaluateSiteCriteria } from '../agent/criteria.ts';
-import { buildPolicySystemPrompt, buildPolicyUserMessage } from '../agent/prompts.ts';
+import { buildPolicySystemPrompt, buildPolicyUserMessage, PAGE_TEXT_BUDGET } from '../agent/prompts.ts';
 import { formatRecentSteps, formatOneShotContext, buildStepRecord } from '../agent/memory.ts';
 import { evaluateActionRisk } from '../agent/risk.ts';
 import { systemAction } from '../agent/systemAction.ts';
@@ -718,6 +718,7 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
     pageType: page.pageType,
     scrollY: page.scrollY,
     pageText: page.pageText,
+    pageTextBudget: PAGE_TEXT_BUDGET[tier],
     elementsText: page.elementsText,
     priceCandidates: page.priceCandidates,
     correction: state.pendingCorrection ?? siteRun.strategyHint,
@@ -1305,6 +1306,7 @@ const executeNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'e
     success: result.success,
     error: result.error,
     message: result.message,
+    note: (result as any).oneShot?.note,
   });
 
   Logger.info('Worker', `[ACTION_DISPATCH] ${(pending.action as any)?.action || 'action'} dispatched on tab [${tabId}].`);

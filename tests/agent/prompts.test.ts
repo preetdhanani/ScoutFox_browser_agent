@@ -253,3 +253,38 @@ test('prompts: buildPolicyUserMessage caps recentSteps to last 5 entries', () =>
   assert.ok(msg.includes('step 7'));
 });
 
+
+// silent-truncation-no-marker: the PAGE TEXT block re-sliced the text to 3000 characters, so a 3000-4500 text was
+// cut with no marker at all, and the content script's own marker after 4500 was sliced off. The model then took
+// the head of a long page for the whole page.
+function pageTextMessage(pageText: string, pageTextBudget?: number): string {
+  return buildPolicyUserMessage({
+    task: 't', siteIndex: 1, totalSites: 1, domain: 'shop.test', role: 'reference', goal: 'g',
+    usedSteps: 0, allocSteps: 10, meterMode: 'normal',
+    pageTitle: 'P', pageUrl: 'https://shop.test', pageType: 'other', scrollY: 0,
+    pageText, elementsText: '', ...(pageTextBudget ? { pageTextBudget } : {}),
+  });
+}
+const pageBlock = (msg: string) => msg.split('PAGE TEXT:\n"""\n')[1].split('\n"""')[0];
+const pageLines = (n: number) => Array.from({ length: n }, (_, i) => `Row ${i + 1}: some product text here`).join('\n');
+
+test('prompts: a 4000-character page text that does not fit the budget ends with a truncation note', () => {
+  const text = pageLines(200).slice(0, 4000);
+  assert.equal(text.length, 4000);
+  const block = pageBlock(pageTextMessage(text));
+  assert.match(block, /\[page text truncated: showing \d+ of 4000 characters - [^\]]*read_page_text[^\]]*\]$/);
+});
+
+test('prompts: a 9000-character page text, already cut by the content script, keeps a note with the full size', async () => {
+  const { capPageText } = await import('../../src/content/pageText.ts');
+  const full = pageLines(400).slice(0, 9000);
+  const block = pageBlock(pageTextMessage(capPageText(full)));
+  assert.match(block, /\[page text truncated: showing \d+ of 9000 characters - [^\]]*\]$/);
+  assert.equal(block.match(/truncated/g)?.length, 1);
+});
+
+test('prompts: the page-text budget is a parameter, and a text within it is shown whole with no note', () => {
+  const text = pageLines(200).slice(0, 4000);
+  const block = pageBlock(pageTextMessage(text, 4500));
+  assert.equal(block, text);
+});
