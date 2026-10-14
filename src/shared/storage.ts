@@ -72,6 +72,11 @@ export interface Settings {
   plannerModel?: string;
   reflectModel?: string;
   modelTier?: 'auto' | 'small' | 'large';
+  /**
+   * Opt-in for execute_js (arbitrary JavaScript in the page, with the page's cookies). Off by default: the model is not
+   * offered the verb and the executor refuses it. Only a stored `true` turns it on.
+   */
+  allowExecuteJs: boolean;
   /** User-added third-party providers, keyed by id. Absent in older settings, so reads default to {}. */
   customProviders?: CustomProviders;
 }
@@ -134,6 +139,7 @@ export const DEFAULT_SETTINGS: Settings = {
   plannerModel: '',
   reflectModel: '',
   modelTier: 'auto',
+  allowExecuteJs: false,
 };
 
 /**
@@ -335,7 +341,9 @@ export const Storage = {
           baseUrl,
           model,
           providerConfigs: mergedConfigs,
-          customProviders
+          customProviders,
+          // Settings stored before the opt-in existed have no value: off. Anything but a real true is off too.
+          allowExecuteJs: loaded.allowExecuteJs === true
         };
         delete (settings as any).engine;
         resolve(settings);

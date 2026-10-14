@@ -53,6 +53,8 @@ test('executeAction - handles execute_js returning result, resultData and oneSho
     101,
     { action: 'execute_js', code: 'return 42;', step: 3 },
     {
+      // execute_js is opt-in (safety/confirm-card-blind-approval): the caller passes the setting.
+      allowExecuteJs: true,
       executeJs: async (_, code) => ({
         success: true,
         result: 42,
@@ -70,6 +72,21 @@ test('executeAction - handles execute_js returning result, resultData and oneSho
   assert.equal(res.oneShot.label, 'JavaScript Result');
   assert.equal(res.oneShot.text, '42');
   assert.equal(res.oneShot.step, 3);
+});
+
+test('executeAction - refuses execute_js when the setting is off, before any script runs', async () => {
+  let ran = false;
+  for (const allowExecuteJs of [undefined, false]) {
+    const res = await executeAction(101, { action: 'execute_js', code: 'return 42;' }, {
+      allowExecuteJs,
+      executeJs: async () => { ran = true; return { success: true, result: 42 }; },
+    });
+    assert.equal(res.success, false);
+    assert.match(res.error || '', /execute_js is turned off in Settings/);
+    assert.match(res.error || '', /Do not call execute_js again/);
+    assert.equal(res.effect, 'none');
+  }
+  assert.equal(ran, false, 'the script never ran');
 });
 
 test('executeAction - handles open_window with url_changed effect', async () => {

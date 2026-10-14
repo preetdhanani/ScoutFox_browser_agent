@@ -1103,6 +1103,7 @@ export class AgentRunner {
           pageUrl: interrupt.pageUrl,
           reason: interrupt.reason,
           targetDomain: interrupt.targetDomain,
+          detail: interrupt.detail,
         };
       } else if (interrupt?.kind === 'challenge_help') {
         this.pendingChallengeHelp = {
@@ -1194,6 +1195,7 @@ export class AgentRunner {
       signal: this.runtime.control.stepSignal(),
       waitDomQuiet: (tId, qMs, mMs) => this.runtime.browser.waitDomQuiet(tId, qMs, mMs),
       actionDelayMs: settings?.actionDelayMs,
+      allowExecuteJs: settings?.allowExecuteJs === true,
     });
   }
 

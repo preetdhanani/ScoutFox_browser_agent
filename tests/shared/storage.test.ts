@@ -32,6 +32,21 @@ test('Storage - DEFAULT_SETTINGS sanity check', () => {
   assert.equal(DEFAULT_PROVIDER_CONFIGS.nvidia.llmTimeoutMs, 300000);
 });
 
+test('Storage - execute_js is opt-in: off by default, and only a stored true turns it on', async () => {
+  assert.equal(DEFAULT_SETTINGS.allowExecuteJs, false);
+  // An existing user has no stored value: off.
+  mockStorageData['agent_settings'] = { provider: 'openrouter', maxSteps: 250 };
+  assert.equal((await Storage.getSettings()).allowExecuteJs, false);
+  // A malformed stored value is not a yes.
+  mockStorageData['agent_settings'] = { provider: 'openrouter', allowExecuteJs: 'true' };
+  assert.equal((await Storage.getSettings()).allowExecuteJs, false);
+  await Storage.saveSettings({ allowExecuteJs: true });
+  assert.equal((await Storage.getSettings()).allowExecuteJs, true);
+  await Storage.saveSettings({ allowExecuteJs: false });
+  assert.equal((await Storage.getSettings()).allowExecuteJs, false);
+  delete mockStorageData['agent_settings'];
+});
+
 test('Storage - getSettings & saveSettings roundtrip', async () => {
   const initial = await Storage.getSettings();
   assert.equal(initial.maxSteps, 250);

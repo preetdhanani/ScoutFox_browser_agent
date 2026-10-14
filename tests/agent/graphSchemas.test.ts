@@ -68,6 +68,16 @@ test('buildReflectSchema: validates reflect decisions', () => {
   assert.equal(validateAgainst(schema, invalid).ok, false);
 });
 
+test('buildPolicySchema: execute_js is in the large browse schema only when the setting allows it', () => {
+  const off = buildPolicySchema({ mode: 'browse', tier: 'large', goalKind: 'collect', columns: ['price'] });
+  assert.equal(validateAgainst(off, { action: 'execute_js', code: 'return 1', reason: 'r' }).ok, false);
+  assert.equal(validateAgainst(off, { action: 'open_window', url: 'https://a.test', reason: 'r' }).ok, true);
+  const on = buildPolicySchema({ mode: 'browse', tier: 'large', goalKind: 'collect', columns: ['price'], allowExecuteJs: true });
+  assert.equal(validateAgainst(on, { action: 'execute_js', code: 'return 1', reason: 'r' }).ok, true);
+  const small = buildPolicySchema({ mode: 'browse', tier: 'small', goalKind: 'collect', columns: ['price'], allowExecuteJs: true });
+  assert.equal(validateAgainst(small, { action: 'execute_js', code: 'return 1', reason: 'r' }).ok, false);
+});
+
 test('buildPolicySchema: browse, extract, answer, and harvest schemas', () => {
   // browse mode (collect)
   const browseSchema = buildPolicySchema({ mode: 'browse', goalKind: 'collect', columns: ['price', 'shipping'] });

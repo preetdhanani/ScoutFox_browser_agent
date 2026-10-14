@@ -272,6 +272,7 @@ async function loadSettings() {
   const defaultTimeout = activeIsCustom ? DEFAULT_SETTINGS.llmTimeoutMs : (DEFAULT_PROVIDER_CONFIGS[activeProvider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs);
   document.getElementById('llmTimeoutInput').value = providerCfg.llmTimeoutMs || (activeProvider === 'nvidia' ? defaultTimeout : (currentSettings.llmTimeoutMs || defaultTimeout));
   document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
+  document.getElementById('executeJsToggle').checked = currentSettings.allowExecuteJs === true;
   const effortSelect = document.getElementById('effortDefaultSelect');
   if (effortSelect) {
     effortSelect.value = currentSettings.effortDefault || 'medium';
@@ -510,6 +511,7 @@ async function autoSaveCurrentForm() {
     // or "1000" (thinking seconds) would otherwise make every LLM call abort almost immediately.
     llmTimeoutMs: Math.max(5000, parseInt(document.getElementById('llmTimeoutInput').value, 10) || (DEFAULT_PROVIDER_CONFIGS[provider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs)),
     showElementBadges: document.getElementById('badgesToggle').checked,
+    allowExecuteJs: document.getElementById('executeJsToggle').checked === true,
     effortDefault: document.getElementById('effortDefaultSelect')?.value || currentSettings.effortDefault || 'medium',
     plannerModel: (document.getElementById('plannerModelInput')?.value || '').trim(),
     reflectModel: (document.getElementById('reflectModelInput')?.value || '').trim()

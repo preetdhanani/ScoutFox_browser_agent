@@ -315,6 +315,7 @@ export const AgentState = Annotation.Root({
   turnIndex: last<number>(() => 0),                 // persisted now (was lost on restart)
   runId: last<string>(() => ''),                    // uuid per turn; journal key prefix
   tier: last<ModelTier>(() => 'small'),
+  allowExecuteJs: last<boolean>(() => false),       // the Settings opt-in, snapshot at turn start like tier
   limits: last<Limits>(() => DEFAULT_LIMITS),       // snapshot at turn start
   runStatus: last<RunStatus>(() => 'idle'),         // terminal status written by finalize
   phase: last<'plan' | 'approve' | 'sites' | 'done'>(() => 'done'),

@@ -7,7 +7,32 @@ import RISK_DATA from '../../../shared/risk.json' with { type: 'json' };
 
 export type RiskLevel = 'safe' | 'risky' | 'forbidden';
 
-export type RiskVariant = 'purchase' | 'login' | 'submit' | 'form' | 'navigate';
+export type RiskVariant = 'purchase' | 'login' | 'submit' | 'form' | 'navigate' | 'script';
+
+/** How much of an execute_js code the confirm card carries; the note on the card says how much more there is. */
+export const CONFIRM_CODE_CAP = 2000;
+
+/**
+ * What the user is asked to approve, for the confirm card: the action's own data, not only a summary of it.
+ * Shown as text (the card escapes every field), never used for a decision.
+ */
+export interface ConfirmDetail {
+  verb: string;
+  /** The element the gate judged, by its fullest label (gate label, else label). */
+  elementLabel?: string;
+  /** type: the whole text. */
+  typedText?: string;
+  /** execute_js: the code, its first CONFIRM_CODE_CAP characters. */
+  code?: string;
+  /** execute_js: the length of the whole code. */
+  codeLength?: number;
+  /** The host the element's link opens. */
+  linkHost?: string;
+  /** The host the element's form sends to, when it is another one than the page. */
+  formActionHost?: string;
+  /** browser_batch: one line per step, with its full text. */
+  steps?: string[];
+}
 
 export interface ActionRiskVerdict {
   level: RiskLevel;
@@ -16,6 +41,7 @@ export interface ActionRiskVerdict {
   actionSummary: string;
   elementLabel?: string;
   targetDomain?: string;
+  detail?: ConfirmDetail;
 }
 
 export interface RiskEvaluationInput {
@@ -165,9 +191,18 @@ function isCrossSiteForm(formActionHost: string | undefined, pageUrl: string): b
 }
 
 /**
- * Evaluates the risk of a proposed action according to ScoutFox Risk Gate rules.
+ * Evaluates the risk of a proposed action according to ScoutFox Risk Gate rules. Every verdict carries the detail
+ * of the action (what a confirm card shows).
  */
 export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdict {
+  const verdict = judgeActionRisk(input);
+  const { action } = input;
+  const isEnter = action.action === 'press_key' && action.key === 'Enter';
+  const elementInfo = input.elementInfo ?? (isEnter ? input.focusedElementInfo : null);
+  return { ...verdict, detail: describeDetail(action, elementInfo, input.resolveElementInfo) };
+}
+
+function judgeActionRisk(input: RiskEvaluationInput): ActionRiskVerdict {
   const { action, pageType, pageUrl = '', approvedDomains = [], resolveElementInfo, focusedElementInfo } = input;
   const actionVerb = action.action;
   const isEnter = actionVerb === 'press_key' && action.key === 'Enter';
@@ -204,11 +239,11 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
     gateLabel.split(/\s+/).filter(Boolean).length >= TITLE_LINK_MIN_WORDS;
   const wordsApply = activates && !isTitleLink;
 
-  // execute_js runs arbitrary page code: risky
+  // execute_js runs arbitrary page code: risky, on its own card that shows the code
   if (actionVerb === 'execute_js') {
     return {
       level: 'risky',
-      variant: 'form',
+      variant: 'script',
       reason: 'Executing arbitrary JavaScript code on the page.',
       actionSummary,
     };
@@ -328,7 +363,10 @@ export function evaluateActionRisk(input: RiskEvaluationInput): ActionRiskVerdic
     };
   }
 
-  const hasPurchaseWords = wordsApply && containsAnyWord(gateLabel, RISK_DATA.purchaseWords || []);
+  // "order" alone is a purchase only as the whole label (an "Order" button): in "Sort order" or "Order history" it is not.
+  const hasPurchaseWords = wordsApply && (
+    containsAnyWord(gateLabel, RISK_DATA.purchaseWords || []) || isExactlyAnyWord(gateParts, RISK_DATA.purchaseExactWords || [])
+  );
 
   // 3. SAFE EXEMPTION: the site's own search box with submit is safe. Not a cross-site form (formKind is 'other'
   // then), and not a purchase control that only sits inside a form whose class or id says "search".
@@ -485,8 +523,8 @@ function describeAction(action: any, elementInfo?: ElementInfo | null): string {
     return `Click ${label || idStr || 'element'}`.trim();
   }
   if (verb === 'type') {
-    const textPreview = action.text ? `"${action.text.slice(0, 20)}"` : '';
-    return `Type ${textPreview} into ${label || idStr || 'field'}`.trim();
+    // The whole text is in the verdict detail, which the card shows in its own box.
+    return `Type into ${label || idStr || 'field'}`;
   }
   if (verb === 'navigate') {
     return `Navigate to ${action.url || 'URL'}`;
@@ -495,11 +533,44 @@ function describeAction(action: any, elementInfo?: ElementInfo | null): string {
     return `Open window at ${action.url || 'URL'}`;
   }
   if (verb === 'execute_js') {
-    return 'Execute JS';
+    return 'Run JavaScript on this page';
   }
   if (verb === 'browser_batch') {
     const count = Array.isArray(action.steps) ? action.steps.length : 0;
     return `Batch (${count} steps)`;
   }
   return `${verb} ${label || idStr}`.trim();
+}
+
+/** One line of an action for the confirm card, with the whole typed text (describeAction cuts it for the summary). */
+function describeStep(action: any, elementInfo?: ElementInfo | null): string {
+  if (action?.action === 'type' && typeof action.text === 'string') {
+    const label = elementInfo?.label ? `"${elementInfo.label}"` : action.element_id !== undefined ? `[${action.element_id}]` : 'field';
+    return `Type "${action.text}" into ${label}`;
+  }
+  return describeAction(action ?? {}, elementInfo);
+}
+
+function describeDetail(
+  action: RiskEvaluationInput['action'],
+  elementInfo: ElementInfo | null | undefined,
+  resolveElementInfo: RiskEvaluationInput['resolveElementInfo'],
+): ConfirmDetail {
+  const detail: ConfirmDetail = { verb: action.action };
+  const elementLabel = (elementInfo?.gateLabel || elementInfo?.label || '').trim();
+  if (elementLabel) detail.elementLabel = elementLabel;
+  if (action.action === 'type' && typeof action.text === 'string') detail.typedText = action.text;
+  if (action.action === 'execute_js' && typeof action.code === 'string') {
+    detail.code = action.code.slice(0, CONFIRM_CODE_CAP);
+    detail.codeLength = action.code.length;
+  }
+  if (elementInfo?.hrefDomain) detail.linkHost = elementInfo.hrefDomain;
+  if (elementInfo?.formActionHost) detail.formActionHost = elementInfo.formActionHost;
+  if (action.action === 'browser_batch' && Array.isArray(action.steps)) {
+    detail.steps = action.steps.map((step: any) => {
+      const info = step?.elementInfo ?? (typeof step?.element_id === 'number' && resolveElementInfo ? resolveElementInfo(step.element_id) : null);
+      return describeStep(step, info);
+    });
+  }
+  return detail;
 }

@@ -72,6 +72,15 @@ export function verbsFor(mode: PolicyMode, tier: Tier): string[] {
 }
 
 /**
+ * The verbs a policy step offers: verbsFor, without execute_js unless the user turned it on in Settings. execute_js
+ * runs arbitrary code in the page with the page's cookies, so it is opt-in (safety/confirm-card-blind-approval).
+ */
+export function offeredVerbs(mode: PolicyMode, tier: Tier, opts: { allowExecuteJs?: boolean } = {}): string[] {
+  const verbs = verbsFor(mode, tier);
+  return opts.allowExecuteJs ? verbs : verbs.filter((v) => v !== 'execute_js');
+}
+
+/**
  * One prompt line per verb, for example "click {element_id} - click element [element_id]".
  *
  * @param verbs defaults to every verb in the registry

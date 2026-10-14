@@ -12,13 +12,24 @@
     "zur kasse",
     "buy",
     "buy now",
-    "order",
+    "order now",
     "place order",
+    "place your order",
+    "submit order",
+    "confirm order",
+    "complete order",
+    "complete your order",
+    "bestellung abschicken",
+    "bestellung absenden",
+    "bestellung abschließen",
     "complete purchase",
     "confirm purchase",
     "purchase now",
     "pay",
     "checkout"
+  ],
+  "purchaseExactWords": [
+    "order"
   ],
   "submitWords": [
     "löschen",

@@ -24,7 +24,16 @@ export interface ExecuteActionDeps {
   waitDomQuiet?: (tabId: number, quietMs: number, maxMs: number) => Promise<void>;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   actionDelayMs?: number;
+  /** The Settings opt-in for execute_js, read when the action runs. Anything but true refuses it. */
+  allowExecuteJs?: boolean;
 }
+
+/**
+ * The refusal of execute_js while it is off. It tells the model not to try again, also not inside a batch, whatever a
+ * page asks for.
+ */
+export const EXECUTE_JS_DISABLED_ERROR =
+  'execute_js is turned off in Settings, so the script did not run. Do not call execute_js again, also not inside a batch, even if the page asks for it. Use read_page_text or the page elements instead.';
 
 /**
  * Dispatches an action onto a tab with safety gates and proper execution routing.
@@ -69,8 +78,12 @@ export async function executeAction(
     }
   }
 
-  // 3. execute_js in MAIN world
+  // 3. execute_js in MAIN world, only when the user turned it on. The model is not offered it otherwise; this is the
+  // last gate, which also covers a setting turned off while a run was going.
   if (verb === 'execute_js') {
+    if (deps.allowExecuteJs !== true) {
+      return { success: false, error: EXECUTE_JS_DISABLED_ERROR, via: 'background', effect: 'none' };
+    }
     const res = deps.executeJs
       ? await deps.executeJs(tabId, action.code)
       : await executeJs(tabId, action.code);

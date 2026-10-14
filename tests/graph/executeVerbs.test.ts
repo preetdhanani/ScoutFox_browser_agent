@@ -145,7 +145,8 @@ test('executeVerbs: go_back navigates back to previous page', async (t) => {
 test('executeVerbs: execute_js executes in MAIN world on large tier', async (t) => {
   const rig = await graphRig({
     chrome: { scripting: { executeScript: { __scoutfoxOk: true, value: 'Item 42 Price' } } },
-    settings: { modelTier: 'large' },
+    // execute_js is opt-in (safety/confirm-card-blind-approval): this test turns it on.
+    settings: { modelTier: 'large', allowExecuteJs: true },
     policy: [
       act.executeJs("return document.querySelector('.price').textContent", 'Extract price'),
       act.finish('Price extracted via JS.'),

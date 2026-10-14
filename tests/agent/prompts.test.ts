@@ -87,11 +87,21 @@ test('prompts: buildPolicySystemPrompt uses wait {amount} and press_key keys wit
 });
 
 test('prompts: buildPolicySystemPrompt includes large tier actions when tier is large', () => {
-  const prompt = buildPolicySystemPrompt('browse', 'large', ['price'], true, 'collect');
+  // execute_js is opt-in (safety/confirm-card-blind-approval), so this asks for it.
+  const prompt = buildPolicySystemPrompt('browse', 'large', ['price'], true, 'collect', { allowExecuteJs: true });
   assert.ok(prompt.includes('execute_js {code}'));
   assert.ok(prompt.includes('read_network_requests {filter, includeBody, limit}'));
   assert.ok(prompt.includes('browser_batch {steps, stopOnError}'));
   assert.ok(prompt.includes('open_window {url}'));
+});
+
+test('prompts: the large tier prompt leaves out execute_js unless the setting allows it', () => {
+  const prompt = buildPolicySystemPrompt('browse', 'large', ['price'], true, 'collect');
+  assert.ok(!prompt.includes('execute_js'));
+  assert.ok(prompt.includes('browser_batch {steps, stopOnError}'));
+  assert.ok(prompt.includes('read_network_requests'));
+  // The setting cannot give a small model a large tier verb.
+  assert.ok(!buildPolicySystemPrompt('browse', 'small', ['price'], true, 'collect', { allowExecuteJs: true }).includes('execute_js'));
 });
 
 test('prompts: buildPolicySystemPrompt excludes large tier actions when tier is small', () => {

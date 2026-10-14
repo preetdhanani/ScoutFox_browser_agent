@@ -448,3 +448,33 @@ test('worker risk gate - an input submit named only by its value raises a card',
   assert.equal(hold?.kind, 'confirm_action');
   assert.equal(hold?.variant, 'submit');
 });
+
+// safety/confirm-card-blind-approval: the hold carries what the card must show.
+test('worker risk gate - a type hold carries the full typed text and the form action host', async () => {
+  const text = 'Hello, I would like to cancel my contract number 12345 at the end of this month.';
+  const hold = await firstHold(
+    'test-worker-risk-type-detail',
+    JSON.stringify({ thought: 'send', action: 'type', element_id: 1, text, submit: true }),
+    contactSnapshot({
+      focused: null,
+      elementInfo: {
+        '1': { role: 'textbox', label: 'Nachricht', formKind: 'other', fieldKind: 'text', formActionHost: 'forms.other.test' },
+        '2': { role: 'button', label: 'element', gateLabel: 'Registrieren', formKind: 'other', submitControl: true },
+      },
+    }),
+  );
+  assert.equal(hold?.kind, 'confirm_action');
+  const detail = hold?.kind === 'confirm_action' ? hold.detail : undefined;
+  assert.equal(detail?.typedText, text);
+  assert.equal(detail?.formActionHost, 'forms.other.test');
+});
+
+test('worker risk gate - the hold names the element by its gate label when the model label is a placeholder', async () => {
+  const hold = await firstHold(
+    'test-worker-risk-gate-label',
+    '{"thought": "register", "action": "click", "elementId": 2}',
+    contactSnapshot({ focused: null }),
+  );
+  assert.equal(hold?.kind, 'confirm_action');
+  assert.equal(hold?.kind === 'confirm_action' ? hold.elementLabel : '', 'Registrieren');
+});

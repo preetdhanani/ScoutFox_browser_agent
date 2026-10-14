@@ -264,6 +264,8 @@ export interface PolicySchemaOptions {
   columns?: string[];
   priceLike?: boolean;
   goalKind?: 'collect' | 'do' | 'answer';
+  /** The Settings opt-in for execute_js. Missing is off: the schema does not offer it, even to the large tier. */
+  allowExecuteJs?: boolean;
 }
 
 function buildRecordFindingBranch(columns?: string[], priceLike?: boolean): JsonSchema {
@@ -288,7 +290,7 @@ function buildRecordFindingBranch(columns?: string[], priceLike?: boolean): Json
  * Builds the LangGraph worker policy schema for a specific mode, tier, and goal.
  */
 export function buildPolicySchema(options: PolicySchemaOptions): JsonSchema {
-  const { mode, tier = 'small', columns = [], priceLike = false, goalKind = 'collect' } = options;
+  const { mode, tier = 'small', columns = [], priceLike = false, goalKind = 'collect', allowExecuteJs = false } = options;
 
   if (mode === 'extract') {
     return {
@@ -344,7 +346,8 @@ export function buildPolicySchema(options: PolicySchemaOptions): JsonSchema {
   // mode === 'browse'
   const baseVerbs = ['click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward', 'wait', 'read_page_text', 'ask_user'];
   if (tier === 'large') {
-    baseVerbs.push('execute_js', 'read_network_requests', 'browser_batch', 'open_window');
+    if (allowExecuteJs) baseVerbs.push('execute_js');
+    baseVerbs.push('read_network_requests', 'browser_batch', 'open_window');
   }
 
   const branches: JsonSchema[] = baseVerbs.map((v) => branchFor(verbDef(v), { withReason: true, batchSteps: BATCH_STEP_STYLE }));

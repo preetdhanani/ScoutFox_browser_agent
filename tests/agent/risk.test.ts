@@ -490,3 +490,82 @@ test('risk: an unknown verb keeps the default-safe fallback, because sanitize re
   assert.equal(sanitized.invalidAction, 'buy_item', 'an unoffered verb never reaches the gate');
   assert.equal(evaluateActionRisk({ action: { action: 'buy_item', element_id: 1 }, elementInfo: { role: 'button', label: 'Weiter' } }).level, 'safe');
 });
+
+// ---------------------------------------------------------------------------------------------
+// safety/confirm-card-blind-approval: the verdict carries what the user is asked to approve
+// ---------------------------------------------------------------------------------------------
+
+test('risk: an execute_js verdict is its own script variant and carries the code, up to the 2000 character cap', () => {
+  const code = `const rows = [...document.querySelectorAll('tr')]; return rows.map((r) => r.textContent).join('\\n');`;
+  const verdict = evaluateActionRisk({ action: { action: 'execute_js', code }, pageUrl: 'https://shop.de/p/1', approvedDomains: ['shop.de'] });
+  assert.equal(verdict.level, 'risky');
+  assert.equal(verdict.variant, 'script');
+  assert.equal(verdict.detail?.verb, 'execute_js');
+  assert.equal(verdict.detail?.code, code);
+  assert.equal(verdict.detail?.codeLength, code.length);
+
+  const long = 'a'.repeat(2500);
+  const cut = evaluateActionRisk({ action: { action: 'execute_js', code: long } });
+  assert.equal(cut.detail?.code?.length, 2000);
+  assert.equal(cut.detail?.codeLength, 2500);
+});
+
+test('risk: a type verdict carries the full typed text, not the first 20 characters', () => {
+  const text = 'Erika Mustermann, Heidestrasse 17, 51147 Koeln';
+  const verdict = evaluateActionRisk({
+    action: { action: 'type', element_id: 3, text },
+    elementInfo: { role: 'textbox', label: 'Adresse', fieldKind: 'address' },
+    pageUrl: 'https://shop.de/konto',
+    approvedDomains: ['shop.de'],
+  });
+  assert.equal(verdict.level, 'risky');
+  assert.equal(verdict.detail?.typedText, text);
+  assert.equal(verdict.detail?.elementLabel, 'Adresse');
+});
+
+test('risk: a verdict carries the element gate label, the link host and the form action host', () => {
+  const link = click({ role: 'link', label: 'Pay', gateLabel: 'Pay | Pay with Wallet', hrefDomain: 'wallet.example' });
+  assert.equal(link.level, 'risky');
+  assert.equal(link.detail?.elementLabel, 'Pay | Pay with Wallet');
+  assert.equal(link.detail?.linkHost, 'wallet.example');
+
+  const enter = evaluateActionRisk({
+    action: { action: 'press_key', key: 'Enter' },
+    focusedElementInfo: { role: 'textbox', label: 'E-Mail', formKind: 'other', formActionHost: 'collect.other.example' },
+    pageUrl: 'https://shop.de/newsletter',
+    approvedDomains: ['shop.de'],
+  });
+  assert.equal(enter.level, 'risky');
+  assert.equal(enter.detail?.formActionHost, 'collect.other.example');
+  assert.equal(enter.detail?.elementLabel, 'E-Mail');
+});
+
+test('risk: a batch verdict lists every step with its full text', () => {
+  const infos: Record<number, any> = { 1: { role: 'textbox', label: 'Kommentar' }, 2: { role: 'button', label: 'Post comment' } };
+  const verdict = evaluateActionRisk({
+    action: { action: 'browser_batch', steps: [
+      { action: 'type', element_id: 1, text: 'A long comment that is surely more than twenty characters' },
+      { action: 'click', element_id: 2 },
+    ] },
+    pageUrl: 'https://shop.de/p/1',
+    approvedDomains: ['shop.de'],
+    resolveElementInfo: (id) => infos[id],
+  });
+  assert.equal(verdict.level, 'risky');
+  assert.deepEqual(verdict.detail?.steps, [
+    'Type "A long comment that is surely more than twenty characters" into "Kommentar"',
+    'Click "Post comment"',
+  ]);
+});
+
+test('risk: the word "order" alone no longer gates sorting and order history, order phrases still do', () => {
+  for (const label of ['Sort order', 'Order history', 'Order by price', 'Sortierung: Reihenfolge', 'Track your order', 'Orders']) {
+    const verdict = click({ role: 'button', label });
+    assert.equal(verdict.level, 'safe', `"${label}" is not a purchase control`);
+  }
+  for (const label of ['Order now', 'Place order', 'Place your order', 'Submit order', 'Confirm order', 'Complete order', 'Order', 'Jetzt bestellen', 'Bestellung abschicken']) {
+    const verdict = click({ role: 'button', label });
+    assert.equal(verdict.level, 'risky', `"${label}" is a purchase control`);
+    assert.equal(verdict.variant, 'purchase', `"${label}" variant`);
+  }
+});

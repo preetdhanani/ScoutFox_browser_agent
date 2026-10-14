@@ -2009,11 +2009,6 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   color: var(--text-main);
   font-size: 12px;
 }
-.target-element {
-  color: var(--text-muted);
-  font-style: italic;
-  margin-left: 4px;
-}
 .action-target-domain {
   font-size: 11px;
   color: var(--text-muted);
@@ -2040,6 +2035,88 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .remember-domain-row {
   margin-top: 4px;
 }
+
+/* Confirm card: what the user approves */
+.action-confirmation-card {
+  min-width: 0;
+}
+.action-confirmation-card.variant-script {
+  border-left-color: var(--danger);
+}
+.variant-tag.tag-script { background: var(--danger-soft); color: var(--danger); }
+.confirm-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+}
+.confirm-row-label {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+.confirm-row-value {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+.confirm-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.confirm-block-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.confirm-code {
+  margin: 0;
+  max-width: 100%;
+  max-height: 220px;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-main);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 2;
+}
+/* Typed text is prose: it wraps instead of scrolling sideways. */
+.confirm-code.confirm-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.confirm-code code {
+  font: inherit;
+  color: inherit;
+  background: none;
+  padding: 0;
+}
+.confirm-code-note {
+  font-size: 10.5px;
+  color: var(--warning);
+}
+.confirm-steps {
+  margin: 0;
+  padding: 6px 8px 6px 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-main);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+/* End confirm card detail */
 .checkbox-label {
   display: flex;
   align-items: center;

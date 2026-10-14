@@ -4,6 +4,7 @@
 // siteIn in and builds siteOut (plus the new history rows) from the worker's final state.
 import { Annotation } from '@langchain/langgraph/web';
 import { last, list, MAX_HISTORY, MAX_STEP_RECORDS, MAX_TRAIL } from './state.ts';
+import type { ConfirmDetail } from '../agent/risk.ts';
 import type {
   BlockedSource,
   CdpState,
@@ -38,6 +39,7 @@ export interface SiteIn {                // written by sched; read-only in the w
   task: string; taskKind: PlanMeta['taskKind']; columns: string[]; priceLike: boolean;
   compare: PlanMeta['compare'] | null;
   profile: EffortProfile; tier: ModelTier; limits: Limits; runId: string;
+  allowExecuteJs?: boolean;              // the Settings opt-in at turn start; missing = off (execute_js not offered)
   alloc: number; slackAvailable: number; hardCapLeft: number;   // budget units
   stepBase: number; systemActionBase: number; parseErrorsBase: number; everParsedOk: boolean;
   tabId: number; cdp: CdpState;
@@ -163,7 +165,7 @@ export interface PendingAction {         // written by risk
   signature: string;                     // 'verb|target|url', the same key the stuck check and the bans use
   journalKey: string;                    // '<runId>:<step>'
   risk: { level: 'safe' | 'risky' | 'forbidden';
-          variant?: 'submit' | 'purchase' | 'login' | 'form' | 'navigate'; reason: string; targetDomain?: string };
+          variant?: 'submit' | 'purchase' | 'login' | 'form' | 'navigate' | 'script'; reason: string; targetDomain?: string };
 }
 
 export interface ExecRecord { step: number; action: PageAction; signature: string; sigBefore: PageSig;
@@ -173,8 +175,9 @@ export interface VerifyResult { outcome: 'ok' | 'no_effect' | 'failed' | 'stuck'
   goal: 'closer' | 'same' | 'away' | null; detail: string }
 
 export type WorkerHold =                 // worker hold kinds; challenge_help and continue_budget added in P7b
-  | { kind: 'confirm_action'; variant: 'submit' | 'purchase' | 'login' | 'form' | 'navigate';
-      actionSummary: string; elementLabel: string; pageUrl: string; reason: string; targetDomain?: string }
+  | { kind: 'confirm_action'; variant: 'submit' | 'purchase' | 'login' | 'form' | 'navigate' | 'script';
+      actionSummary: string; elementLabel: string; pageUrl: string; reason: string; targetDomain?: string;
+      detail?: ConfirmDetail }           // what the card shows: typed text, code, link and form hosts (agent/risk.ts)
   | { kind: 'ask_user'; question: string }
   | { kind: 'paused'; reason: 'user' | 'llm_failure'; error?: string }
   | { kind: 'challenge_help'; reason: string; domain: string; url: string }

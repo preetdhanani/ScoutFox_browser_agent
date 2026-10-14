@@ -82,7 +82,8 @@ test('executeGates: risk gate pauses at confirm hold when navigating to unapprov
 test('executeGates: risk gate pauses at confirm hold for execute_js on large tier model', async (t) => {
   const rig = await graphRig({
     chrome: { scripting: { executeScript: [{ result: { __scoutfoxOk: true, value: 'Items List' } }] } },
-    settings: { modelTier: 'large' },
+    // execute_js is opt-in (safety/confirm-card-blind-approval): this test turns it on.
+    settings: { modelTier: 'large', allowExecuteJs: true },
     policy: [
       act.executeJs('return document.title;', 'Get page title'),
       act.finish('Finished after JS execution.'),

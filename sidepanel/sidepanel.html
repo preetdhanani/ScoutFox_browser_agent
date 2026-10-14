@@ -280,6 +280,15 @@
             </label>
           </div>
 
+          <!-- execute_js is opt-in: off, the model is not offered it and the engine refuses it. -->
+          <div class="form-group toggle-group" id="executeJsGroup">
+            <label class="toggle-label" for="executeJsToggle">
+              <span>Allow the agent to run JavaScript on pages</span>
+              <input type="checkbox" id="executeJsToggle">
+            </label>
+            <span class="subtext-hint">Off by default. A script runs with the page's rights, including your login cookies on that site. You still approve every script on a card that shows its code. Only large models get it. Turning it on applies from the next task; turning it off stops scripts at once.</span>
+          </div>
+
           <button class="btn btn-primary btn-block" id="btnSaveSettings">Save Settings</button>
         </div>
       </section>

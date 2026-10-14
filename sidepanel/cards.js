@@ -140,6 +140,57 @@ export function renderPlanApprovalCard(approval, planSteps = [], effortProfile =
   `;
 }
 
+/** The host of a URL, or '' for one that does not parse. */
+function hostOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch (_) {
+    return '';
+  }
+}
+
+/** One labelled line of the card, or '' when there is no value. */
+function confirmRow(label, value) {
+  if (!value) return '';
+  return `<div class="confirm-row"><span class="confirm-row-label">${escapeHtml(label)}</span><code class="confirm-row-value">${escapeHtml(value)}</code></div>`;
+}
+
+/**
+ * The action's own data, so the user sees what they approve: the typed text, the code of a script (escaped, monospace,
+ * scrolling inside its box) and the steps of a batch. `detail` comes from the risk gate (agent/risk.ts ConfirmDetail).
+ */
+function renderConfirmDetail(detail) {
+  if (!detail || typeof detail !== 'object') return '';
+  const parts = [];
+  if (typeof detail.typedText === 'string' && detail.typedText) {
+    parts.push(`
+      <div class="confirm-block">
+        <span class="confirm-block-label">Text to type</span>
+        <pre class="confirm-code confirm-text">${escapeHtml(detail.typedText)}</pre>
+      </div>`);
+  }
+  if (typeof detail.code === 'string') {
+    const total = Number(detail.codeLength) || detail.code.length;
+    const cut = total > detail.code.length
+      ? `<span class="confirm-code-note">Showing the first ${detail.code.length} of ${total} characters. The rest is not shown but runs too.</span>`
+      : '';
+    parts.push(`
+      <div class="confirm-block">
+        <span class="confirm-block-label">JavaScript to run</span>
+        <pre class="confirm-code"><code>${escapeHtml(detail.code)}</code></pre>
+        ${cut}
+      </div>`);
+  }
+  if (Array.isArray(detail.steps) && detail.steps.length > 0) {
+    parts.push(`
+      <div class="confirm-block">
+        <span class="confirm-block-label">Steps</span>
+        <ol class="confirm-steps">${detail.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol>
+      </div>`);
+  }
+  return parts.join('');
+}
+
 /**
  * Render Action Confirmation Card (HITL interrupt: confirm_action)
  */
@@ -147,49 +198,56 @@ export function renderActionConfirmationCard(confirm) {
   if (!confirm) return '';
 
   const variant = confirm.variant || 'form';
+  const detail = confirm.detail && typeof confirm.detail === 'object' ? confirm.detail : null;
   const actionSummary = confirm.actionSummary || 'Perform browser action';
-  const elementLabel = confirm.elementLabel ? `"${confirm.elementLabel}"` : '';
+  const elementLabel = confirm.elementLabel || (detail && detail.elementLabel) || '';
   const reason = confirm.reason || 'This action modifies external state or navigates away.';
-  const pageUrl = confirm.pageUrl || '';
-  const targetDomain = confirm.targetDomain || (pageUrl ? new URL(pageUrl, 'https://localhost').hostname : '');
+  const pageHost = confirm.pageUrl ? hostOf(confirm.pageUrl) : '';
+  // Only a navigate hold has a targetDomain, and the engine remembers only that one: "remember" is offered only then,
+  // so the checkbox never shows where it would do nothing.
+  const targetDomain = confirm.targetDomain || '';
 
   const variantTitles = {
     purchase: 'Purchase / Checkout Action',
     login: 'Login / Authentication Action',
     submit: 'Form Submission / Deletion',
     form: 'Personal Data Entry',
-    navigate: 'External Site Navigation'
+    navigate: 'External Site Navigation',
+    script: 'Run script on this page'
   };
 
   const title = variantTitles[variant] || 'Confirmation Required';
-
-  const showRememberCheckbox = variant === 'navigate' || !!targetDomain;
+  const variantClass = String(variant).replace(/[^a-z]/g, '');
 
   return `
-    <div class="approval-card action-confirmation-card variant-${variant}">
+    <div class="approval-card action-confirmation-card variant-${variantClass}">
       <div class="card-header">
         <div class="card-title-group">
           <span class="card-icon">🛡️</span>
           <span class="card-title">${escapeHtml(title)}</span>
         </div>
-        <span class="variant-tag tag-${variant}">${escapeHtml(variant)}</span>
+        <span class="variant-tag tag-${variantClass}">${escapeHtml(variant)}</span>
       </div>
 
       <div class="card-body">
         <div class="action-summary-box">
           <div class="action-highlight">
             <strong>${escapeHtml(actionSummary)}</strong>
-            ${elementLabel ? `<span class="target-element">${escapeHtml(elementLabel)}</span>` : ''}
           </div>
-          ${targetDomain ? `<div class="action-target-domain">Target domain: <code>${escapeHtml(targetDomain)}</code></div>` : ''}
+          ${confirmRow('Element', elementLabel)}
+          ${confirmRow('Link opens', detail && detail.linkHost)}
+          ${confirmRow('Form sends to', detail && detail.formActionHost)}
+          ${targetDomain ? confirmRow('Target domain', targetDomain) : confirmRow('Page', pageHost)}
         </div>
+
+        ${renderConfirmDetail(detail)}
 
         <div class="risk-reason-box">
           <span class="reason-label">Risk Policy:</span>
           <span class="reason-text">${escapeHtml(reason)}</span>
         </div>
 
-        ${showRememberCheckbox ? `
+        ${targetDomain ? `
           <div class="remember-domain-row">
             <label class="checkbox-label" for="chkRememberSite">
               <input type="checkbox" id="chkRememberSite" checked>

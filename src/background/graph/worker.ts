@@ -21,7 +21,7 @@ import { Logger } from '../../shared/logger.ts';
 import { interruptWithConfig } from './interrupt.ts';
 import { parseModelReply, type ParseResult } from '../agent/parse.ts';
 import { findTopLevelObjects } from '../agent/repairJson.ts';
-import { ACTION_VERBS, REGISTRY, verbsFor, type PolicyMode } from '../agent/actions.ts';
+import { ACTION_VERBS, REGISTRY, offeredVerbs, type PolicyMode } from '../agent/actions.ts';
 import { toPerceiveError } from '../browser/snapshot.ts';
 import { buildPolicySchema } from '../agent/schemas.ts';
 import { evaluateMeterMode, calculateSlackDraw } from '../agent/budget.ts';
@@ -721,7 +721,8 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
     planBlock = `Plan (step ${stepCount}${hardCap ? `/${hardCap}` : ''} overall):\n${stepLines.join('\n')}`;
   }
 
-  const systemPrompt = buildPolicySystemPrompt(mode, tier, columns, priceLike, goalKind);
+  const allowExecuteJs = siteIn.allowExecuteJs === true;
+  const systemPrompt = buildPolicySystemPrompt(mode, tier, columns, priceLike, goalKind, { allowExecuteJs });
   const userMessage = buildPolicyUserMessage({
     task: siteIn.task,
     siteIndex: siteIn.index,
@@ -767,7 +768,7 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
     memoryBudget: MEMORY_BUDGET[tier],
   });
 
-  const schema = buildPolicySchema({ mode, tier, columns, priceLike, goalKind });
+  const schema = buildPolicySchema({ mode, tier, columns, priceLike, goalKind, allowExecuteJs });
   const stepSignal = runtime.control.stepSignal();
   let replyText = '';
 
@@ -882,7 +883,8 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
     };
   }
 
-  const allowedVerbs = [...verbsFor(mode, tier as any)];
+  // execute_js is opt-in: when it is off, a reply that uses it anyway is rejected here as a verb this step does not offer.
+  const allowedVerbs = offeredVerbs(mode, tier as any, { allowExecuteJs: siteIn.allowExecuteJs === true });
   if (isAnswerSite(siteIn) && !allowedVerbs.includes('finish')) {
     allowedVerbs.push('finish');
   }
@@ -1204,7 +1206,9 @@ const riskNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'risk
   };
 
   const actionSummary = evalResult.actionSummary;
-  const elementLabel = evalResult.elementLabel || (elementInfo?.label || (action.element_id !== undefined ? `#${action.element_id}` : ''));
+  // The fullest name of the element the gate judged: an input submit the model sees as "element" is named by its value.
+  const elementLabel = evalResult.detail?.elementLabel || evalResult.elementLabel ||
+    (elementInfo?.label || (action.element_id !== undefined ? `#${action.element_id}` : ''));
   const pageUrl = state.page?.url || '';
 
   const pendingHold: WorkerHold | null = evalResult.level === 'risky'
@@ -1215,7 +1219,10 @@ const riskNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'risk
         elementLabel,
         pageUrl,
         reason: evalResult.reason,
+        // Only a navigate verdict has a targetDomain, and the hold remembers only that (see holdNode): the card offers
+        // "remember" only when it is set.
         targetDomain: evalResult.targetDomain,
+        detail: evalResult.detail,
       }
     : null;
 

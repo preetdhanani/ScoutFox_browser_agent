@@ -66,7 +66,9 @@ export function buildPolicySystemPrompt(
   tier: ModelTier = 'small',
   columns: string[] = [],
   priceLike: boolean = false,
-  goalKind: GoalKind = 'collect'
+  goalKind: GoalKind = 'collect',
+  // The Settings opt-in for execute_js; missing is off, so the prompt does not offer it.
+  options: { allowExecuteJs?: boolean } = {}
 ): string {
   const identity = 'You are ScoutFox, a browser agent that controls one browser tab.';
 
@@ -110,8 +112,7 @@ ask_user {question} - only if you cannot answer without the user`;
   // mode === 'browse'
   const colList = columns.length > 0 ? columns.join(', ') : (priceLike ? 'price, shipping, delivery' : 'value');
   const largeActions = tier === 'large'
-    ? `execute_js {code} - run JavaScript in the page and get the result (max 2000 chars)
-read_network_requests {filter, includeBody, limit} - see recent network requests
+    ? `${options.allowExecuteJs ? 'execute_js {code} - run JavaScript in the page and get the result (max 2000 chars)\n' : ''}read_network_requests {filter, includeBody, limit} - see recent network requests
 browser_batch {steps, stopOnError} - up to 8 click/type/scroll/press_key/wait steps on this page
 open_window {url} - open a new browser window\n`
     : '';

@@ -109,7 +109,8 @@ const LIE = 'The Framework Laptop 16 costs 9,99 EUR.';
 
 function newStore(maxSteps = 12, session: Record<string, unknown> = {}): FakeStorage {
   return createFakeStorage({
-    local: { data: { agent_settings: { provider: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'test-model', modelTier: 'large', maxSteps, actionDelayMs: 1, effortDefault: 'low' } } },
+    // allowExecuteJs: execute_js is opt-in (safety/confirm-card-blind-approval); the execute_js tests here need it on.
+    local: { data: { agent_settings: { provider: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'test-model', modelTier: 'large', allowExecuteJs: true, maxSteps, actionDelayMs: 1, effortDefault: 'low' } } },
     session: { data: session },
   });
 }
