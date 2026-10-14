@@ -29,10 +29,12 @@ import { ChatOpenAICompletions } from '@langchain/openai';
 import type { BaseMessage } from '@langchain/core/messages';
 import { Logger } from '../../shared/logger.ts';
 import {
+  ProviderError,
   UnreadableReplyError,
   agentRouterAuthText,
   agentRouterEmptyText,
   assertApiKey,
+  classifyProviderFailure,
   describeAgentRouterFailure,
   isAgentRouterAuthFailure,
   statusOf,
@@ -68,10 +70,13 @@ export async function callAgentRouter(settings: LlmSettings, messages: ChatTurn[
   const headers = agentRouterHeaders(apiKey);
   const startTime = Date.now();
 
-  const fail = (inner: string): never => {
+  const fail = (inner: string, cause?: unknown): never => {
     // A Pause, a Stop or the deadline is reported once, as [NETWORK_ABORTED] by generateCompletion, not as a failed request.
     if (!signal?.aborted) Logger.error('AgentRouterClient', '[NETWORK] Failed request to AgentRouter', inner);
-    throw new Error(wrapAgentRouterFailure(inner));
+    // The kind and the status come from the error the SDK threw, so the retry wrapper sees a refused key as
+    // auth and an overloaded endpoint as transient, not as two wordings of the same text.
+    const failure = classifyProviderFailure(cause);
+    throw new ProviderError(wrapAgentRouterFailure(inner), { status: failure.status, kind: failure.kind, retryAfterMs: failure.retryAfterMs });
   };
 
   // Attempt 1: the Anthropic Messages endpoint. The SDK adds /v1/messages to the URL it is given.
@@ -97,14 +102,14 @@ export async function callAgentRouter(settings: LlmSettings, messages: ChatTurn[
     const failure = messagesCall.asAnswered(error, signal);
     const rawBody = messagesCall.body();
     // No HTTP answer (a network error, or an abort that reached the SDK): a second request would meet the same wall.
-    if (signal?.aborted || statusOf(failure) === undefined) return fail(describeAgentRouterFailure(failure, { apiKey }));
+    if (signal?.aborted || statusOf(failure) === undefined) return fail(describeAgentRouterFailure(failure, { apiKey }), failure);
     // A model that AgentRouter serves in the OpenAI format may answer this endpoint in that format too.
     const foreign = failure instanceof UnreadableReplyError ? textOfChoices(rawBody) : '';
     if (foreign) {
       Logger.info('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output from AgentRouter (${model}), length: ${foreign.length} chars`);
       return foreign;
     }
-    if (isAgentRouterAuthFailure(failure, rawBody)) return fail(agentRouterAuthText(failure, { rawBody, apiKey }));
+    if (isAgentRouterAuthFailure(failure, rawBody)) return fail(agentRouterAuthText(failure, { rawBody, apiKey }), failure);
     Logger.warn('AgentRouterClient', '[NETWORK] Messages endpoint failed, trying the chat completions endpoint', describeAgentRouterFailure(failure, { rawBody, apiKey }));
   }
 
@@ -122,7 +127,8 @@ export async function callAgentRouter(settings: LlmSettings, messages: ChatTurn[
   try {
     reply = await openai.invoke(turns, { signal, callbacks: options.callbacks });
   } catch (error) {
-    return fail(describeAgentRouterFailure(completionsCall.asAnswered(error, signal), { rawBody: completionsCall.body(), apiKey }));
+    const answered = completionsCall.asAnswered(error, signal);
+    return fail(describeAgentRouterFailure(answered, { rawBody: completionsCall.body(), apiKey }), answered);
   }
   const text = reply.text || textOfChoices(completionsCall.body());
   if (!text) return fail(agentRouterEmptyText(payloadOf(reply), apiKey));

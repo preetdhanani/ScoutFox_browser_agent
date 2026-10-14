@@ -285,7 +285,7 @@ export type HistoryEntry =
   | { type: 'error'; step?: number; content: string }
   | { type: 'notice'; step?: number; content: string; level: 'info' | 'warn';
       kind: 'blocked' | 'site' | 'system_nav' | 'cdp' | 'restart' | 'plan' | 'effort' | 'budget'
-          | 'stuck' | 'risk' | 'reflect' | 'replan' }
+          | 'stuck' | 'risk' | 'reflect' | 'replan' | 'llm_retry' }
   | { type: 'user_answer'; content: string }
   | { type: 'plan_review'; version: number; sites: PlanView['sites']; level: Level;
       decision: 'approved' | 'rejected'; diff?: PlanView['replanDiff'] }

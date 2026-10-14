@@ -53,6 +53,111 @@ export function statusOf(error: unknown): number | undefined {
   return Number.isInteger(status) && status >= 100 ? status : undefined;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Failure classes: what a failure means for the retry wrapper (agent/recovery.ts)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What kind of failure a provider error is. The retry wrapper reads it instead of retrying everything:
+ *   auth        the key was refused (401, 403) - a retry sends the same key and fails the same way
+ *   rate_limit  the provider throttled the call (429) - retried, and a retry-after hint decides the wait
+ *   transient   the provider had a bad moment (5xx, 408, 499, a network error) - retried with backoff
+ *   bad_request the request itself was rejected (400, 404, 422, ...) - a retry sends the same request
+ *   context     the conversation does not fit the model's context window - a retry cannot shrink it
+ *   unknown     anything else - retried, as the only safe guess for an error nothing is known about
+ */
+export type ProviderFailureKind = 'auth' | 'rate_limit' | 'transient' | 'bad_request' | 'context' | 'unknown';
+
+export interface ProviderFailureClass {
+  kind: ProviderFailureKind;
+  status?: number;
+  retryAfterMs?: number;
+}
+
+/** A 200 that could not be read, a context overflow, and the like: the words a provider uses for it. */
+const CONTEXT_TEXT = /context (?:length|window)|maximum context|prompt is too long|too many (?:input )?tokens|input length exceeds|exceeds the context|reduce the length/i;
+const RATE_LIMIT_TEXT = /rate.?limit|too many requests|quota (?:exceeded|reached)|resource_exhausted/i;
+/** What a failure with no HTTP answer says when it is worth a retry: the network's own words, and the statuses a proxy writes into a text. */
+const TRANSIENT_TEXT = /overloaded|internal server error|network|connection|failed to fetch|fetch failed|\b499\b|stream (?:idle|closed|disconnected)|did not respond within|timed? ?out|timeout|socket hang up|econnreset|econnrefused|etimedout|eai_again|\b5\d\d\b/i;
+
+/** The message of an error, also when it is a plain object with a message member (a mocked SDK error). */
+function textOf(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  const message = (error as { message?: unknown } | null | undefined)?.message;
+  return typeof message === 'string' ? message : String(error ?? '');
+}
+
+/**
+ * The retry-after hint of an error, when the SDK kept the response headers: `retry-after-ms` in milliseconds,
+ * `retry-after` in seconds or as an HTTP date. Undefined when there is none or it cannot be read.
+ */
+export function retryAfterOf(error: unknown): number | undefined {
+  const headers = (error as { headers?: unknown } | null | undefined)?.headers;
+  if (!headers) return undefined;
+  const get = (name: string): string | undefined => {
+    if (typeof Headers !== 'undefined' && headers instanceof Headers) return headers.get(name) ?? undefined;
+    if (typeof headers !== 'object') return undefined;
+    const record = headers as Record<string, unknown>;
+    const key = Object.keys(record).find((k) => k.toLowerCase() === name);
+    const value = key ? record[key] : undefined;
+    return typeof value === 'string' ? value : undefined;
+  };
+  const ms = Number(get('retry-after-ms'));
+  if (Number.isFinite(ms) && ms >= 0) return ms;
+  const seconds = get('retry-after');
+  if (!seconds) return undefined;
+  const n = Number(seconds);
+  if (Number.isFinite(n) && seconds.trim() !== '') return Math.max(0, n * 1000);
+  const at = Date.parse(seconds);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+}
+
+/**
+ * What a provider failure means for the retry wrapper. The status decides when there is one; the message's own
+ * words decide for a failure with no HTTP answer (a network error, a timeout), which is where the reference's
+ * fixed prefix list comes in. A ProviderError is trusted as it stands: it was classified where it was thrown.
+ */
+export function classifyProviderFailure(error: unknown): ProviderFailureClass {
+  if (error instanceof ProviderError) return { kind: error.kind, status: error.status, retryAfterMs: error.retryAfterMs };
+  const status = statusOf(error);
+  const retryAfterMs = retryAfterOf(error);
+  const text = textOf(error);
+  let kind: ProviderFailureKind;
+  if (CONTEXT_TEXT.test(text)) kind = 'context';
+  else if (status === 401 || status === 403) kind = 'auth';
+  else if (status === 429 || RATE_LIMIT_TEXT.test(text)) kind = 'rate_limit';
+  else if (status === undefined && TRANSIENT_TEXT.test(text)) kind = 'transient';
+  else if (status !== undefined && (status >= 500 || status === 408 || status === 499)) kind = 'transient';
+  else if (status !== undefined && status >= 400) kind = 'bad_request';
+  else kind = 'unknown';
+  return { kind, status, retryAfterMs };
+}
+
+/** True when the retry wrapper may try the call again: a bad moment, a throttle, or an error nothing is known about. */
+export function isRetryableProviderFailure(error: unknown): boolean {
+  const kind = classifyProviderFailure(error).kind;
+  return kind === 'transient' || kind === 'rate_limit' || kind === 'unknown';
+}
+
+/**
+ * The error the provider boundary throws to its callers: today's message text, plus the classification the
+ * retry wrapper needs. Every path out of llm/index.ts, agentRouter.ts and ollama.ts throws one, so
+ * agent/recovery.ts never has to guess a kind out of message text alone.
+ */
+export class ProviderError extends Error {
+  readonly status?: number;
+  readonly kind: ProviderFailureKind;
+  readonly retryAfterMs?: number;
+
+  constructor(message: string, info: Partial<ProviderFailureClass> = {}) {
+    super(message);
+    this.name = 'ProviderError';
+    this.status = info.status;
+    this.kind = info.kind ?? 'unknown';
+    this.retryAfterMs = info.retryAfterMs;
+  }
+}
+
 /** Shorter keys are left alone: replacing "k" in a test key would mangle the text. */
 const MIN_SCRUBBED_KEY_LENGTH = 8;
 

@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MemorySaver } from '@langchain/langgraph/web';
-import { callWithRetry } from '../../src/background/agent/recovery.ts';
+import {
+  LLM_MAX_ATTEMPTS,
+  LLM_RETRY_BASE_DELAY_MS,
+  LLM_RETRY_JITTER_RATIO,
+  LLM_RETRY_MAX_DELAY_MS,
+  callWithRetry
+} from '../../src/background/agent/recovery.ts';
+import { ProviderError } from '../../src/background/llm/errors.ts';
 import { buildWorkerGraph } from '../../src/background/graph/worker.ts';
 import { buildOrchestratorGraph } from '../../src/background/graph/orchestrator.ts';
 import { registerMockRuntime } from '../helpers/mockRuntime.ts';
@@ -22,6 +29,7 @@ test('callWithRetry retries transient errors with clock sleep and respects maxAt
     {
       maxAttempts: 3,
       baseDelayMs: 300,
+      jitterRatio: 0,
       sleep: fakeSleep,
     }
   );
@@ -155,14 +163,14 @@ test('worker policyNode pauses with llm_failure error row upon 3 failed attempts
     config
   );
 
-  assert.equal(calls, 3);
+  assert.equal(calls, LLM_MAX_ATTEMPTS);
   assert.equal(out.pendingHold?.kind, 'paused');
   assert.equal(out.pendingHold?.reason, 'llm_failure');
 
   const errRow = out.history?.find((h) => h.type === 'error');
   assert.ok(errRow);
   assert.match(errRow.content, /LLM Connection Error \(groq\)/);
-  assert.match(errRow.content, /after 3 attempts/);
+  assert.match(errRow.content, new RegExp(`after ${LLM_MAX_ATTEMPTS} attempts`));
   assert.match(errRow.content, /Task paused at step 0 - click Resume to try again/);
   assert.equal(out.siteRun?.used ?? 0, 0, 'Does not increment step count on pause');
 });
@@ -198,7 +206,7 @@ test('orchestrator planNode pauses with llm_failure error row upon exhaustion', 
     config
   );
 
-  assert.equal(calls, 3);
+  assert.equal(calls, LLM_MAX_ATTEMPTS);
   assert.equal(out.pendingHold?.kind, 'paused');
   assert.equal(out.pendingHold?.reason, 'llm_failure');
   assert.equal(out.resumeRoute, 'plan');
@@ -206,11 +214,120 @@ test('orchestrator planNode pauses with llm_failure error row upon exhaustion', 
   const errRow = out.history?.find((h) => h.type === 'error');
   assert.ok(errRow);
   assert.match(errRow.content, /LLM Connection Error \(nvidia\)/);
-  assert.match(errRow.content, /after 3 attempts/);
+  assert.match(errRow.content, new RegExp(`after ${LLM_MAX_ATTEMPTS} attempts`));
   assert.match(errRow.content, /Task paused at step 0 - click Resume to try again/);
 });
 
-test('callWithRetry uses linear delay: baseDelayMs * attempt', async () => {
+test('worker policyNode fails fast on a 401 with an authentication pause message and no retry', async (t) => {
+  const threadId = 'test-worker-llm-401-fail-fast';
+  let calls = 0;
+
+  registerMockRuntime(
+    threadId,
+    {
+      settings: async () => ({ provider: 'openai', model: 'gpt-4o-mini' } as any),
+      llm: {
+        complete: (async () => {
+          calls++;
+          throw new ProviderError('API connection error (https://api.openai.com/v1): API Error (401): Incorrect API key provided.', { status: 401, kind: 'auth' });
+        }) as any,
+      },
+    },
+    t
+  );
+
+  const graph = buildWorkerGraph(new MemorySaver());
+  const config = { configurable: { thread_id: threadId } };
+
+  const out = await graph.invoke(
+    {
+      siteIn: {
+        site: {
+          id: 's1',
+          name: 'Shop',
+          domain: 'shop.test',
+          startUrl: 'https://shop.test',
+          goal: 'Find price',
+          role: 'reference',
+          kind: 'store',
+          difficulty: 1,
+        },
+        index: 1,
+        total: 1,
+        task: 'Find price',
+        tier: 'small',
+        alloc: 10,
+        runId: 'run-1',
+      } as any,
+    },
+    config
+  );
+
+  assert.equal(calls, 1, 'a refused key is never retried');
+  assert.equal(out.pendingHold?.kind, 'paused');
+  assert.equal(out.pendingHold?.reason, 'llm_failure');
+
+  const errRow = out.history?.find((h) => h.type === 'error');
+  assert.ok(errRow);
+  assert.match(errRow.content, /LLM Authentication Error \(openai\)/);
+  assert.match(errRow.content, /check your provider settings|API key/i);
+  assert.doesNotMatch(errRow.content, /after \d+ attempts/, 'the exhausted-attempts wording is for retried errors only');
+  assert.match(errRow.content, /Task paused at step 0 - click Resume to try again/);
+});
+
+test('worker policyNode keeps user-visible retry rows for the backoff waits it made', async (t) => {
+  const threadId = 'test-worker-llm-retry-notices';
+  let calls = 0;
+
+  registerMockRuntime(
+    threadId,
+    {
+      settings: async () => ({ provider: 'openrouter', model: 'mock-model' } as any),
+      llm: {
+        complete: (async () => {
+          calls++;
+          throw new ProviderError('OpenRouter API Error (503): upstream overloaded', { status: 503, kind: 'transient' });
+        }) as any,
+      },
+    },
+    t
+  );
+
+  const graph = buildWorkerGraph(new MemorySaver());
+  const config = { configurable: { thread_id: threadId } };
+
+  const out = await graph.invoke(
+    {
+      siteIn: {
+        site: {
+          id: 's1',
+          name: 'Shop',
+          domain: 'shop.test',
+          startUrl: 'https://shop.test',
+          goal: 'Find price',
+          role: 'reference',
+          kind: 'store',
+          difficulty: 1,
+        },
+        index: 1,
+        total: 1,
+        task: 'Find price',
+        tier: 'small',
+        alloc: 10,
+        runId: 'run-1',
+      } as any,
+    },
+    config
+  );
+
+  assert.equal(calls, LLM_MAX_ATTEMPTS);
+  const notices: any[] = (out.history ?? []).filter((h: any) => h.type === 'notice' && h.kind === 'llm_retry');
+  assert.equal(notices.length, LLM_MAX_ATTEMPTS - 1, 'one row per backoff wait');
+  assert.match(notices[0].content, /Retrying LLM call in \d+ s \(attempt 2 of 5\)/);
+  assert.match(notices.at(-1)!.content, new RegExp(`\\(attempt ${LLM_MAX_ATTEMPTS} of ${LLM_MAX_ATTEMPTS}\\)`));
+});
+
+test('callWithRetry backs off exponentially: baseDelayMs doubled per attempt, capped', async () => {
   const delays: number[] = [];
   const fakeSleep = async (ms: number) => { delays.push(ms); };
 
@@ -223,6 +340,7 @@ test('callWithRetry uses linear delay: baseDelayMs * attempt', async () => {
         {
           maxAttempts: 4,
           baseDelayMs: 100,
+          jitterRatio: 0,
           sleep: fakeSleep,
         }
       );
@@ -230,7 +348,76 @@ test('callWithRetry uses linear delay: baseDelayMs * attempt', async () => {
     /fail 4/
   );
 
-  assert.deepEqual(delays, [100, 200, 300]);
+  assert.deepEqual(delays, [100, 200, 400]);
+});
+
+test('callWithRetry fails fast on permanent provider errors: no retry for auth, bad request or context overflow', async () => {
+  const permanent = [
+    new ProviderError('OpenRouter API Authentication Error (401): Invalid or missing API key.', { status: 401, kind: 'auth' }),
+    new ProviderError('API Error (400): model gpt-nope does not exist', { status: 400, kind: 'bad_request' }),
+    new ProviderError('This model\'s maximum context length is 8192 tokens.', { kind: 'context' })
+  ];
+  for (const err of permanent) {
+    let calls = 0;
+    await assert.rejects(
+      () => callWithRetry(async () => { calls++; throw err; }, { sleep: async () => {} }),
+      (e) => e === err
+    );
+    assert.equal(calls, 1, `${err.name} kind ${err.kind}: a permanent error must not be retried`);
+  }
+});
+
+test('callWithRetry retries a 503 with exponential backoff and jitter up to the configured budget', async () => {
+  const sleeps: number[] = [];
+  let calls = 0;
+  await assert.rejects(
+    () => callWithRetry(
+      async () => { calls++; throw new ProviderError('503 Service Unavailable', { status: 503, kind: 'transient' }); },
+      { sleep: async (ms) => { sleeps.push(ms); } }
+    ),
+    /503/
+  );
+  assert.equal(calls, LLM_MAX_ATTEMPTS, 'a transient outage is retried up to the full budget');
+  assert.equal(sleeps.length, LLM_MAX_ATTEMPTS - 1);
+  for (let i = 0; i < sleeps.length; i++) {
+    const pure = LLM_RETRY_BASE_DELAY_MS * 2 ** i;
+    assert.ok(sleeps[i] >= pure, `delay ${i} (${sleeps[i]} ms) must be at least the exponential step (${pure} ms)`);
+    const bound = Math.min(pure * (1 + LLM_RETRY_JITTER_RATIO), LLM_RETRY_MAX_DELAY_MS);
+    assert.ok(sleeps[i] <= bound, `delay ${i} (${sleeps[i]} ms) must stay within the jittered cap (${bound} ms)`);
+  }
+});
+
+test('a Pause or Stop during a backoff sleep wakes the caller at once', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const startedAt = Date.now();
+  setTimeout(() => controller.abort(), 20);
+  await assert.rejects(
+    () => callWithRetry(
+      async () => { calls++; throw new Error('503 Service Unavailable'); },
+      {
+        signal: controller.signal,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      }
+    ),
+    /503/
+  );
+  assert.equal(calls, 1, 'no further attempt after the signal fired');
+  assert.ok(Date.now() - startedAt < 1000, `the wait must end on the abort, not after the backoff (took ${Date.now() - startedAt} ms)`);
+});
+
+test('a retry-after hint from the provider is honoured as the backoff delay', async () => {
+  const sleeps: number[] = [];
+  let calls = 0;
+  await assert.rejects(
+    () => callWithRetry(
+      async () => { calls++; throw new ProviderError('429 Too Many Requests', { status: 429, kind: 'rate_limit', retryAfterMs: 7000 }); },
+      { maxAttempts: 2, jitterRatio: 0, sleep: async (ms) => { sleeps.push(ms); } }
+    ),
+    /429/
+  );
+  assert.equal(calls, 2);
+  assert.deepEqual(sleeps, [7000], 'the provider\'s retry-after decides the wait, not the exponential step');
 });
 
 test('callWithRetry passes attempt count 1..N and returns on first success without sleep', async () => {
@@ -404,6 +591,7 @@ test('callWithRetry fires onRetry callback with correct attempt, error, and dela
     {
       maxAttempts: 3,
       baseDelayMs: 50,
+      jitterRatio: 0,
       onRetry: (attempt, err, delay) => {
         events.push({ attempt, msg: (err as Error).message, delay });
       },

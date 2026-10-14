@@ -37,7 +37,7 @@
 import { ChatOllama } from '@langchain/ollama';
 import type { BaseMessage } from '@langchain/core/messages';
 import { Logger } from '../../shared/logger.ts';
-import { describeOllamaFailure, statusOf } from './errors.ts';
+import { ProviderError, classifyProviderFailure, describeOllamaFailure, statusOf } from './errors.ts';
 import { toLangChainMessages, watchFetch } from './factory.ts';
 import { baseUrlOf, modelOf } from './settings.ts';
 import type { ChatTurn, CompletionOptions, LlmSettings } from './types.ts';
@@ -119,12 +119,14 @@ function watchFirstLine(response: Response, onForeignLine: (line: string) => voi
  * raw text of an error response (the client keeps only the `error` member of a JSON body). `onFetchError` sees what
  * fetch rejected with, which is how a dead server is told from an {"error": ...} line in the stream, and
  * `onForeignLine` sees a first line that is not an Ollama line, which is how a server that is not Ollama is told from both.
+ * `onErrorResponse` sees every HTTP error response, so its retry-after header can reach the retry wrapper.
  */
 function callFetch(
   callSignal: AbortSignal | undefined,
   capture: typeof fetch,
   onFetchError: (error: unknown) => void,
-  onForeignLine: (line: string) => void
+  onForeignLine: (line: string) => void,
+  onErrorResponse: (response: Response) => void
 ): typeof fetch {
   return (async (input: string | URL | Request, init: RequestInit = {}) => {
     const signals = [init.signal, callSignal].filter((signal): signal is AbortSignal => !!signal);
@@ -138,8 +140,21 @@ function callFetch(
       onFetchError(error);
       throw error;
     }
-    return response.ok ? watchFirstLine(response, onForeignLine) : response;
+    if (response.ok) return watchFirstLine(response, onForeignLine);
+    onErrorResponse(response);
+    return response;
   }) as typeof fetch;
+}
+
+/** The retry-after hint of an error response, in milliseconds: `retry-after-ms`, or `retry-after` in seconds. */
+function retryAfterMsOf(response: Response): number | undefined {
+  const msText = response.headers.get('retry-after-ms');
+  const ms = Number(msText);
+  if (msText?.trim() && Number.isFinite(ms) && ms >= 0) return ms;
+  const seconds = response.headers.get('retry-after');
+  const n = Number(seconds);
+  if (seconds?.trim() && Number.isFinite(n) && n >= 0) return n * 1000;
+  return undefined;
 }
 
 /**
@@ -166,6 +181,7 @@ export async function callOllama(settings: LlmSettings, messages: ChatTurn[], sy
   let rawBody: string | undefined;
   let fetchFailed = false;
   let foreignLine: string | undefined;
+  let retryAfterMs: number | undefined;
   try {
     // A 400/422 can name a request field this server or model does not accept. Each known case is dropped once
     // and remembered, so only the first call pays for the retry:
@@ -181,7 +197,7 @@ export async function callOllama(settings: LlmSettings, messages: ChatTurn[], sy
         numPredict,
         temperature: settings.temperature ?? 0.1,
         maxRetries: 0,
-        fetch: callFetch(signal, errors.fetch, () => { fetchFailed = true; }, (line) => { foreignLine = line; })
+        fetch: callFetch(signal, errors.fetch, () => { fetchFailed = true; }, (line) => { foreignLine = line; }, (response) => { retryAfterMs = retryAfterMsOf(response); })
       });
       try {
         reply = await chat.invoke(turns, { format, signal, callbacks: options.callbacks });
@@ -214,7 +230,10 @@ export async function callOllama(settings: LlmSettings, messages: ChatTurn[], sy
     const inner = describeOllamaFailure(error, { url, model, rawBody, fetchFailed, foreignLine });
     // A Pause, a Stop or the deadline is reported once, as [NETWORK_ABORTED] by generateCompletion, not as a failed connection.
     if (!signal?.aborted) Logger.error('OllamaClient', `[NETWORK] Failed connection to Ollama at ${url}`, inner);
-    throw new Error(inner);
+    // The kind comes from the error the client threw (its status, or the network's words in the text), so the
+    // retry wrapper sees a dead server as transient and a missing model as a request error.
+    const failure = classifyProviderFailure(error);
+    throw new ProviderError(inner, { status: failure.status, kind: failure.kind, retryAfterMs });
   }
 
   const elapsed = Date.now() - startTime;

@@ -40,7 +40,7 @@ import { buildReflectSystemPrompt, buildReflectUserMessage, buildGroundingText, 
 import { previousTurnsSummary, lastCompletedTurn } from '../agent/previousTurns.ts';
 import { Logger } from '../../shared/logger.ts';
 import { resolveModelTier } from '../agent/tier.ts';
-import { callWithRetry } from '../agent/recovery.ts';
+import { LLM_MAX_ATTEMPTS, callWithRetry, llmPauseText } from '../agent/recovery.ts';
 import { buildFinishEntry, buildMaxStepsEntry, NO_ANSWER_GIVEN, coerceAnswerText } from '../agent/outcome.ts';
 import { EvidenceLedger, normalizeUrlForMatch, registrableHost } from '../agent/evidence.ts';
 import { auditAnswer, goalSources, prepareAnswer, annotateAnswer } from '../agent/answerAudit.ts';
@@ -388,6 +388,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
   const schema = buildGraphPlanSchema({ mode: 'initial' });
   const stepSignal = runtime.control.stepSignal();
   let parsedPlan: any = null;
+  const retryNotices: HistoryEntry[] = [];
 
   try {
     const res = await callWithRetry(
@@ -402,11 +403,22 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
           signal: stepSignal,
         }),
       {
-        maxAttempts: 3,
-        baseDelayMs: 300,
+        signal: stepSignal,
         isAbort: (err) => runtime.control.isUserAbort(err, stepSignal),
         shouldContinue: () => !runtime.control.stopRequested && !runtime.control.pauseRequested,
         sleep: runtime.clock.sleep,
+        onRetry: (attemptNumber, err, delayMs) => {
+          const seconds = Math.round(delayMs / 1000);
+          const detail = err instanceof Error ? err.message : String(err);
+          Logger.warn('Orchestrator', `Plan LLM call failed (attempt ${attemptNumber}), retrying in ${seconds} s: ${detail}`);
+          retryNotices.push({
+            type: 'notice',
+            step: state.stepCount ?? 0,
+            level: 'info',
+            kind: 'llm_retry',
+            content: `Retrying LLM call in ${seconds} s (attempt ${attemptNumber + 1} of ${LLM_MAX_ATTEMPTS}).`
+          });
+        },
       }
     );
 
@@ -454,7 +466,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
     const errEntry: HistoryEntry = {
       type: 'error',
       step: state.stepCount ?? 0,
-      content: `LLM Connection Error (${provider}) after 3 attempts: ${err.message}. Task paused at step ${state.stepCount ?? 0} - click Resume to try again, or check your provider settings if this keeps happening.`,
+      content: llmPauseText(provider, err, state.stepCount ?? 0),
     };
     return {
       lastDecision: {
@@ -467,7 +479,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
         reason: 'llm_failure',
         error: err.message ?? 'LLM request failed',
       },
-      history: [errEntry],
+      history: [...retryNotices, errEntry],
       resumeRoute: 'plan',
     };
   }
@@ -1159,11 +1171,13 @@ const reflectNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
           signal: stepSignal,
         }),
       {
-        maxAttempts: 3,
-        baseDelayMs: 300,
+        signal: stepSignal,
         isAbort: (err) => runtime.control.isUserAbort(err, stepSignal),
         shouldContinue: () => !runtime.control.stopRequested && !runtime.control.pauseRequested,
         sleep: runtime.clock.sleep,
+        onRetry: (attemptNumber, err, delayMs) => {
+          Logger.warn('Orchestrator', `Reflect LLM call failed (attempt ${attemptNumber}), retrying in ${Math.round(delayMs / 1000)} s: ${err instanceof Error ? err.message : String(err)}`);
+        },
       }
     );
 

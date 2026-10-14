@@ -20,7 +20,7 @@ test('callWithRetry retries a failing attempt and returns once one succeeds', as
     calls++;
     if (n < 3) throw new Error(`transient failure ${n}`);
     return 'recovered';
-  });
+  }, { sleep: async () => {} });
   assert.equal(result, 'recovered');
   assert.equal(calls, 3);
 });
@@ -28,7 +28,7 @@ test('callWithRetry retries a failing attempt and returns once one succeeds', as
 test('callWithRetry throws the last error once maxAttempts is exhausted', async () => {
   let calls = 0;
   await assert.rejects(
-    () => callWithRetry(async () => { calls++; throw new Error('permanent failure'); }),
+    () => callWithRetry(async () => { calls++; throw new Error('permanent failure'); }, { sleep: async () => {} }),
     /permanent failure/
   );
   assert.equal(calls, LLM_MAX_ATTEMPTS, `must try exactly ${LLM_MAX_ATTEMPTS} times, not loop forever`);
@@ -56,7 +56,7 @@ test('callWithRetry stops before the next attempt when shouldContinue turns fals
         allowContinue = false; // simulate Pause/Stop landing right after this attempt fails
         throw new Error('connection reset');
       },
-      { shouldContinue: () => allowContinue }
+      { shouldContinue: () => allowContinue, sleep: async () => {} }
     ),
     /connection reset/
   );
@@ -68,7 +68,11 @@ test('callWithRetry calls onRetry with the attempt number and computed delay bef
   let calls = 0;
   await callWithRetry(
     async (n) => { calls++; if (n < 2) throw new Error('flaky'); return 'ok'; },
-    { onRetry: (attempt, err, delayMs) => seen.push({ attempt, message: (err as Error).message, delayMs }) }
+    {
+      onRetry: (attempt, err, delayMs) => seen.push({ attempt, message: (err as Error).message, delayMs }),
+      sleep: async () => {},
+      jitterRatio: 0,
+    }
   );
   assert.equal(seen.length, 1);
   assert.equal(seen[0].attempt, 1);
@@ -87,7 +91,8 @@ test('callWithRetry uses injectable sleep option for backoff delay', async () =>
     },
     {
       sleep: async (ms) => { sleptMs.push(ms); },
-    }
+      jitterRatio: 0,
+    },
   );
   assert.equal(result, 'ok');
   assert.equal(calls, 3);

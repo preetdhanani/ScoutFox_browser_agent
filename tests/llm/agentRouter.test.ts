@@ -226,7 +226,8 @@ test('an abort ends the call with no second request', async (t) => {
   task.abort(new Error('the task was stopped'));
 
   assert.equal(await settledWithin(call), 'rejected', 'the call ended at once');
-  await assert.rejects(call, /^Error: AgentRouter API connection error: /);
+  // The boundary now throws ProviderError (the retry wrapper reads its kind); the text is unchanged.
+  await assert.rejects(call, /^ProviderError: AgentRouter API connection error: /);
   assert.equal(sent.length, 1, 'no fallback for a call that was cancelled');
   assert.equal(sent[0].signal!.aborted, true);
 });

@@ -12,7 +12,7 @@
 import { Logger } from '../../shared/logger.ts';
 import { callAgentRouter } from './agentRouter.ts';
 import { withDeadline } from './deadline.ts';
-import { GEMINI_EMPTY_TEXT, assertApiKey, describeCustomFailure, describeFailure, wrapCustomFailure, wrapFailure } from './errors.ts';
+import { GEMINI_EMPTY_TEXT, ProviderError, assertApiKey, classifyProviderFailure, describeCustomFailure, describeFailure, retryAfterOf, wrapCustomFailure, wrapFailure } from './errors.ts';
 import { createCustomProviderCall, createProviderCall, toLangChainMessages } from './factory.ts';
 import type { ProviderCall } from './factory.ts';
 import { callOllama } from './ollama.ts';
@@ -64,9 +64,12 @@ export async function callProvider(provider: string, settings: LlmSettings, mess
       : describeFailure(chatProvider, error, context);
     // A Pause, a Stop or the deadline is reported once, as [NETWORK_ABORTED] by generateCompletion, not as a failed request.
     if (!options.signal?.aborted) Logger.error(call.logTag, `[NETWORK] Failed request to ${call.logTarget}`, inner);
-    throw new Error(custom
+    // The classification comes from the error the SDK threw (its status, its retry-after header), the text
+    // from the failure functions: the caller gets today's message plus the kind the retry wrapper needs.
+    const failure = classifyProviderFailure(error);
+    throw new ProviderError(custom
       ? wrapCustomFailure(inner, { ...context, providerLabel: custom.displayName || provider, protocol: custom.protocol })
-      : wrapFailure(chatProvider, inner, context));
+      : wrapFailure(chatProvider, inner, context), { status: failure.status, kind: failure.kind, retryAfterMs: failure.retryAfterMs });
   }
 }
 

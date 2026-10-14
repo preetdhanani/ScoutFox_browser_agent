@@ -35,7 +35,7 @@ import { buildPolicySystemPrompt, buildPolicyUserMessage, MEMORY_BUDGET, PAGE_TE
 import { formatRecentSteps, formatOneShotContext, buildStepRecord } from '../agent/memory.ts';
 import { evaluateActionRisk } from '../agent/risk.ts';
 import { systemAction } from '../agent/systemAction.ts';
-import { callWithRetry } from '../agent/recovery.ts';
+import { LLM_MAX_ATTEMPTS, callWithRetry, llmPauseText } from '../agent/recovery.ts';
 import { coerceAnswerText } from '../agent/outcome.ts';
 import { EvidenceLedger, normalizeUrlForMatch, siteOf, type EvidenceInput } from '../agent/evidence.ts';
 import {
@@ -772,6 +772,7 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
   const stepSignal = runtime.control.stepSignal();
   let replyText = '';
 
+  const retryNotices: HistoryEntry[] = [];
   try {
     const res = await callWithRetry(
       () =>
@@ -785,11 +786,22 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
           signal: stepSignal,
         }),
       {
-        maxAttempts: 3,
-        baseDelayMs: 300,
+        signal: stepSignal,
         isAbort: (err) => runtime.control.isUserAbort(err, stepSignal),
         shouldContinue: () => !runtime.control.stopRequested && !runtime.control.pauseRequested,
         sleep: runtime.clock.sleep,
+        onRetry: (attemptNumber, err, delayMs) => {
+          const seconds = Math.round(delayMs / 1000);
+          const detail = err instanceof Error ? err.message : String(err);
+          Logger.warn('Worker', `LLM call failed (attempt ${attemptNumber}), retrying in ${seconds} s: ${detail}`);
+          retryNotices.push({
+            type: 'notice',
+            step: siteRun.used ?? 0,
+            level: 'info',
+            kind: 'llm_retry',
+            content: `Retrying LLM call in ${seconds} s (attempt ${attemptNumber + 1} of ${LLM_MAX_ATTEMPTS}).`
+          });
+        },
       }
     );
     replyText = res.text;
@@ -803,7 +815,7 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
     const errEntry: HistoryEntry = {
       type: 'error',
       step: siteRun.used ?? 0,
-      content: `LLM Connection Error (${provider}) after 3 attempts: ${err.message}. Task paused at step ${siteRun.used ?? 0} - click Resume to try again, or check your provider settings if this keeps happening.`,
+      content: llmPauseText(provider, err, siteRun.used ?? 0),
     };
     return {
       lastDecision: {
@@ -816,7 +828,7 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
         reason: 'llm_failure',
         error: err.message ?? 'LLM request failed',
       },
-      history: [errEntry],
+      history: [...retryNotices, errEntry],
     };
   }
 
