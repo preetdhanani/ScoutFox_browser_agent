@@ -56,30 +56,72 @@ test('tier 2: falls back to data-testid, then name, when id is absent', () => {
   const instance = loadActionExecutor(
     { getElement: () => null, elements: [{ id: 2, locator: { tag: 'button', text: 'Go', attrs: { id: '', 'data-testid': 'go-btn', name: '' }, cssPath: '' } }] },
     {
-      querySelector: (sel) => (sel === '[data-testid="go-btn"]' ? movedEl : null),
+      querySelectorAll: (sel) => (sel === '[data-testid="go-btn"]' ? [movedEl] : []),
       contains: (n) => n === movedEl
     }
   );
   assert.equal(instance.resolveElement(2), movedEl);
 });
 
-test('tier 3: re-resolves by CSS path when no stable attribute matches', () => {
+// cdp-synthetic-fallback: the cssPath tier took the FIRST match of an unanchored selector with no
+// tag or text check, so after a re-render it could silently click a different element. It is gone.
+test('the unanchored CSS path tier is gone: a cssPath match alone resolves to nothing', () => {
   const movedEl = {};
   const instance = loadActionExecutor(
     { getElement: () => null, elements: [{ id: 3, locator: { tag: 'a', text: 'Docs', attrs: { id: '', 'data-testid': '', name: '' }, cssPath: 'nav > a:nth-of-type(2)' } }] },
     { querySelector: (sel) => (sel === 'nav > a:nth-of-type(2)' ? movedEl : null), contains: (n) => n === movedEl }
   );
-  assert.equal(instance.resolveElement(3), movedEl);
+  assert.equal(instance.resolveElement(3), null, 'the css path could silently hit a different element, so it must not resolve');
 });
 
-test('tier 4: re-resolves by matching tag and visible text as a last resort', () => {
+// cdp-synthetic-fallback: the tag-plus-text tier took the first element of the same tag with the
+// same label text, which could silently hit a different element (the first of several equal
+// buttons). It is gone.
+test('the same-tag same-text tier is gone: a tag and text match alone resolves to nothing', () => {
   const movedEl = { innerText: 'Submit' };
   const otherEl = { innerText: 'Cancel' };
   const instance = loadActionExecutor(
     { getElement: () => null, elements: [{ id: 4, locator: { tag: 'button', text: 'Submit', attrs: {}, cssPath: '' } }] },
     { querySelectorAll: (sel) => (sel === 'button' ? [otherEl, movedEl] : []) }
   );
-  assert.equal(instance.resolveElement(4), movedEl, 'must match the element whose text equals the recorded label, not just any button');
+  assert.equal(instance.resolveElement(4), null, 'the first of several equal buttons must never be clicked silently');
+});
+
+// cdp-synthetic-fallback: a stable attribute only counts when it matches exactly one element.
+test('tier 2 needs a unique match: two elements with the same data-testid resolve to nothing', () => {
+  const first = {};
+  const second = {};
+  const instance = loadActionExecutor(
+    { getElement: () => null, elements: [{ id: 6, locator: { tag: 'button', text: 'Go', attrs: { id: '', 'data-testid': 'go-btn', name: '' }, cssPath: '' } }] },
+    {
+      querySelectorAll: (sel) => (sel === '[data-testid="go-btn"]' ? [first, second] : []),
+      contains: (n) => n === first || n === second
+    }
+  );
+  assert.equal(instance.resolveElement(6), null, 'an ambiguous data-testid could hit the wrong twin, so it must not resolve');
+});
+
+// cdp-synthetic-fallback: a tier 2 hit is a recovery of a re-rendered element and says so.
+test('a tier 2 hit reports that the element was recovered by its stable attributes', () => {
+  const movedEl = { id: 'search-box' };
+  const instance = loadActionExecutor(
+    { getElement: () => null, elements: [{ id: 1, locator: { tag: 'input', text: 'Search', attrs: { id: 'search-box' }, cssPath: '' } }] },
+    { getElementById: (id) => (id === 'search-box' ? movedEl : null), contains: (n) => n === movedEl }
+  );
+  const detail = instance.resolveElementDetailed(1);
+  assert.equal(detail.element, movedEl);
+  assert.equal(detail.recoveredBy, 'stable-id');
+});
+
+test('the live reference tier is not a recovery', () => {
+  const liveEl = {};
+  const instance = loadActionExecutor(
+    { getElement: () => liveEl, elements: [{ id: 5, locator: { tag: 'button', text: 'x', attrs: {}, cssPath: '' } }] },
+    { contains: (n) => n === liveEl }
+  );
+  const detail = instance.resolveElementDetailed(5);
+  assert.equal(detail.element, liveEl);
+  assert.equal(detail.recoveredBy, undefined);
 });
 
 test('a live reference still attached to the DOM is used directly, without touching the fallback tiers at all', () => {

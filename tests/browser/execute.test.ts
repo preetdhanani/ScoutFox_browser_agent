@@ -291,3 +291,48 @@ test('executeAction - read_page_text one-shot carries the part note', async () =
   assert.equal(res.oneShot.note, '12000 chars, part 2 of 4, chars 3001-6000');
   assert.equal(res.oneShot.text, 'chunk two');
 });
+
+// cdp-synthetic-fallback: execute used to default every successful synthetic result to
+// dom_changed, so a synthetic click that changed nothing was reported as "page updated" and
+// verify never fired the no-visible-change failure.
+test('executeAction - a synthetic action that changes nothing reports effect none', async () => {
+  const res = await executeAction(
+    101,
+    { action: 'click', element_id: 1 },
+    {
+      dispatchAction: async () => ({
+        success: true,
+        via: 'synthetic',
+        message: 'Clicked element [1]',
+        syntheticReason: 'debugger could not attach: not permitted',
+      }),
+      waitForTabComplete: async () => {},
+      waitDomQuiet: async () => {},
+    } as any
+  );
+
+  assert.equal(res.success, true);
+  assert.equal(res.via, 'synthetic');
+  assert.equal(res.effect, 'none', 'a synthetic result without a probe effect must not default to dom_changed');
+  assert.equal(res.syntheticReason, 'debugger could not attach: not permitted');
+});
+
+// cdp-synthetic-fallback carry-over: read_page_text is a pure read; it went through the synthetic
+// path and inherited the dom_changed default, so a read counted as a page change.
+test('executeAction - a synthetic read_page_text reports no effect', async () => {
+  const res = await executeAction(
+    101,
+    { action: 'read_page_text' },
+    {
+      dispatchAction: async () => ({
+        success: true,
+        via: 'synthetic',
+        message: 'Page text',
+        result: { pageText: 'hello' },
+      }),
+    } as any
+  );
+
+  assert.equal(res.success, true);
+  assert.equal(res.effect, 'none', 'a pure read must not count as a page change');
+});

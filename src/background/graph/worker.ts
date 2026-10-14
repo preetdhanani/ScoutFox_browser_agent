@@ -1427,6 +1427,7 @@ const executeNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'e
   };
 
   const elementInfo = (pending.action as any)?.element_id !== undefined ? state.page?.elementInfo?.[(pending.action as any).element_id] : null;
+  const syntheticReason = (result as any).syntheticReason as string | undefined;
   const stepRec = buildStepRecord({
     step: (state.siteRun?.used ?? 0) + 1,
     node: 'policy',
@@ -1439,6 +1440,8 @@ const executeNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'e
     error: result.error,
     message: result.message,
     note: (result as any).oneShot?.note,
+    via: result.via,
+    syntheticReason,
   });
 
   Logger.info('Worker', `[ACTION_DISPATCH] ${(pending.action as any)?.action || 'action'} dispatched on tab [${tabId}].`);
@@ -1505,6 +1508,29 @@ const executeNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'e
     await runtime.browser.waitForTabComplete(tabId, 4000).catch(() => {});
   }
 
+  // The user is told once per site when the input dropped to synthetic DOM events, and the
+  // site's cdp state flips to synthetic (sticky), so the notice never repeats.
+  let history: HistoryEntry[] = [execResultEntry];
+  let siteRunUpdate = state.siteRun;
+  const isDowngrade = !!syntheticReason && /^(debugger|CDP)/.test(syntheticReason);
+  if (result.via === 'synthetic' && isDowngrade && state.siteRun && !state.siteRun.syntheticNoticed) {
+    history = [
+      ...history,
+      {
+        type: 'notice',
+        step: state.siteRun.used ?? 0,
+        level: 'info',
+        kind: 'cdp',
+        content: `Using page-level clicks: ${syntheticReason}`,
+      },
+    ];
+    siteRunUpdate = {
+      ...state.siteRun,
+      syntheticNoticed: true,
+      cdp: { mode: 'synthetic', reason: syntheticReason ?? null, sticky: true },
+    };
+  }
+
   return {
     lastExec: {
       step: (state.siteRun?.used ?? 0) + 1,
@@ -1516,7 +1542,8 @@ const executeNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'e
     },
     steps: [stepRec],
     oneShotContext: (result as any).oneShot ?? null,
-    history: [execResultEntry],
+    history,
+    ...(siteRunUpdate !== state.siteRun ? { siteRun: siteRunUpdate } : {}),
     ...(newEvidenceEvents.length > 0 ? { evidenceEvents: newEvidenceEvents } : {}),
   };
 });
@@ -1672,6 +1699,7 @@ const recoverNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'r
     signature,
     kind,
     detail,
+    ...(state.lastExec?.result?.via === 'synthetic' ? { fallbackUsed: 'synthetic' as const } : {}),
   }, immediateBan ? 0 : retriesPerAction);
 
   const banned = [...(siteRun.banned ?? [])];

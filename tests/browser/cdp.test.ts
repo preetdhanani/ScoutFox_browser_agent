@@ -167,3 +167,112 @@ test('CDPManager: reconcileLeakedTargets detaches untracked attached tabs', asyn
   assert.equal(cdp.isAttached(101), true);
   assert.equal(cdp.isAttached(102), false);
 });
+
+// cdp-synthetic-fallback: the foreign-debugger error ("Another debugger is already attached")
+// used to be swallowed as a successful attach. Now it is retried with a short backoff, because
+// a foreign extension iframe often detaches again within moments.
+test('CDPManager: attach retries the foreign-debugger error and succeeds on a later try', async () => {
+  let tries = 0;
+  const foreignError = () => new Error('Another debugger is already attached to the tab with id: 101.');
+  const fc = fakeChrome({
+    debugger: {
+      attach: () => {
+        tries++;
+        return tries < 4 ? foreignError() : undefined;
+      },
+      commands: { 'Emulation.setFocusEmulationEnabled': {} }
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  await cdp.attach(101);
+
+  assert.equal(cdp.isAttached(101), true);
+  assert.equal(fc.callsTo('debugger.attach').length, 4, 'the foreign-debugger error is retried up to four tries');
+});
+
+test('CDPManager: attach gives up after four foreign-debugger tries and never marks the tab attached', async () => {
+  const fc = fakeChrome({
+    debugger: {
+      attach: () => new Error('Another debugger is already attached to the tab with id: 101.'),
+      commands: { 'Emulation.setFocusEmulationEnabled': {} }
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  await assert.rejects(() => cdp.attach(101), /another debugger/i);
+
+  assert.equal(cdp.isAttached(101), false, 'a failed attach must not mark the tab attached');
+  assert.equal(fc.callsTo('debugger.attach').length, 4);
+});
+
+test('CDPManager: concurrent attaches share one debugger.attach call', async () => {
+  const fc = fakeChrome({
+    debugger: {
+      commands: { 'Emulation.setFocusEmulationEnabled': {} }
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  await Promise.all([cdp.attach(101), cdp.attach(101)]);
+
+  assert.equal(cdp.isAttached(101), true);
+  assert.equal(fc.callsTo('debugger.attach').length, 1, 'in-flight attaches are deduplicated per tab');
+});
+
+test('CDPManager: sendCommand re-attaches once and repeats after a not-attached error', async () => {
+  const fc = fakeChrome({
+    debugger: {
+      commands: {
+        'Emulation.setFocusEmulationEnabled': {},
+        'Runtime.evaluate': () => ({ result: { value: 42 } })
+      }
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  await cdp.attach(101);
+
+  // The browser ends the session behind our back (DevTools opened, tab crashed)
+  fc.debugger.detach(101);
+  assert.equal(cdp.isAttached(101), false);
+
+  const res = await cdp.sendCommand(101, 'Runtime.evaluate', { expression: '1' });
+
+  assert.deepEqual(res, { result: { value: 42 } }, 'the command is repeated once after the re-attach');
+  assert.equal(cdp.isAttached(101), true);
+  assert.equal(fc.callsTo('debugger.attach').length, 2, 'exactly one re-attach happened');
+});
+
+test('CDPManager: a command that never answers times out with a named error', async () => {
+  const fc = fakeChrome({
+    debugger: {
+      commands: { 'Emulation.setFocusEmulationEnabled': {} },
+      sendCommand: (_method: unknown) => new Promise(() => {})
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager({ commandTimeoutMs: 50 });
+  await cdp.attach(101);
+
+  await assert.rejects(
+    () => cdp.sendCommand(101, 'Page.captureScreenshot', {}),
+    /timed out/,
+    'a hanging command must reject under the timer, not hang the run'
+  );
+});

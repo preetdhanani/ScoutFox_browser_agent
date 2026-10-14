@@ -34,6 +34,10 @@ export interface BuildStepRecordParams {
   message?: string;
   /** The part note of a read_page_text ("12000 chars, part 2 of 4, ..."), shown instead of the effect. */
   note?: string;
+  /** The input path the action ran through, so the model knows when input was synthetic. */
+  via?: 'cdp' | 'synthetic' | 'background' | 'state';
+  /** Why the input dropped to synthetic DOM events, shown in the step line. */
+  syntheticReason?: string;
 }
 
 export function buildStepRecord(params: BuildStepRecordParams): StepRecord {
@@ -58,6 +62,13 @@ export function buildStepRecord(params: BuildStepRecordParams): StepRecord {
     effectText = clipWithNote(params.message, RECORD_DETAIL_CAP, { inline: true });
   }
 
+  // The model must know when the input was synthetic DOM events instead of trusted CDP
+  // input, and why, or it believes a synthetic click that did nothing has progressed.
+  if (params.via === 'synthetic' && params.syntheticReason) {
+    const reason = clipWithNote(params.syntheticReason, RECORD_DETAIL_CAP, { inline: true });
+    effectText = `${effectText} (synthetic: ${reason})`;
+  }
+
   const line = `${stepNum} ${verb}${target ? ` ${target}` : ''} -> ${effectText}`.trim();
 
   let outcome: StepRecord['outcome'] = 'ok';
@@ -74,6 +85,8 @@ export function buildStepRecord(params: BuildStepRecordParams): StepRecord {
     line,
     outcome,
     detail: effectText.slice(0, 300),
+    ...(params.via ? { via: params.via } : {}),
+    ...(params.via === 'synthetic' && params.syntheticReason ? { syntheticReason: params.syntheticReason } : {}),
   };
 }
 

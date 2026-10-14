@@ -497,3 +497,23 @@ test('AgentRunner - waitForTabComplete respects AbortSignal', async (t) => {
 
   runner.dispose();
 });
+
+// cdp-synthetic-fallback carry-over: fakeChrome fires the tab "complete" event inside the
+// navigation call, before waitForTabComplete attaches its listener, so every navigate in the
+// runner tests used to wait the full timeout. A wait must check the tab status first.
+test('AgentRunner - waitForTabComplete returns at once when the tab already completed', async (t) => {
+  const env = setupEnvironment();
+  t.after(env.cleanup);
+
+  const runner = new AgentRunner(101, 1);
+  await runner.restorePromise;
+
+  await env.fc.tabs.navigate(101, PRODUCT_URL);
+
+  const start = Date.now();
+  await runner.waitForTabComplete(101, 4000);
+  const duration = Date.now() - start;
+  assert.ok(duration < 250, `a tab that is already complete must not be waited for, took ${duration}ms`);
+
+  runner.dispose();
+});

@@ -10,11 +10,32 @@ export interface AttachedTabInfo {
   userDetached?: boolean;
 }
 
+export interface CDPManagerOptions {
+  /** Timer for one chrome.debugger.attach round (including the foreign-debugger retries). */
+  attachTimeoutMs?: number;
+  /** Timer for one CDP command. */
+  commandTimeoutMs?: number;
+}
+
+const DEFAULT_ATTACH_TIMEOUT_MS = 10_000;
+const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
+/** The foreign-extension iframe case often clears within moments: four tries, short backoff. */
+const FOREIGN_ATTACH_TRIES = 4;
+const FOREIGN_ATTACH_BACKOFF_MS = 100;
+
 export class CDPManager {
   private attachedTabs = new Map<number, AttachedTabInfo>();
   private initialized = false;
+  private attachTimeoutMs: number;
+  private commandTimeoutMs: number;
+  /** In-flight attach per tab, so concurrent callers share one debugger.attach round. */
+  private attaching = new Map<number, Promise<void>>();
+  /** Tabs with an attach in flight; sendCommand must not re-attach from inside one. */
+  private inAttach = new Set<number>();
 
-  constructor() {
+  constructor(options: CDPManagerOptions = {}) {
+    this.attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
+    this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.setupListeners();
   }
 
@@ -62,7 +83,11 @@ export class CDPManager {
 
   /**
    * Attach debugger to tabId and enable focus emulation.
-   * Tolerates "Another debugger is already attached".
+   * Deduplicated per tab: an already tracked tab is a no-op and concurrent
+   * attaches share one round. The foreign-debugger error ("Another debugger
+   * is already attached", e.g. DevTools or another extension holding the tab)
+   * is retried with a short backoff and, if it persists, fails loudly instead
+   * of being swallowed as a successful attach.
    */
   async attach(tabId: number): Promise<void> {
     if (!this.hasDebugger()) {
@@ -76,32 +101,89 @@ export class CDPManager {
       return;
     }
 
+    // Already tracked as attached: nothing to do (dedupe)
+    if (this.isAttached(tabId)) {
+      return;
+    }
+
+    const inFlight = this.attaching.get(tabId);
+    if (inFlight) {
+      return await inFlight;
+    }
+
+    const round = this.attachRound(tabId).finally(() => {
+      this.attaching.delete(tabId);
+      this.inAttach.delete(tabId);
+    });
+    this.attaching.set(tabId, round);
+    this.inAttach.add(tabId);
+    return await round;
+  }
+
+  private async attachRound(tabId: number): Promise<void> {
     // Cancel any pending pause detach timer
     this.clearPauseTimer(tabId);
 
     const target = { tabId };
-    try {
-      await chrome.debugger.attach(target, '1.3');
-    } catch (err: any) {
-      const msg = (err && err.message) || String(err);
-      if (!msg.includes('Another debugger is already attached')) {
-        throw err;
+    let lastForeignError: Error | undefined;
+
+    for (let attempt = 1; attempt <= FOREIGN_ATTACH_TRIES; attempt++) {
+      try {
+        await this.withTimeout(
+          Promise.resolve(chrome.debugger.attach(target, '1.3')) as Promise<void>,
+          this.attachTimeoutMs,
+          `Debugger attach timed out after ${Math.round(this.attachTimeoutMs / 1000)} s (DevTools may be open or the renderer crashed).`
+        );
+      } catch (err: any) {
+        const msg = (err && err.message) || String(err);
+        if (!msg.includes('Another debugger is already attached')) {
+          throw err;
+        }
+        lastForeignError = new Error(
+          'Debugger could not attach: another debugger (DevTools or another extension) is attached to this tab.'
+        );
+        if (attempt < FOREIGN_ATTACH_TRIES) {
+          await this.sleepDelay(FOREIGN_ATTACH_BACKOFF_MS * attempt);
+          continue;
+        }
+        throw lastForeignError;
       }
-    }
 
-    this.attachedTabs.set(tabId, {
-      attachedAt: Date.now()
+      this.attachedTabs.set(tabId, {
+        attachedAt: Date.now()
+      });
+
+      // Enable focus emulation so elements act as focused in the background
+      try {
+        await this.sendCommand(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+      } catch (_) {
+        // Non-fatal if emulation is not supported on this target
+      }
+
+      // Wait for the yellow warning bar to settle
+      await this.waitForYellowBarSettle(tabId);
+      return;
+    }
+  }
+
+  /** Rejects with the named error when the promise does not settle within the timer. */
+  private withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      if (typeof (timer as any)?.unref === 'function') {
+        (timer as any).unref();
+      }
+      promise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        }
+      );
     });
-
-    // Enable focus emulation so elements act as focused in the background
-    try {
-      await this.sendCommand(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true });
-    } catch (_) {
-      // Non-fatal if emulation is not supported on this target
-    }
-
-    // Wait for the yellow warning bar to settle
-    await this.waitForYellowBarSettle(tabId);
   }
 
   /**
@@ -140,13 +222,16 @@ export class CDPManager {
   }
 
   /**
-   * Send a CDP command to the attached tab.
+   * Send a CDP command to the attached tab. The command runs under a timer,
+   * and a not-attached or detached-while-handling error re-attaches once and
+   * repeats the command instead of failing the action silently.
    */
   async sendCommand(
     tabId: number,
     method: string,
     params: Record<string, unknown> = {},
-    control?: { signal?: AbortSignal; stopRequested?: boolean; pauseRequested?: boolean }
+    control?: { signal?: AbortSignal; stopRequested?: boolean; pauseRequested?: boolean },
+    retried = false
   ): Promise<any> {
     if (!this.hasDebugger()) {
       throw new Error('chrome.debugger API is not available.');
@@ -164,7 +249,27 @@ export class CDPManager {
       }
     }
 
-    return await chrome.debugger.sendCommand({ tabId }, method, params);
+    try {
+      return await this.withTimeout(
+        Promise.resolve(chrome.debugger.sendCommand({ tabId }, method, params)) as Promise<any>,
+        this.commandTimeoutMs,
+        `CDP command ${method} timed out after ${Math.round(this.commandTimeoutMs / 1000)} s (the renderer may have crashed or the debugger detached).`
+      );
+    } catch (err: any) {
+      const msg = (err && err.message) || String(err);
+      const detached = /not attached|detached while handling|detachedFromTarget/i.test(msg);
+      if (
+        retried ||
+        !detached ||
+        this.inAttach.has(tabId) ||
+        (effectiveControl?.signal?.aborted || effectiveControl?.stopRequested || effectiveControl?.pauseRequested)
+      ) {
+        throw err;
+      }
+      // Re-attach once and repeat the command; if that fails too, the error goes to the caller.
+      await this.attach(tabId);
+      return await this.sendCommand(tabId, method, params, control, true);
+    }
   }
 
   private clockSleep?: (ms: number, signal?: AbortSignal) => Promise<void>;

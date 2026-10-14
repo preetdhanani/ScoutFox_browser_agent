@@ -13,6 +13,8 @@ export interface NewFailure {
   signature: string;
   kind: StepFailure['kind'];
   detail: string;
+  /** Set when the failing action ran on synthetic DOM events instead of trusted CDP input. */
+  fallbackUsed?: 'synthetic';
 }
 
 export const MAX_FAILURE_RECORDS = 6;
@@ -48,7 +50,8 @@ export function recordFailure(
       ...prev,
       count: prev.count + 1,
       detail: incoming.detail || prev.detail,
-      step: incoming.step ?? prev.step
+      step: incoming.step ?? prev.step,
+      ...(incoming.fallbackUsed ? { fallbackUsed: incoming.fallbackUsed } : {})
     };
     list.splice(idx, 1);
     list.unshift(failure);
@@ -64,7 +67,8 @@ export function recordFailure(
       },
       url: incoming.url || '',
       detail: incoming.detail,
-      count: 1
+      count: 1,
+      ...(incoming.fallbackUsed ? { fallbackUsed: incoming.fallbackUsed } : {})
     };
     list.unshift(failure);
   }
@@ -100,7 +104,8 @@ export function renderFailureMemory(failures: StepFailure[], bannedList: string[
     const isBanned = bannedList.includes(sig);
     const countPart = f.count > 1 ? ` (x${f.count}${isBanned ? ', blocked by ScoutFox' : ''})` : (isBanned ? ' (blocked by ScoutFox)' : '');
     const targetDesc = f.action.label ? ` ${f.action.label}` : (f.action.elementId !== undefined ? ` [${f.action.elementId}]` : (f.action.url ? ` ${f.action.url}` : ''));
-    return `- ${f.action.verb}${targetDesc} -> ${f.kind}: ${f.detail}${countPart}`;
+    const fallbackPart = f.fallbackUsed ? ' (synthetic input)' : '';
+    return `- ${f.action.verb}${targetDesc} -> ${f.kind}${fallbackPart}: ${f.detail}${countPart}`;
   });
 
   return lines.join('\n');

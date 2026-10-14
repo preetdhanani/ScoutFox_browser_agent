@@ -118,6 +118,8 @@ export interface StepRecord {
   line: string;                          // CODE one-liner: '#12 click [88] "Alle Angebote" -> no visible change'
   outcome: 'ok' | 'failed' | 'no_effect' | 'rejected' | 'parse_error' | 'system' | 'user';
   detail: string;                        // max 300 chars
+  via?: 'cdp' | 'synthetic' | 'background' | 'state';   // the input path the action ran through
+  syntheticReason?: string;              // why the input dropped to synthetic DOM events
 }
 
 // ---------- actions (canonical verbs come from shared/actions.json) ----------
@@ -211,6 +213,7 @@ export interface SiteRun {               // Revision 2's siteRun; its step recor
   consecutiveParseErrors: number; parseErrors: number; everParsedOk: boolean;
   systemActions: number; modelCalls: number; tokensIn?: number; tokensOut?: number;
   cdp: CdpState;
+  syntheticNoticed?: boolean;            // the one-per-site panel notice about synthetic input was emitted
   finalAnswer?: FinalAnswer;             // answer sites
   summaryReport?: string;                // a collect site's subgoal_done summary when it recorded nothing; never routes the run
   exit?: { status: SiteStatus; reason: string; fatal?: 'model_unusable' | 'dom_error' | 'hard_cap' | 'tab_gone' | 'out_of_scope' };

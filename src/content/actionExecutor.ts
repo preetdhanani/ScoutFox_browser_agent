@@ -13,7 +13,7 @@ import {
   removeCursorOverlay,
   highlightElement
 } from './cursor.ts';
-import { resolveElement } from './resolve.ts';
+import { resolveElement, resolveElementDetailed } from './resolve.ts';
 import { waitForDomQuiet } from './domQuiet.ts';
 import {
   describeElement,
@@ -103,6 +103,10 @@ export class ActionExecutor implements ActionExecutionContext {
 
   resolveElement(elementId: number | string): Element | null {
     return resolveElement(elementId, this.getDoc(), this.getWin());
+  }
+
+  resolveElementDetailed(elementId: number | string): { element: Element | null; recoveredBy?: 'stable-id' } {
+    return resolveElementDetailed(elementId, this.getDoc(), this.getWin());
   }
 
   describeElement(el: Element | null): string {

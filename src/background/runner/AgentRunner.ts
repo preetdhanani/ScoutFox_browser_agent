@@ -1227,6 +1227,44 @@ export class AgentRunner {
     if (signal?.aborted) return;
     if (typeof chrome === 'undefined' || !chrome.tabs?.onUpdated) return;
 
+    // The load may already have finished before this listener exists (the navigation
+    // completed while the action was still dispatching, and fakeChrome fires the
+    // "complete" event inside the navigation call). Check the status first, then
+    // listen, so an already complete tab never waits out the whole timer. The check
+    // yields to the event loop once and reads again, so a navigation that starts right
+    // after the action (fakeDom opens the page on the next timer tick) is not misread
+    // as already finished while the tab still shows the old page.
+    const readComplete = (): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        try {
+          if (!chrome.tabs?.get) {
+            resolve(false);
+            return;
+          }
+          const maybePromise: any = (chrome.tabs.get as any)(tabId, (tab: chrome.tabs.Tab | undefined) => {
+            resolve(!!tab && tab.status === 'complete');
+          });
+          if (maybePromise && typeof maybePromise.then === 'function') {
+            maybePromise.then(
+              (tab: chrome.tabs.Tab | undefined) => resolve(!!tab && tab.status === 'complete'),
+              () => resolve(false)
+            );
+          }
+        } catch (_) {
+          resolve(false);
+        }
+      });
+
+    const yieldMacro = () => new Promise<void>((r) => setTimeout(r, 0));
+
+    if (await readComplete()) {
+      await yieldMacro();
+      if (await readComplete()) {
+        return;
+      }
+    }
+    if (signal?.aborted) return;
+
     await new Promise<void>((resolve) => {
       let resolved = false;
       const cleanup = () => {

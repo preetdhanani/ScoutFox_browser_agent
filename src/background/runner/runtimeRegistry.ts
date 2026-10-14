@@ -48,6 +48,8 @@ export interface ExecResult {
   via: 'cdp' | 'synthetic' | 'background';
   effect: Effect;
   urlAfter?: string;
+  /** Why the input dropped to synthetic DOM events, when via is 'synthetic'. */
+  syntheticReason?: string;
   oneShot?: OneShot;
 }
 

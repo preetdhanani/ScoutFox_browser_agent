@@ -29,6 +29,8 @@ export interface DispatchResult {
   urlAfter?: string;
   stale?: boolean;
   obscuredBy?: string;
+  /** Why the input dropped to synthetic DOM events (set on every synthetic fallback). */
+  syntheticReason?: string;
 }
 
 interface KeyDefinition {
@@ -91,7 +93,7 @@ export class InputDispatcher {
 
       case 'select':
         // Native <select> menus always use synthetic DOM setter to avoid OS popup locks
-        return await this.fallbackToSynthetic(tabId, actionPayload);
+        return await this.fallbackToSynthetic(tabId, actionPayload, 'native select element');
 
       case 'press_key':
       case 'keypress':
@@ -129,24 +131,16 @@ export class InputDispatcher {
       urlBefore = tab?.url || '';
     } catch (_) {}
 
-    const canUseCDP = await this.ensureCdpAttached(tabId);
-    if (!canUseCDP) {
-      const res = await this.fallbackToSynthetic(tabId, payload);
-      let urlAfter = '';
-      try {
-        const tab = await this.getTab(tabId);
-        urlAfter = tab?.url || '';
-      } catch (_) {}
-      if (urlAfter && urlBefore !== urlAfter) {
-        res.effect = 'url_changed';
-        res.urlAfter = urlAfter;
-      }
-      return res;
+    const attach = await this.ensureCdpAttached(tabId);
+    if (!attach.ok) {
+      return await this.syntheticWithUrlChange(tabId, payload, attach.reason, urlBefore);
     }
 
     const resolveRes = await this.resolvePoint(tabId, targetId, docId);
     if (!resolveRes.success) {
-      if (resolveRes.obscuredBy) {
+      // A stale element fails loudly: synthetic re-resolution could silently hit a
+      // different element after a re-render, so the model gets the stale error instead.
+      if (resolveRes.stale || resolveRes.obscuredBy) {
         return {
           success: false,
           error: resolveRes.error,
@@ -155,32 +149,17 @@ export class InputDispatcher {
           via: 'cdp'
         };
       }
-      const res = await this.fallbackToSynthetic(tabId, payload);
-      let urlAfter = '';
-      try {
-        const tab = await this.getTab(tabId);
-        urlAfter = tab?.url || '';
-      } catch (_) {}
-      if (urlAfter && urlBefore !== urlAfter) {
-        res.effect = 'url_changed';
-        res.urlAfter = urlAfter;
-      }
-      return res;
+      return await this.syntheticWithUrlChange(
+        tabId,
+        payload,
+        `element point could not be resolved: ${resolveRes.error}`,
+        urlBefore
+      );
     }
 
     // Native <select> elements should not receive CDP clicks to prevent native OS popup lock
     if (resolveRes.tag === 'select') {
-      const res = await this.fallbackToSynthetic(tabId, payload);
-      let urlAfter = '';
-      try {
-        const tab = await this.getTab(tabId);
-        urlAfter = tab?.url || '';
-      } catch (_) {}
-      if (urlAfter && urlBefore !== urlAfter) {
-        res.effect = 'url_changed';
-        res.urlAfter = urlAfter;
-      }
-      return res;
+      return await this.syntheticWithUrlChange(tabId, payload, 'native select element', urlBefore);
     }
 
     await this.safeProbeBegin(tabId);
@@ -195,17 +174,7 @@ export class InputDispatcher {
           via: 'cdp'
         };
       }
-      const res = await this.fallbackToSynthetic(tabId, payload);
-      let urlAfter = '';
-      try {
-        const tab = await this.getTab(tabId);
-        urlAfter = tab?.url || '';
-      } catch (_) {}
-      if (urlAfter && urlBefore !== urlAfter) {
-        res.effect = 'url_changed';
-        res.urlAfter = urlAfter;
-      }
-      return res;
+      return await this.syntheticWithUrlChange(tabId, payload, `CDP click failed: ${err.message || err}`, urlBefore);
     }
 
     // Deliverable 4: The click effect probe END is sent about 300 ms after the click, on the injectable clock
@@ -239,6 +208,28 @@ export class InputDispatcher {
   }
 
   /**
+   * Runs the synthetic fallback and reports the URL change of a click-like action.
+   */
+  private async syntheticWithUrlChange(
+    tabId: number,
+    payload: Record<string, any>,
+    reason: string,
+    urlBefore: string
+  ): Promise<DispatchResult> {
+    const res = await this.fallbackToSynthetic(tabId, payload, reason);
+    let urlAfter = '';
+    try {
+      const tab = await this.getTab(tabId);
+      urlAfter = tab?.url || '';
+    } catch (_) {}
+    if (urlAfter && urlBefore !== urlAfter) {
+      res.effect = 'url_changed';
+      res.urlAfter = urlAfter;
+    }
+    return res;
+  }
+
+  /**
    * Handles type action via CDP click + selectAll + insertText.
    */
   private async handleType(
@@ -267,19 +258,9 @@ export class InputDispatcher {
       urlBefore = tab?.url || '';
     } catch (_) {}
 
-    const canUseCDP = await this.ensureCdpAttached(tabId);
-    if (!canUseCDP) {
-      const res = await this.fallbackToSynthetic(tabId, payload);
-      let urlAfter = '';
-      try {
-        const tab = await this.getTab(tabId);
-        urlAfter = tab?.url || '';
-      } catch (_) {}
-      if (urlAfter && urlBefore !== urlAfter) {
-        res.effect = 'url_changed';
-        res.urlAfter = urlAfter;
-      }
-      return res;
+    const attach = await this.ensureCdpAttached(tabId);
+    if (!attach.ok) {
+      return await this.syntheticWithUrlChange(tabId, payload, attach.reason, urlBefore);
     }
 
     const resolveRes = await this.resolvePoint(tabId, targetId, docId);
@@ -295,17 +276,7 @@ export class InputDispatcher {
 
     // Native select tags receiving a type command must use synthetic setter
     if (resolveRes.tag === 'select') {
-      const res = await this.fallbackToSynthetic(tabId, payload);
-      let urlAfter = '';
-      try {
-        const tab = await this.getTab(tabId);
-        urlAfter = tab?.url || '';
-      } catch (_) {}
-      if (urlAfter && urlBefore !== urlAfter) {
-        res.effect = 'url_changed';
-        res.urlAfter = urlAfter;
-      }
-      return res;
+      return await this.syntheticWithUrlChange(tabId, payload, 'native select element', urlBefore);
     }
 
     await this.safeProbeBegin(tabId);
@@ -432,9 +403,9 @@ export class InputDispatcher {
       };
     }
 
-    const canUseCDP = await this.ensureCdpAttached(tabId);
-    if (!canUseCDP) {
-      return await this.fallbackToSynthetic(tabId, payload);
+    const attach = await this.ensureCdpAttached(tabId);
+    if (!attach.ok) {
+      return await this.fallbackToSynthetic(tabId, payload, attach.reason);
     }
 
     await this.safeProbeBegin(tabId);
@@ -596,21 +567,23 @@ export class InputDispatcher {
   }
 
   /**
-   * Ensures CDP is attached to the tab and allowed.
+   * Ensures CDP is attached to the tab and allowed. Returns the reason when it is not,
+   * so every synthetic fallback can name why the trusted input path was not used.
    */
-  private async ensureCdpAttached(tabId: number): Promise<boolean> {
+  private async ensureCdpAttached(tabId: number): Promise<{ ok: boolean; reason: string }> {
     if (this.cdp.isUserDetached(tabId)) {
-      return false;
+      return { ok: false, reason: 'debugger detached by user' };
     }
     if (this.cdp.isAttached(tabId)) {
-      return true;
+      return { ok: true, reason: '' };
     }
     try {
       await this.cdp.attach(tabId);
-      return true;
-    } catch (err) {
+      return { ok: true, reason: '' };
+    } catch (err: any) {
+      const detail = err?.message || String(err);
       Logger.info('InputDispatcher', `CDP attach failed on tab [${tabId}], falling back to synthetic.`, err);
-      return false;
+      return { ok: false, reason: `debugger could not attach: ${detail}` };
     }
   }
 
@@ -641,25 +614,42 @@ export class InputDispatcher {
 
   /**
    * Fallback execution using the content script's synthetic ActionExecutor.
+   * The effect probe runs around the synthetic action too, so a synthetic
+   * action that changed nothing is reported as no visible change, and the
+   * reason the trusted input path was not used is carried on the result.
    */
   async fallbackToSynthetic(
     tabId: number,
-    actionPayload: Record<string, any>
+    actionPayload: Record<string, any>,
+    reason?: string
   ): Promise<DispatchResult> {
+    await this.safeProbeBegin(tabId);
     try {
       const response = await this.sendToTab<any>(tabId, {
         action: 'EXECUTE_ACTION',
         payload: actionPayload
       });
+      if (!response) {
+        return {
+          success: false,
+          error: 'The content script did not answer the synthetic action request.',
+          via: 'synthetic',
+          ...(reason ? { syntheticReason: reason } : {})
+        };
+      }
+      const probeEffect = await this.safeProbeEnd(tabId);
       return {
-        ...(response || { success: true }),
-        via: 'synthetic'
+        ...response,
+        via: 'synthetic',
+        ...(reason ? { syntheticReason: reason } : {}),
+        ...(probeEffect !== 'unknown' ? { effect: probeEffect } : {})
       };
     } catch (err: any) {
       return {
         success: false,
         error: err.message || 'Synthetic action execution failed.',
-        via: 'synthetic'
+        via: 'synthetic',
+        ...(reason ? { syntheticReason: reason } : {})
       };
     }
   }

@@ -156,6 +156,48 @@ test('InputDispatcher: click reports obscuredBy error when covered', async () =>
   assert.equal(res.via, 'cdp');
 });
 
+test('InputDispatcher: click with a stale element fails loudly and never dispatches synthetic events', async () => {
+  let syntheticCalled = false;
+
+  const fc = fakeChrome({
+    debugger: {
+      commands: { 'Emulation.setFocusEmulationEnabled': {} }
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
+    dom: {
+      101: {
+        RESOLVE_ELEMENT_POINT: () => ({
+          success: false,
+          stale: true,
+          error: 'Element [5] is no longer attached to the document.'
+        }),
+        EFFECT_PROBE_BEGIN: () => ({ success: true }),
+        EFFECT_PROBE_END: () => ({ success: true, effect: 'dom_changed' }),
+        EXECUTE_ACTION: () => {
+          syntheticCalled = true;
+          return { success: true, message: 'Synthetic clicked' };
+        }
+      }
+    }
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  const dispatcher = new InputDispatcher(cdp);
+
+  const res = await dispatcher.dispatchAction(101, {
+    action: 'click',
+    element_id: 5
+  });
+
+  assert.equal(res.success, false);
+  assert.equal(res.stale, true);
+  assert.match(res.error || '', /no longer attached/);
+  assert.equal(res.via, 'cdp');
+  assert.equal(syntheticCalled, false, 'a stale element must fail, never fall back to synthetic clicks');
+});
+
 test('InputDispatcher: click on select element falls back to synthetic', async () => {
   let syntheticCalled = false;
 
@@ -164,7 +206,7 @@ test('InputDispatcher: click on select element falls back to synthetic', async (
       commands: { 'Emulation.setFocusEmulationEnabled': {} }
     },
     tabs: { list: [{ id: 101, url: 'https://example.com' }] },
-    scripting: { executeScript: [{ result: 800 }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
     dom: {
       101: {
         RESOLVE_ELEMENT_POINT: () => ({
@@ -173,6 +215,8 @@ test('InputDispatcher: click on select element falls back to synthetic', async (
           tag: 'select',
           text: 'Country'
         }),
+        EFFECT_PROBE_BEGIN: () => ({ success: true }),
+        EFFECT_PROBE_END: () => ({ success: true, effect: 'dom_changed' }),
         EXECUTE_ACTION: (msg: any) => {
           syntheticCalled = true;
           return { success: true, message: 'Synthetic select click' };
@@ -193,6 +237,7 @@ test('InputDispatcher: click on select element falls back to synthetic', async (
   assert.equal(res.success, true);
   assert.equal(res.via, 'synthetic');
   assert.equal(syntheticCalled, true);
+  assert.match(res.syntheticReason || '', /native select/);
 });
 
 test('InputDispatcher: type uses CDP focus, selectAll, insertText and Enter submit', async () => {
@@ -257,8 +302,11 @@ test('InputDispatcher: select action routes to synthetic fallback', async () => 
   const fc = fakeChrome({
     debugger: true,
     tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
     dom: {
       101: {
+        EFFECT_PROBE_BEGIN: () => ({ success: true }),
+        EFFECT_PROBE_END: () => ({ success: true, effect: 'value_set' }),
         EXECUTE_ACTION: (msg: any) => {
           syntheticPayload = msg.payload;
           return { success: true, message: 'Selected Option B' };
@@ -281,6 +329,7 @@ test('InputDispatcher: select action routes to synthetic fallback', async () => 
   assert.equal(res.via, 'synthetic');
   assert.equal(syntheticPayload?.action, 'select');
   assert.equal(syntheticPayload?.value, 'Option B');
+  assert.equal(res.effect, 'value_set', 'the synthetic action carries the effect probe result');
 });
 
 test('InputDispatcher: falls back to synthetic when user detached debugger', async () => {
@@ -291,9 +340,11 @@ test('InputDispatcher: falls back to synthetic when user detached debugger', asy
       commands: { 'Emulation.setFocusEmulationEnabled': {} }
     },
     tabs: { list: [{ id: 101, url: 'https://example.com' }] },
-    scripting: { executeScript: [{ result: 800 }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
     dom: {
       101: {
+        EFFECT_PROBE_BEGIN: () => ({ success: true }),
+        EFFECT_PROBE_END: () => ({ success: true, effect: 'dom_changed' }),
         EXECUTE_ACTION: () => {
           syntheticCalled = true;
           return { success: true, message: 'Synthetic clicked' };
@@ -318,6 +369,7 @@ test('InputDispatcher: falls back to synthetic when user detached debugger', asy
   assert.equal(res.success, true);
   assert.equal(res.via, 'synthetic');
   assert.equal(syntheticCalled, true);
+  assert.match(res.syntheticReason || '', /debugger detached by user/);
 });
 
 test('InputDispatcher: click falls back to synthetic when CDP click throws', async () => {
@@ -333,7 +385,7 @@ test('InputDispatcher: click falls back to synthetic when CDP click throws', asy
       }
     },
     tabs: { list: [{ id: 101, url: 'https://example.com' }] },
-    scripting: { executeScript: [{ result: 800 }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
     dom: {
       101: {
         RESOLVE_ELEMENT_POINT: () => ({
@@ -342,6 +394,8 @@ test('InputDispatcher: click falls back to synthetic when CDP click throws', asy
           tag: 'button',
           text: 'Fallback Button'
         }),
+        EFFECT_PROBE_BEGIN: () => ({ success: true }),
+        EFFECT_PROBE_END: () => ({ success: true, effect: 'dom_changed' }),
         EXECUTE_ACTION: () => {
           syntheticCalled = true;
           return { success: true, message: 'Synthetic executed' };
@@ -362,11 +416,43 @@ test('InputDispatcher: click falls back to synthetic when CDP click throws', asy
   assert.equal(res.success, true);
   assert.equal(res.via, 'synthetic');
   assert.equal(syntheticCalled, true);
+  assert.match(res.syntheticReason || '', /CDP click failed/);
+  assert.match(res.syntheticReason || '', /CDP target crashed/);
+});
+
+test('InputDispatcher: an empty content-script reply is an error, not success', async () => {
+  const fc = fakeChrome({
+    debugger: {
+      commands: { 'Emulation.setFocusEmulationEnabled': {} }
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
+    dom: {
+      101: {
+        // A content script that answers with nothing (sendResponse() with no argument)
+        EXECUTE_ACTION: () => null
+      }
+    }
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  const dispatcher = new InputDispatcher(cdp);
+
+  const res = await dispatcher.dispatchAction(101, {
+    action: 'click',
+    element_id: 1
+  });
+
+  assert.equal(res.success, false, 'an empty reply must not be reported as a successful action');
+  assert.match(res.error || '', /did not answer|no answer/i);
+  assert.equal(res.via, 'synthetic');
 });
 
 test('InputDispatcher: safeProbeEnd returns unknown when probe message throws or fails', async () => {
   const fc = fakeChrome({
     tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: () => [{ result: 0 }] },
     dom: {
       101: {
         EFFECT_PROBE_BEGIN: () => ({ success: true }),

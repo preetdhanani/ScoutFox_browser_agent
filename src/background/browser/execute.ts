@@ -317,7 +317,13 @@ export async function executeAction(
             : undefined,
         });
 
-    let effect = (res.effect as ExecResult['effect']) || (res.success ? 'dom_changed' : 'none');
+    // A synthetic result carries the effect probe result from fallbackToSynthetic; without one
+    // it must not default to dom_changed, or a synthetic action that changed nothing would be
+    // reported as "page updated" and verify would never fire the no-visible-change failure.
+    const viaSynthetic = res.via === 'synthetic';
+    let effect =
+      (res.effect as ExecResult['effect']) ||
+      (res.success && !viaSynthetic ? 'dom_changed' : 'none');
     const isClick = verb === 'click';
     const isTypeSubmit = verb === 'type' && (res.submitted || Boolean(action?.submit));
 
@@ -365,6 +371,7 @@ export async function executeAction(
       via: isNav ? 'background' : (res.via ?? 'cdp'),
       effect,
       urlAfter: urlAfter || res.urlAfter || undefined,
+      syntheticReason: (res as any).syntheticReason,
       oneShot,
     };
   } catch (err: any) {
