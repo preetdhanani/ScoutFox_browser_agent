@@ -67,7 +67,7 @@ import { startOllamaProxy } from './lib/ollamaProxy.mjs';
 import { missingManifestFiles, prepareExtensionCopy, TAMPERS } from './lib/extensionCopy.mjs';
 import { MOCK_FAIL_PREFIX } from './lib/callRecord.mjs';
 import { runFacts, TASKS } from './lib/tasks.mjs';
-import { HOST_RULES } from './lib/twoSources.mjs';
+import { HOST_RULES, SHOP_B } from './lib/twoSources.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -300,7 +300,13 @@ async function watchWorker(target, errors) {
     errors.push(`service worker CSP violation: ${d.violatedDirective} ${d.contentSecurityPolicyViolationType}${at}`);
   });
   session.on('Runtime.consoleAPICalled', (e) => {
-    if (e.type === 'error' || e.type === 'assert') errors.push(`service worker console.${e.type}: ${oneLine(textOfArgs(e.args), 300)}`);
+    if (e.type !== 'error' && e.type !== 'assert') return;
+    const text = textOfArgs(e.args);
+    // shop-b.test is made unresolvable on purpose (twoSources.mjs HOST_RULES), so a run that opens it stands on
+    // Chromium's own error page, where no extension script can be injected. The engine logs that at error level
+    // (snapshot.ts INJECT_FAILED) and then ends the site without a value; for this one host it is the expected path.
+    if (/\[INJECT_FAILED\]/.test(text) && /is showing error page/.test(text) && text.includes(`${SHOP_B}/`)) return;
+    errors.push(`service worker console.${e.type}: ${oneLine(text, 300)}`);
   });
   session.on('Runtime.exceptionThrown', (e) => {
     const d = e.exceptionDetails || {};
@@ -1025,7 +1031,8 @@ async function runTask(ctx, fixtures, llm, name) {
   const answer = facts.answer;
   // Before the tab closes: closing it ends its session, and the panel would show nothing.
   if (shotDir) screenshots.push(...await panelScreenshots(ctx, tabId, shotName, shotDir));
-  if (page.url() !== probes[0].url) probes.push(await probePage(ctx, page, tabId));
+  // Chromium's own error page (a host that does not resolve) never gets content scripts, so there is nothing to probe there.
+  if (page.url() !== probes[0].url && !page.url().startsWith('chrome-error://')) probes.push(await probePage(ctx, page, tabId));
   await sleep(300); // late page errors
   await page.close();
 

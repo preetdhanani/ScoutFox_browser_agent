@@ -471,7 +471,8 @@ export function renderTruthTableMarkdown(table: FindingsTable): string {
   for (const row of table.rows) {
     const cells = table.columns.map((col) => {
       const cell = row.cells[col];
-      if (!cell || !cell.value) return 'not found';
+      // A site the run skipped before checking it has no value because nobody looked, not because the page lacked it.
+      if (!cell || !cell.value) return row.status === 'skipped' ? 'not checked' : 'not found';
       const flagText = cell.flag ? ` (${cell.flag})` : '';
       if (cell.url) {
         return `[${cell.value}](${cell.url})${flagText}`;

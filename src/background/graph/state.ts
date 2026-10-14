@@ -159,7 +159,10 @@ export interface PlanMeta {
   sites: SiteSpec[];                     // at most MAX_SITES; finished sites are immutable
   source: 'llm' | 'fallback';
 }
-export interface SiteState { status: SiteStatus; criteriaMet: boolean; reason?: string }
+export interface SiteState {
+  status: SiteStatus; criteriaMet: boolean; reason?: string;
+  stoppedEarly?: true;                   // 'skipped' by a reflect stop_early while still pending: never checked, not dropped by the user
+}
 export interface SiteSummary {           // all the orchestrator knows about a finished site
   siteId: string; status: SiteStatus; criteriaMet: boolean;
   findings: number;                      // accepted findings
@@ -287,7 +290,8 @@ export type HistoryEntry =
       runStats?: RunStats; offer?: Offer; stoppedEarly?: string; findings?: Finding[];
       audit?: FinishAuditRecord }
   | { type: 'partial_result'; answer: string; table: FindingsTable | null; reason: EndReason;
-      runStats?: RunStats; offer?: Offer; findings?: Finding[] };  // never a "Done"
+      runStats?: RunStats; offer?: Offer; findings?: Finding[];
+      skippedSites?: Array<{ siteId: string; site: string; reason: string }> };  // never a "Done"
 
 export interface Limits {
   maxSteps: number;                  // settings.maxSteps: the "Step limit (hard cap)" for all budget units

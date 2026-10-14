@@ -52,7 +52,8 @@ export function actionsOfFormat(format) {
  *            'browse' has the click verb, 'answer' has finish, 'extract' has continue_browsing, and 'harvest' is
  *            the record_finding schema without either of those
  *   reflect  the orchestrator's reflect call and the worker's mid-site reflect: no schema, told apart by the
- *            first words of the system prompt
+ *            first words of their own system prompt, which starts a line after the user's system instructions
+ *            (settings.systemInstructions, prepended by AgentRunner to every call)
  * Anything else is { node: 'unknown' }, which includes the calls of the old engine (its schema has click AND
  * finish), so a protocol drift is named and not guessed.
  *
@@ -78,8 +79,8 @@ export function classifyRequest(sent) {
     return { node: 'unknown', mode: '' };
   }
   if (format === undefined) {
-    if (/^You are the reflection supervisor of an autonomous browser agent\./.test(system)) return { node: 'reflect', mode: 'initial' };
-    if (/^You are an autonomous web agent strategy supervisor\./.test(system)) return { node: 'reflect', mode: 'mid_site' };
+    if (/^You are the reflection supervisor of an autonomous browser agent\./m.test(system)) return { node: 'reflect', mode: 'initial' };
+    if (/^You are an autonomous web agent strategy supervisor\./m.test(system)) return { node: 'reflect', mode: 'mid_site' };
   }
   return { node: 'unknown', mode: '' };
 }

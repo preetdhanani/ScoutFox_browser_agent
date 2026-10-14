@@ -16,8 +16,10 @@ import {
   MAX_SITES,
   type PlanMeta,
   type Predicate,
+  type ReflectResult,
   type RunStats,
   type SiteSpec,
+  type SiteState,
   type SiteSummary,
   type TaskKind,
 } from './state.ts';
@@ -852,6 +854,22 @@ export const summaryNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
   };
 });
 
+/**
+ * A reflect stop_early ends the run with planned sites still pending. Every one of them is marked
+ * 'skipped' with the reason (and the stoppedEarly mark that tells compile they were never checked,
+ * unlike a site the user or a replan dropped), so compile reports the run as partial.
+ */
+function stopEarlyUpdate(pendingSites: SiteSpec[], reflectResult: ReflectResult): Partial<AgentUpdate> {
+  const skipped: Record<string, SiteState> = {};
+  for (const site of pendingSites) {
+    skipped[site.id] = { status: 'skipped', criteriaMet: false, reason: reflectResult.reason, stoppedEarly: true };
+  }
+  return {
+    reflectResult,
+    ...(pendingSites.length > 0 ? { sites: { $set: skipped } } : {}),
+  };
+}
+
 const reflectNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'reflect', async (state, config) => {
   const runtime = getRuntime(config);
   const profile = state.effortProfile ?? getEffortProfile(state.effort?.level);
@@ -883,14 +901,12 @@ const reflectNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
     state.siteOut?.fatal === 'tab_gone' ||
     state.siteOut?.fatal === 'out_of_scope'
   ) {
-    return {
-      reflectResult: {
-        decision: 'stop_early',
-        reason: `Site ended run-fatal: ${state.siteOut.fatal}`,
-        changes: '',
-        by: 'fast_path',
-      },
-    };
+    return stopEarlyUpdate(pendingSites, {
+      decision: 'stop_early',
+      reason: `Site ended run-fatal: ${state.siteOut.fatal}`,
+      changes: '',
+      by: 'fast_path',
+    });
   }
 
   // Fast-path: no pending sites remain
@@ -905,30 +921,9 @@ const reflectNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
     };
   }
 
-  // Fast-path: goal completeness check
-  const columns = state.planMeta?.columns ?? [];
-  const findings = state.findings ?? [];
-  const foundFields = new Set(findings.map((f) => f.field));
-  const allColumnsFound = columns.length > 0 && columns.every((col) => foundFields.has(col));
-  const referenceDone = (state.planMeta?.sites ?? []).some((s) => s.role === 'reference' && sitesMap[s.id]?.status === 'done');
-
-  if (allColumnsFound && referenceDone && findings.length >= 2) {
-    const noticeEntry: HistoryEntry = {
-      type: 'notice',
-      level: 'info',
-      kind: 'reflect',
-      content: 'Early completion: All target findings and criteria satisfied early.',
-    };
-    return {
-      reflectResult: {
-        decision: 'stop_early',
-        reason: 'All required criteria and findings collected early',
-        changes: '',
-        by: 'fast_path',
-      },
-      history: [noticeEntry],
-    };
-  }
+  // No code-written early completion: findings for every column after the reference site say
+  // nothing about the comparison sites that are still pending, so only the LLM (or a run-fatal
+  // exit above) may stop the run early, and compile then reports it as partial.
 
   // Fast-path: replan limits reached or reserve budget depleted
   const replanCount = state.replan?.count ?? 0;
@@ -1010,6 +1005,10 @@ const reflectNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
       }
     }
 
+    if (reflectDecision.decision === 'stop_early') {
+      return stopEarlyUpdate(pendingSites, { ...reflectDecision, by: 'llm' });
+    }
+
     return {
       reflectResult: {
         ...reflectDecision,
@@ -1036,9 +1035,17 @@ const reflectNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator'
 export const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 'compile', (state, config) => {
   const runtime = getRuntime(config);
   const sites = Object.values(state.sites ?? {});
-  const nonSkippedSites = sites.filter((s: any) => s.status !== 'skipped');
-  const allDone = nonSkippedSites.length > 0 && nonSkippedSites.every((s) => s.status === 'done');
-  const isStopEarlySuccess = state.reflectResult?.decision === 'stop_early' && (state.findings?.length ?? 0) > 0;
+  // A site the user or a replan dropped does not count against "all done". A site a reflect
+  // stop_early skipped while still pending (stoppedEarly) does: it was never checked, so the run is
+  // partial, whatever the reflect decision said.
+  const countedSites = sites.filter((s) => s.status !== 'skipped' || s.stoppedEarly === true);
+  const allDone = countedSites.length > 0 && countedSites.every((s) => s.status === 'done');
+  const stopEarlySkipped = (state.planMeta?.sites ?? [])
+    .filter((site) => state.sites?.[site.id]?.status === 'skipped' && state.sites[site.id].stoppedEarly === true)
+    .map((site) => ({ siteId: site.id, site: site.domain, reason: state.sites[site.id].reason ?? '' }));
+  // A closed tab or a tab that left the ScoutFox group ends the whole run. That is never a success,
+  // even when earlier sites recorded findings (BUG-24).
+  const isRunFatal = state.siteOut?.fatal === 'tab_gone' || state.siteOut?.fatal === 'out_of_scope';
   const stopped = state.ctl?.stopRequested || state.siteOut?.status === 'stopped';
 
   // Compile truth table if columns and sites exist
@@ -1056,6 +1063,10 @@ export const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
 
     const evidenceMode = (state.effortProfile?.evidence ?? (state.effort as any)?.profile?.evidence) as any;
     table = compileTruthTable(state.planMeta.sites, state.findings ?? [], compareOpt, evidenceMode);
+    // Rows of sites a stop_early skipped say so, instead of the "done" rows with "not found" cells.
+    for (const row of table.rows) {
+      if (state.sites?.[row.siteId]?.stoppedEarly === true) row.status = 'skipped';
+    }
     markdownTable = renderTruthTableMarkdown(table);
   }
 
@@ -1167,11 +1178,9 @@ export const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
         runStats,
       });
     }
-  } else if (allDone || isStopEarlySuccess || Boolean(state.siteOut?.finalAnswer)) {
-    endReason = allDone ? 'all_subgoals_done' : (state.siteOut?.finalAnswer ? 'goal_achieved' : 'stopped_early');
-    const defaultMsg = isStopEarlySuccess
-      ? 'Task completed early with required criteria satisfied.'
-      : NO_ANSWER_GIVEN;
+  } else if (!isRunFatal && (allDone || Boolean(state.siteOut?.finalAnswer))) {
+    endReason = allDone ? 'all_subgoals_done' : 'goal_achieved';
+    const defaultMsg = NO_ANSWER_GIVEN;
     // A collect site that ended with a subgoal_done summary and nothing recorded leaves its report
     // in summaryReport (never in finalAnswer: summaryRouter would skip the remaining sites). It is
     // the card's text when there is no real answer and no table, marked unconfirmed.
@@ -1221,16 +1230,21 @@ export const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
         : null;
     endReason = isBlocked ? 'partial' : 'stopped_early';
     const hasWorkerAnswer = Boolean(state.siteOut?.finalAnswer?.text?.trim());
+    const llmStopEarly = state.reflectResult?.decision === 'stop_early' && !isRunFatal;
     const reasonText = runFatalText
       ? runFatalText
       : hasWorkerAnswer
         ? state.siteOut!.finalAnswer!.text
-        : (isBlocked
-            ? `Site domain ${blockedDomain} is blocked after repeated challenges or errors.`
-            : 'Task ended without completing all goals.');
-    const answer = markdownTable
-      ? `${reasonText}\n\n${markdownTable}`
-      : reasonText;
+        : llmStopEarly
+          ? `Stopped early: ${state.reflectResult!.reason || 'no reason given'}`
+          : (isBlocked
+              ? `Site domain ${blockedDomain} is blocked after repeated challenges or errors.`
+              : 'Task ended without completing all goals.');
+    // The sites the stop never let run are named, so the card does not read as if they were checked.
+    const skippedText = stopEarlySkipped.length > 0
+      ? `Not checked: ${stopEarlySkipped.map((s) => s.site).join(', ')}.`
+      : '';
+    const answer = [reasonText, skippedText, markdownTable].filter((part) => part.trim() !== '').join('\n\n');
     const audit = (state.siteOut?.finalAnswer as any)?.audit;
     historyEntries.push({
       type: 'partial_result',
@@ -1239,8 +1253,12 @@ export const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
       table,
       reason: isBlocked ? 'partial' : 'stopped_early',
       findings: state.findings,
+      ...(stopEarlySkipped.length > 0 ? { skippedSites: stopEarlySkipped } : {}),
       runStats,
     });
+    if (llmStopEarly) {
+      Logger.info('Orchestrator', `[TASK_STOPPED_EARLY] Reflect stopped the run early with ${stopEarlySkipped.length} planned site(s) not checked - reported as partial.`);
+    }
   }
 
   return {
@@ -1249,7 +1267,9 @@ export const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
       text: historyEntries.find((h) => h.type === 'finish' || h.type === 'partial_result')?.answer ?? '',
       unconfirmed: Boolean(historyEntries.find((h) => h.type === 'finish')?.unconfirmed ?? state.siteOut?.finalAnswer?.unconfirmed ?? false),
       table,
-      partial: !(allDone || isStopEarlySuccess),
+      // True for every partial_result and for any run where a counted site is not done. The panel
+      // reads this (or the entry type) to tell a partial run from a "Done".
+      partial: !allDone || historyEntries.some((h) => h.type === 'partial_result'),
     },
     runStats,
     history: historyEntries,

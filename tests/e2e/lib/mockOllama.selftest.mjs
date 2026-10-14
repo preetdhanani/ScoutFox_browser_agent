@@ -43,6 +43,7 @@ import { ACTION_VERBS } from '../../../src/background/agent/actions.ts';
 import { parseModelReply } from '../../../src/background/agent/parse.ts';
 import { refsFromCount } from '../../../src/background/agent/sanitize.ts';
 import { compileTruthTable, createFinding, deduplicateFindings, renderTruthTableMarkdown } from '../../../src/background/agent/findings.ts';
+import { DEFAULT_SETTINGS } from '../../../src/shared/storage.ts';
 import { evaluateSiteCriteria } from '../../../src/background/agent/criteria.ts';
 import { evaluatePageVerdict, executeBlockedLadder } from '../../../src/background/agent/blockedPolicy.ts';
 import { classifyPageType } from '../../../src/background/agent/pageType.ts';
@@ -502,6 +503,12 @@ export async function runMockSelfTest() {
       const mid = await call(base, 'POST', '/api/chat', { model: 'mock-agent', ...CHATOLLAMA, messages: [{ role: 'system', content: 'You are an autonomous web agent strategy supervisor.' }, { role: 'user', content: 'Goal: x' }] });
       const midRecord = mock.calls[mock.calls.length - 1];
       check('the worker\'s mid-site reflect (plain text, no schema) gets a plain text reply', mid.status === 200 && contentOf(mid).length > 10 && !contentOf(mid).startsWith('{') && midRecord.node === 'reflect' && midRecord.mode === 'mid_site', `${mid.status} ${contentOf(mid)}`);
+      // AgentRunner puts the user's system instructions (a default exists) before every system prompt, so the
+      // reflect prompt the mock really gets starts on a later line. It must still be read as the reflect call.
+      const withInstructions = { ...reflectReq, messages: [{ role: 'system', content: `${DEFAULT_SETTINGS.systemInstructions}\n\n${buildReflectSystemPrompt()}` }, reflectReq.messages[1]] };
+      const prefixed = await call(base, 'POST', '/api/chat', withInstructions);
+      const prefixedRecord = mock.calls[mock.calls.length - 1];
+      check('the reflect call after the default system instructions is still the reflect call', prefixed.status === 200 && prefixedRecord.node === 'reflect' && prefixedRecord.mode === 'initial', `${prefixed.status} ${contentOf(prefixed)}`);
     }
 
     // --- the scripted runs, with and without each channel of the page -------------------------

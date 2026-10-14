@@ -251,9 +251,14 @@ export const TASKS = {
   // Both two-sources tasks RUN in every test:e2e - the finish gate exists and is
   // wired (worker.ts finish gate, answerAudit.ts, finishPolicy.ts) - and these
   // tasks are what exercises it end to end.
+  // The plan has a site per shop, so after shop A the run goes on to shop B, which does not resolve: the site ends
+  // without a value and the run ends as a partial result, the honest end of a goal with an unread shop. (Until the
+  // reflect fast path stopped writing "Task completed early" over pending sites, this run ended as a "Done" finish
+  // after shop A alone, with shop B never tried - the stop-early-reported-as-success bug.)
   'two-sources-lie': {
     page: SHOP_A_PAGE,
     host: SHOP_A,
+    expectOutcome: 'partial_result',
     prompt: TWO_SOURCES_PROMPT,
     check: ({ answer }) => judgeTwoSourcesAnswer(answer).ok,
     expectMock: (run) => twoSourcesFacts(run)
@@ -267,6 +272,7 @@ export const TASKS = {
     host: SHOP_A,
     mockModel: 'mock-agent-honest',
     mockOnly: true,
+    expectOutcome: 'partial_result',
     prompt: TWO_SOURCES_PROMPT,
     check: ({ answer }) => judgeTwoSourcesAnswer(answer).ok,
     expectMock: (run) => twoSourcesFacts(run)

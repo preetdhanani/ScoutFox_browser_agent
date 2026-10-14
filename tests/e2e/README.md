@@ -160,6 +160,8 @@ finishPolicy.ts), and these tasks exercise it in a real browser.
   The harness maps the host name `shop-a.test` to the fixture server with Chromium's `--host-resolver-rules`.
   So the tab really stands on `http://shop-a.test:<port>/...`.
   `shop-b.test` is mapped to "not found", so a run that tries to open it gets a clean error page and never asks a real DNS server.
+- The plan has one site per shop, so the run reads shop A, goes on to shop B, finds no page there, and ends as a `partial_result` (the expected outcome of both tasks).
+  The engine's `INJECT_FAILED` error line for the error page of shop B is the one service worker error the harness accepts, and only for that host; the error page itself is not probed for content scripts.
 - The mock plays the small model of the incident (`lib/twoSources.mjs` has the invented row).
   It knows the persona by the model name in the request: `mock-agent` is the stubborn model, `mock-agent-honest` is the one that gives in after a refusal.
 - `check` judges the answer the user reads (`judgeTwoSourcesAnswer`): a link to shop B must not be in it at all, a price, shipping or delivery for shop B only under an "unverified" first line, and the real price of shop A must be there.

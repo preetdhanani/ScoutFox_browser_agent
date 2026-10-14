@@ -6,6 +6,7 @@ import { buildOrchestratorGraph } from '../../src/background/graph/orchestrator.
 import { runtimeRegistry, type RunRuntime } from '../../src/background/runner/runtimeRegistry.ts';
 import { SessionStorageSaver } from '../../src/background/checkpoint/SessionStorageSaver.ts';
 import { createFakeStorage } from '../helpers/fakeStorageSession.ts';
+import { previousTurnsSummary } from '../../src/background/agent/previousTurns.ts';
 
 interface MockRuntimeOptions {
   customPlan?: any;
@@ -209,14 +210,25 @@ test('orchestratorReflect: Low effort profile (reflect: off) continues without c
   assert.equal(step.runStatus, 'idle');
 });
 
-test('orchestratorReflect: Fast path stop_early finishes cleanly when all criteria are satisfied early', async (t) => {
+const THREE_SITE_PLAN = {
+  taskKind: 'research',
+  searchQuery: 'framework laptop price',
+  columns: ['price'],
+  priceLike: true,
+  sites: [
+    { id: 's1', name: 'Framework Store', domain: 'frame.work', startUrl: 'https://frame.work/products/laptop', goal: 'Find laptop price', role: 'reference', kind: 'store', difficulty: 1 },
+    { id: 's2', name: 'Competitor Store', domain: 'competitor.test', startUrl: 'https://competitor.test/laptop', goal: 'Find competitor price', role: 'compare', kind: 'store', difficulty: 2 },
+    { id: 's3', name: 'Third Store', domain: 'third.test', startUrl: 'https://third.test/laptop', goal: 'Find third price', role: 'compare', kind: 'store', difficulty: 2 },
+  ],
+};
+
+// A stop_early while planned sites are still pending is not a success: the skipped sites were never
+// checked, so the run must end as a partial result that names them, never as a "Done" finish entry.
+test('orchestratorReflect: stop_early with pending sites ends as a partial result that names the skipped sites', async (t) => {
   const threadId = 'test-reflect-stop-early';
   createMockRuntime(threadId, {
-    // S1 provides reference price, S2 provides compare price
-    policyFindings: {
-      s1: '1.200 EUR',
-      s2: '1.250 EUR',
-    },
+    customPlan: THREE_SITE_PLAN,
+    reflectReply: { decision: 'stop_early', reason: 'The reference price is enough' },
   });
   t.after(() => runtimeRegistry.delete(threadId));
 
@@ -228,24 +240,85 @@ test('orchestratorReflect: Fast path stop_early finishes cleanly when all criter
   let step = await graph.invoke(
     {
       task: 'Compare laptop price across sites',
-      effort: {
-        requested: 'medium',
-        level: 'medium',
-        suggestedBy: 'user',
-      },
+      effort: { requested: 'medium', level: 'medium', suggestedBy: 'user' },
     },
     config,
   );
-
   if (step.pendingHold?.kind === 'approve_plan') {
     step = await graph.invoke(new Command({ resume: { kind: 'approve' } }), config);
   }
 
-  // Task completes
   assert.equal(step.runStatus, 'idle');
-  assert.ok(step.finalAnswer);
-  assert.equal(step.finalAnswer.partial, false, 'Early completion with criteria met must not be marked partial');
-  assert.ok(step.history.some((h: any) => h.type === 'finish'));
+  assert.equal(step.reflectResult?.decision, 'stop_early');
+  assert.ok(!step.history.some((h: any) => h.type === 'finish'), 'a stop_early with pending sites must never write a finish entry');
+  assert.ok(!step.history.some((h: any) => /Task completed early/.test(String(h.answer ?? h.content ?? ''))));
+  const last = step.history.at(-1) as any;
+  assert.equal(last?.type, 'partial_result', JSON.stringify(last)?.slice(0, 300));
+  assert.equal(last.reason, 'stopped_early');
+  assert.match(last.answer, /^Stopped early: The reference price is enough/);
+  assert.match(last.answer, /competitor\.test/);
+  assert.match(last.answer, /third\.test/);
+  assert.deepEqual(last.skippedSites.map((s: any) => s.siteId), ['s2', 's3']);
+  assert.equal(step.finalAnswer?.partial, true);
+  assert.equal(step.endReason, 'stopped_early');
+  // The pending sites are marked skipped with the reason, as the design doc says.
+  assert.equal(step.sites.s2.status, 'skipped');
+  assert.equal(step.sites.s3.status, 'skipped');
+  assert.match(String(step.sites.s2.reason), /The reference price is enough/);
+  // Their table rows say they were not checked, instead of "not found".
+  const rowS2 = last.table?.rows.find((r: any) => r.siteId === 's2');
+  assert.equal(rowS2?.status, 'skipped');
+  assert.match(last.answer, /\*\*competitor\.test\*\* \(compare\) \| not checked/);
+  // The next-turn recap does not call the run completed.
+  const recap = previousTurnsSummary([{ type: 'user_goal', turn: 1, prompt: 'Compare laptop price across sites', timestamp: '', isNewRun: true }, ...step.history]);
+  assert.match(recap.join('\n'), /did not finish - partial/);
+});
+
+// A closed tab ends the whole run. With findings already recorded the card must still lead with the
+// tab-closed reason (findings table below), never turn the fatal exit into a success.
+test('orchestratorReflect: tab_gone with findings ends as a partial result with the tab-closed reason above the table', async (t) => {
+  const threadId = 'test-reflect-tab-gone-findings';
+  const runtime = createMockRuntime(threadId, { customPlan: THREE_SITE_PLAN });
+  t.after(() => runtimeRegistry.delete(threadId));
+  let lastUrl = '';
+  const browser = runtime.browser as any;
+  const healthySnapshot = browser.snapshot;
+  browser.navigate = async (_tabId: number, url: string) => { lastUrl = url; };
+  browser.snapshot = async (...args: any[]) => {
+    if (lastUrl.includes('competitor.test')) throw new Error('Tab 201 no longer exists');
+    return healthySnapshot(...args);
+  };
+
+  const fakeStorage = createFakeStorage();
+  const saver = new SessionStorageSaver(fakeStorage.connect().session as any);
+  const graph = buildOrchestratorGraph(saver);
+  const config = { configurable: { thread_id: threadId } };
+
+  let step = await graph.invoke(
+    {
+      task: 'Compare laptop price across sites',
+      effort: { requested: 'medium', level: 'medium', suggestedBy: 'user' },
+    },
+    config,
+  );
+  if (step.pendingHold?.kind === 'approve_plan') {
+    step = await graph.invoke(new Command({ resume: { kind: 'approve' } }), config);
+  }
+
+  assert.equal(step.runStatus, 'idle');
+  assert.ok((step.findings ?? []).length > 0, 'site 1 must have recorded a finding');
+  assert.equal(step.siteOut?.fatal, 'tab_gone');
+  assert.ok(!step.history.some((h: any) => h.type === 'finish'), 'a run-fatal exit must never write a finish entry');
+  const last = step.history.at(-1) as any;
+  assert.equal(last?.type, 'partial_result', JSON.stringify(last)?.slice(0, 300));
+  assert.match(last.answer, /^The tab was closed, so the task stopped\./);
+  const tableAt = last.answer.indexOf('| Site');
+  assert.ok(tableAt > 0, 'the findings table must follow the reason');
+  assert.match(last.answer.slice(tableAt), /1\.200 EUR/);
+  assert.match(last.answer.slice(0, tableAt), /third\.test/, 'the never-started site is named as skipped');
+  assert.deepEqual(last.skippedSites.map((s: any) => s.siteId), ['s3']);
+  assert.equal(step.sites.s3.status, 'skipped');
+  assert.equal(step.finalAnswer?.partial, true);
 });
 
 test('orchestratorReflect: Replan flow drops pending site, adds alternative site, and preserves finished sites', async (t) => {
