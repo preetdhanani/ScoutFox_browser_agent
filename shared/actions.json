@@ -116,8 +116,11 @@
       "category": "page",
       "tiers": ["small", "large"],
       "modes": ["browse", "extract", "answer", "harvest"],
-      "prompt": "read_page_text {} - read more text of this page",
-      "schema": { "required": [], "properties": {} },
+      "prompt": "read_page_text {element_id} - read more text of this page; each call returns the next part, and with element_id it returns only that element's text",
+      "schema": {
+        "required": [],
+        "properties": { "element_id": { "$ref": "#/$defs/elementId" } }
+      },
       "aliases": ["extract_text", "read_text", "extract_page_text"]
     },
     {

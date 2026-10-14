@@ -251,3 +251,86 @@ test('5. doBrowserBatch enforces step bounds, forbidden actions, and accurate er
   assert.equal(forbiddenRes.results[0].ok, false);
   assert.match(forbiddenRes.results[0].error, /is forbidden inside browser_batch/);
 });
+
+test('6. read_page_text continues where the last read stopped instead of repeating the first chunk', async () => {
+  // The live failure: a model on an arXiv feed page called read_page_text five times and got the
+  // same first 1500 chars every time, because the prompt says "read more text of this page" while
+  // the tool always returned the head of the text. The run burned 23 steps and never answered.
+  const longText = Array.from({ length: 200 }, (_, i) => `Line ${i + 1} of the page text`).join('. ');
+  const fakeWindow = {
+    location: { href: 'https://export.arxiv.test/api/query?x=1' },
+    domCompressor: { extractPageText: () => longText },
+  };
+  const executor = new ActionExecutor(undefined, fakeWindow as any);
+
+  const first = await executor.execute({ action: 'read_page_text' });
+  assert.equal(first.success, true);
+  assert.match(first.message, /^Extracted text snippet \(\d+ chars\):/, 'the first read keeps the legacy wrapper');
+  assert.ok(first.message.includes('Line 1 of the page text'));
+  assert.equal(first.result.pageText, longText.slice(0, 1500));
+
+  const second = await executor.execute({ action: 'read_page_text' });
+  assert.match(second.message, /part 2, chars 1501-3000/);
+  assert.equal(second.result.pageText, longText.slice(1500, 3000));
+  assert.notEqual(second.result.pageText, first.result.pageText, 'the second read shows new text');
+
+  const third = await executor.execute({ action: 'read_page_text' });
+  assert.match(third.message, /part 3, chars 3001-4500\)/);
+  assert.doesNotMatch(third.message, /end of the text/, 'part 3 is not the end of a 200-line text');
+  assert.equal(third.result.pageText, longText.slice(3000, 4500));
+
+  const fourth = await executor.execute({ action: 'read_page_text' });
+  assert.match(fourth.message, /part 4, chars 4501-\d+, end of the text/);
+  assert.equal(fourth.result.pageText, longText.slice(4500));
+
+  // After the end, the read starts over - and says so, or the model burns steps re-reading.
+  const fifth = await executor.execute({ action: 'read_page_text' });
+  assert.match(fifth.message, /whole text already shown/, 'a wrapped read says the text was already shown');
+  assert.doesNotMatch(fifth.message, /part \d/, 'a wrapped read is not numbered as a next part');
+  assert.equal(fifth.result.pageText, longText.slice(0, 1500));
+
+  // A different URL starts the read over.
+  const otherWindow = {
+    location: { href: 'https://other.test/page' },
+    domCompressor: { extractPageText: () => longText },
+  };
+  const otherExecutor = new ActionExecutor(undefined, otherWindow as any);
+  const other = await otherExecutor.execute({ action: 'read_page_text' });
+  assert.doesNotMatch(other.message, /part \d/);
+  assert.doesNotMatch(other.message, /whole text already shown/);
+  assert.equal(other.result.pageText, longText.slice(0, 1500));
+});
+
+test('7. read_page_text with element_id returns only that element\'s text', async () => {
+  // The live failure: on a 25-result arXiv search page the full text is capped at 4500 chars, so
+  // the model could only ever see result 1. It HALLUCINATED an element_id parameter for
+  // read_page_text because it wanted exactly this tool. The element list is how it reads result
+  // 2, 3, ... without the cap.
+  const elements = new Map<number, any>();
+  elements.set(7, {
+    getBoundingClientRect: () => ({ top: 10, left: 20, width: 80, height: 30, right: 100, bottom: 40 }),
+    innerText: 'arXiv:2610.02863 Multi-Agent AI as a Nested Principal-Agent Problem. Abstract: In private wealth management...',
+  });
+  const fakeWindow = {
+    location: { href: 'https://arxiv.test/search' },
+    domCompressor: { getElement: (id: number) => elements.get(id) || null },
+  };
+  const fakeDocument = { contains: () => true };
+  const executor = new ActionExecutor(fakeDocument as any, fakeWindow as any);
+
+  const scoped = await executor.execute({ action: 'read_page_text', element_id: 7 });
+  assert.equal(scoped.success, true);
+  assert.match(scoped.message, /^Text of element \[7\] \(\d+ chars\):/);
+  assert.ok(scoped.message.includes('Nested Principal-Agent Problem'));
+  assert.equal(scoped.result.pageText, elements.get(7).innerText);
+
+  // An id that is not on the page is an error that names the way out, not a wrong read.
+  const missing = await executor.execute({ action: 'read_page_text', element_id: 99 });
+  assert.equal(missing.success, false);
+  assert.match(missing.error, /not on this page's element list/);
+
+  // Without element_id the page-level chunked read is unchanged.
+  const pageRead = await executor.execute({ action: 'read_page_text' });
+  assert.equal(pageRead.success, true);
+  assert.match(pageRead.message, /^Extracted text snippet/);
+});

@@ -181,6 +181,11 @@
               "action": {
                 "const": "read_page_text"
               },
+              "element_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999999
+              },
               "reason": {
                 "type": "string"
               }
@@ -624,6 +629,11 @@
             "properties": {
               "action": {
                 "const": "read_page_text"
+              },
+              "element_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999999
               }
             }
           },
@@ -1065,6 +1075,11 @@
             "properties": {
               "action": {
                 "const": "read_page_text"
+              },
+              "element_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999999
               },
               "reason": {
                 "type": "string"
@@ -1817,6 +1832,11 @@
               "action": {
                 "const": "read_page_text"
               },
+              "element_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999999
+              },
               "reason": {
                 "type": "string"
               }
@@ -1847,6 +1867,11 @@
             "properties": {
               "action": {
                 "const": "read_page_text"
+              },
+              "element_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999999
               }
             }
           }
@@ -2901,6 +2926,11 @@
               "action": {
                 "const": "read_page_text"
               },
+              "element_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999999
+              },
               "reason": {
                 "type": "string"
               }
@@ -3134,6 +3164,11 @@
               "action": {
                 "const": "read_page_text"
               },
+              "element_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999999
+              },
               "reason": {
                 "type": "string"
               }
@@ -3225,6 +3260,11 @@
             "properties": {
               "action": {
                 "const": "read_page_text"
+              },
+              "element_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 999999
               },
               "reason": {
                 "type": "string"
@@ -4002,7 +4042,7 @@
         "navigate {url} - open a full https:// URL in this tab",
         "go_back {} - go back in the browser history",
         "go_forward {} - go forward in the browser history",
-        "read_page_text {} - read more text of this page",
+        "read_page_text {element_id} - read more text of this page; each call returns the next part, and with element_id it returns only that element's text",
         "execute_js {code} - run JavaScript in the page and get the value it returns",
         "read_network_requests {filter, includeBody, limit} - see the recent network requests of this page; every field is optional",
         "browser_batch {steps, stopOnError} - run up to 8 steps on this page in one reply; each step is a click, type, scroll, press_key or wait action with its own fields",

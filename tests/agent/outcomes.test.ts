@@ -354,3 +354,56 @@ test('buildFinishEntry correctly handles boolean values through coercion', () =>
   const boolFalse = buildFinishEntry({ action: 'finish', answer: false as any });
   assert.equal(boolFalse.answer, 'false');
 });
+
+test('compileNode drops the no-answer placeholder when a filled findings table is the answer', async (t) => {
+  // An extract-only run (the site ended done after record_finding, no finish action) used to show
+  // "(The model did not provide an answer.)" above the very table that holds the data the user
+  // asked for. The table is the answer; the placeholder only belongs when there is nothing.
+  const threadId = 'test-compile-table-no-placeholder';
+  registerMockRuntime(threadId, {}, t);
+  const config = { configurable: { thread_id: threadId } };
+
+  const finding = {
+    id: 'f1',
+    siteId: 's1',
+    field: 'price',
+    valueRaw: '1.399,00 EUR',
+    value: '1.399,00 EUR',
+    url: 'https://shop.test/item',
+    capturedAt: '2026-10-13T12:00:00.000Z',
+    step: 1,
+    docId: 'doc-1',
+    evidence: { snippet: 'ab 1.399,00 EUR inkl. MwSt.', source: 'text' as const },
+    checks: ['value_on_page'],
+    quality: 'verified' as const,
+  };
+
+  const state: any = {
+    task: 'What is the price of the Framework Laptop 16?',
+    limits: { maxSteps: 10, maxSeconds: 60, maxSites: 3 },
+    budget: { allocated: 10, used: 1, reserve: 0, sites: { s1: 1 } },
+    planMeta: {
+      columns: ['price'],
+      sites: [{ id: 's1', name: 'Framework Store', domain: 'shop.test', goal: 'Read the price', role: 'reference', kind: 'store', startUrl: 'https://shop.test/item', fields: ['price'], criteria: { fields: [{ name: 'price', required: true }], doneWhen: 'all_required' } }],
+    },
+    sites: {
+      s1: { id: 's1', domain: 'shop.test', status: 'done', alloc: 10, used: 1 },
+    },
+    findings: [finding],
+    siteOut: {
+      siteId: 's1',
+      status: 'done',
+      used: 1,
+      findings: [finding],
+      parseErrors: 0,
+    },
+  };
+
+  const update = await compileNode(state, config);
+  assert.equal(update.endReason, 'all_subgoals_done');
+  const finishEntry = (update.history as any[])?.find((h) => h.type === 'finish');
+  assert.ok(finishEntry);
+  assert.ok(!String(finishEntry.answer).includes('did not provide an answer'), `the placeholder must go when the table exists: ${finishEntry.answer}`);
+  assert.match(finishEntry.answer, /1\.399,00 EUR/);
+  assert.ok(finishEntry.table, 'the structured table stays on the entry');
+});

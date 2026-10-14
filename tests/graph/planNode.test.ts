@@ -265,6 +265,55 @@ test('planNode: a roundup task becomes an answer site and finishes with the list
   const answer = rig.finishAnswer() || '';
   assert.ok(answer.includes('debpalash / VoiceStudio'), `the answer must list the repositories, got: ${answer}`);
 });
+
+test('planNode: a search ask over a roundup noun becomes an answer site, so the model must answer in prose', async (t) => {
+  // The live failure: "Search Google for open-source AI browser frameworks" was planned as
+  // research. The site's criteria were met the moment the results page loaded (a URL predicate),
+  // the model ended the site with the status report "the search results page is displayed", and
+  // the card answered nothing. A search ask over a roundup noun wants the found items, so it is
+  // planned as an answer site: the model cannot end without prose there.
+  const pages: PageSpec[] = [{
+    url: 'https://google.test/search?q=open-source+AI+browser+frameworks',
+    title: 'open-source AI browser frameworks - Google Search',
+    text: ['BrowserUse - an open-source AI browser framework', 'LaVague - a web agent framework', 'About 8,000,000 results'],
+    elements: [link('BrowserUse - an open-source AI browser framework', 'https://github.test/browser-use/browser-use')],
+  }];
+  const rig = await graphRig({
+    pages,
+    startUrl: pages[0].url,
+    plan: JSON.stringify({
+      task_kind: 'research',
+      columns: ['framework'],
+      search_query: 'open-source AI browser frameworks',
+      sites: [
+        { domain: 'google.test', goal: 'Search Google for open-source AI browser frameworks', role: 'reference', kind: 'page', difficulty: 1, required_fields: ['framework'], done_when: 'predicate', predicate: { type: 'url_contains', value: 'search' } },
+      ],
+    }),
+    policy: [act.subgoalDone('Open-source AI browser frameworks include BrowserUse and LaVague.')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Search Google for open-source AI browser frameworks');
+  assert.equal(rig.status(), 'idle');
+
+  const policyCalls = rig.llm.callsOf('policy');
+  assert.ok(policyCalls.length >= 1, 'the search-ask site got a policy call');
+  const system = String((policyCalls[0] as any)?.system ?? '');
+  assert.ok(system.includes('subgoal_done {summary, evidence}'), `a search-ask answer site must be offered subgoal_done, got: ${system.slice(0, 220)}`);
+  assert.ok(!system.includes('record_finding'), 'a search-ask answer site must not be offered record_finding');
+  const answer = rig.finishAnswer() || '';
+  assert.ok(answer.includes('BrowserUse'), `the answer must name what the search found, got: ${answer}`);
+});
+
+test('planNode: a search ask without a roundup noun stays a research plan', async (t) => {
+  // "Search for flights to Paris" is an action ask: the noun list does not match, so the planner's
+  // research plan stands and the site can still end on its predicate.
+  const { isSearchAskTask } = await import('../../src/background/graph/orchestrator.ts');
+  assert.equal(isSearchAskTask('Search Google for flights to Paris'), false);
+  assert.equal(isSearchAskTask('Search Google for open-source AI browser frameworks'), true);
+  assert.equal(isSearchAskTask('look up the best tools for video editing'), true);
+  assert.equal(isSearchAskTask('Buy milk'), false);
+});
 test('planNode: strips thought tags from plan response before parsing JSON', async (t) => {
   const planWithThoughts = `
 <thought>

@@ -182,6 +182,13 @@ describe('evidenceFromActionResult', () => {
     assert.deepEqual(evidenceFromActionResult({ action: 'extract_page_text' }, { success: true, message }), { kind: 'text', text: 'Preis: 2.189,00 EUR\nVersand 4,99 EUR' });
   });
 
+  test('read_page_text: a continued read keeps its part note in the wrapper but records only the text', () => {
+    const message = 'Extracted text snippet (4541 chars, part 2, chars 1501-3000):\n"""\nSecond chunk of the feed text\n"""';
+    assert.deepEqual(evidenceFromActionResult({ action: 'read_page_text' }, { success: true, message }), { kind: 'text', text: 'Second chunk of the feed text' });
+    const endMessage = 'Extracted text snippet (4541 chars, part 3, chars 3001-4541, end of the text):\n"""\nLast chunk\n"""';
+    assert.deepEqual(evidenceFromActionResult({ action: 'read_page_text' }, { success: true, message: endMessage }), { kind: 'text', text: 'Last chunk' });
+  });
+
   test('read_page_text: a message in another shape is kept as it is, and an empty one is nothing', () => {
     assert.deepEqual(evidenceFromActionResult({ action: 'read_page_text' }, { success: true, message: 'some text 4,99 EUR' }), { kind: 'text', text: 'some text 4,99 EUR' });
     assert.equal(evidenceFromActionResult({ action: 'read_page_text' }, { success: true, message: 'Extracted text snippet (0 chars):\n"""\n\n"""' }), null);

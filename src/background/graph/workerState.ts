@@ -198,6 +198,7 @@ export interface SiteRun {               // Revision 2's siteRun; its step recor
   systemActions: number; modelCalls: number; tokensIn?: number; tokensOut?: number;
   cdp: CdpState;
   finalAnswer?: FinalAnswer;             // answer sites
+  summaryReport?: string;                // a collect site's subgoal_done summary when it recorded nothing; never routes the run
   exit?: { status: SiteStatus; reason: string; fatal?: 'model_unusable' | 'dom_error' | 'hard_cap' | 'tab_gone' | 'out_of_scope' };
   midSiteReflected?: boolean;
   softCapReached?: boolean;
@@ -213,6 +214,7 @@ export interface SiteOut {               // built by the site wrapper from the w
   modelCalls: number; tokensIn?: number; tokensOut?: number;
   failures: StepFailure[]; anomalies: string[]; userAnswered: boolean; notes: string;
   finalAnswer?: FinalAnswer; cdp: CdpState; activeTabId: number | null;
+  summaryReport?: string;                // see SiteRun.summaryReport
   evidenceEvents?: EvidenceInput[];
   evidenceBase?: LedgerSnapshot | null;
   lastRefusedFinish?: any;

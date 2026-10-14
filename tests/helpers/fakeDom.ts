@@ -196,6 +196,8 @@ export interface ActionResult {
   error?: string;
   label?: string;
   submitted?: boolean;
+  /** Extra payload of the result (the real read_page_text returns { pageText }). */
+  result?: Record<string, unknown>;
 }
 
 /** One EXECUTE_ACTION the fake content script answered. */
@@ -257,6 +259,8 @@ const PAGE_TEXT_MARKER = `[page text truncated at ${PAGE_TEXT_LIMIT} characters]
 const MAX_TEXT_PIECES = 90;
 const ELEMENT_TEXT_LIMIT = 60;
 const READ_TEXT_LIMIT = 1500;
+/** Read position of read_page_text per fake document, mirroring the real content script's module state. */
+const readStateByDoc = new Map<any, { text: string; offset: number; exhausted: boolean }>();
 const LABEL_LIMIT = 48;
 const ELEMENT_KEYS = ['tag', 'text', 'type', 'role', 'placeholder', 'label', 'id', 'name', 'testId', 'value', 'disabled', 'checked', 'expanded', 'editable', 'y', 'goes', 'cssPath'];
 const PAGE_KEYS = ['url', 'title', 'text', 'elements', 'viewportHeight', 'pageHeight', 'scrollY'];
@@ -652,8 +656,43 @@ export function fakeDom(options: FakeDomOptions): FakeDom {
       }
       case 'read_page_text':
       case 'extract_page_text': {
+        // Scoped read, mirroring the real content script: with element_id, only that element's text.
+        const requestedId = payload.element_id;
+        if (requestedId !== undefined && requestedId !== null && String(requestedId).trim() !== '') {
+          const el = element(doc, requestedId);
+          if (!el) return gone(requestedId);
+          const elText = String(el.text ?? '');
+          return {
+            success: true,
+            message: `Text of element [${String(requestedId)}] (${elText.length} chars):\n"""\n${elText.slice(0, 2000)}\n"""`,
+            result: { pageText: elText.slice(0, 2000) },
+          };
+        }
         const text = formatPageText(doc.page.text);
-        return { success: true, message: `Extracted text snippet (${text.length} chars):\n"""\n${text.slice(0, READ_TEXT_LIMIT)}\n"""` };
+        // Mirrors the real content script (src/content/actions.ts): a repeated read of the same
+        // text returns the NEXT chunk, and a read after the end says the whole text was shown.
+        const cached = readStateByDoc.get(doc);
+        if (!cached || cached.text !== text) {
+          readStateByDoc.set(doc, { text, offset: 0, exhausted: false });
+        }
+        const state = readStateByDoc.get(doc)!;
+        const start = state.offset;
+        const wasExhausted = state.exhausted;
+        const end = Math.min(start + READ_TEXT_LIMIT, text.length);
+        const chunk = text.slice(start, end);
+        const reachedEnd = end >= text.length;
+        state.offset = reachedEnd ? 0 : end;
+        if (reachedEnd) state.exhausted = true;
+        const partNote = start === 0
+          ? (wasExhausted && text.length > 0
+            ? ', whole text already shown - do not read this page again, act on the ELEMENTS list or open a specific result'
+            : '')
+          : `, part ${Math.floor(start / READ_TEXT_LIMIT) + 1}, chars ${start + 1}-${end}${reachedEnd ? ', end of the text' : ''}`;
+        return {
+          success: true,
+          message: `Extracted text snippet (${text.length} chars${partNote}):\n"""\n${chunk}\n"""`,
+          result: { pageText: chunk },
+        };
       }
       case 'browser_batch':
         throw violation('fakeDom: browser_batch is not simulated - script the EXECUTE_ACTION answer with fc.dom.on(tabId, \'EXECUTE_ACTION\', ...) for this test');

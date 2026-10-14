@@ -79,6 +79,19 @@ export function isRoundupTask(task: string): boolean {
   return /\b(list|show|give|tell)\b[\s\S]{0,30}\b(all|the)\b/i.test(task);
 }
 
+// "Search Google for open-source AI browser frameworks" asks for the frameworks, not for the act of
+// searching. Planned as research, the site's criteria were met the moment the results page loaded
+// (a URL predicate), the model ended the site with a status report, and the card showed a summary
+// that answered nothing. A search ask over a roundup noun wants the found items as the answer, so
+// it is planned as an answer site, where the model cannot end without prose.
+const SEARCH_ASK_PATTERN = /\b(search|google|google\s+search|look\s?up|lookup)\b/i;
+
+/** True for a "search for <roundup noun>" ask: the deliverable is what the search finds. */
+export function isSearchAskTask(task: string): boolean {
+  if (!task) return false;
+  return SEARCH_ASK_PATTERN.test(task) && ROUNDUP_NOUN_PATTERN.test(task);
+}
+
 /**
  * Redirects a planner output to answer mode when the task is clearly a prose ask on one site:
  * an explicit summarize/explain verb (or a list/roundup ask), no price-like columns, and no
@@ -91,12 +104,13 @@ function overridePlanToAnswer(state: AgentStateT, plan: PlanMeta | null): PlanMe
   const task = state.task || '';
   const summaryAsk = /\b(summar(y|ize)|summaries|tl;?dr|explain|describe)\b/i.test(task);
   const roundup = isRoundupTask(task);
-  if (!summaryAsk && !roundup) return plan;
+  const searchAsk = isSearchAskTask(task);
+  if (!summaryAsk && !roundup && !searchAsk) return plan;
   if (plan.priceLike) return plan;
   if (plan.sites.length > 1) return plan;
-  // A roundup plan may carry non-prose columns (repository, stars); the model still answers in
-  // prose, so the prose-column check only guards the plain summarize path.
-  if (!roundup) {
+  // A roundup or search-ask plan may carry non-prose columns (repository, stars, framework); the
+  // model still answers in prose, so the prose-column check only guards the plain summarize path.
+  if (!roundup && !searchAsk) {
     const proseColumns = plan.columns.filter((c) => !isAutoValueField(c));
     if (!proseColumns.every((c) => /summary|description|content|text|answer|value|title/.test(c))) return plan;
   }
@@ -1115,7 +1129,7 @@ export const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
         } else {
           ans = annotateAnswer(answer, audit);
         }
-        if (markdownTable) ans = `${ans}\n\n${markdownTable}`;
+        if (markdownTable) ans = [ans, markdownTable].filter((part) => part.trim() !== '' && part !== NO_ANSWER_GIVEN).join('\n\n') || markdownTable;
         historyEntries.push({
           type: 'finish',
           answer: ans,
@@ -1141,18 +1155,39 @@ export const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
         findings: state.findings,
         runStats,
       });
+    } else if (!answerKept && !markdownTable && (state.siteOut?.summaryReport ?? '').trim()) {
+      // The steps ran out with nothing recorded and no answer. The last site's subgoal_done summary
+      // is the only report of what happened, so it is shown instead of an empty card.
+      historyEntries.push({
+        type: 'partial_result',
+        answer: (state.siteOut?.summaryReport ?? '').trim(),
+        table: null,
+        reason: 'max_steps',
+        findings: state.findings,
+        runStats,
+      });
     }
   } else if (allDone || isStopEarlySuccess || Boolean(state.siteOut?.finalAnswer)) {
     endReason = allDone ? 'all_subgoals_done' : (state.siteOut?.finalAnswer ? 'goal_achieved' : 'stopped_early');
     const defaultMsg = isStopEarlySuccess
       ? 'Task completed early with required criteria satisfied.'
       : NO_ANSWER_GIVEN;
+    // A collect site that ended with a subgoal_done summary and nothing recorded leaves its report
+    // in summaryReport (never in finalAnswer: summaryRouter would skip the remaining sites). It is
+    // the card's text when there is no real answer and no table, marked unconfirmed.
+    const summaryReport = !state.siteOut?.finalAnswer && !markdownTable
+      ? (state.siteOut?.summaryReport ?? '').trim()
+      : '';
     const rawAns = state.siteOut?.finalAnswer
       ? (state.siteOut.finalAnswer.text?.trim() ? state.siteOut.finalAnswer.text : NO_ANSWER_GIVEN)
-      : defaultMsg;
-    const coerced = coerceAnswerText(rawAns) || NO_ANSWER_GIVEN;
-    const answer = markdownTable ? `${coerced}\n\n${markdownTable}` : coerced;
-    const unconfirmed = state.siteOut?.finalAnswer?.unconfirmed === true;
+      : (summaryReport || defaultMsg);
+    let coerced = coerceAnswerText(rawAns) || NO_ANSWER_GIVEN;
+    // A filled findings table is an answer on its own. The "(The model did not provide an answer.)"
+    // line above a table with the data the user asked for reads like a failure, so the placeholder
+    // only stays when there is no table to show.
+    if (markdownTable && coerced === NO_ANSWER_GIVEN) coerced = '';
+    const answer = markdownTable ? [coerced, markdownTable].filter((part) => part.trim() !== '').join('\n\n') : coerced;
+    const unconfirmed = state.siteOut?.finalAnswer?.unconfirmed === true || (!state.siteOut?.finalAnswer && Boolean(summaryReport));
     const audit = (state.siteOut?.finalAnswer as any)?.audit;
     historyEntries.push({
       type: 'finish',

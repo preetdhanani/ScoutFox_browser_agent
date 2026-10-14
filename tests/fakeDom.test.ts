@@ -840,6 +840,7 @@ test('read_page_text, press_key and wait answer like the real ones, and wait doe
   assert.deepEqual(await r.send(act({ action: 'read_page_text' })), {
     success: true,
     message: 'Extracted text snippet (37 chars):\n"""\nFramework Laptop 16 - ab 1.399,00 EUR\n"""',
+    result: { pageText: 'Framework Laptop 16 - ab 1.399,00 EUR' },
   });
   assert.equal((await r.send(act({ action: 'extract_page_text' }))).success, true);
   assert.deepEqual(await r.send(act({ action: 'press_key', key: 'Escape' })), { success: true, message: 'Pressed key [Escape]' });

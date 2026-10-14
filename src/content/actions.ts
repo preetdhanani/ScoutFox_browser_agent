@@ -375,6 +375,13 @@ export async function doBrowserBatch(
 /**
  * Execute action requested by agent
  */
+
+// The read position of read_page_text on the current page. Module state on purpose: the action
+// executor lives for the lifetime of the page, so a navigation resets it with the page itself.
+interface PageReadState { url: string; text: string; offset: number; exhausted: boolean }
+let pageReadState: PageReadState | null = null;
+const PAGE_TEXT_CHUNK = 1500;
+
 export async function execute(
   actionPayload: any,
   context: ActionExecutionContext,
@@ -404,13 +411,56 @@ export async function execute(
     case 'read_page_text':
     case 'extract_page_text': {
       const compressor = win && (win as any).domCompressor ? (win as any).domCompressor : null;
+      // Scoped read: with a valid element_id, return only that element's text. This is how the model
+      // reads result 2, 3, ... of a long search page, whose full text is capped far below the page.
+      const requestedId = actionPayload.element_id;
+      if (requestedId !== undefined && requestedId !== null && String(requestedId).trim() !== '') {
+        const el = context.resolveElement
+          ? context.resolveElement(requestedId as number | string)
+          : null;
+        if (!el) {
+          return { success: false, error: `Element [${String(requestedId)}] is not on this page's element list. Use an element_id from the last snapshot, or read_page_text without element_id for the next part of the page text.` };
+        }
+        const elText = ((el as HTMLElement).innerText || (el as Element).textContent || '').trim();
+        return {
+          success: true,
+          message: `Text of element [${String(requestedId)}] (${elText.length} chars):\n"""\n${elText.slice(0, 2000)}\n"""`,
+          result: { pageText: elText.slice(0, 2000) },
+        };
+      }
       const pageText =
         compressor && typeof compressor.extractPageText === 'function'
           ? compressor.extractPageText()
           : doc && doc.body
             ? (doc.body as HTMLElement).innerText || doc.body.textContent || ''
             : '';
-      return { success: true, message: `Extracted text snippet (${pageText.length} chars):\n"""\n${pageText.slice(0, 1500)}\n"""` };
+      const url = win && win.location ? win.location.href : '';
+      // The prompt promises "read more text of this page". A repeated read of the SAME text must
+      // move forward, or the model re-reads the same first chunk forever (it did exactly that on
+      // an arXiv feed page: five identical reads, no progress, run ended without the answer).
+      // A different URL, or a text that changed under the same URL, starts the read over.
+      if (!pageReadState || pageReadState.url !== url || pageReadState.text !== pageText) {
+        pageReadState = { url, text: pageText, offset: 0, exhausted: false };
+      }
+      const start = pageReadState.offset;
+      const wasExhausted = pageReadState.exhausted;
+      const end = Math.min(start + PAGE_TEXT_CHUNK, pageText.length);
+      const chunk = pageText.slice(start, end);
+      const reachedEnd = end >= pageText.length;
+      pageReadState.offset = reachedEnd ? 0 : end;
+      if (reachedEnd) pageReadState.exhausted = true;
+      // After the end, the read starts over - but the model must know it is re-reading, or it burns
+      // steps on text it already has (it did: a full wrap-around read after "end of the text").
+      const partNote = start === 0
+        ? (wasExhausted && pageText.length > 0
+          ? ', whole text already shown - do not read this page again, act on the ELEMENTS list or open a specific result'
+          : '')
+        : `, part ${Math.floor(start / PAGE_TEXT_CHUNK) + 1}, chars ${start + 1}-${end}${reachedEnd ? ', end of the text' : ''}`;
+      return {
+        success: true,
+        message: `Extracted text snippet (${pageText.length} chars${partNote}):\n"""\n${chunk}\n"""`,
+        result: { pageText: chunk },
+      };
     }
     case 'browser_batch':
       return context.doBrowserBatch(steps, stopOnError);

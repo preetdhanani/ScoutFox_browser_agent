@@ -160,6 +160,7 @@ export function buildSiteOut(state: WorkerStateT): SiteOut {
     userAnswered: (r?.userAnswers?.length ?? 0) > 0,
     notes: '',
     finalAnswer: r?.finalAnswer,
+    summaryReport: r?.summaryReport,
     cdp: r?.cdp ?? { mode: 'off', reason: null, sticky: false },
     activeTabId: r?.tabId ?? null,
     evidenceEvents: state.evidenceEvents ?? [],
@@ -432,6 +433,23 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
     mode: state.siteRun?.mode ?? 'browse',
   };
 
+  // A second perceive of the SAME page at the SAME step (the reload rung of the blocked ladder, a
+  // recover that loops back) wrote an exact copy of the row the panel already had. The copy is pure
+  // noise in the history the panel shows and the prompts read, so it is not appended when the last
+  // row is this very step_start. Any field that differs (a new step number, a new title after the
+  // reload let the real page through) makes it a genuine row again.
+  const lastHistoryEntry = state.history?.[state.history.length - 1] as HistoryEntry | undefined;
+  const isDuplicateStepStart = Boolean(
+    lastHistoryEntry
+    && lastHistoryEntry.type === 'step_start'
+    && lastHistoryEntry.step === stepStartEntry.step
+    && lastHistoryEntry.url === stepStartEntry.url
+    && lastHistoryEntry.pageTitle === stepStartEntry.pageTitle
+    && lastHistoryEntry.elementCount === stepStartEntry.elementCount
+    && lastHistoryEntry.siteId === stepStartEntry.siteId
+    && lastHistoryEntry.mode === stepStartEntry.mode
+  );
+
   Logger.info('Worker', `[DOM_SNAPSHOT_INPUT] Tab [${tabId}] "${page.title}" (${page.url}) - ${page.elementCount} elements.`);
 
   const elements = typeof snapshot.elementsText === 'string'
@@ -465,7 +483,7 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
   return {
     page,
     perceiveError: null,
-    history: [stepStartEntry],
+    history: isDuplicateStepStart ? [] : [stepStartEntry],
     evidenceEvents: [evidenceEvent],
   };
 });
@@ -1906,6 +1924,15 @@ const recordNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 're
     // "(The model did not provide an answer.)".
     const answerSite = isAnswerSite(siteIn);
     const summaryText = coerceAnswerText(action.summary).trim() || coerceAnswerText(action.evidence).trim();
+    // A collect site that ends with a summary but nothing recorded ("Search Google for X" after the
+    // results page loaded) used to throw the summary away: no findings, no finalAnswer, and the card
+    // showed "(The model did not provide an answer.)" over a run the log called a success. The
+    // summary is kept as the site's summaryReport, which compile shows when there is no real answer
+    // and no table. It must NOT become a finalAnswer: summaryRouter reads finalAnswer as "the goal
+    // is achieved" and would skip every remaining site of the plan.
+    const collectSummary = !answerSite && Boolean(summaryText) && (siteRun.findings ?? []).length === 0
+      ? summaryText
+      : undefined;
     return {
       siteRun: {
         ...siteRun,
@@ -1914,6 +1941,7 @@ const recordNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 're
         ...(answerSite && summaryText
           ? { finalAnswer: { text: summaryText, unconfirmed: false, table: null, partial: false } }
           : {}),
+        ...(collectSummary ? { summaryReport: collectSummary } : {}),
         exit: { status: criteriaRes.status, reason: action.summary || criteriaRes.reason }
       }
     };

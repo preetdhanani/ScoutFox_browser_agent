@@ -108,7 +108,12 @@ export interface RecordedText {
 }
 
 const NETWORK_PREFIX = 'Recent Network Activity:\n';
-const PAGE_TEXT_WRAPPER = /^Extracted text snippet \(\d+ chars\):\n"""\n([\s\S]*?)\n?"""\s*$/;
+// The parenthetical may carry a part note for a continued read ("..., part 2, chars 1501-3000
+// (end of the text)"), so anything after "chars" up to the closing paren is allowed.
+const PAGE_TEXT_WRAPPER = /^Extracted text snippet \(\d+ chars[^)]*\):\n"""\n([\s\S]*?)\n?"""\s*$/;
+// A scoped read (read_page_text with element_id) answers in its own shape; its text is evidence too,
+// or an answer citing it would be flagged as not backed by any page that was read.
+const ELEMENT_TEXT_WRAPPER = /^Text of element \[\d+\] \(\d+ chars[^)]*\):\n"""\n([\s\S]*?)\n?"""\s*$/;
 
 /** Text without white space and quotes, to see whether a result is only the code's own literal handed back. */
 function squeeze(s: string): string {
@@ -133,7 +138,8 @@ export function evidenceFromActionResult(
       case 'read_page_text':
       case 'extract_page_text': {
         if (typeof result.message !== 'string') return null;
-        const wrapped = PAGE_TEXT_WRAPPER.exec(result.message);
+        const wrapped = PAGE_TEXT_WRAPPER.exec(result.message)
+          ?? ELEMENT_TEXT_WRAPPER.exec(result.message);
         const text = wrapped ? (wrapped[1] ?? '') : result.message;
         return text.trim() === '' ? null : { kind: 'text', text };
       }
