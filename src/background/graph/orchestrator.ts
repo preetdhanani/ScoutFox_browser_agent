@@ -31,7 +31,7 @@ import { ORCHESTRATOR_ROUTE_MAPS, planRouter, holdRouter, schedRouter, summaryRo
 import { defineNode, getRuntime } from '../runner/runtimeRegistry.ts';
 import { buildWorkerGraph, buildSiteOut } from './worker.ts';
 import { interruptWithConfig } from './interrupt.ts';
-import { buildGraphPlanSchema } from '../agent/schemas.ts';
+import { buildGraphPlanSchema, PLAN_MAX_STEPS } from '../agent/schemas.ts';
 import { computeSiteBase, computeSiteAlloc, computeWorkingTotal, computeUsableBudget } from '../agent/budget.ts';
 import { deduplicateFindings, compileTruthTable, renderTruthTableMarkdown, isAutoValueField } from '../agent/findings.ts';
 import { buildPlanSystemPrompt, buildPlanUserMessage } from '../agent/prompts.ts';
@@ -42,8 +42,8 @@ import { Logger } from '../../shared/logger.ts';
 import { resolveModelTier } from '../agent/tier.ts';
 import { callWithRetry } from '../agent/recovery.ts';
 import { buildFinishEntry, buildMaxStepsEntry, NO_ANSWER_GIVEN, coerceAnswerText } from '../agent/outcome.ts';
-import { EvidenceLedger, normalizeUrlForMatch } from '../agent/evidence.ts';
-import { auditAnswer, prepareAnswer, annotateAnswer } from '../agent/answerAudit.ts';
+import { EvidenceLedger, normalizeUrlForMatch, registrableHost } from '../agent/evidence.ts';
+import { auditAnswer, goalSources, prepareAnswer, annotateAnswer } from '../agent/answerAudit.ts';
 import { auditRecordOf, compactLedgerSnapshot } from '../agent/planEvidence.ts';
 
 // ---------------------------------------------------------------------------------------------
@@ -478,6 +478,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
     : isAnswerLikeTask(state.task) ? 'answer' : 'research';
 
   let planMeta: PlanMeta;
+  const planNotices: HistoryEntry[] = [];
   if (parsedPlan && Array.isArray(parsedPlan.sites) && parsedPlan.sites.length > 0) {
     const parsedColumns: string[] = Array.isArray(parsedPlan.columns)
       ? parsedPlan.columns.map((c: string) => String(c).toLowerCase().replace(/[^a-z0-9_]/g, '_')).slice(0, 5)
@@ -488,7 +489,23 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
     const columns = parsedColumns.filter((c) => !isAutoValueField(c));
     const priceLike = columns.some((c) => /price|cost|preis|shipping/i.test(c));
 
-    const sites: SiteSpec[] = parsedPlan.sites.slice(0, 4).map((s: any, idx: number) => {
+    // One site cap: the schema allows PLAN_MAX_STEPS sites and the prompt asks for up to that
+    // many, so the code cuts at the same number and says so when it has to cut at all.
+    const userSources = new Set(goalSources(state.task).map((h) => registrableHost(h)));
+    const namedByUserOf = (domain: string): boolean =>
+      Boolean(domain) && domain !== 'this_page' && userSources.has(registrableHost(domain));
+
+    const parsedSites: any[] = parsedPlan.sites;
+    const overCap = parsedSites.length > PLAN_MAX_STEPS;
+    // When the plan must be cut, the sites the user named survive first, in their order.
+    const orderedSites: any[] = overCap
+      ? [...parsedSites].sort(
+          (a, b) => Number(namedByUserOf(b.domain || currentDomain)) - Number(namedByUserOf(a.domain || currentDomain))
+        )
+      : parsedSites;
+    const droppedSites = orderedSites.slice(PLAN_MAX_STEPS);
+
+    const sites: SiteSpec[] = orderedSites.slice(0, PLAN_MAX_STEPS).map((s: any, idx: number) => {
       const id = `s${idx + 1}`;
       const domain = s.domain || currentDomain;
       const goalKind = s.goalKind || s.goal_kind || (taskKind === 'action' ? 'do' : taskKind === 'answer' ? 'answer' : 'collect');
@@ -541,7 +558,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
         role: idx === 0 ? 'reference' : (s.role || 'compare'),
         kind: s.kind || 'store',
         difficulty: (s.difficulty === 1 || s.difficulty === 2 || s.difficulty === 3) ? s.difficulty : 1,
-        namedByUser: true,
+        namedByUser: namedByUserOf(domain),
         criteria: {
           fields,
           doneWhen,
@@ -560,6 +577,18 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
       sites,
       source: 'llm',
     };
+
+    if (droppedSites.length > 0) {
+      const droppedList = droppedSites
+        .map((s: any) => s.domain || s.name || 'unnamed site')
+        .join(', ');
+      planNotices.push({
+        type: 'notice',
+        level: 'warn',
+        kind: 'plan',
+        content: `Plan trimmed to ${PLAN_MAX_STEPS} sites (the planner sent ${parsedSites.length}) - dropped: ${droppedList}.`,
+      });
+    }
   } else {
     // Deterministic fallback
     Logger.info('Orchestrator', '[PLANNER_FALLBACK] Using deterministic fallback plan.');
@@ -592,7 +621,17 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
 
   // A clearly-prose research plan ("Summarize the main articles on ...") becomes answer mode -
   // without this the site ran collect policy, could never satisfy prose columns, and looped.
+  // The reclassification is code-made, so it gets a notice instead of staying silent.
+  const kindBeforeOverride = planMeta.taskKind;
   planMeta = overridePlanToAnswer(state, planMeta) ?? planMeta;
+  if (planMeta.taskKind !== kindBeforeOverride) {
+    planNotices.push({
+      type: 'notice',
+      level: 'info',
+      kind: 'plan',
+      content: `Plan reclassified: the task reads as a summarize or ask, so the plan was switched from ${kindBeforeOverride} to answer mode.`,
+    });
+  }
 
   const siteMap: Record<string, { status: 'pending'; criteriaMet: false }> = {};
   const approved = new Set<string>(state.approvedDomains ?? []);
@@ -618,6 +657,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
       planMeta,
       budgetEstimate,
     },
+    ...(planNotices.length > 0 ? { history: planNotices } : {}),
   };
 });
 

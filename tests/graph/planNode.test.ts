@@ -314,6 +314,113 @@ test('planNode: a search ask without a roundup noun stays a research plan', asyn
   assert.equal(isSearchAskTask('look up the best tools for video editing'), true);
   assert.equal(isSearchAskTask('Buy milk'), false);
 });
+function siteList(domains: string[], kind: 'research' | 'action'): string {
+  return JSON.stringify({
+    task_kind: kind,
+    columns: kind === 'research' ? ['price'] : [],
+    search_query: 'test task',
+    sites: domains.map((domain, idx) => ({
+      domain,
+      goal: `Handle ${domain}`,
+      role: idx === 0 ? 'reference' : 'compare',
+      kind: kind === 'action' ? 'page' : 'store',
+      difficulty: 1,
+      required_fields: kind === 'research' ? ['price'] : [],
+      done_when: kind === 'action' ? 'predicate' : 'all_required',
+      check: kind === 'action' ? { type: 'url_contains', value: 'done' } : { type: 'none', value: '' },
+    })),
+  });
+}
+
+test('planNode: a 6-site research plan is kept in full', async (t) => {
+  const domains = ['shop1.test', 'shop2.test', 'shop3.test', 'shop4.test', 'shop5.test', 'shop6.test'];
+  const rig = await graphRig({
+    autoApprove: false,
+    plan: siteList(domains, 'research'),
+    policy: [],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Compare laptop prices on shop1.test, shop2.test, shop3.test, shop4.test, shop5.test and shop6.test');
+  assert.equal(rig.status(), 'paused');
+
+  const plan = (rig.pending().approval as any).planMeta;
+  assert.equal(plan.sites.length, 6, `all 6 sites must be kept, got ${plan.sites.length}: ${JSON.stringify(plan.sites.map((s: any) => s.domain))}`);
+  for (const site of plan.sites) {
+    assert.equal(site.namedByUser, true, `${site.domain} is named in the task, so it is user-named`);
+  }
+  assert.equal(rig.history().some((h) => h.type === 'notice' && h.kind === 'plan'), false, 'nothing was dropped, so no trim notice');
+
+  await rig.stop();
+});
+
+test('planNode: an over-cap plan is cut with a notice and the user-named sites are kept first', async (t) => {
+  const named = ['shop1.test', 'shop2.test', 'shop3.test', 'shop4.test', 'shop5.test', 'shop6.test'];
+  const rig = await graphRig({
+    autoApprove: false,
+    plan: siteList(['invented.test', ...named], 'research'),
+    policy: [],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Compare laptop prices on shop1.test, shop2.test, shop3.test, shop4.test, shop5.test and shop6.test');
+  assert.equal(rig.status(), 'paused');
+
+  const plan = (rig.pending().approval as any).planMeta;
+  const keptDomains = plan.sites.map((s: any) => s.domain);
+  assert.equal(plan.sites.length, 6, `the cap keeps 6 sites, got ${plan.sites.length}: ${JSON.stringify(keptDomains)}`);
+  assert.ok(!keptDomains.includes('invented.test'), `the site the user never named is dropped first, kept: ${JSON.stringify(keptDomains)}`);
+  for (const site of plan.sites) {
+    assert.equal(site.namedByUser, true, `${site.domain} is named in the task`);
+  }
+  const notice = rig.history().find((h) => h.type === 'notice' && h.kind === 'plan') as any;
+  assert.ok(notice, 'a cut writes a notice entry');
+  assert.equal(notice.level, 'warn');
+  assert.ok(String(notice.content).includes('invented.test'), `the notice names what was dropped, got: ${notice?.content}`);
+
+  await rig.stop();
+});
+
+test('planNode: a 6-step action plan is kept in full', async (t) => {
+  const domains = ['shop1.test', 'shop2.test', 'shop3.test', 'shop4.test', 'shop5.test', 'shop6.test'];
+  const rig = await graphRig({
+    autoApprove: false,
+    plan: siteList(domains, 'action'),
+    policy: [],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Order on shop1.test, register on shop2.test, subscribe on shop3.test, check out on shop4.test, pay on shop5.test and confirm on shop6.test');
+  assert.equal(rig.status(), 'paused');
+
+  const plan = (rig.pending().approval as any).planMeta;
+  assert.equal(plan.sites.length, 6, `all 6 action steps must be kept, got ${plan.sites.length}: ${JSON.stringify(plan.sites.map((s: any) => s.domain))}`);
+
+  await rig.stop();
+});
+
+test('planNode: the summarize override writes a notice when it changes the plan kind', async (t) => {
+  const rig = await graphRig({
+    plan: JSON.stringify({
+      task_kind: 'research',
+      columns: ['title', 'url', 'summary'],
+      search_query: 'main articles',
+      sites: [
+        { domain: 'shop.test', goal: 'Read the main articles', role: 'reference', kind: 'page', difficulty: 1, required_fields: ['title', 'url', 'summary'], done_when: 'all_required', check: { type: 'none', value: '' } },
+      ],
+    }),
+    policy: [act.finish('Top story: GLM-Legal ...')],
+  });
+  t.after(rig.cleanup);
+
+  await rig.start('Summarize the main articles on this page');
+  assert.equal(rig.status(), 'idle');
+
+  const notice = rig.history().find((h) => h.type === 'notice' && h.kind === 'plan') as any;
+  assert.ok(notice, 'a plan kind override writes a notice entry');
+  assert.ok(/research.*answer|answer.*research/i.test(String(notice.content)), `the notice says the plan kind was changed, got: ${notice?.content}`);
+});
+
 test('planNode: strips thought tags from plan response before parsing JSON', async (t) => {
   const planWithThoughts = `
 <thought>
