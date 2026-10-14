@@ -237,6 +237,9 @@ export const namedShops = (goal) => [...new Set(String(goal || '').match(SHOP_NA
 export function kindOfGoal(goal) {
   if (namedShops(goal).length >= 2) return 'sources';
   if (/\b(cheapest|lowest|least expensive|best price)\b/i.test(goal)) return 'cheapest';
+  // Before the facts kind: a disclosure goal names the shipping disclosure, and "shipping" alone
+  // would read as a price-and-shipping goal whose facts the closed disclosure does not show yet.
+  if (/\bdisclosure\b/i.test(goal)) return 'disclosure';
   if (/\b(price|cost|shipping|delivery|preis|versand|lieferung)\b/i.test(goal)) return 'facts';
   return 'unknown';
 }
@@ -447,6 +450,10 @@ function planFor(message) {
     const columns = ['shop', 'price', 'shipping', 'total'];
     return { ...base, columns, sites: [planSite({ domain: tabHost, goal: 'Open the offers page of the product and note the offer with the lowest total of price and shipping', role: 'reference', kind: 'listing', fields: columns })] };
   }
+  if (kind === 'disclosure') {
+    const columns = ['value'];
+    return { ...base, columns, sites: [planSite({ domain: tabHost, goal: 'Open the shipping and returns disclosure and read the return window', role: 'reference', kind: 'page', fields: columns })] };
+  }
   const columns = kind === 'facts' ? ['price', 'shipping', 'delivery'] : ['value'];
   return { ...base, columns, sites: [planSite({
     domain: tabHost,
@@ -483,6 +490,23 @@ function policyFor(request) {
   }
 
   if (kind === 'sources') return withMissing(twoSources(page, verbs, columns, model), 'the two-sources goal');
+
+  if (kind === 'disclosure') {
+    // The return window sits inside the disclosure: while it is closed the page text does not have
+    // it, so the mock clicks the summary element open; once the fact is in the page text it hands
+    // it over in whatever verb the mode offers.
+    const fact = pageLines(page.pageText).find((l) => /returns are accepted within/i.test(l));
+    if (!fact) {
+      const summary = page.elements.find((e) => /shipping and returns/i.test(e.label));
+      if (!summary || !verbs.has('click')) {
+        return failed('the prompt has no "Shipping and returns" element to click and no return window in the page text.', 'disclosure: nothing to open');
+      }
+      return { reply: { action: 'click', element_id: summary.id, reason: `Element [${summary.id}] "${summary.label}" opens the disclosure the goal asks about.` }, note: 'disclosure: click the summary open' };
+    }
+    if (verbs.has('record_finding')) return { reply: { action: 'record_finding', value: fact }, note: 'disclosure: record the return window' };
+    if (verbs.has('finish')) return { reply: finish(`The page says: ${fact}`, 'The return window was inside the opened disclosure.'), note: 'disclosure: finish with the return window' };
+    return failed('this mode has neither record_finding nor finish, so the return window cannot be handed over.', 'disclosure: no verb for the fact');
+  }
 
   if (kind === 'cheapest') {
     const offers = parseOffers(page.pageText);

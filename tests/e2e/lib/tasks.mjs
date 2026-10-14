@@ -214,6 +214,22 @@ export const TASKS = {
       ...expectFindings(run, ['price', 'shipping', 'delivery'])
     ]
   },
+  // The selector-only-addressing gap: only selector-matched elements got ids, so a closed
+  // details>summary, a styled radio label, a role option and a handler-only div were unreachable.
+  // patterns.html combines all four. The run passes only when the summary is listed and clickable:
+  // the return window sits inside the closed disclosure, so the page text does not have it until
+  // the mock clicks the summary open (the innerText extractor hides closed details content).
+  'patterns-disclosure': {
+    page: 'patterns.html',
+    prompt: 'Open the shipping and returns disclosure on this page and tell me the return window.',
+    check: ({ answer, steps }) => /30 days/.test(answer) && steps.some((s) => s.action && s.action.action === 'click'),
+    expectMock: (run) => [
+      ...expectSites(run, ['done']),
+      ...expectPlanRows(run, ['done']),
+      ...expectCalls(run, { plan: 1, policy: 2, reflect: 0 }),
+      ...expectFindings(run, ['value'])
+    ]
+  },
   'cheapest-offer': {
     page: 'search.html',
     prompt: 'Find the shop with the cheapest total price (price plus shipping) for the Framework Laptop 16 DIY Edition.',

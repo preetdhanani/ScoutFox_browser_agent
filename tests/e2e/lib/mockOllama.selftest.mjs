@@ -63,6 +63,10 @@ const snapshotOf = (name) => {
   return JSON.parse(fs.readFileSync(path.join(dir, `${name}.json`), 'utf8'));
 };
 
+/** True when a committed snapshot of the fixture page exists (written by --dump-snapshots in a real browser). */
+const hasSnapshot = (name) =>
+  fs.existsSync(path.join(SNAPSHOT_DIR, `${name}.json`)) || fs.existsSync(path.join(E2E_SNAPSHOT_DIR, `${name}.json`));
+
 // What the page shows the mock when a channel is lost.
 const BLIND = {
   none: (s) => s,
@@ -414,8 +418,13 @@ export async function runMockSelfTest() {
       JSON.stringify(mock.calls.slice(-3).map((c) => c.repeat)) === '[0,1,2]', JSON.stringify(mock.calls.slice(-4).map((c) => c.repeat)));
 
     // --- the plan -----------------------------------------------------------------------------
+    // A task whose fixture page has no committed snapshot (it is judged by the smoke run alone,
+    // because recording one needs a real browser) is left out of the prompt checks here.
+    const noSnapshot = Object.entries(TASKS).filter(([, task]) => !hasSnapshot(task.page.replace(/[?#].*$/, '').replace(/\.html$/, ''))).map(([name]) => name);
+    check('tasks without a committed fixture snapshot are judged by the smoke run alone, and the list of them is pinned', JSON.stringify(noSnapshot) === '["patterns-disclosure"]', JSON.stringify(noSnapshot));
     for (const [name, task] of Object.entries(TASKS)) {
       const startPage = task.page.replace(/[?#].*$/, '').replace(/\.html$/, '');
+      if (!hasSnapshot(startPage)) continue;
       const snapshot = snapshotOf(startPage);
       const res = await call(base, 'POST', '/api/chat', planRequest('mock-agent', task.prompt, snapshot));
       let plan = null;
@@ -486,6 +495,30 @@ export async function runMockSelfTest() {
       const req = policyRequest({ model: 'mock-agent', task: TASKS['cheapest-offer'].prompt, plan: cheapestPlan, site: cheapestPlan.sites[0], snapshot: search });
       const reply = JSON.parse(contentOf(await call(base, 'POST', '/api/chat', req)));
       check('policy browse mode on the search page of the cheapest goal clicks the link with the product, element [8], and no other', reply.action === 'click' && reply.element_id === 8, JSON.stringify(reply));
+    }
+
+    // The disclosure skill (the patterns-disclosure task). Its fixture page has no committed
+    // snapshot, so the reply logic is checked here with a synthetic snapshot of the same shape;
+    // the full run through the real page is what the smoke run judges.
+    {
+      const closed = {
+        title: 'Configurator widgets - Fixture Shop',
+        url: 'http://127.0.0.1:8765/patterns.html',
+        pageText: 'Configurator widgets\nEvery widget on this page stands for one pattern an element selector can miss.\nShipping and returns\nStorage\n512 GB\n1 TB\nNo colour chosen yet.\nBatch of 1\nBatch of 5',
+        elementsText: '[1] summary "Shipping and returns"\n[2] label "512 GB"\n[3] label "1 TB"\n[4] div "Midnight Black"\n[5] div "Silver"\n[6] div "Batch of 1"\n[7] div "Batch of 5"',
+        elementCount: 7
+      };
+      const disclosurePlan = sitesFromPlan({ columns: ['value'], sites: [{ domain: '127.0.0.1', url: '', goal: 'Open the shipping and returns disclosure and read the return window', role: 'reference', kind: 'page', difficulty: 1, required_fields: ['value'], done_when: 'all_required' }] }, closed.url);
+      const openReq = policyRequest({ model: 'mock-agent', task: TASKS['patterns-disclosure'].prompt, plan: disclosurePlan, site: disclosurePlan.sites[0], snapshot: closed });
+      const openReply = JSON.parse(contentOf(await call(base, 'POST', '/api/chat', openReq)));
+      check('disclosure goal, closed disclosure: the mock clicks the summary element and nothing else', openReply.action === 'click' && openReply.element_id === 1, JSON.stringify(openReply));
+      const opened = { ...closed, pageText: `${closed.pageText}\nReturns are accepted within 30 days of delivery.` };
+      const recordReq = policyRequest({ model: 'mock-agent', task: TASKS['patterns-disclosure'].prompt, plan: disclosurePlan, site: disclosurePlan.sites[0], snapshot: opened });
+      const recordReply = JSON.parse(contentOf(await call(base, 'POST', '/api/chat', recordReq)));
+      check('disclosure goal, opened disclosure: the mock records the return window as the value column', recordReply.action === 'record_finding' && /30 days/.test(recordReply.value), JSON.stringify(recordReply));
+      const answerReq = policyRequest({ model: 'mock-agent', mode: 'answer', task: TASKS['patterns-disclosure'].prompt, plan: disclosurePlan, site: disclosurePlan.sites[0], snapshot: opened });
+      const answerReply = JSON.parse(contentOf(await call(base, 'POST', '/api/chat', answerReq)));
+      check('disclosure goal in answer mode: the mock finishes with the return window', answerReply.action === 'finish' && /30 days/.test(answerReply.answer), JSON.stringify(answerReply));
     }
 
     // --- reflect ----------------------------------------------------------------------------------

@@ -9,12 +9,22 @@ export const INTERACTIVE_SELECTOR = [
   'input:not([type="hidden"])',
   'select',
   'textarea',
+  'summary',
+  'details > summary',
+  '[contenteditable="true"]',
   '[role="button"]',
   '[role="link"]',
   '[role="checkbox"]',
   '[role="textbox"]',
   '[role="combobox"]',
   '[role="tab"]',
+  '[role="radio"]',
+  '[role="menuitem"]',
+  '[role="menuitemradio"]',
+  '[role="option"]',
+  '[role="switch"]',
+  '[role="slider"]',
+  '[role="treeitem"]',
   '[tabindex="0"]',
   '[onclick]'
 ].join(',');
@@ -73,14 +83,118 @@ export function getCssPath(
 }
 
 /**
+ * The control a <label> stands for: the labeled control property, then for="", then a control the
+ * label wraps. Null when the label has none.
+ */
+function labeledControl(label: Element, doc: Document): Element | null {
+  const control = (label as HTMLLabelElement).control;
+  if (control && control.nodeType === 1) return control;
+  const forId = label.getAttribute('for');
+  if (forId && typeof doc.getElementById === 'function') {
+    const byFor = doc.getElementById(forId);
+    if (byFor) return byFor;
+  }
+  if (typeof label.querySelector === 'function') {
+    try {
+      return label.querySelector('input, select, textarea');
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** True when an ancestor of the element is already listed, so the ancestor covers the click. */
+function hasListedAncestor(el: Element, kept: Set<Element>): boolean {
+  let parent = el.parentElement;
+  while (parent) {
+    if (kept.has(parent)) return true;
+    parent = parent.parentElement;
+  }
+  return false;
+}
+
+/**
+ * The cheap clickable heuristic: a text-bearing leaf whose computed cursor is pointer. Cursor is
+ * inherited, so the text leaf of a pointer-styled card matches, and its click bubbles to the
+ * card's handler. Elements with element children are no leaves, so a card that also holds a real
+ * button is never listed over that button.
+ */
+function isClickableLeaf(el: Element, win?: Window | null): boolean {
+  const children = (el as Element & { children?: ArrayLike<Element> }).children;
+  if (children && children.length > 0) return false;
+  const text = ((el as HTMLElement).innerText || el.textContent || '').trim();
+  if (!text) return false;
+  const styleReader = win && typeof win.getComputedStyle === 'function' ? win.getComputedStyle : (typeof window !== 'undefined' ? window.getComputedStyle : undefined);
+  if (!styleReader) return false;
+  try {
+    return styleReader(el).cursor === 'pointer';
+  } catch {
+    return false;
+  }
+}
+
+/** Sorts into document order when the elements can say their position, so the element window keeps DOM order. */
+const DOCUMENT_POSITION_FOLLOWING = 4;
+const DOCUMENT_POSITION_PRECEDING = 2;
+
+function inDocumentOrder(elements: Element[]): Element[] {
+  if (elements.length < 2) return elements;
+  const probe = elements[0] as Element & { compareDocumentPosition?: (other: Element) => number };
+  if (typeof probe.compareDocumentPosition !== 'function') return elements;
+  return [...elements].sort((a, b) => {
+    const pos = (a as Element & { compareDocumentPosition(other: Element): number }).compareDocumentPosition(b);
+    if (pos & DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (pos & DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  });
+}
+
+/**
  * Find interactive and focusable elements on the page.
+ *
+ * Three passes, deduped to exactly one id per physical target, merged back into document order:
+ *   1. the selector matches (the visibility rules of these are unchanged);
+ *   2. a label whose associated control is visually hidden (a styled radio or checkbox over a
+ *      zero-size native input): the label is the one visible, clickable thing of the pair, so it
+ *      carries the id, and a click on it activates the control like a user's click does;
+ *   3. handler-only clickables: a text-bearing leaf with computed cursor pointer and no listed
+ *      clickable ancestor (an addEventListener card, swatch or custom dropdown option).
  */
 export function findInteractiveElements(
   doc: Document = typeof document !== 'undefined' ? document : (null as unknown as Document)
 ): Element[] {
   if (!doc || typeof doc.querySelectorAll !== 'function') return [];
-  const candidates = Array.from(doc.querySelectorAll(INTERACTIVE_SELECTOR));
-  return candidates.filter((el) => isVisible(el));
+  const listed: Element[] = [];
+  const kept = new Set<Element>();
+  const add = (el: Element): void => {
+    if (kept.has(el)) return;
+    listed.push(el);
+    kept.add(el);
+  };
+
+  for (const el of Array.from(doc.querySelectorAll(INTERACTIVE_SELECTOR))) {
+    if (isVisible(el)) add(el);
+  }
+
+  for (const label of Array.from(doc.querySelectorAll('label'))) {
+    if (kept.has(label) || !isVisible(label) || hasListedAncestor(label, kept)) continue;
+    const control = labeledControl(label, doc);
+    if (!control || (control.getAttribute('type') || '').toLowerCase() === 'hidden' || isVisible(control)) continue;
+    add(label);
+  }
+
+  for (const el of Array.from(doc.querySelectorAll('*'))) {
+    if (kept.has(el) || !isVisible(el) || hasListedAncestor(el, kept)) continue;
+    if ((el.tagName || '').toLowerCase() === 'label') {
+      const control = labeledControl(el, doc);
+      if (control && isVisible(control)) continue;
+    }
+    if (!isClickableLeaf(el, doc.defaultView)) continue;
+    add(el);
+  }
+
+  return inDocumentOrder(listed);
 }
 
 /**
