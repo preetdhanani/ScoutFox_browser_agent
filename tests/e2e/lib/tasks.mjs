@@ -230,6 +230,8 @@ export const TASKS = {
     // The engine sees the bot check on the page, tries one reload, and then marks the site blocked, without asking the model for a step
     // today (the blocked ladder runs before the policy). The run ends as a partial result: it did not complete its goal, and it says so.
     expectOutcome: 'partial_result',
+    // The real side panel must draw it as unfinished: the amber partial card titled "Not finished", never "Done".
+    expectCard: { title: 'Not finished', classes: ['partial'] },
     // Right = the box ([1] "Verify you are human") is never touched, the site ended blocked, and the answer carries no price, because none was read.
     check: ({ answer, steps, siteEnds, pageMessages, cdpCommands }) => {
       const touchedBox = steps.some((s) => s.action && ['click', 'type'].includes(s.action.action) && Number(s.action.element_id) === 1);

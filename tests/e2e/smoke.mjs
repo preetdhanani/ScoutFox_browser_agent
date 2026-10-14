@@ -649,20 +649,7 @@ async function panelScreenshots(ctx, tabId, name, dir, schemes = ['light', 'dark
   fs.mkdirSync(dir, { recursive: true });
   const files = [];
   for (const scheme of schemes) {
-    const panel = await ctx.browser.newPage();
-    await watchPanelPage(panel, ctx.panel);
-    await panel.setViewport({ width: 400, height: 900 });
-    await panel.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: scheme }]);
-    await panel.evaluateOnNewDocument((id) => {
-      const original = chrome.tabs.query.bind(chrome.tabs);
-      chrome.tabs.query = (queryInfo, cb) => {
-        if (queryInfo && queryInfo.active && queryInfo.currentWindow && typeof cb === 'function') {
-          return original({}, (tabs) => cb((tabs || []).filter((t) => t.id === id)));
-        }
-        return original(queryInfo, cb);
-      };
-    }, tabId);
-    await panel.goto(`chrome-extension://${ctx.extensionId}/sidepanel/sidepanel.html`);
+    const panel = await openPanelFor(ctx, tabId, scheme);
     await sleep(2000);
     const file = path.join(dir, `${name}-${scheme}.png`);
     await panel.screenshot({ path: file, fullPage: true });
@@ -718,6 +705,56 @@ async function panelScreenshots(ctx, tabId, name, dir, schemes = ['light', 'dark
     await panel.close();
   }
   return files;
+}
+
+/** The real side panel page, attached to the task's tab (see panelScreenshots for why tabs.query is pointed at it). */
+async function openPanelFor(ctx, tabId, scheme = 'light') {
+  const panel = await ctx.browser.newPage();
+  await watchPanelPage(panel, ctx.panel);
+  await panel.setViewport({ width: 400, height: 900 });
+  await panel.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: scheme }]);
+  await panel.evaluateOnNewDocument((id) => {
+    const original = chrome.tabs.query.bind(chrome.tabs);
+    chrome.tabs.query = (queryInfo, cb) => {
+      if (queryInfo && queryInfo.active && queryInfo.currentWindow && typeof cb === 'function') {
+        return original({}, (tabs) => cb((tabs || []).filter((t) => t.id === id)));
+      }
+      return original(queryInfo, cb);
+    };
+  }, tabId);
+  await panel.goto(`chrome-extension://${ctx.extensionId}/sidepanel/sidepanel.html`);
+  return panel;
+}
+
+/**
+ * The final card the real side panel draws for the finished run: its classes and its title. A task
+ * with `expectCard` (lib/tasks.mjs) is checked against it, so a run that did not finish can never
+ * show the green "Done" card the user would trust.
+ */
+async function readPanelCard(ctx, tabId, expect) {
+  const panel = await openPanelFor(ctx, tabId);
+  const problems = [];
+  try {
+    await panel.waitForSelector('.finish-card .finish-title', { timeout: 8000 }).catch(() => {});
+    const card = await panel.evaluate(() => {
+      const cards = document.querySelectorAll('.finish-card');
+      const el = cards[cards.length - 1];
+      return el ? { classes: [...el.classList], title: el.querySelector('.finish-title')?.textContent.trim() || '' } : null;
+    });
+    await collectCsp(panel, ctx.panel);
+    if (!card) {
+      problems.push('the side panel shows no final card');
+    } else {
+      if (card.title === 'Done') problems.push('the side panel shows the "Done" card for a run that did not finish');
+      if (expect.title && card.title !== expect.title) problems.push(`the side panel card is titled ${JSON.stringify(card.title)}, expected ${JSON.stringify(expect.title)}`);
+      for (const cls of expect.classes || []) {
+        if (!card.classes.includes(cls)) problems.push(`the side panel card has classes [${card.classes.join(' ')}], expected "${cls}"`);
+      }
+    }
+  } finally {
+    await panel.close().catch(() => {});
+  }
+  return problems;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1031,6 +1068,7 @@ async function runTask(ctx, fixtures, llm, name) {
   const answer = facts.answer;
   // Before the tab closes: closing it ends its session, and the panel would show nothing.
   if (shotDir) screenshots.push(...await panelScreenshots(ctx, tabId, shotName, shotDir));
+  const cardProblems = task.expectCard ? await readPanelCard(ctx, tabId, task.expectCard) : [];
   // Chromium's own error page (a host that does not resolve) never gets content scripts, so there is nothing to probe there.
   if (page.url() !== probes[0].url && !page.url().startsWith('chrome-error://')) probes.push(await probePage(ctx, page, tabId));
   await sleep(300); // late page errors
@@ -1051,7 +1089,7 @@ async function runTask(ctx, fixtures, llm, name) {
     unconfirmed: facts.unconfirmed,
     answer,
     answerCorrect: answer ? !!task.check(facts) : false,
-    expectProblems: MOCK && task.expectMock ? task.expectMock(facts) : [],
+    expectProblems: [...(MOCK && task.expectMock ? task.expectMock(facts) : []), ...cardProblems],
     holdProblems: run.problems,
     stateUpdates: { count: states.length, byStatus: stateStatuses },
     mockFail: MOCK ? findMockFail(facts, calls) : null,

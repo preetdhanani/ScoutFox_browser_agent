@@ -1157,10 +1157,12 @@ export const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
     }
     const maxStepsEntry = buildMaxStepsEntry(hardCap, { answerKept });
     historyEntries.push(maxStepsEntry);
+    // The step-cap sentence goes first in a partial_result too: the card must say why the run
+    // ended, and the error row above it sits in the collapsed action group.
     if (state.findings && state.findings.length > 0 && !answerKept) {
       historyEntries.push({
         type: 'partial_result',
-        answer: markdownTable,
+        answer: [maxStepsEntry.content, markdownTable].filter((part) => part.trim() !== '').join('\n\n'),
         table,
         reason: 'max_steps',
         findings: state.findings,
@@ -1171,7 +1173,7 @@ export const compileNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
       // is the only report of what happened, so it is shown instead of an empty card.
       historyEntries.push({
         type: 'partial_result',
-        answer: (state.siteOut?.summaryReport ?? '').trim(),
+        answer: `${maxStepsEntry.content}\n\n${(state.siteOut?.summaryReport ?? '').trim()}`,
         table: null,
         reason: 'max_steps',
         findings: state.findings,

@@ -407,3 +407,68 @@ test('compileNode drops the no-answer placeholder when a filled findings table i
   assert.match(finishEntry.answer, /1\.399,00 EUR/);
   assert.ok(finishEntry.table, 'the structured table stays on the entry');
 });
+
+// partial-runs-render-as-done: a step-cap run with findings used to write only the table as the
+// partial_result answer, so the card never said why the run ended (the reason sat in a collapsed
+// error row). The step-cap sentence now comes first, above the table.
+const capFinding = {
+  id: 'f1',
+  siteId: 's1',
+  field: 'price',
+  valueRaw: '1.399,00 EUR',
+  value: '1.399,00 EUR',
+  url: 'https://shop.test/item',
+  capturedAt: '2026-10-14T12:00:00.000Z',
+  step: 1,
+  docId: 'doc-1',
+  evidence: { snippet: 'ab 1.399,00 EUR inkl. MwSt.', source: 'text' as const },
+  checks: ['value_on_page'],
+  quality: 'verified' as const,
+};
+
+function capState(extra: Record<string, unknown> = {}): any {
+  return {
+    task: 'What is the price of the Framework Laptop 16?',
+    limits: { maxSteps: 5, maxSeconds: 60, maxSites: 3 },
+    budget: { allocated: 5, used: 6, reserve: 0, sites: { s1: 6 } },
+    planMeta: {
+      columns: ['price'],
+      sites: [{ id: 's1', name: 'Shop', domain: 'shop.test', goal: 'Read the price', role: 'reference', kind: 'store', startUrl: 'https://shop.test/item', fields: ['price'], criteria: { fields: [{ name: 'price', required: true }], doneWhen: 'all_required' } }],
+    },
+    sites: { s1: { id: 's1', domain: 'shop.test', status: 'running', alloc: 5, used: 6 } },
+    ...extra,
+  };
+}
+
+test('compileNode: a step-cap partial_result with findings says the step-cap reason above the table', async (t) => {
+  const threadId = 'test-compile-step-cap-reason-first';
+  registerMockRuntime(threadId, {}, t);
+  const state = capState({
+    findings: [capFinding],
+    siteOut: { siteId: 's1', status: 'partial', fatal: 'hard_cap', used: 6, findings: [capFinding], parseErrors: 0 },
+  });
+
+  const update = await compileNode(state, { configurable: { thread_id: threadId } });
+  assert.equal(update.endReason, 'max_steps');
+  const partial = (update.history as any[]).find((h) => h.type === 'partial_result');
+  assert.ok(partial, 'a partial_result is written');
+  assert.equal(partial.reason, 'max_steps');
+  const reason = buildMaxStepsEntry(5).content;
+  assert.ok(String(partial.answer).startsWith(reason), `the step-cap reason comes first, got: ${partial.answer}`);
+  assert.match(partial.answer, /1\.399,00 EUR/, 'the table is still there');
+  assert.ok(partial.answer.indexOf(reason) < partial.answer.indexOf('|'), 'the reason is above the table');
+});
+
+test('compileNode: a step-cap partial_result from a summary report says the step-cap reason first', async (t) => {
+  const threadId = 'test-compile-step-cap-summary-reason';
+  registerMockRuntime(threadId, {}, t);
+  const state = capState({
+    findings: [],
+    siteOut: { siteId: 's1', status: 'partial', fatal: 'hard_cap', used: 6, findings: [], parseErrors: 0, summaryReport: 'Opened the listing page.' },
+  });
+
+  const update = await compileNode(state, { configurable: { thread_id: threadId } });
+  const partial = (update.history as any[]).find((h) => h.type === 'partial_result');
+  assert.ok(partial);
+  assert.equal(partial.answer, `${buildMaxStepsEntry(5).content}\n\nOpened the listing page.`);
+});

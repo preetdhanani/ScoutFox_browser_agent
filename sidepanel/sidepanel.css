@@ -686,6 +686,8 @@ a:hover { color: var(--text-main); }
 /* One-line explanation under the title of an audited card. */
 .finish-card.has-sub .finish-title { margin-bottom: 3px; }
 .finish-subs { margin-bottom: 8px; }
+/* A run that ended with nothing to show under its reason (a blocked site, no findings): no gap below. */
+.finish-subs:last-child { margin-bottom: 0; }
 .finish-sub {
   font-size: 11.5px;
   line-height: 1.45;

@@ -975,3 +975,115 @@ test('the comment at the plan rows tells the truth about where the skipped sites
   }
   assert.ok(!CSS.includes('\u2014'), 'no em dash in the stylesheet');
 });
+
+// ---------------------------------------------------------------------------------------------
+// partial_result: a run that ended before it finished is never a green Done
+// (docs/reference-gap/tickets/p1-planning-ux-partial-runs-render-as-done.md)
+// ---------------------------------------------------------------------------------------------
+
+const TABLE = '| Site | price |\n| --- | --- |\n| shop-a.test | 1.399,00 EUR |';
+const partialResult = (reason, answer, extra = {}) => ({ type: 'partial_result', reason, answer, table: null, ...extra });
+// The complete icon, as the plain Done card draws it.
+const COMPLETE_ICON = cardFor(null).match(/<div class="finish-title">(<svg[^]*?<\/svg>)/)[1];
+const titleOf = (html) => textOf(html.match(/<div class="finish-title">([^]*?)<\/div>/)[1]);
+const subOf = (html) => (html.match(/<div class="finish-sub">([^]*?)<\/div>/) || [])[1] || '';
+
+// The partial cards carry the findings as a markdown table, so the table tags are ours there too.
+const TABLE_TAGS = new Set(['table', 'thead', 'tbody', 'tr', 'th', 'td']);
+function assertOnlyOurTagsWithTable(html) {
+  for (const tag of tagNames(html)) assert.ok(OUR_TAGS.has(tag) || TABLE_TAGS.has(tag), `unexpected <${tag}> in: ${html.slice(0, 300)}`);
+}
+
+/** One partial_result per reason, written the way compile writes it (orchestrator.ts). */
+const PARTIAL_CASES = [
+  { reason: 'stopped', title: 'Stopped by you', answer: `Task was stopped by user.\n\n${TABLE}`, says: 'Task was stopped by user.' },
+  { reason: 'max_steps', title: 'Stopped at the step limit', answer: `Stopped without finishing - reached the maximum allowed steps (40) before the task called finish.\n\n${TABLE}`, says: 'reached the maximum allowed steps (40)' },
+  { reason: 'partial', title: 'Not finished', answer: `Site domain shop-b.test is blocked after repeated challenges or errors.\n\n${TABLE}`, says: 'shop-b.test is blocked' },
+  { reason: 'stopped_early', title: 'Not finished', answer: `Stopped early: the price was found on the first shop.\n\nNot checked: shop-b.test, shop-c.test.\n\n${TABLE}`, says: 'Stopped early: the price was found on the first shop.',
+    extra: { skippedSites: [{ siteId: 's2', site: 'shop-b.test', reason: 'stop early' }, { siteId: 's3', site: 'shop-c.test', reason: 'stop early' }] } },
+  { reason: 'model_unusable', title: 'Not finished', answer: `Task stopped early due to unusable model replies.\n\n${TABLE}`, says: 'unusable model replies' }
+];
+
+test('a partial_result of every reason gets its own title, the amber card, and never the Done title or the complete icon', () => {
+  for (const c of PARTIAL_CASES) {
+    const history = [goal('g'), navigate('https://shop-a.test/'), executed(), partialResult(c.reason, c.answer, c.extra)];
+    const turn = buildTurns(history)[0];
+    assert.equal(turn.partial, true, c.reason);
+    assert.equal(turn.partialReason, c.reason, `${c.reason}: the reason is kept on the turn`);
+    const html = renderFinishCard(turn);
+    assert.equal(titleOf(html), c.title, c.reason);
+    assert.ok(!html.includes(COMPLETE_ICON), `${c.reason}: no complete icon`);
+    assert.ok(classOfCard(html).split(' ').includes('partial'), `${c.reason}: the amber card`);
+    assert.ok(textOf(html).includes(c.says), `${c.reason}: the reason is visible`);
+    assert.match(html, /1\.399,00 EUR/, `${c.reason}: the findings are still shown`);
+    assertOnlyOurTagsWithTable(html);
+  }
+});
+
+test('the reason line of a partial_result is the subtitle, and is not shown a second time in the body', () => {
+  const c = PARTIAL_CASES.find((x) => x.reason === 'stopped_early');
+  const html = renderFinishCard(buildTurns([goal('g'), partialResult(c.reason, c.answer, c.extra)])[0]);
+  assert.equal(subOf(html), 'Stopped early: the price was found on the first shop.');
+  assert.ok(classOfCard(html).split(' ').includes('has-sub'));
+  assert.equal(html.split('Stopped early: the price').length - 1, 1, 'the reason line is shown once');
+  assert.ok(textOf(html).includes('Not checked: shop-b.test, shop-c.test.'));
+});
+
+test('a step-cap partial_result from before the fix (the table only) still names its reason', () => {
+  const html = renderFinishCard(buildTurns([goal('g'), partialResult('max_steps', TABLE)])[0]);
+  assert.equal(titleOf(html), 'Stopped at the step limit');
+  assert.ok(subOf(html).length > 0, 'a fallback subtitle says why');
+  assert.match(subOf(html), /step/i);
+  assert.match(html, /1\.399,00 EUR/);
+});
+
+test('a long first paragraph is not squeezed into the subtitle: the reason is a fallback sentence, the text stays in the body', () => {
+  const long = `${'The worker wrote a long answer. '.repeat(10)}\n\n${TABLE}`;
+  const html = renderFinishCard(buildTurns([goal('g'), partialResult('partial', long)])[0]);
+  assert.equal(titleOf(html), 'Not finished');
+  assert.ok(subOf(html).length > 0 && subOf(html).length < 140, subOf(html));
+  assert.ok(textOf(html).includes('The worker wrote a long answer.'));
+});
+
+test('an unknown partial reason is Not finished, and the reason text from a page is escaped', () => {
+  const html = renderFinishCard(buildTurns([goal('g'), partialResult('something_new', `Blocked by ${XSS}.\n\n${TABLE}`)])[0]);
+  assert.equal(titleOf(html), 'Not finished');
+  assert.ok(!html.includes('<img'));
+  assert.ok(html.includes(XSS_ESCAPED));
+  assertOnlyOurTagsWithTable(html);
+});
+
+test('an audit on a partial_result is kept and rendered', () => {
+  const history = [goal('g'), partialResult('stopped_early', `Stopped early: enough.\n\n${TABLE}`, { audit: PARTIAL })];
+  const turn = buildTurns(history)[0];
+  assert.deepEqual(turn.audit, PARTIAL);
+  const html = renderFinishCard(turn);
+  assert.equal(titleOf(html), 'Not finished');
+  assert.ok(html.includes('<details class="audit attention"'), 'the audit details are shown');
+  assert.ok(html.includes('geizhals.de'));
+  // An unverified audit turns the edge red, like on any other card.
+  const red = renderFinishCard(buildTurns([goal('g'), partialResult('partial', 'Blocked.', { audit: UNVERIFIED })])[0]);
+  assert.ok(classOfCard(red).split(' ').includes('unverified'));
+  assert.ok(!red.includes(COMPLETE_ICON));
+});
+
+test('the group of a partial turn is open, so the steps that led to it are visible', () => {
+  const html = renderTurns([goal('g'), navigate('https://shop-a.test/'), executed(), partialResult('stopped', `Task was stopped by user.\n\n${TABLE}`)], 'stopped', [], '', '');
+  assert.ok(html.includes('act-group open'));
+  assert.ok(!html.includes('did not finish'), 'it has an answer, so it is not "did not finish"');
+  assert.ok(html.includes('Stopped by you'));
+  assert.ok(!/<\/svg> Done</.test(html));
+});
+
+test('a partial card is a finish card for the scroll landing', () => {
+  assert.notEqual(finishCardKey([goal('g'), partialResult('stopped', 'Task was stopped by user.')]), null);
+});
+
+test('an action with no result in a partial turn that is no longer live has no pulsing dot', () => {
+  // The group of a partial turn is open, so a row that never got a result (a record_finding the run ended on) is seen.
+  const recordFinding = { type: 'agent_response', action: { action: 'record_finding', field: 'price' }, thought: '' };
+  const html = renderTurns([goal('g'), recordFinding, partialResult('stopped_early', `Task ended without completing all goals.\n\n${TABLE}`)], 'idle', [], '', '');
+  assert.ok(html.includes('act-group open'));
+  assert.ok(!html.includes('act-state live'), 'a turn that ended has no live dot');
+  assert.ok(renderTurns([goal('g'), recordFinding], 'running', [], '', '').includes('act-state live'), 'a live turn keeps it');
+});

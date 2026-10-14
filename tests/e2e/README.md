@@ -117,6 +117,8 @@ A run fails when any of these is true.
 - On such a page, the MAIN-world net recorder did not run (`window.__scoutfox_net_recorder_active` is not `true`), or the isolated-world content script does not answer a `GET_DOM_SNAPSHOT` message.
 - The side panel, opened as a page, shows a console error, a page error or a CSP violation.
   Its script must also have run (the model badge shows the configured model), and its request for the model list must have worked.
+- A task with `expectCard` in `lib/tasks.mjs` (the bot check) gets a final card in the real side panel that is titled "Done", has another title than the one expected, or lacks the expected class.
+  The bot check must show the amber `partial` card titled "Not finished", because a blocked run did not finish.
 - The "LLM Timeout (ms)" field of that page, after 1000 is typed into it, does not show the stored value 5000 (a value below the minimum is saved as 5000, and the field must not keep the typed number).
 - With `--mock` only: the engine did not take the mock's plan (its plan rows are not the sites of the mock's plan reply, so the generic fallback plan was used), the finish is unconfirmed, a task has an error entry in its history, the mock refused a call (HTTP 400, 500 or 501), or a reply of the mock starts with `MOCK-FAIL:`.
 - With `--mock` only: what the engine did is not what the task expects (`expectMock` in `lib/tasks.mjs`).

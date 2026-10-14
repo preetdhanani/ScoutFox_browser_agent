@@ -1542,7 +1542,7 @@ let seenFinishKey = null;
 function finishCardKey(history) {
   const list = Array.isArray(history) ? history : [];
   for (let i = list.length - 1; i >= 0; i--) {
-    if (list[i] && list[i].type === 'finish') {
+    if (list[i] && (list[i].type === 'finish' || list[i].type === 'partial_result')) {
       return `${currentSessionId}|${i}|${String(list[i].answer == null ? '' : list[i].answer).length}`;
     }
   }
@@ -1628,8 +1628,12 @@ function buildTurns(history) {
       cur.findings = item.findings || null;
       cur.runStats = item.runStats || null;
     } else if (item.type === 'partial_result') {
+      // The run ended before it finished (a Stop, the step cap, a blocked site, a stop-early, unusable
+      // model replies). It has an answer slot like a finish, but renderFinishCard never calls it Done.
       cur.answer = item.answer;
       cur.partial = true;
+      cur.partialReason = typeof item.reason === 'string' ? item.reason : '';
+      cur.audit = item.audit || null;
       cur.table = item.table || null;
       cur.findings = item.findings || null;
       cur.runStats = item.runStats || null;
@@ -1685,7 +1689,8 @@ function describeAction(action, outcome) {
  */
 function isTurnExpanded(turn, isLive, incomplete) {
   if (turnExpandOverride.has(turn.turn)) return turnExpandOverride.get(turn.turn);
-  return isLive || incomplete;
+  // A run that ended before it finished stays open too: the steps are how it got there.
+  return isLive || incomplete || !!turn.partial;
 }
 
 /**
@@ -1860,6 +1865,7 @@ function renderAuditDetails(audit, turnNo, mode) {
  * "Unconfirmed answer": its content was checked, but the model never said it was done.
  */
 function renderFinishCard(turn, findings = null) {
+  if (turn.partial) return renderPartialCard(turn, findings);
   const audit = normalizeAudit(turn.audit);
   const unconfirmed = !!turn.answerUnconfirmed;
   // With an audit the card already says all of it (title, subtitle, the notes below): the stored answer keeps the
@@ -1908,6 +1914,59 @@ function renderFinishCard(turn, findings = null) {
   // The caveat goes above a doubtful answer, so it is seen before the answer is read, and below a
   // checked one, where it is only a receipt.
   return `<div class="${classes.join(' ')}"><div class="finish-title">${icon} ${title}</div>${subHtml}${attention ? details : ''}${body}${findingsHtml}${attention ? '' : details}</div>`;
+}
+
+/**
+ * The card of a run that ended before it finished (a partial_result entry). It is never "Done" and
+ * never has the complete icon: the title says how the run ended, the card has the amber edge of a
+ * partial answer, and the subtitle says why. The engine writes the why as the first paragraph of
+ * the answer ("Task was stopped by user.", "Stopped early: ...", "Site domain x is blocked ...");
+ * it moves to the subtitle so it is not said twice. When that paragraph is the table, or a long
+ * text, the subtitle is a fixed sentence for the reason and the whole answer stays in the body.
+ */
+const PARTIAL_TITLE = {
+  stopped: 'Stopped by you',
+  max_steps: 'Stopped at the step limit'
+};
+const PARTIAL_SUBTITLE = {
+  stopped: 'The run was stopped before it finished.',
+  max_steps: 'The run used all its steps before it finished.',
+  partial: 'A site could not be read, so not every source was checked.',
+  stopped_early: 'The run stopped before every planned site was checked.',
+  model_unusable: 'The model replies could not be used, so the run stopped early.'
+};
+const PARTIAL_SUBTITLE_FALLBACK = 'The run ended before it finished.';
+// A first paragraph longer than this, or with a line break, is an answer, not a reason line.
+const PARTIAL_REASON_MAX = 200;
+
+function splitPartialReason(answer) {
+  const text = String(answer == null ? '' : answer).trim();
+  const at = text.indexOf('\n\n');
+  const first = (at >= 0 ? text.slice(0, at) : text).trim();
+  const looksLikeReason = first && !first.includes('\n') && !first.startsWith('|') && first.length <= PARTIAL_REASON_MAX;
+  return looksLikeReason
+    ? { reason: first, rest: at >= 0 ? text.slice(at + 2).trim() : '' }
+    : { reason: '', rest: text };
+}
+
+function renderPartialCard(turn, findings = null) {
+  const audit = normalizeAudit(turn.audit);
+  const reasonCode = turn.partialReason || '';
+  const title = PARTIAL_TITLE[reasonCode] || 'Not finished';
+  const { reason, rest } = splitPartialReason(turn.answer);
+  const subtitle = reason ? escapeHtml(reason) : (PARTIAL_SUBTITLE[reasonCode] || PARTIAL_SUBTITLE_FALLBACK);
+  const shown = audit ? withoutEngineNotes(rest) : rest;
+  const body = shown ? `<div class="finish-body">${formatMarkdownText(shown)}</div>` : '';
+
+  const allFindings = (findings && findings.length > 0) ? findings : (turn.findings || (turn.table && turn.table.rows ? turn.table.rows : []));
+  const hasEmbeddedTable = hasMarkdownBlocks(shown) && String(shown).includes('|');
+  const findingsHtml = (allFindings && allFindings.length > 0 && !hasEmbeddedTable) ? renderProvenanceFindingsTable(allFindings) : '';
+
+  // An unverified audit turns the edge red, as on any other card (the .unverified rule comes after .partial).
+  const classes = ['finish-card', 'partial', 'has-sub'];
+  if (audit && audit.verdict === 'unverified') classes.push('unverified');
+  const details = audit ? renderAuditDetails(audit, turn.turn, audit.verdict === 'verified' ? 'verified' : 'attention') : '';
+  return `<div class="${classes.join(' ')}"><div class="finish-title">${ICONS.warning} ${title}</div><div class="finish-subs"><div class="finish-sub">${subtitle}</div></div>${details}${body}${findingsHtml}</div>`;
 }
 
 // What the engine writes into an annotated answer (annotateAnswer in agent/answerAudit.ts): one warning line on top, and a
@@ -2010,8 +2069,8 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
       const refused = !!(e.outcome && e.outcome.finishRefused);
       // A refused finish is not a failed action (no red cross): it is the engine's answer check saying "not yet".
       const bad = !!(e.outcome && e.outcome.success === false) && !refused;
-      // The finish that ended the turn has no outcome row after it, and must not pulse forever.
-      const pending = !e.outcome && !(e.action.action === 'finish' && turn.answer);
+      // Only a live turn pulses: a turn that ended (and the finish that ended it) has no result coming.
+      const pending = isLive && !e.outcome && !(e.action.action === 'finish' && turn.answer);
       const why = e.thought
         ? `<div class="act-why" ${shown ? '' : 'hidden'}>${escapeHtml(e.thought)}</div>`
         : '';
