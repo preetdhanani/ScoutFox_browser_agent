@@ -27,6 +27,12 @@ import type {
 import type { ExecResult } from '../runner/runtimeRegistry.ts';
 import type { EvidenceInput, LedgerSnapshot } from '../agent/evidence.ts';
 
+/** One finished site of this task in the EARLIER SITES block; the trim keeps only head (agent/prompts.ts). */
+export interface EarlierSite {
+  head: string;                          // 'frame.work (reference): done, 3 values saved in 6 steps'
+  notes: string;                         // the site's summary notes; the prompt cuts them to 120 chars
+}
+
 export interface SiteIn {                // written by sched; read-only in the worker
   site: SiteSpec; index: number; total: number;          // 'site 2 of 3'
   task: string; taskKind: PlanMeta['taskKind']; columns: string[]; priceLike: boolean;
@@ -36,10 +42,10 @@ export interface SiteIn {                // written by sched; read-only in the w
   stepBase: number; systemActionBase: number; parseErrorsBase: number; everParsedOk: boolean;
   tabId: number; cdp: CdpState;
   approvedDomains: string[];
-  blocked: BlockedSource[];              // DO NOT OPEN
-  visitedRecent: VisitedEntry[];         // the last 10, all sites
+  blocked: BlockedSource[];              // DO NOT OPEN; risk refuses to open them (blockedTargetOf in worker.ts)
+  visitedRecent: VisitedEntry[];         // the last 10 of this task by lastStep, all sites
   findingsLines: string[];               // the FINDINGS block, one line per site
-  earlierSites: string[];                // one line per finished site, from siteSummaries
+  earlierSites: EarlierSite[];           // one per finished site of this task, from siteSummaries
   recap: string[];                       // earlier turns (agent/previousTurns.ts)
   priorFindings: string[];               // the previous research task, one line per finding (priorFindingLine: "[turn N, site] field: value (url)")
   ledgerPrior?: LedgerSnapshot;

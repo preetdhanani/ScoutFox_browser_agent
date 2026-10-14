@@ -4,7 +4,7 @@
 // Erasable TypeScript (no enums, no parameter properties).
 
 import { END, START, StateGraph, type BaseCheckpointSaver } from '@langchain/langgraph/web';
-import { WorkerState, type PageSig, type PendingAction, type PriceCandidate, type SiteIn, type SiteOut, type WorkerHold, type WorkerStateT, type WorkerUpdate } from './workerState.ts';
+import { WorkerState, type PageSig, type PageSnapshot, type PendingAction, type PriceCandidate, type SiteIn, type SiteOut, type WorkerHold, type WorkerStateT, type WorkerUpdate } from './workerState.ts';
 import {
   WORKER_ROUTE_MAPS,
   meterRouter,
@@ -29,15 +29,15 @@ import { classifyPageType } from '../agent/pageType.ts';
 import { evaluatePageVerdict, executeBlockedLadder } from '../agent/blockedPolicy.ts';
 import { detectStuck } from '../agent/stuck.ts';
 import { recordFailure, isSignatureBanned } from '../agent/failureMemory.ts';
-import { createFinding, deduplicateFindings, findingsContentSignature, isAutoValueField, FINDING_QUALITY_RANK } from '../agent/findings.ts';
+import { createFinding, parsePrice, deduplicateFindings, findingsContentSignature, isAutoValueField, FINDING_QUALITY_RANK } from '../agent/findings.ts';
 import { evaluateSiteCriteria } from '../agent/criteria.ts';
-import { buildPolicySystemPrompt, buildPolicyUserMessage, PAGE_TEXT_BUDGET } from '../agent/prompts.ts';
+import { buildPolicySystemPrompt, buildPolicyUserMessage, MEMORY_BUDGET, PAGE_TEXT_BUDGET } from '../agent/prompts.ts';
 import { formatRecentSteps, formatOneShotContext, buildStepRecord } from '../agent/memory.ts';
 import { evaluateActionRisk } from '../agent/risk.ts';
 import { systemAction } from '../agent/systemAction.ts';
 import { callWithRetry } from '../agent/recovery.ts';
 import { coerceAnswerText } from '../agent/outcome.ts';
-import { EvidenceLedger, siteOf, type EvidenceInput } from '../agent/evidence.ts';
+import { EvidenceLedger, normalizeUrlForMatch, siteOf, type EvidenceInput } from '../agent/evidence.ts';
 import {
   annotateAnswer,
   auditAnswer,
@@ -63,7 +63,7 @@ import {
   withoutAcknowledgedGaps,
   withoutTypedText,
 } from '../agent/planEvidence.ts';
-import type { BlockedSource, HistoryEntry, StepFailure } from './state.ts';
+import type { BlockedSource, HistoryEntry, StepFailure, VisitedEntry } from './state.ts';
 
 /**
  * The site's full evidence ledger: the folded base (meter folds ledgerPrior +
@@ -76,6 +76,36 @@ function workerLedger(state: WorkerStateT): EvidenceLedger {
   const ledger = EvidenceLedger.fromSnapshot(state.evidenceBase ?? state.siteIn?.ledgerPrior ?? null);
   for (const ev of state.evidenceEvents ?? []) ledger.record(ev);
   return ledger;
+}
+
+// Matches a whole amount next to its currency ("1.399,00 EUR", "€ 49.99"), so the
+// candidate value is the full number, not only the digit that touches the symbol.
+const PRICE_PATTERN = /[€$£¥₹]\s?\d[\d.,]*|\d[\d.,]*\s?(?:[€$£¥₹]|EUR\b|USD\b|GBP\b)/gi;
+
+/** Counts price-looking spans in page text and returns the first three as candidates. */
+export function extractPriceCandidates(pageText: string): { priceHits: number; priceCandidates: PriceCandidate[] } {
+  const priceMatches = pageText.match(PRICE_PATTERN);
+  const priceHits = priceMatches ? priceMatches.length : 0;
+  const priceCandidates: PriceCandidate[] = [];
+  if (priceMatches && priceMatches.length > 0) {
+    for (let i = 0; i < Math.min(priceMatches.length, 3); i++) {
+      const match = priceMatches[i];
+      const idx = pageText.indexOf(match);
+      if (idx >= 0) {
+        const snippet = pageText.slice(Math.max(0, idx - 20), Math.min(pageText.length, idx + match.length + 30)).replace(/\s+/g, ' ').trim();
+        const val = parsePrice(match.replace(/[.,]+$/, '')).amount ?? 0;
+        const curr = match.match(/[€$£¥₹]|EUR|USD|GBP/i)?.[0] || '$';
+        priceCandidates.push({
+          id: `p${i + 1}`,
+          text: match,
+          value: val,
+          currency: curr,
+          context: snippet
+        });
+      }
+    }
+  }
+  return { priceHits, priceCandidates };
 }
 
 /** How many pages a site remembers as "do not extract here". */
@@ -321,30 +351,7 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
     : (rawSnapshot ?? {});
 
   const pageText = snapshot.pageText ?? snapshot.elementsText ?? (snapshot.rawHtml ? snapshot.rawHtml.replace(/<[^>]+>/g, ' ') : '');
-  const priceMatches = pageText.match(/[€$£¥₹]\s?\d|\d\s?(?:[€$£¥₹]|EUR\b|USD\b|GBP\b)/gi);
-  const priceHits = priceMatches ? priceMatches.length : 0;
-
-  // Extract top price candidate snippets
-  const priceCandidates: PriceCandidate[] = [];
-  if (priceMatches && priceMatches.length > 0) {
-    for (let i = 0; i < Math.min(priceMatches.length, 3); i++) {
-      const match = priceMatches[i];
-      const idx = pageText.indexOf(match);
-      if (idx >= 0) {
-        const snippet = pageText.slice(Math.max(0, idx - 20), Math.min(pageText.length, idx + match.length + 30)).replace(/\s+/g, ' ').trim();
-        const numMatch = match.replace(/[^0-9.,]/g, '').replace(',', '.');
-        const val = parseFloat(numMatch) || 0;
-        const curr = match.match(/[€$£¥₹]|EUR|USD|GBP/i)?.[0] || '$';
-        priceCandidates.push({
-          id: `p${i + 1}`,
-          text: match,
-          value: val,
-          currency: curr,
-          context: snippet
-        });
-      }
-    }
-  }
+  const { priceHits, priceCandidates } = extractPriceCandidates(pageText);
 
   // Verdict and page type classification
   const verdict = evaluatePageVerdict({
@@ -483,10 +490,34 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
   return {
     page,
     perceiveError: null,
+    // From state.siteRun, not the local copy: a successful read never wrote the tab switch above, and still does not.
+    ...(state.siteRun ? { siteRun: { ...state.siteRun, visited: withVisit(state.siteRun.visited ?? [], page, state.siteRun.siteId, evidenceEvent.step + 1) } } : {}),
     history: isDuplicateStepStart ? [] : [stepStartEntry],
     evidenceEvents: [evidenceEvent],
   };
 });
+
+/**
+ * This site's visited pages with the page just read added (or its entry moved to this step). The only writer of
+ * siteRun.visited; summary merges it into state.visited, and the next site's VISITED block reads it from there.
+ * step is the task-wide step of the read (siteIn.stepBase + steps used on this site + 1).
+ */
+export function withVisit(visited: VisitedEntry[], page: Pick<PageSnapshot, 'url' | 'domain' | 'title' | 'verdict' | 'pageType'>, siteId: string, step: number): VisitedEntry[] {
+  const key = normalizeUrlForMatch(page.url);
+  if (!key) return visited;
+  const at = visited.findIndex((v) => normalizeUrlForMatch(v.url) === key);
+  const prev = at >= 0 ? visited[at] : null;
+  const entry: VisitedEntry = {
+    url: page.url, domain: page.domain || siteOf(page.url), title: page.title, siteId,
+    firstStep: prev?.firstStep ?? step, lastStep: step, visits: (prev?.visits ?? 0) + 1,
+    verdict: page.verdict, pageType: page.pageType,
+  };
+  const rest = at >= 0 ? visited.filter((_, i) => i !== at) : visited;
+  return [...rest, entry].slice(-MAX_SITE_VISITED);
+}
+
+/** The most visited pages a site keeps; the prompt shows the last 10 and summary caps the run map at MAX_VISITED. */
+const MAX_SITE_VISITED = 50;
 
 const meterNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'meter', (state) => {
   const siteRun = state.siteRun;
@@ -727,6 +758,12 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
     oneShotContext: formatOneShotContext(state.oneShotContext),
     evidenceBlock: evidenceBlock || undefined,
     planBlock: planBlock || undefined,
+    recap: siteIn.recap,
+    priorFindings: siteIn.priorFindings,
+    blocked: doNotOpen(siteIn),
+    visited: visitedForPrompt(siteIn.visitedRecent ?? [], siteRun.visited ?? []),
+    earlierSites: siteIn.earlierSites,
+    memoryBudget: MEMORY_BUDGET[tier],
   });
 
   const schema = buildPolicySchema({ mode, tier, columns, priceLike, goalKind });
@@ -1120,7 +1157,7 @@ const riskNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'risk
     ...(state.siteRun?.approvedNew ?? []),
   ];
 
-  const evalResult = evaluateActionRisk({
+  const riskVerdict = evaluateActionRisk({
     action,
     elementInfo,
     pageType: state.page?.pageType,
@@ -1131,6 +1168,25 @@ const riskNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'risk
     resolveElementInfo: (id) => state.page?.elementInfo?.[id] ?? null,
   });
   const signature = `${action.action}|${action.element_id ?? ''}|${action.url ?? ''}`;
+
+  // A domain another site (or an earlier task, for the lasting kinds) marked blocked is refused here, in code: the
+  // DO NOT OPEN block alone is only a request to the model. A forbidden verdict routes to recover, which bans the
+  // signature and shows the refusal in ALREADY TRIED AND FAILED.
+  const blockedHit = state.siteIn
+    ? blockedTargetOf(action, (id) => state.page?.elementInfo?.[id] ?? null, doNotOpen(state.siteIn))
+    : null;
+  if (blockedHit) {
+    Logger.info('Worker', `[GUARDRAIL_BLOCKED_DOMAIN] Refused ${action.action} to ${blockedHit.domain}: it is blocked (DO NOT OPEN).`);
+  }
+  const evalResult = blockedHit
+    ? {
+        ...riskVerdict,
+        level: 'forbidden' as const,
+        variant: undefined,
+        reason: `${blockedHit.domain} is blocked (DO NOT OPEN): ${blockedHit.reason || 'an earlier site could not use it'}`,
+        targetDomain: blockedHit.domain,
+      }
+    : riskVerdict;
 
   const pendingAction: PendingAction = {
     action,
@@ -1176,6 +1232,60 @@ const riskNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'risk
     lastFailure,
   };
 });
+
+/**
+ * The blocked entries this site may not open: every one in siteIn.blocked except the site's own domain. The current
+ * site was scheduled by the plan the user approved, so its own domain stays usable here; its own new blocked state
+ * ends the site through blocked or mark_blocked instead.
+ */
+export function doNotOpen(siteIn: Pick<SiteIn, 'blocked' | 'site'>): BlockedSource[] {
+  const own = siteOf(`https://${siteIn.site?.domain ?? ''}`) || siteOf(siteIn.site?.startUrl ?? '');
+  return (siteIn.blocked ?? []).filter((b) => b.domain && siteOf(`https://${b.domain}`) !== own);
+}
+
+/**
+ * The blocked entry an action would open, or null. Checks the URL of navigate and open_window, the link target of a
+ * click, and the clicks of a browser_batch. Domains are compared by site (registrable domain), so www.x.de and
+ * shop.x.de both hit a block on x.de.
+ */
+export function blockedTargetOf(
+  action: any,
+  resolveElementInfo: (id: number | string) => { hrefDomain?: string } | null,
+  blocked: BlockedSource[],
+): BlockedSource | null {
+  if (!action || blocked.length === 0) return null;
+  const targets: string[] = [];
+  const addClick = (id: unknown) => {
+    if (id === undefined || id === null) return;
+    const href = resolveElementInfo(id as number)?.hrefDomain;
+    if (href) targets.push(siteOf(`https://${href}`));
+  };
+  if ((action.action === 'navigate' || action.action === 'open_window') && typeof action.url === 'string') targets.push(siteOf(action.url));
+  if (action.action === 'click') addClick(action.element_id);
+  if (action.action === 'browser_batch' && Array.isArray(action.steps)) {
+    for (const step of action.steps) if (step?.action === 'click') addClick(step.element_id);
+  }
+  for (const target of targets) {
+    if (!target) continue;
+    const hit = blocked.find((b) => siteOf(`https://${b.domain}`) === target);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * The VISITED input of the prompt: the task's earlier visits (siteIn.visitedRecent) and this site's own, one entry
+ * per page (the later visit wins), in lastStep order. The prompt keeps the last 10.
+ */
+export function visitedForPrompt(earlier: VisitedEntry[], own: VisitedEntry[]): VisitedEntry[] {
+  const byUrl = new Map<string, VisitedEntry>();
+  for (const v of [...earlier, ...own]) {
+    const key = normalizeUrlForMatch(v.url);
+    const prev = byUrl.get(key);
+    if (!prev || v.lastStep >= prev.lastStep) byUrl.set(key, v);
+  }
+  return [...byUrl.values()].sort((a, b) => a.lastStep - b.lastStep);
+}
 
 const holdNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'hold', (state, config) => {
   const resume = interruptWithConfig<any, any>(config, state.pendingHold ?? { kind: 'paused', reason: 'user' });

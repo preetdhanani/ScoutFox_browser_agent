@@ -24,8 +24,9 @@ import {
   type SiteState,
   type SiteSummary,
   type TaskKind,
+  type VisitedEntry,
 } from './state.ts';
-import type { SiteIn } from './workerState.ts';
+import type { EarlierSite, SiteIn } from './workerState.ts';
 import { ORCHESTRATOR_ROUTE_MAPS, planRouter, holdRouter, schedRouter, summaryRouter, reflectRouter, compileRouter } from './routes.ts';
 import { defineNode, getRuntime } from '../runner/runtimeRegistry.ts';
 import { buildWorkerGraph, buildSiteOut } from './worker.ts';
@@ -41,7 +42,7 @@ import { Logger } from '../../shared/logger.ts';
 import { resolveModelTier } from '../agent/tier.ts';
 import { callWithRetry } from '../agent/recovery.ts';
 import { buildFinishEntry, buildMaxStepsEntry, NO_ANSWER_GIVEN, coerceAnswerText } from '../agent/outcome.ts';
-import { EvidenceLedger } from '../agent/evidence.ts';
+import { EvidenceLedger, normalizeUrlForMatch } from '../agent/evidence.ts';
 import { auditAnswer, prepareAnswer, annotateAnswer } from '../agent/answerAudit.ts';
 import { auditRecordOf, compactLedgerSnapshot } from '../agent/planEvidence.ts';
 
@@ -162,6 +163,19 @@ export function priorFindingLine(f: PriorFinding): string {
     site = new URL(f.url).hostname || site;
   } catch {}
   return `[turn ${f.turn}, ${site}] ${f.field}: ${f.valueRaw}${f.url ? ` (${f.url})` : ''}`;
+}
+
+/**
+ * One finished site as the next sites see it in EARLIER SITES: the status part (domain, role, status, values saved,
+ * steps) the trim keeps, and the summary notes the prompt cuts to 120 characters.
+ */
+export function earlierSite(summary: SiteSummary, spec?: SiteSpec): EarlierSite {
+  const name = spec ? `${spec.domain || spec.name} (${spec.role})` : summary.siteId;
+  const values = `${summary.findings} value${summary.findings === 1 ? '' : 's'} saved`;
+  return {
+    head: `${name}: ${summary.status}, ${values} in ${summary.stepsUsed} step${summary.stepsUsed === 1 ? '' : 's'}`,
+    notes: summary.notes || summary.blockers.join('; '),
+  };
 }
 
 /** Blocked entries that describe the browser or the search engines, not the task: they outlive a task. */
@@ -787,9 +801,12 @@ const schedNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', 
     cdp: state.cdp,
     approvedDomains: state.approvedDomains,
     blocked: Object.values(state.blocked ?? {}),
-    visitedRecent: Object.values(state.visited ?? {}).slice(-10),
+    visitedRecent: Object.values(state.visited ?? {})
+      .filter((v) => v.turn === state.turnIndex)
+      .sort((a, b) => a.lastStep - b.lastStep)
+      .slice(-10),
     findingsLines,
-    earlierSites: (state.siteSummaries ?? []).map((s) => `${s.siteId}: ${s.status} (${s.findings} findings)`),
+    earlierSites: (state.siteSummaries ?? []).map((s) => earlierSite(s, sites.find((p) => p.id === s.siteId))),
     recap: previousTurnsSummary(state.history ?? []),
     priorFindings: (state.priorFindings ?? []).map(priorFindingLine),
     ledgerPrior: compactLedgerSnapshot(state.evidence),
@@ -897,7 +914,16 @@ export const summaryNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orches
     blockedUpdates[b.domain] = b;
   }
 
+  // This site's visited pages go into the task-wide map, tagged with the turn (step numbers restart with every task),
+  // so the next site's VISITED block lists them.
+  const visitedUpdates: Record<string, VisitedEntry> = {};
+  for (const v of siteOut.visited ?? []) {
+    const key = normalizeUrlForMatch(v.url);
+    if (key) visitedUpdates[key] = { ...v, turn: state.turnIndex };
+  }
+
   return {
+    visited: { $set: visitedUpdates },
     sites: {
       $set: {
         [siteId]: {

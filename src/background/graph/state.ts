@@ -231,7 +231,10 @@ export interface FindingsTable {
 export interface VisitedEntry {
   url: string; domain: string; title: string; siteId: string;
   firstStep: number; lastStep: number; visits: number; verdict: PageVerdict; pageType: PageType;
+  turn?: number;                         // the task it was visited in; set by summary (steps restart with every task)
 }
+/** The age of a visited entry: step numbers restart with every task, so the turn orders first. */
+export const visitedAge = (v: VisitedEntry): number => (v.turn ?? 0) * 1_000_000 + v.lastStep;
 export interface BlockedSource {
   domain: string;
   kind: 'challenge' | 'error_page' | 'model_reported' | 'search_engine' | 'restricted';
@@ -339,7 +342,7 @@ export const AgentState = Annotation.Root({
   // ---- long-horizon memory ----
   findings: last<Finding[]>(() => []),              // merged by summary with the dedupe key, max MAX_FINDINGS
   priorFindings: last<PriorFinding[]>(() => []),    // the previous research turn's findings, tagged with their turn (written by intake)
-  visited: map<VisitedEntry>(MAX_VISITED, (v) => v.lastStep), // key = normalized url
+  visited: map<VisitedEntry>(MAX_VISITED, visitedAge), // key = normalized url
   blocked: map<BlockedSource>(),                    // key = registrable domain
   evidence: Annotation<LedgerSnapshot, EvidenceUpdate>({
     reducer: reduceEvidence,

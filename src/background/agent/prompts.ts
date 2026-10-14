@@ -3,7 +3,7 @@
 // Erasable TypeScript (no enums, no parameter properties).
 
 import type { GoalKind, ModelTier, PolicyMode, StepFailure } from '../graph/state.ts';
-import type { PageSig } from '../graph/workerState.ts';
+import type { EarlierSite, PageSig } from '../graph/workerState.ts';
 import { renderFailureMemory } from './failureMemory.ts';
 import { clipWithNote, PAGE_TEXT_MORE_HINT } from '../../shared/clip.ts';
 
@@ -180,6 +180,18 @@ export interface PolicyUserMessageParams {
   oneShotContext?: string | null;
   evidenceBlock?: string;
   planBlock?: string;
+  /** Earlier finished tasks of this session, oldest first (previousTurnsSummary lines). */
+  recap?: string[];
+  /** The previous research task's findings, oldest first (priorFindingLine lines). Not evidence for this task. */
+  priorFindings?: string[];
+  /** Domains code refuses to open on this site (cross-site and lasting blocked entries). */
+  blocked?: Array<{ domain: string; url: string }>;
+  /** Pages visited in this task, all sites; the block shows the last MEMORY_CAPS.visitedLines by lastStep. */
+  visited?: Array<{ url: string; title: string; verdict: string; lastStep: number }>;
+  /** One entry per finished site of this task. */
+  earlierSites?: EarlierSite[];
+  /** The characters the trimmable memory blocks may take (see MEMORY_BUDGET); over it, they are trimmed in the design's order. */
+  memoryBudget?: number;
 }
 
 /**
@@ -189,10 +201,103 @@ export interface PolicyUserMessageParams {
  */
 export const PAGE_TEXT_BUDGET: Record<ModelTier, number> = { small: 3000, large: 4500 };
 
+/**
+ * The per-section caps of the memory blocks. Each line is cut with a visible note (clipWithNote), so a cut line
+ * never reads as the whole text.
+ */
+export const MEMORY_CAPS = {
+  /** One finished task of EARLIER IN THIS SESSION (goal plus the 280-character result). */
+  recapEntry: 600,
+  /** The notes part of one EARLIER SITES line. */
+  earlierSiteNote: 120,
+  /** VISITED lines, and the URL and title of each. */
+  visitedLines: 10, visitedUrl: 100, visitedTitle: 50,
+  /** DO NOT OPEN lines, and the URL of each. */
+  blockedLines: 10, blockedUrl: 100,
+  /** FINDINGS FROM AN EARLIER TASK: the newest lines shown, the fewest the trim keeps, and the length of each. */
+  priorFindingLines: 12, priorFindingMin: 4, priorFindingLine: 160,
+} as const;
+
+/**
+ * The characters the trimmable memory blocks (EARLIER IN THIS SESSION, FINDINGS FROM AN EARLIER TASK, EARLIER
+ * SITES) may take per model tier. DO NOT OPEN and VISITED are never trimmed; their line caps bound them.
+ */
+export const MEMORY_BUDGET: Record<ModelTier, number> = { small: 1800, large: 3600 };
+
+/** The rendered memory sections; a section with nothing to show is undefined. */
+export interface MemorySections {
+  recap?: string; priorFindings?: string; blocked?: string; visited?: string; earlierSites?: string;
+}
+
+/**
+ * The memory blocks of the policy user message. When the trimmable blocks are over the budget, code trims in the
+ * design's order (docs/langgraph-design.md "Message shape and token budget"): 1. EARLIER SITES lines are cut to their
+ * status part; 2. (the step one-liner fold of the in-run memory window); 3. recap lines of older turns go, the most
+ * recent finished turn always stays; 4. older prior-task findings go, down to MEMORY_CAPS.priorFindingMin.
+ */
+export function renderMemorySections(params: Pick<PolicyUserMessageParams, 'recap' | 'priorFindings' | 'blocked' | 'visited' | 'earlierSites' | 'memoryBudget'>): MemorySections {
+  const budget = params.memoryBudget ?? MEMORY_BUDGET.small;
+  const inline = { inline: true };
+
+  const recapAll = (params.recap ?? []).map((r) => clipWithNote(r, MEMORY_CAPS.recapEntry, inline));
+  const priorAll = (params.priorFindings ?? []).map((f) => clipWithNote(f, MEMORY_CAPS.priorFindingLine, inline));
+  const sites = params.earlierSites ?? [];
+
+  let recapShown = recapAll.length;
+  let priorShown = Math.min(priorAll.length, MEMORY_CAPS.priorFindingLines);
+  let siteNotes = true;
+
+  const renderRecap = (): string | undefined => {
+    if (recapShown === 0) return undefined;
+    const hidden = recapAll.length - recapShown;
+    const note = hidden > 0 ? `\n[${hidden} earlier task${hidden === 1 ? '' : 's'} not shown]` : '';
+    return `EARLIER IN THIS SESSION (finished tasks, newest last):${note}\n${recapAll.slice(-recapShown).join('\n')}`;
+  };
+  const renderPrior = (): string | undefined => {
+    if (priorShown === 0) return undefined;
+    const hidden = priorAll.length - priorShown;
+    const note = hidden > 0 ? `\n[${hidden} older finding${hidden === 1 ? '' : 's'} not shown]` : '';
+    return `FINDINGS FROM AN EARLIER TASK (a previous request, not evidence for this task; use them only when the task refers back to them):${note}\n${priorAll.slice(-priorShown).join('\n')}`;
+  };
+  const renderSites = (): string | undefined => {
+    if (sites.length === 0) return undefined;
+    const lines = sites.map((s) => {
+      const notes = siteNotes && s.notes ? ` - ${clipWithNote(s.notes.replace(/\s+/g, ' ').trim(), MEMORY_CAPS.earlierSiteNote, inline)}` : '';
+      return `- ${s.head}${notes}`;
+    });
+    return `EARLIER SITES:\n${lines.join('\n')}`;
+  };
+  const size = (): number => [renderRecap(), renderPrior(), renderSites()].reduce((n, b) => n + (b ? b.length + 2 : 0), 0);
+
+  if (size() > budget) siteNotes = false;
+  while (size() > budget && recapShown > 1) recapShown--;
+  while (size() > budget && priorShown > Math.min(priorAll.length, MEMORY_CAPS.priorFindingMin)) priorShown--;
+
+  const blocked = (params.blocked ?? []).slice(0, MEMORY_CAPS.blockedLines)
+    .map((b) => `- ${b.domain}${b.url ? ` (${clipWithNote(b.url, MEMORY_CAPS.blockedUrl, inline)})` : ''}`);
+  const visited = [...(params.visited ?? [])]
+    .sort((a, b) => a.lastStep - b.lastStep)
+    .slice(-MEMORY_CAPS.visitedLines)
+    .map((v) => {
+      const title = v.title ? ` "${clipWithNote(v.title.replace(/\s+/g, ' ').trim(), MEMORY_CAPS.visitedTitle, inline)}"` : '';
+      return `- ${clipWithNote(v.url, MEMORY_CAPS.visitedUrl, inline)}${title} - ${v.verdict}`;
+    });
+
+  return {
+    recap: renderRecap(),
+    priorFindings: renderPrior(),
+    blocked: blocked.length > 0 ? `DO NOT OPEN (blocked; code refuses to open these):\n${blocked.join('\n')}` : undefined,
+    visited: visited.length > 0 ? `VISITED (last ${MEMORY_CAPS.visitedLines}, all sites, newest last):\n${visited.join('\n')}` : undefined,
+    earlierSites: renderSites(),
+  };
+}
+
 export function buildPolicyUserMessage(params: PolicyUserMessageParams): string {
   const parts: string[] = [];
+  const memory = renderMemorySections(params);
 
   parts.push(`TASK: ${params.task}`);
+  if (memory.recap) parts.push(memory.recap);
   parts.push(
     `CURRENT SITE (${params.siteIndex} of ${params.totalSites}, ${params.domain}, ${params.role}): ${params.goal}`
   );
@@ -214,6 +319,10 @@ export function buildPolicyUserMessage(params: PolicyUserMessageParams): string 
 
   if (params.findingsLines && params.findingsLines.length > 0) {
     parts.push(`FINDINGS:\n${params.findingsLines.join('\n')}`);
+  }
+
+  for (const block of [memory.priorFindings, memory.blocked, memory.visited, memory.earlierSites]) {
+    if (block) parts.push(block);
   }
 
   if (params.failures && params.failures.length > 0) {
