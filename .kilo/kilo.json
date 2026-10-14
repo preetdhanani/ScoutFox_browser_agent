@@ -1,0 +1,11 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "agent": {
+    "explore": {
+      "model": "iisys/lisa-flash"
+    },
+    "general": {
+      "model": "iisys/lisa-pro"
+    }
+  }
+}
