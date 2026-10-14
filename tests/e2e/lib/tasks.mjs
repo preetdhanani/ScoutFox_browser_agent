@@ -195,6 +195,22 @@ export const TASKS = {
       ...expectFindings(run, ['price', 'shipping', 'delivery'])
     ]
   },
+  // The page text extractor (src/content/pageText.ts) once read only headings, paragraphs, list items and table cells,
+  // by textContent. On the live frame.work configurator the price, the shipping and the delivery time sit in <span>s
+  // inside <div>s, and the option <li>s hold hidden dropdown copies of their batch lists, so the model got the hidden
+  // lists and never the price. store-spans.html has that shape: the run passes only when the visible <span> text
+  // reaches the model's page text (the mock copies the lines from it, and answers MOCK-FAIL without them).
+  'span-price': {
+    page: 'store-spans.html',
+    prompt: 'What is the price of the Framework Laptop 13 DIY Edition on this page? Also tell me the shipping cost and the delivery time.',
+    check: ({ answer }) => /1[.,]449/.test(answer) && /(kostenlos|free|0,00)/i.test(answer) && /3\s*(-|bis|to)\s*4/i.test(answer),
+    expectMock: (run) => [
+      ...expectSites(run, ['done']),
+      ...expectPlanRows(run, ['done']),
+      ...expectCalls(run, { plan: 1, policy: 1, reflect: 0 }),
+      ...expectFindings(run, ['price', 'shipping', 'delivery'])
+    ]
+  },
   'cheapest-offer': {
     page: 'search.html',
     prompt: 'Find the shop with the cheapest total price (price plus shipping) for the Framework Laptop 16 DIY Edition.',

@@ -2,101 +2,57 @@
  * Regression test for a closed-but-never-actually-fixed issue: extractPageText()'s scrolled-
  * viewport fallback picked allTextNodes.slice(-50) - the last 50 matching nodes in DOCUMENT
  * order - whenever fewer than 10 nodes fell inside the generous +-200/+1500px viewport window.
- * On a page whose matching elements (h1-h6, p, li, td, th, pre, code, blockquote) are sparse
- * near the user's actual scroll position but plentiful elsewhere, that fallback returned
- * whatever happened to be LAST in the DOM - typically the footer - instead of anything near
- * where the user had actually scrolled to.
+ * On a page whose text is sparse near the user's actual scroll position but plentiful elsewhere,
+ * that fallback returned whatever happened to be LAST in the DOM - typically the footer - instead
+ * of anything near where the user had actually scrolled to.
  *
- * Fixed by sorting every matching node by its distance from the viewport and taking the
- * nearest ones, so the fallback always centers on where the user is looking.
+ * The extractor no longer counts nodes (page-text-extractor-whitelist): it reads the visible text of the
+ * content block, and only when a scrolled page has more text than the cap does it narrow that text to the
+ * blocks whose rect lies in the window around the viewport. So the near content is kept however few blocks
+ * there are, and the end of the document is never picked for being last.
  */
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DOMCompressor } from '../src/content/domCompressor.ts';
 import { withGlobals } from './helpers/contentGlobals.ts';
+import { el, fakeDocument, fakeWindow } from './helpers/fakeElementTree.ts';
 
-function makeNode(text, rectTop) {
-  return {
-    tagName: 'P',
-    textContent: text,
-    getBoundingClientRect: () => ({ top: rectTop, bottom: rectTop + 20 })
-  };
-}
-
-function loadCompressor({ scrollY, innerHeight, nodes, containerInnerText }) {
-  const container = {
-    querySelectorAll: () => nodes,
-    innerText: containerInnerText,
-    textContent: containerInnerText
-  };
-
-  const fakeWindow = { scrollY, innerHeight, location: { href: 'https://example.com/docs', hostname: 'example.com' } };
-  const fakeDocument = {
-    title: 'Docs',
-    contentType: 'text/html',
-    documentElement: { scrollHeight: 20000 },
-    body: container,
-    querySelector: () => null // no <article>/<main>/#readme match -> falls back to document.body
-  };
-
-  const compressor = new DOMCompressor();
-  return {
-    extractPageText: () =>
-      withGlobals({ window: fakeWindow, document: fakeDocument }, () => compressor.extractPageText())
-  };
+function extractPageText(body, { scrollY, innerHeight = 800 }) {
+  return withGlobals({ window: fakeWindow({ scrollY, innerHeight, hostname: 'example.com' }), document: fakeDocument(body) }, () =>
+    new DOMCompressor().extractPageText());
 }
 
 // A name for number i made of letters only (0 is "q", 10 is "a"...). The paragraphs below must not
 // differ only by a digit: extractPageText() collapses four or more lines in a row that do (see
-// tests/domCompressorRepeatedRuns.test.js), which would hide which of them the fallback picked.
+// tests/domCompressorRepeatedRuns.test.js), which would hide which of them were picked.
 const letters = (i) => i.toString(26).replace(/\d/g, (d) => 'qrstuvwxyz'[d]);
 
-test('the scrolled-viewport fallback centers on the current scroll position, not the end of the document', () => {
-  // 5 nodes genuinely near the current scroll position (scrollY=5000, innerHeight=800, so the
-  // viewport spans roughly y=5000-5800 in page coordinates; getBoundingClientRect() is
-  // viewport-relative, so a node actually on screen has a small rect.top near 0).
-  const nearNodes = Array.from({ length: 5 }, (_, i) =>
-    makeNode(`NEAR-VIEWPORT-CONTENT-PARAGRAPH-NUMBER-${letters(i)}-with-enough-text-to-not-be-filtered-out`, 50 + i * 10));
+/** A paragraph at a viewport-relative top (getBoundingClientRect() is viewport-relative, so on screen is near 0). */
+const paragraph = (text, top) => el('p', { top, height: 20 }, text);
 
-  // 55 nodes far from the current scroll position in EITHER direction - enough that fewer
-  // than 10 of the 60 total fall inside the generous viewport window, triggering the fallback,
-  // and enough (>50 total) that a naive slice(-50) or slice(0,50) could plausibly miss the
-  // near ones depending on where they sit in the array.
-  const farNodes = Array.from({ length: 55 }, (_, i) =>
-    makeNode(`FAR-AWAY-FOOTER-CONTENT-PARAGRAPH-NUMBER-${letters(i)}-should-not-be-picked-here`, i % 2 === 0 ? -9000 - i : 9000 + i));
+test('a scrolled page with sparse text near the viewport keeps that text, not the end of the document', () => {
+  // 5 paragraphs genuinely near the current scroll position (scrollY=5000, innerHeight=800).
+  const near = Array.from({ length: 5 }, (_, i) =>
+    paragraph(`NEAR-VIEWPORT-CONTENT-PARAGRAPH-NUMBER-${letters(i)}-with-enough-text-to-not-be-filtered-out`, 50 + i * 10));
+  // 55 paragraphs far from it in EITHER direction, with enough text that the page does not fit the cap.
+  const far = Array.from({ length: 55 }, (_, i) =>
+    paragraph(`FAR-AWAY-FOOTER-CONTENT-PARAGRAPH-NUMBER-${letters(i)}-should-not-be-picked-here ${'and more words to fill the page '.repeat(3)}`, i % 2 === 0 ? -9000 - i : 9000 + i));
+  // Near ones FIRST in document order, far ones after: the old slice(-50) would have dropped exactly the near ones.
+  const body = el('body', {}, ...near, ...far);
 
-  // Near nodes placed FIRST in document order, far ones after - so slice(-50) (the old,
-  // buggy fallback) would grab indices [10..59], excluding the near nodes entirely, while
-  // sorting by distance (the fix) must surface them regardless of their array position.
-  const allNodes = [...nearNodes, ...farNodes];
+  const text = extractPageText(body, { scrollY: 5000 });
 
-  const compressor = loadCompressor({
-    scrollY: 5000,
-    innerHeight: 800,
-    nodes: allNodes,
-    containerInnerText: 'GENERIC-CONTAINER-FALLBACK-TEXT-should-not-be-needed-here-either'
-  });
-
-  const text = compressor.extractPageText();
-
-  // The cap keeps 50 of 60 total nodes, so some of the LEAST-far nodes inevitably fill the
-  // remainder alongside the near ones - that is expected, not a bug. The actual invariant a
-  // distance-based fallback must satisfy is that the genuinely near content is never excluded
-  // in favour of it; the old allTextNodes.slice(-50) could and did exclude it outright, since
-  // it picked purely by array position (document order) with no regard for distance at all.
-  for (let i = 0; i < nearNodes.length; i++) {
-    assert.ok(text.includes(`NEAR-VIEWPORT-CONTENT-PARAGRAPH-NUMBER-${letters(i)}-`),
-      `paragraph ${i}, genuinely near the current scroll position, must survive the fallback`);
+  for (let i = 0; i < near.length; i++) {
+    assert.ok(text.includes(`NEAR-VIEWPORT-CONTENT-PARAGRAPH-NUMBER-${letters(i)}-`), `paragraph ${i}, near the current scroll position, must be read`);
   }
+  assert.doesNotMatch(text, /FAR-AWAY-FOOTER/, 'the far paragraphs are outside the window and the page is narrowed to it');
 });
 
-test('a page with enough nodes directly in the viewport never needs the fallback at all', () => {
-  const nodes = Array.from({ length: 35 }, (_, i) => makeNode(`ORDINARY-VISIBLE-PARAGRAPH-${letters(i)}`, 50 + i * 5));
+test('a scrolled page whose text fits the cap is read whole, so nothing is lost for being off screen', () => {
+  const nodes = Array.from({ length: 35 }, (_, i) => paragraph(`ORDINARY-PARAGRAPH-${letters(i)}`, -3000 + i * 200));
+  const text = extractPageText(el('body', {}, ...nodes), { scrollY: 3000 });
 
-  const compressor = loadCompressor({ scrollY: 500, innerHeight: 800, nodes, containerInnerText: '' });
-  const text = compressor.extractPageText();
-
-  assert.ok(text.includes(`ORDINARY-VISIBLE-PARAGRAPH-${letters(0)}`));
-  assert.ok(text.includes(`ORDINARY-VISIBLE-PARAGRAPH-${letters(34)}`), 'and so does the last one in the viewport');
+  assert.ok(text.includes(`ORDINARY-PARAGRAPH-${letters(0)}`), 'the first one, far above the viewport');
+  assert.ok(text.includes(`ORDINARY-PARAGRAPH-${letters(34)}`), 'and the last one, far below it');
 });

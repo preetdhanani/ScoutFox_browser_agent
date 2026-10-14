@@ -40,16 +40,19 @@
   "elementInfo": {
     "1": {
       "role": "link",
-      "label": "PreisFuchs"
+      "label": "PreisFuchs",
+      "hrefDomain": "127.0.0.1"
     },
     "2": {
       "role": "searchbox",
       "label": "Suche",
+      "formKind": "search",
       "fieldKind": "search"
     },
     "3": {
       "role": "button",
-      "label": "Suchen"
+      "label": "Suchen",
+      "formKind": "search"
     },
     "4": {
       "role": "button",
@@ -62,32 +65,39 @@
     },
     "6": {
       "role": "link",
-      "label": "Gaming-Laptops bis zu 50% reduziert"
+      "label": "Gaming-Laptops bis zu 50% reduziert",
+      "hrefDomain": "127.0.0.1"
     },
     "7": {
       "role": "link",
-      "label": "Framework Laptop 13 DIY Edition (Intel Core Ultra)"
+      "label": "Framework Laptop 13 DIY Edition (Intel Core Ultra)",
+      "hrefDomain": "127.0.0.1"
     },
     "8": {
       "role": "link",
-      "label": "Framework Laptop 16 DIY Edition (AMD Ryzen 7040)"
+      "label": "Framework Laptop 16 DIY Edition (AMD Ryzen 7040)",
+      "hrefDomain": "127.0.0.1"
     },
     "9": {
       "role": "link",
-      "label": "Framework Laptop 16 Grafikmodul AMD Radeon RX 7700S"
+      "label": "Framework Laptop 16 Grafikmodul AMD Radeon RX 7700S",
+      "hrefDomain": "127.0.0.1"
     },
     "10": {
       "role": "link",
-      "label": "Framework Laptop 16 Tastatur-Modul (Deutsch)"
+      "label": "Framework Laptop 16 Tastatur-Modul (Deutsch)",
+      "hrefDomain": "127.0.0.1"
     },
     "11": {
       "role": "link",
-      "label": "Framework Laptop 16 Netzteil 180 W"
+      "label": "Framework Laptop 16 Netzteil 180 W",
+      "hrefDomain": "127.0.0.1"
     },
     "12": {
       "role": "link",
-      "label": "Weiter"
+      "label": "Weiter",
+      "hrefDomain": "127.0.0.1"
     }
   },
-  "pageText": "\n### Suchergebnisse für \"framework laptop 16\"\n\n6 Treffer\nAnzeige Gaming-Laptops bis zu 50% reduziert\nAnzeige\nGaming-Laptops bis zu 50% reduziert\nFramework Laptop 13 DIY Edition (Intel Core Ultra) Notebook, 13,5 Zoll, 9 Angebote, ab 1.049,00 EUR\nFramework Laptop 13 DIY Edition (Intel Core Ultra)\nNotebook, 13,5 Zoll, 9 Angebote, ab 1.049,00 EUR\nFramework Laptop 16 DIY Edition (AMD Ryzen 7040) Notebook, 16 Zoll, 4 Angebote, ab 1.379,00 EUR\nFramework Laptop 16 DIY Edition (AMD Ryzen 7040)\nNotebook, 16 Zoll, 4 Angebote, ab 1.379,00 EUR\nFramework Laptop 16 Grafikmodul AMD Radeon RX 7700S Zubehör, 3 Angebote, ab 449,00 EUR\nFramework Laptop 16 Grafikmodul AMD Radeon RX 7700S\nZubehör, 3 Angebote, ab 449,00 EUR\nFramework Laptop 16 Tastatur-Modul (Deutsch) Zubehör, 2 Angebote, ab 99,00 EUR\nFramework Laptop 16 Tastatur-Modul (Deutsch)\nZubehör, 2 Angebote, ab 99,00 EUR\nFramework Laptop 16 Netzteil 180 W Zubehör, 5 Angebote, ab 79,00 EUR\nFramework Laptop 16 Netzteil 180 W\nZubehör, 5 Angebote, ab 79,00 EUR\nWeiter"
+  "pageText": "Suchergebnisse für \"framework laptop 16\"\n6 Treffer\nSortieren: Relevanz\nNur Laptops\nAnzeige\nGaming-Laptops bis zu 50% reduziert\nFramework Laptop 13 DIY Edition (Intel Core Ultra)\nNotebook, 13,5 Zoll, 9 Angebote, ab 1.049,00 EUR\nFramework Laptop 16 DIY Edition (AMD Ryzen 7040)\nNotebook, 16 Zoll, 4 Angebote, ab 1.379,00 EUR\nFramework Laptop 16 Grafikmodul AMD Radeon RX 7700S\nZubehör, 3 Angebote, ab 449,00 EUR\nFramework Laptop 16 Tastatur-Modul (Deutsch)\nZubehör, 2 Angebote, ab 99,00 EUR\nFramework Laptop 16 Netzteil 180 W\nZubehör, 5 Angebote, ab 79,00 EUR\nWeiter"
 }

@@ -47,7 +47,7 @@ If the sources are newer than `dist/`, it prints a warning to build again (or to
 | --- | --- |
 | `--mock` | Uses the offline mock instead of Ollama, and runs the mock's own self-test first. |
 | `--build` | Runs `npm run build` first, so `dist/` is fresh. |
-| `--task=a,b` | Runs only these tasks: `store-price`, `cheapest-offer`, `bot-check`, `two-sources-lie`, `two-sources-honest-retry`. A pending task is skipped (see "Pending tasks"). |
+| `--task=a,b` | Runs only these tasks: `store-price`, `span-price`, `cheapest-offer`, `bot-check`, `two-sources-lie`, `two-sources-honest-retry`. A pending task is skipped (see "Pending tasks"). |
 | `--model=name` | The model name (default `qwen3.5:9b`, or `mock-agent` with `--mock`). The honest variant of the two-sources task always uses `mock-agent-honest` with `--mock`. |
 | `--max-steps=n` | The engine's hard step cap for a task (default 30). The graph engine builds its step budget from it. |
 | `--timeout=ms` | The time limit for one task (default 360000, or 60000 with `--mock`). |
@@ -172,6 +172,7 @@ finishPolicy.ts), and these tasks exercise it in a real browser.
 - `dist/` loads in Chromium: the manifest paths exist, the worker starts as one ES module, the content scripts run as classic scripts, and the side panel page loads with its bundled assets.
 - Page content really reaches the model prompt, through the content script.
   The mock answers only from the page text and the element list it finds in the prompt.
+- Text that sits in plain `<span>`s and `<div>`s reaches the page text, and hidden copies do not (`span-price` on `store-spans.html`, the shape of the live frame.work configurator).
 - A run goes through the whole graph in the real browser: plan, the approval of the plan, the site worker, the findings, the final answer.
 - A click that navigates works, and the content script answers on the second page.
   (Today this part is red, see "Known state".)

@@ -130,8 +130,94 @@ export function finishPageText(text: string): string {
   return capPageText(collapseRepeatedRuns(scanned), PAGE_TEXT_CAP, scanned.length < text.length);
 }
 
+/** Shown instead of a page text under PAGE_TEXT_MIN_CHARS, so the model knows the page has no readable text. Kept short: the page verdict reads a text under 120 characters as a blank page. */
+export const PAGE_TEXT_EMPTY_MARKER = '[no readable text on this page]';
+export const PAGE_TEXT_MIN_CHARS = 10;
+/** The content blocks to read, in priority order. The first selector that matches wins, and of its matches the one with the longest visible text. */
+export const CONTENT_SELECTORS = ['main', '[role="main"]', 'article', '#readme', '.markdown-body'];
+/** The window of a scrolled page, in viewport pixels: from this far above the viewport ... */
+const WINDOW_ABOVE = 200;
+/** ... to this far below it. */
+const WINDOW_BELOW = 1500;
+/** How deep the window opens blocks that straddle its edges. */
+const WINDOW_MAX_DEPTH = 12;
+
 /**
- * Dedicated scroll-aware body text extraction from document.
+ * The visible text with its whitespace normalised: one space inside a line, no blank lines, nothing at the ends.
+ * innerText separates table cells with a tab; they are kept apart as " | ", so a row still shows its columns.
+ */
+export function normalizePageText(text: string): string {
+  return text
+    .split(/\r?\n|\r/)
+    .map((line) => line.split('\t').map((cell) => cell.replace(/[\s\u00a0]+/g, ' ').trim()).filter(Boolean).join(' | '))
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** The visible text of an element. innerText leaves out hidden elements and reads text from any element type. */
+function visibleText(el: Element): string {
+  return normalizePageText((el as HTMLElement).innerText ?? el.textContent ?? '');
+}
+
+/**
+ * The block to read: the first content selector that matches, the longest of its matches, else <body>.
+ * A selector whose matches have no visible text is passed over, so an empty <main> shell never hides the page.
+ */
+function chooseContainer(doc: Document): { container: Element; text: string } | null {
+  for (const selector of CONTENT_SELECTORS) {
+    let best: { container: Element; text: string } | null = null;
+    for (const candidate of Array.from(doc.querySelectorAll(selector))) {
+      const text = visibleText(candidate);
+      if (!best || text.length > best.text.length) best = { container: candidate, text };
+    }
+    if (best && best.text.length >= PAGE_TEXT_MIN_CHARS) return best;
+  }
+  return doc.body ? { container: doc.body, text: visibleText(doc.body) } : null;
+}
+
+/** True when the element has text of its own (not only inside child elements), so it cannot be split into its children. */
+function hasOwnText(el: Element): boolean {
+  return Array.from(el.childNodes || []).some((node) => node.nodeType === 3 && (node.textContent || '').trim() !== '');
+}
+
+/**
+ * The text of the blocks of a scrolled page that lie in the window around the viewport, cut by block rect.
+ * A block wholly inside the window is read whole, a block outside it is skipped, and a block that straddles an
+ * edge is opened into its children. A block with an empty rect is not rendered (display: none, or inside a
+ * hidden element); its children are looked at, so a hidden subtree is never read.
+ */
+function windowedText(container: Element, viewportHeight: number): string {
+  const top = -WINDOW_ABOVE;
+  const bottom = viewportHeight + WINDOW_BELOW;
+  const parts: string[] = [];
+  const visit = (el: Element, depth: number) => {
+    for (const child of Array.from(el.children)) {
+      const rect = child.getBoundingClientRect();
+      const empty = rect.width === 0 && rect.height === 0;
+      if (!empty && (rect.bottom < top || rect.top > bottom)) continue;
+      const inside = !empty && rect.top >= top && rect.bottom <= bottom;
+      if (!empty && (inside || depth >= WINDOW_MAX_DEPTH || child.children.length === 0 || hasOwnText(child))) {
+        const text = visibleText(child);
+        if (text) parts.push(text);
+      } else if (child.children.length > 0 && depth < WINDOW_MAX_DEPTH) {
+        visit(child, depth + 1);
+      }
+    }
+  };
+  visit(container, 0);
+  return parts.join('\n');
+}
+
+/** A page text under PAGE_TEXT_MIN_CHARS is replaced by (or, when there is some, followed by) the empty marker. */
+function markIfEmpty(text: string): string {
+  if (text.length >= PAGE_TEXT_MIN_CHARS) return text;
+  return text ? `${text}\n${PAGE_TEXT_EMPTY_MARKER}` : PAGE_TEXT_EMPTY_MARKER;
+}
+
+/**
+ * The page text the model reads: the visible text of the page's content block, any element type, with repeated
+ * runs collapsed and the cap applied. A page scrolled down whose text is longer than the cap is narrowed to the
+ * blocks around the viewport first.
  */
 export function extractPageTextFromDocument(
   doc: Document = typeof document !== 'undefined' ? document : (null as unknown as Document),
@@ -154,56 +240,24 @@ export function extractPageTextFromDocument(
     );
     if (hostname.includes('raw.githubusercontent.com') || rawContentType) {
       const rawText = doc.body ? ((doc.body as HTMLElement).innerText || doc.body.textContent || '') : '';
-      return capPageText(rawText.trim());
+      return markIfEmpty(capPageText(rawText.trim()));
     }
 
-    const targetedContainer = doc.querySelector('article, main, #readme, .markdown-body, [role="main"]');
-    const container = targetedContainer || doc.body;
-    if (!container) return '';
+    const chosen = chooseContainer(doc);
+    if (!chosen) return PAGE_TEXT_EMPTY_MARKER;
 
-    const allTextNodes = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, td, th, pre, code, blockquote'));
-    let textNodes = allTextNodes;
-
+    let finished = finishPageText(chosen.text);
     const scrollY = win ? win.scrollY : 0;
     const vHeight = (win && win.innerHeight) ? win.innerHeight : 800;
-
-    if (scrollY > 200 && allTextNodes.length > 30) {
-      textNodes = allTextNodes.filter((node) => {
-        const rect = node.getBoundingClientRect();
-        return rect.bottom >= -200 && rect.top <= vHeight + 1500;
-      });
-      if (textNodes.length < 10) {
-        textNodes = allTextNodes
-          .map((node) => ({ node, dist: Math.abs(node.getBoundingClientRect().top) }))
-          .sort((a, b) => a.dist - b.dist)
-          .slice(0, 50)
-          .map((entry) => entry.node);
-      }
-    } else {
-      textNodes = allTextNodes.slice(0, 90);
+    // Only a scrolled page whose text does not fit (finishPageText added its truncation line) is narrowed.
+    if (scrollY > 200 && finished.length > PAGE_TEXT_CAP) {
+      const near = windowedText(chosen.container, vHeight);
+      if (near.length >= PAGE_TEXT_MIN_CHARS) finished = finishPageText(near);
     }
 
-    let extractedText = '';
-    if (textNodes.length > 0) {
-      extractedText = textNodes
-        .map((node) => {
-          const str = (node.textContent || '').trim().replace(/\s+/g, ' ');
-          if (/^h[1-6]$/i.test(node.tagName)) {
-            return `\n### ${str}\n`;
-          }
-          return str;
-        })
-        .filter((t) => t.length > 3)
-        .join('\n');
-    }
-
-    if (!extractedText || extractedText.length < 100) {
-      extractedText = ((container as HTMLElement).innerText || container.textContent || '').trim();
-    }
-
-    return finishPageText(extractedText);
+    return markIfEmpty(finished);
   } catch {
-    return capPageText(doc.body ? ((doc.body as HTMLElement).innerText || doc.body.textContent || '') : '', 3000);
+    return markIfEmpty(capPageText(doc.body ? ((doc.body as HTMLElement).innerText || doc.body.textContent || '') : '', 3000));
   } finally {
     if (badgeContainer && badgeContainer.style) {
       badgeContainer.style.display = prevDisplay;

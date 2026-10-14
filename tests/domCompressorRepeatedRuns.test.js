@@ -8,15 +8,19 @@
  *
  * What the live page does (read with the real extractor in a real browser): every option of the
  * configurator is one <li> whose textContent holds the batch list once where people see it and
- * again in several hidden copies, so one <li> is about 5000 characters of the same few words.
+ * again in several hidden copies, so one <li> is about 5000 characters of the same few words, and
+ * the price, the shipping and the delivery lines sit in <span>s.
  * tests/fixtures/site/configurator.html has that shape. The compressor is the TypeScript module
  * (src/content/domCompressor.ts, which builds the shipped content/domCompressor.js), run against
- * a small fake DOM, and the fixture is read into the fake nodes by the tiny HTML reader
- * below, so the test runs on the page file and not on a hand copy of its text.
+ * a small fake DOM, and the fixture is read into a fake element tree (tests/helpers/fakeElementTree.ts),
+ * so the test runs on the page file and not on a hand copy of its text.
  *
- * The fix collapses a run of at least four units that are the same after masking digits into
+ * The first fix collapses a run of at least four units that are the same after masking digits into
  * "first ... last (N similar entries)", runs it again for repeated cycles, never touches a run
  * whose digits carry a price or a delivery time, and marks a text that is still cut at the cap.
+ * The second fix (tests/content/pageTextExtractor.test.ts) reads the visible text (innerText) of the
+ * page's content block instead of the textContent of some tags, so the hidden copies are not read at
+ * all and the <span>s are. The collapse still runs on what is visible.
  */
 
 import test from 'node:test';
@@ -25,6 +29,7 @@ import fs from 'node:fs';
 
 import { DOMCompressor } from '../src/content/domCompressor.ts';
 import { withGlobals } from './helpers/contentGlobals.ts';
+import { fakeDocument, fakeWindow, parseHtml } from './helpers/fakeElementTree.ts';
 
 const FIXTURE = fs.readFileSync(new URL('./fixtures/site/configurator.html', import.meta.url), 'utf8');
 
@@ -35,19 +40,17 @@ const MARKER = `[page text truncated at ${CAP} characters]`;
 // The real compressor against a fake DOM
 // ---------------------------------------------------------------------------------------------
 
-function textNode(text, tagName = 'P') {
-  return { tagName, textContent: text, getBoundingClientRect: () => ({ top: 0, bottom: 20 }) };
-}
-
-function loadCompressor({ nodes = [], contentType = 'text/html', hostname = 'shop.test', innerText = '' } = {}) {
-  const container = { querySelectorAll: () => nodes, innerText, textContent: innerText };
+/** The compressor on a page that has no content block, so the extractor reads the innerText of <body>. */
+function loadCompressor({ contentType = 'text/html', hostname = 'shop.test', innerText = '' } = {}) {
+  const body = { innerText, textContent: innerText };
   const fakeWindow = { scrollY: 0, innerHeight: 800, location: { href: `https://${hostname}/`, hostname } };
   const fakeDocument = {
     title: 'Test page',
     contentType,
     documentElement: { scrollHeight: 800 },
-    body: container,
-    querySelector: () => container
+    body,
+    querySelector: () => null,
+    querySelectorAll: () => []
   };
   const compressor = new DOMCompressor();
   return {
@@ -59,54 +62,21 @@ function loadCompressor({ nodes = [], contentType = 'text/html', hostname = 'sho
 
 /** What the compressor returns for a page made of these paragraphs. */
 function pageTextOf(...paragraphs) {
-  return loadCompressor({ nodes: paragraphs.map((p) => textNode(p)), innerText: paragraphs.join('\n') }).extractPageText();
+  return loadCompressor({ innerText: paragraphs.join('\n') }).extractPageText();
 }
 
 const collapse = (text) => loadCompressor().collapseRepeatedRuns(text);
 
-// ---------------------------------------------------------------------------------------------
-// A tiny HTML reader for the fixture page: the elements that extractPageText selects inside <main>,
-// in document order, each with its textContent (all descendant text, hidden or not, like a browser).
-// ---------------------------------------------------------------------------------------------
-
-const SELECTED = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'LI', 'TD', 'TH', 'PRE', 'CODE', 'BLOCKQUOTE']);
-const VOID = new Set(['META', 'LINK', 'BR', 'HR', 'IMG', 'INPUT']);
-
-function selectedNodesOfMain(html) {
-  const nodes = [];
-  const open = [];
-  let inMain = false;
-  for (const [, closing, name, text] of html.matchAll(/<!--[\s\S]*?-->|<(\/?)([a-zA-Z][\w-]*)[^>]*>|([^<]+)/g)) {
-    if (text !== undefined) {
-      if (inMain) for (const el of open) el.textContent += text.replaceAll('&amp;', '&');
-      continue;
-    }
-    if (name === undefined) continue; // a comment
-    const tag = name.toUpperCase();
-    if (VOID.has(tag)) continue;
-    if (closing) {
-      const at = open.map((el) => el.tagName).lastIndexOf(tag);
-      if (at >= 0) open.length = at;
-      if (tag === 'MAIN') inMain = false;
-      continue;
-    }
-    if (tag === 'MAIN') inMain = true;
-    const el = textNode('', tag);
-    open.push(el);
-    if (inMain && SELECTED.has(tag)) nodes.push(el);
-  }
-  return nodes;
-}
-
-const configuratorNodes = selectedNodesOfMain(FIXTURE);
-const configuratorText = () => loadCompressor({ nodes: configuratorNodes }).extractPageText();
+const configuratorBody = parseHtml(FIXTURE);
+const configuratorText = () =>
+  withGlobals({ window: fakeWindow(), document: fakeDocument(configuratorBody) }, () => new DOMCompressor().extractPageText());
 
 // ---------------------------------------------------------------------------------------------
 // The reproduction: the configurator page
 // ---------------------------------------------------------------------------------------------
 
 test('the fixture keeps the shape of the live page: the batch text alone is more than twice the cap', () => {
-  const batchText = configuratorNodes.filter((n) => n.tagName === 'LI').map((n) => n.textContent.replace(/\s+/g, ' ')).join(' ');
+  const batchText = configuratorBody.querySelectorAll('li').map((n) => n.textContent.replace(/\s+/g, ' ')).join(' ');
   assert.ok(batchText.length > CAP * 2, `the option <li>s hold ${batchText.length} characters, which must stay well above the cap of ${CAP}`);
   assert.ok((batchText.match(/Batch \d+ Shipped/g) || []).length > 200, 'and most of it is the repeated batch list');
 });
@@ -126,13 +96,13 @@ test('the configurator page: the real content keeps the order of the page', () =
     return index;
   };
   const order = [
-    '### Framework Laptop 16',
+    'Framework Laptop 16',
     'For pre-order laptop and desktop configurations',
-    '### Configuration',
+    'Configuration',
     'System, Base',
     'System, Overkill',
     'Touchpad, One Piece Haptic Touchpad',
-    '### Your order',
+    'Your order',
     'Starting at €2,069.00',
     'Free shipping on laptop and desktop orders',
     'Ships within 5 business days'

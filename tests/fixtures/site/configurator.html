@@ -12,10 +12,10 @@
        Ships <month> - Sold Out) once where people see it, and again in the hidden copies the
        dropdown keeps in the DOM. textContent reads all of them, innerText only the visible one, so
        one <li> is thousands of characters of the same few words, and the price, shipping and
-       delivery text after the options used to fall behind the 4500 character cap. On the live page
-       those last lines sit in <span>s; here they are <p>s, because the compressor reads <p> and
-       not <span>, and this fixture is about the repeated text. The batch lists are long on purpose:
-       shortening them would hide the problem this page exists to reproduce. -->
+       delivery text after the options used to fall behind the 4500 character cap. As on the live
+       page, those last lines sit in <span>s inside <div>s, with no heading, paragraph or list item
+       around them. The batch lists are long on purpose: shortening them would hide the problem
+       this page exists to reproduce. -->
   <header class="bar">
     <a class="logo" href="index.html">Framework</a>
     <nav>
@@ -521,9 +521,9 @@
 
     <section class="summary">
       <h2>Your order</h2>
-      <p class="price">Starting at €2,069.00</p>
-      <p>Free shipping on laptop and desktop orders</p>
-      <p>Ships within 5 business days - Deliveries to Europe are currently delayed by up to 7 days due to global freight disruptions.</p>
+      <div class="price"><span>Starting at</span> <span>€2,069.00</span></div>
+      <div><span>Free shipping on laptop and desktop orders</span></div>
+      <div><span>Ships within 5 business days - Deliveries to Europe are currently delayed by up to 7 days due to global freight disruptions.</span></div>
       <p><button type="button" class="primary">Add to cart</button></p>
     </section>
   </main>

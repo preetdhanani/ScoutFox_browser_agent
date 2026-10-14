@@ -178,7 +178,8 @@ function formatEuro(cents) {
   return `${euros},${String(cents % 100).padStart(2, '0')} EUR`;
 }
 
-const pageLines = (pageText) => pageText.split('\n').map((l) => l.replace(/^#+\s*/, '').trim()).filter(Boolean);
+// A line of the page text, or a cell of a table row (the extractor writes the cells of a row as "a | b | c").
+const pageLines = (pageText) => pageText.split('\n').flatMap((l) => l.split(' | ')).map((l) => l.replace(/^#+\s*/, '').trim()).filter(Boolean);
 const trimEnd = (l) => l.replace(/[.\s]+$/, '');
 
 /**

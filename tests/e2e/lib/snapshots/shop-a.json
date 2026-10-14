@@ -32,19 +32,23 @@
   "elementInfo": {
     "1": {
       "role": "link",
-      "label": "Shop A"
+      "label": "Shop A",
+      "hrefDomain": "shop-a.test"
     },
     "2": {
       "role": "link",
-      "label": "Laptops"
+      "label": "Laptops",
+      "hrefDomain": "shop-a.test"
     },
     "3": {
       "role": "link",
-      "label": "Zubehör"
+      "label": "Zubehör",
+      "hrefDomain": "shop-a.test"
     },
     "4": {
       "role": "link",
-      "label": "Service"
+      "label": "Service",
+      "hrefDomain": "shop-a.test"
     },
     "5": {
       "role": "button",
@@ -63,5 +67,5 @@
       "label": "In den Warenkorb"
     }
   },
-  "pageText": "\n### Framework Laptop 16 DIY Edition (AMD Ryzen 7040 Series)\n\nDer modulare 16-Zoll-Laptop zum Selbstzusammenbauen, bei Shop A sofort bestellbar.\n1.389,00 EUR\ninkl. MwSt.\nVersand: 6,90 EUR\nLieferung in 3-4 Werktagen.\n\n### Ausstattung\n\nIn den Warenkorb\n\n### Technische Daten\n\nDisplay: 16 Zoll, 2560 x 1600, 165 Hz\nSpeicher: bis 96 GB DDR5\n14 Tage Rückgaberecht, 1 Jahr Garantie"
+  "pageText": "Framework Laptop 16 DIY Edition (AMD Ryzen 7040 Series)\nDer modulare 16-Zoll-Laptop zum Selbstzusammenbauen, bei Shop A sofort bestellbar.\n1.389,00 EUR\ninkl. MwSt.\nVersand: 6,90 EUR\nLieferung in 3-4 Werktagen.\nAusstattung\nAMD Ryzen 7 7840HS\nOhne Grafikmodul\nIn den Warenkorb\nTechnische Daten\nDisplay: 16 Zoll, 2560 x 1600, 165 Hz\nSpeicher: bis 96 GB DDR5\n14 Tage Rückgaberecht, 1 Jahr Garantie"
 }

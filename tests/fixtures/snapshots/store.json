@@ -48,23 +48,28 @@
   "elementInfo": {
     "1": {
       "role": "link",
-      "label": "Framework"
+      "label": "Framework",
+      "hrefDomain": "127.0.0.1"
     },
     "2": {
       "role": "link",
-      "label": "Laptops"
+      "label": "Laptops",
+      "hrefDomain": "127.0.0.1"
     },
     "3": {
       "role": "link",
-      "label": "Marketplace"
+      "label": "Marketplace",
+      "hrefDomain": "127.0.0.1"
     },
     "4": {
       "role": "link",
-      "label": "Support"
+      "label": "Support",
+      "hrefDomain": "127.0.0.1"
     },
     "5": {
       "role": "searchbox",
       "label": "Suche",
+      "formKind": "search",
       "fieldKind": "search"
     },
     "6": {
@@ -97,20 +102,24 @@
     },
     "13": {
       "role": "link",
-      "label": "Technische Daten"
+      "label": "Technische Daten",
+      "hrefDomain": "127.0.0.1"
     },
     "14": {
       "role": "link",
-      "label": "Versand & Rückgabe"
+      "label": "Versand & Rückgabe",
+      "hrefDomain": "127.0.0.1"
     },
     "15": {
       "role": "link",
-      "label": "Impressum"
+      "label": "Impressum",
+      "hrefDomain": "127.0.0.1"
     },
     "16": {
       "role": "link",
-      "label": "Datenschutz"
+      "label": "Datenschutz",
+      "hrefDomain": "127.0.0.1"
     }
   },
-  "pageText": "\n### Framework Laptop 16 DIY Edition (AMD Ryzen 7040 Series)\n\nEin modularer 16-Zoll-Laptop, den du selbst zusammenbaust und später aufrüsten kannst.\nab 1.399,00 EUR\ninkl. MwSt.\nKostenloser Versand nach Deutschland.\nLieferung in 5-7 Werktagen.\n\n### Prozessor\n\n\n### Grafik\n\nIn den Warenkorb\n\n### Technische Daten\n\nDisplay: 16 Zoll, 2560 x 1600, 165 Hz\nSpeicher: bis 96 GB DDR5\nGewicht: ab 2,1 kg\n30 Tage Rückgaberecht, 1 Jahr Garantie\nTechnische Daten"
+  "pageText": "Framework Laptop 16 DIY Edition (AMD Ryzen 7040 Series)\nEin modularer 16-Zoll-Laptop, den du selbst zusammenbaust und später aufrüsten kannst.\nab 1.399,00 EUR\ninkl. MwSt.\nKostenloser Versand nach Deutschland.\nLieferung in 5-7 Werktagen.\nProzessor\nAMD Ryzen 7 7840HS\nAMD Ryzen 9 7940HS\nGrafik\nOhne Grafikmodul\nMit Grafikmodul AMD Radeon RX 7700S\nIn den Warenkorb\nTechnische Daten\nDisplay: 16 Zoll, 2560 x 1600, 165 Hz\nSpeicher: bis 96 GB DDR5\nGewicht: ab 2,1 kg\n30 Tage Rückgaberecht, 1 Jahr Garantie\nTechnische Daten"
 }

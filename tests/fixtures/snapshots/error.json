@@ -22,7 +22,8 @@
   "elementInfo": {
     "1": {
       "role": "link",
-      "label": "PreisFuchs"
+      "label": "PreisFuchs",
+      "hrefDomain": "127.0.0.1"
     },
     "2": {
       "role": "button",
@@ -30,8 +31,9 @@
     },
     "3": {
       "role": "link",
-      "label": "Zur Startseite"
+      "label": "Zur Startseite",
+      "hrefDomain": "127.0.0.1"
     }
   },
-  "pageText": "\n### Diese Seite ist gerade nicht verfügbar\n\nFehler 503: Der Dienst ist vorübergehend überlastet. Bitte versuche es in ein paar Minuten noch einmal.\nFehler-ID: 7f3a-91c2\nNeu laden\nZur Startseite"
+  "pageText": "Diese Seite ist gerade nicht verfügbar\nFehler 503: Der Dienst ist vorübergehend überlastet. Bitte versuche es in ein paar Minuten noch einmal.\nFehler-ID: 7f3a-91c2\nNeu laden\nZur Startseite"
 }

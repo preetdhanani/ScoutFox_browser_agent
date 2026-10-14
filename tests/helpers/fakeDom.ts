@@ -36,17 +36,17 @@
  * A page (PageSpec):
  *   url, title (default: none, so 'Untitled Page' like the real one), viewportHeight (800),
  *   pageHeight (default: the lowest element, at least the viewport), scrollY (0),
- *   text     the visible text. A string is trimmed, as the real extractor trims innerText. A list is formatted like the real
- *            extractor does for a page of headings and paragraphs: only the first 90 pieces are read,
- *            { heading } becomes "\n### heading\n", pieces of 3 characters or less are dropped, the
- *            rest is joined with "\n". Both forms are cut at 4500 characters, and a text that is cut
- *            ends with the line "[page text truncated at 4500 characters]", like the real one. Three
- *            things of the real extractor are NOT modelled, because a description has no positions
- *            and no innerText: it falls back to the whole innerText when the pieces add up to under
- *            100 characters, and on a page scrolled more than 200 px with more than 30 pieces it
- *            reads the pieces near the viewport instead of the first 90, so the text there changes
- *            as the page scrolls. Here the text is the same at every scroll position. The third is
- *            the collapse of repeated text: the real extractor turns four or more units in a row that
+ *   text     the visible text (what innerText of the page's content block gives). A string is the text itself; a list is
+ *            one block per piece, each on its own line, { heading } as its plain text. Either way the
+ *            whitespace is normalised like the real extractor does (one space inside a line, no blank
+ *            lines, nothing at the ends), the text is cut at 4500 characters, and a text that is cut
+ *            ends with the line "[page text truncated at 4500 characters]", like the real one. A page
+ *            with fewer than 10 characters of text (no text at all included) gets the line
+ *            "[no readable text on this page]". Two things of the real extractor are NOT modelled,
+ *            because a description has no positions: on a page scrolled more than 200 px whose text
+ *            does not fit the cap, the real one reads only the blocks around the viewport, so the text
+ *            there changes as the page scrolls. Here the text is the same at every scroll position. The
+ *            second is the collapse of repeated text: the real extractor turns four or more units in a row that
  *            are the same after masking digits ("Batch 1 Shipped" ... "Batch 9 Shipped") into
  *            "first ... last (N similar entries)", and this fake does not. A description just gives
  *            the text the model should see, whatever it is, so describe such a page already collapsed.
@@ -54,7 +54,7 @@
  *   elements the interactive elements in document order (see ElementSpec). Only these appear in the
  *            list the model sees, numbered 1, 2, 3... from the top on every snapshot, first 120.
  * An element (ElementSpec): tag, text, type, role, placeholder, label (the aria-label), id, name,
- *   testId, value, disabled, checked, expanded, editable (contenteditable), y (top edge in px from the
+ *   testId, value, disabled, checked, expanded, editable (contenteditable), form (the kind of the form it is in), y (top edge in px from the
  *   page top, default 0), goes (the URL that a click, or typing with submit, leads to), cssPath. The role, the label, the value
  *   preview and the state come out the way the real code computes them from such an element (an <a>
  *   is a link, a search input is a searchbox, a checkbox has the value "on", a password never shows
@@ -123,6 +123,8 @@ export interface ElementSpec {
   expanded?: boolean;
   /** contenteditable: typing into it replaces its text (the snapshot does not show this attribute). */
   editable?: boolean;
+  /** The kind of the <form> the element is in ('search', 'login', 'checkout' or 'other'), as content/perception.ts computeFormKind() reads it. Left out: not in a form. */
+  form?: string;
   /** Top edge, in px from the top of the page. Default 0. */
   y?: number;
   /** The URL a click on this element (or typing with submit) opens. */
@@ -255,14 +257,15 @@ const MAX_ELEMENTS = 120;
 const PAGE_TEXT_LIMIT = 4500;
 /** The last line of a page text that was cut at the limit (content/domCompressor.js capPageText). */
 const PAGE_TEXT_MARKER = `[page text truncated at ${PAGE_TEXT_LIMIT} characters]`;
-/** How many text pieces (headings, paragraphs...) of a page the real extractor reads when the page is not scrolled far. */
-const MAX_TEXT_PIECES = 90;
+/** The page text of a page with fewer than 10 characters of visible text (src/content/pageText.ts PAGE_TEXT_EMPTY_MARKER). */
+const PAGE_TEXT_EMPTY_MARKER = '[no readable text on this page]';
+const PAGE_TEXT_MIN_CHARS = 10;
 const ELEMENT_TEXT_LIMIT = 60;
 const READ_TEXT_LIMIT = 1500;
 /** Read position of read_page_text per fake document, mirroring the real content script's module state. */
 const readStateByDoc = new Map<any, { text: string; offset: number; exhausted: boolean }>();
 const LABEL_LIMIT = 48;
-const ELEMENT_KEYS = ['tag', 'text', 'type', 'role', 'placeholder', 'label', 'id', 'name', 'testId', 'value', 'disabled', 'checked', 'expanded', 'editable', 'y', 'goes', 'cssPath'];
+const ELEMENT_KEYS = ['tag', 'text', 'type', 'role', 'placeholder', 'label', 'id', 'name', 'testId', 'value', 'disabled', 'checked', 'expanded', 'editable', 'form', 'y', 'goes', 'cssPath'];
 const PAGE_KEYS = ['url', 'title', 'text', 'elements', 'viewportHeight', 'pageHeight', 'scrollY'];
 
 /** content/domCompressor.js computeRole(): the implicit role of an element without a role attribute. */
@@ -340,19 +343,26 @@ function capPageText(text: string): string {
   return text.length > PAGE_TEXT_LIMIT ? `${text.slice(0, PAGE_TEXT_LIMIT)}\n${PAGE_TEXT_MARKER}` : text;
 }
 
-/** content/domCompressor.js extractPageText() for a page of headings and paragraphs. */
+/** src/content/pageText.ts normalizePageText(): one space inside a line, table cells (tabs) apart as " | ", no blank lines, nothing at the ends. */
+function normalizeLines(text: string): string {
+  return text
+    .split(/\r?\n|\r/)
+    .map((line) => line.split('\t').map((cell) => cell.replace(/[\s\u00a0]+/g, ' ').trim()).filter(Boolean).join(' | '))
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** content/domCompressor.js extractPageText(): the visible text, normalised, cut, and marked when it is under 10 characters. */
 function formatPageText(text: PageText | undefined): string {
-  if (text === undefined) return '';
-  // A plain page is its innerText, trimmed and then cut (extractPageText: `.trim()` then the cap).
-  if (typeof text === 'string') return capPageText(text.trim());
-  // The first 90 pieces of the page, counted before the short ones are dropped (allTextNodes.slice(0, 90)).
-  return capPageText(
-    text
-      .slice(0, MAX_TEXT_PIECES)
-      .map((piece) => (typeof piece === 'string' ? collapse(piece) : `\n### ${collapse(piece.heading)}\n`))
-      .filter((piece) => piece.length > 3)
-      .join('\n'),
-  );
+  const lines = text === undefined
+    ? ''
+    : typeof text === 'string'
+      ? normalizeLines(text)
+      // Every piece is one block of the page: a line of its own, a heading as plain text, like innerText.
+      : normalizeLines(text.map((piece) => (typeof piece === 'string' ? piece : piece.heading)).join('\n'));
+  const capped = capPageText(lines);
+  if (capped.length >= PAGE_TEXT_MIN_CHARS) return capped;
+  return capped ? `${capped}\n${PAGE_TEXT_EMPTY_MARKER}` : PAGE_TEXT_EMPTY_MARKER;
 }
 
 function pageHeightOf(page: PageSpec, viewportHeight: number): number {
@@ -362,7 +372,18 @@ function pageHeightOf(page: PageSpec, viewportHeight: number): number {
 }
 
 /** One element the way getElementSummary() describes it. `nth` is its position among elements of the same tag. */
-function summarize(el: ElementSpec, id: number, nth: number, scrollY: number, viewportHeight: number): SnapshotElement {
+/** content/perception.ts computeHrefDomain(): the host a link leads to. A link() always has an href: `goes`, or a same-page "#" when it leads nowhere. */
+function hrefDomainOf(el: ElementSpec, pageUrl: string): string | undefined {
+  if (el.tag.toLowerCase() !== 'a') return undefined;
+  try {
+    const url = new URL(el.goes ?? '#', pageUrl);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.hostname.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function summarize(el: ElementSpec, id: number, nth: number, scrollY: number, viewportHeight: number, pageUrl: string): SnapshotElement {
   const tagName = el.tag.toLowerCase();
   const type = el.type ?? '';
   const placeholder = el.placeholder ?? '';
@@ -387,6 +408,13 @@ function summarize(el: ElementSpec, id: number, nth: number, scrollY: number, vi
   if (expanded === true) extraAttrs += ' expanded';
   else if (expanded === false) extraAttrs += ' collapsed';
   if (valuePreview) extraAttrs += ` value="${valuePreview}"`;
+  // A link to another site says where it goes.
+  const hrefDomain = hrefDomainOf(el, pageUrl);
+  let pageHost = '';
+  try {
+    pageHost = new URL(pageUrl).hostname.toLowerCase();
+  } catch (_) {}
+  if (hrefDomain && pageHost && hrefDomain !== pageHost) extraAttrs += ` domain="${hrefDomain}"`;
   if (isPasswordLike) extraAttrs += ' (user only)';
 
   const labelText = text || ariaLabel || placeholder || 'element';
@@ -440,7 +468,7 @@ function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElem
     const tag = el.tag.toLowerCase();
     const nth = (seen.get(tag) ?? 0) + 1;
     seen.set(tag, nth);
-    return summarize(el, i + 1, nth, scrollY, viewportHeight);
+    return summarize(el, i + 1, nth, scrollY, viewportHeight, page.url);
   });
   const refs = summaries.map((e) => e.id);
   const shownRefs = refs.slice();
@@ -454,9 +482,9 @@ function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElem
     elementInfo[s.id] = {
       role: s.role,
       label: s.text,
-      formKind: undefined,
+      formKind: el?.form,
       fieldKind: el ? computeFieldKind(el) : undefined,
-      hrefDomain: undefined,
+      hrefDomain: el ? hrefDomainOf(el, page.url) : undefined,
     };
   }
   return {

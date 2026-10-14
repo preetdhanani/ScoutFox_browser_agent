@@ -38,20 +38,24 @@
   "elementInfo": {
     "1": {
       "role": "link",
-      "label": "PreisFuchs"
+      "label": "PreisFuchs",
+      "hrefDomain": "127.0.0.1"
     },
     "2": {
       "role": "searchbox",
       "label": "Suche",
+      "formKind": "search",
       "fieldKind": "search"
     },
     "3": {
       "role": "button",
-      "label": "Suchen"
+      "label": "Suchen",
+      "formKind": "search"
     },
     "4": {
       "role": "link",
-      "label": "Zurück zu den Suchergebnissen"
+      "label": "Zurück zu den Suchergebnissen",
+      "hrefDomain": "127.0.0.1"
     },
     "5": {
       "role": "button",
@@ -68,20 +72,24 @@
     },
     "8": {
       "role": "link",
-      "label": "Zum Shop"
+      "label": "Zum Shop",
+      "hrefDomain": "127.0.0.1"
     },
     "9": {
       "role": "link",
-      "label": "Zum Shop"
+      "label": "Zum Shop",
+      "hrefDomain": "127.0.0.1"
     },
     "10": {
       "role": "link",
-      "label": "Zum Shop"
+      "label": "Zum Shop",
+      "hrefDomain": "127.0.0.1"
     },
     "11": {
       "role": "link",
-      "label": "Zum Shop"
+      "label": "Zum Shop",
+      "hrefDomain": "127.0.0.1"
     }
   },
-  "pageText": "Zurück zu den Suchergebnissen\n\n### Framework Laptop 16 DIY Edition (AMD Ryzen 7040)\n\n4 Angebote, Preise inkl. MwSt.\nShop\nPreis\nVersand\nGesamt\nLieferung\nNotebookWelt\n1.379,00 EUR\n9,90 EUR\n1.388,90 EUR\n1-2 Wochen\nZum Shop\nFramework Store (Hersteller)\n1.399,00 EUR\nversandkostenfrei\n1.399,00 EUR\n5-7 Werktage\nZum Shop\nTechHaus24\n1.449,00 EUR\n4,99 EUR\n1.453,99 EUR\n2-3 Werktage\nZum Shop\nMegaElektro\n1.529,90 EUR\nversandkostenfrei\n1.529,90 EUR\nsofort lieferbar\nZum Shop"
+  "pageText": "Zurück zu den Suchergebnissen\nFramework Laptop 16 DIY Edition (AMD Ryzen 7040)\n4 Angebote, Preise inkl. MwSt.\nSortieren: Preis aufsteigend\nNur versandkostenfrei\nPreisalarm setzen\nShop | Preis | Versand | Gesamt | Lieferung\nNotebookWelt | 1.379,00 EUR | 9,90 EUR | 1.388,90 EUR | 1-2 Wochen | Zum Shop\nFramework Store (Hersteller) | 1.399,00 EUR | versandkostenfrei | 1.399,00 EUR | 5-7 Werktage | Zum Shop\nTechHaus24 | 1.449,00 EUR | 4,99 EUR | 1.453,99 EUR | 2-3 Werktage | Zum Shop\nMegaElektro | 1.529,90 EUR | versandkostenfrei | 1.529,90 EUR | sofort lieferbar | Zum Shop"
 }

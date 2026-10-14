@@ -76,6 +76,7 @@ const BLIND = {
 // whatever the page text and the element list show.
 const EXPECTED = {
   'store-price': { none: true, noText: false, noElements: true, both: false },
+  'span-price': { none: true, noText: false, noElements: true, both: false },
   'cheapest-offer': { none: true, noText: false, noElements: false, both: false },
   'bot-check': { none: true, noText: true, noElements: true, both: true }
 };
@@ -87,6 +88,7 @@ const CLICK_LEADS_TO = { search: { 8: 'compare' } };
 // The steps (the model's replies) each smoke task takes when the page is fully visible.
 const EXPECTED_STEPS = {
   'store-price': ['record_finding'],
+  'span-price': ['record_finding'],
   'cheapest-offer': ['click', 'record_finding'],
   'bot-check': []
 };
@@ -433,7 +435,7 @@ export async function runMockSelfTest() {
     check('the plan message is read back: task, tab title and tab URL', parsedPlanMessage.task === 'the task' && parsedPlanMessage.tabTitle === 'A title' && parsedPlanMessage.tabUrl === 'http://127.0.0.1:8765/x.html', JSON.stringify(parsedPlanMessage));
 
     // --- the policy message is read back as the engine wrote it -------------------------------
-    for (const name of ['store', 'search', 'compare', 'challenge', 'error']) {
+    for (const name of ['store', 'store-spans', 'search', 'compare', 'challenge', 'error']) {
       const snapshot = snapshotOf(name);
       const req = policyRequest({ model: 'm', task: 'the goal', plan: storePlan, site: { ...storePlan.sites[0], goal: 'the site goal' }, snapshot });
       const parsed = parsePolicyMessage(req.messages[1].content);

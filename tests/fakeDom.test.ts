@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import { fakeChrome } from './helpers/fakeChrome.ts';
 import type { FakeChrome } from './helpers/fakeChrome.ts';
 import { button, fakeDom, input, link, pageSnapshot } from './helpers/fakeDom.ts';
-import type { DomSnapshot, ElementSpec, FakeDom, PageSpec } from './helpers/fakeDom.ts';
+import type { DomSnapshot, ElementSpec, FakeDom, PageSpec, PageText } from './helpers/fakeDom.ts';
 import { DOMCompressor } from '../src/content/domCompressor.ts';
 import { ActionExecutor } from '../src/content/actionExecutor.ts';
 import { withGlobals } from './helpers/contentGlobals.ts';
@@ -40,6 +40,7 @@ interface FakeNode {
   parentElement: unknown;
   previousElementSibling: FakeNode | null;
   getAttribute(name: string): string | null;
+  closest(selector: string): unknown;
   setAttribute(): void;
   checkVisibility(): boolean;
   getBoundingClientRect(): { width: number; height: number; top: number; bottom: number; left: number; right: number };
@@ -54,19 +55,12 @@ function realSnapshot(page: PageSpec, options: { scrollY?: number; maxElements?:
   assert.notEqual(page.pageHeight, undefined, 'give the page a pageHeight');
   const scrollY = options.scrollY ?? 0;
   const text = page.text;
-  const textNodes = Array.isArray(text)
-    ? text.map((piece) => ({
-        tagName: typeof piece === 'string' ? 'P' : 'H2',
-        textContent: typeof piece === 'string' ? piece : piece.heading,
-        getBoundingClientRect: () => ({ top: 0, bottom: 20 }),
-      }))
-    : [];
   const body = {
     nodeType: 1,
-    // The real extractor reads a plain string page from body.innerText.
-    innerText: typeof text === 'string' ? text : '',
+    // The page has no content block, so the real extractor reads the innerText of <body>: a list
+    // page is one block per piece, each on its own line, as a browser renders it.
+    innerText: typeof text === 'string' ? text : Array.isArray(text) ? text.map((piece) => (typeof piece === 'string' ? piece : piece.heading)).join('\n') : '',
     textContent: '',
-    querySelectorAll: () => textNodes,
   };
 
   const nodes: FakeNode[] = [];
@@ -87,6 +81,8 @@ function realSnapshot(page: PageSpec, options: { scrollY?: number; maxElements?:
     nodes.push({
       tagName: spec.tag.toUpperCase(),
       nodeType: 1,
+      // A link() always has an href, like the <a href> it stands for (a same-page "#" when it leads nowhere).
+      ...(tag === 'a' ? { href: new URL(spec.goes ?? '#', page.url).href } : {}),
       id: spec.id ?? '',
       innerText: spec.text ?? '',
       textContent: spec.text ?? '',
@@ -97,6 +93,9 @@ function realSnapshot(page: PageSpec, options: { scrollY?: number; maxElements?:
       parentElement: body,
       previousElementSibling: nodes.at(-1) ?? null,
       getAttribute: (name) => attributes[name] ?? null,
+      // The form the element is in: its kind as the aria-label, which computeFormKind() reads.
+      closest: (selector: string) =>
+        selector === 'form' && spec.form ? { id: '', className: '', getAttribute: (name: string) => (name === 'aria-label' ? spec.form : null) } : null,
       setAttribute: () => {},
       checkVisibility: () => true,
       getBoundingClientRect: () => ({ width: 50, height: 20, top, bottom: top + 20, left: 10, right: 60 }),
@@ -240,29 +239,29 @@ test('a page whose text is one string is trimmed like the real extractor trims i
   assert.equal(paddedFake.pageText, `${words.slice(0, 4500)}\n[page text truncated at 4500 characters]`);
 });
 
-test('a page text that is a list is cut at its first 90 pieces before the short ones are dropped, like the real extractor', () => {
+test('a page text that is a list is read whole, one line per piece, short pieces and headings included, like the real extractor', () => {
   const long: PageSpec = {
     url: 'https://long.test/',
     pageHeight: 800,
     // Letters, not digits, tell the pieces apart: the real extractor collapses four or more in a row that
     // differ only by a number ("paragraph number 0" ... "paragraph number 89") into one line.
-    text: Array.from({ length: 120 }, (_, i) => `paragraph number ${letters(i)}`),
+    text: [{ heading: 'All the paragraphs' }, '€5', ...Array.from({ length: 120 }, (_, i) => `paragraph number ${letters(i)}`)],
   };
   const fake = pageSnapshot(long);
   assert.deepStrictEqual(fake, realSnapshot(long));
-  assert.match(fake.pageText, new RegExp(`paragraph number ${letters(89)}$`));
-  assert.doesNotMatch(fake.pageText, new RegExp(`paragraph number ${letters(90)}`));
+  // No 90-piece cap and no minimum length: every piece is read, the heading as its plain text.
+  assert.match(fake.pageText, /^All the paragraphs\n€5\nparagraph number q\n/);
+  assert.match(fake.pageText, new RegExp(`paragraph number ${letters(119)}$`));
+  assert.equal(fake.pageText.split('\n').length, 122);
+});
 
-  // The cap counts pieces, not survivors: 45 pieces that are too short to keep use up half of it.
-  const padded: PageSpec = {
-    url: 'https://padded.test/',
-    pageHeight: 800,
-    text: [...Array.from({ length: 45 }, () => 'ab'), ...Array.from({ length: 75 }, (_, i) => `paragraph ${letters(i)}`)],
-  };
-  const paddedFake = pageSnapshot(padded);
-  assert.deepStrictEqual(paddedFake, realSnapshot(padded));
-  assert.match(paddedFake.pageText, new RegExp(`paragraph ${letters(44)}$`));
-  assert.equal(paddedFake.pageText.split('\n').length, 45);
+test('a page with fewer than 10 characters of text says so, like the real extractor', () => {
+  for (const text of [undefined, '', '   ', 'Error 42', ['ab', 'c']] as Array<PageText | undefined>) {
+    const page: PageSpec = { url: 'https://empty.test/', pageHeight: 800, ...(text === undefined ? {} : { text }) };
+    const fake = pageSnapshot(page);
+    assert.deepStrictEqual(fake, realSnapshot(page), JSON.stringify(text));
+    assert.match(fake.pageText, /\[no readable text on this page\]$/);
+  }
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -292,7 +291,11 @@ const STORE: PageSpec = {
     'Kostenloser Versand nach Deutschland.',
     'Lieferung in 5-7 Werktagen.',
     { heading: 'Prozessor' },
+    'AMD Ryzen 7 7840HS',
+    'AMD Ryzen 9 7940HS',
     { heading: 'Grafik' },
+    'Ohne Grafikmodul',
+    'Mit Grafikmodul AMD Radeon RX 7700S',
     'In den Warenkorb',
     { heading: 'Technische Daten' },
     'Display: 16 Zoll, 2560 x 1600, 165 Hz',
@@ -306,7 +309,7 @@ const STORE: PageSpec = {
     link('Laptops'),
     link('Marketplace'),
     link('Support'),
-    input('search', { placeholder: 'Suche', label: 'Suche' }),
+    input('search', { placeholder: 'Suche', label: 'Suche', form: 'search' }),
     button('Warenkorb (0)', { type: 'button' }),
     button('Land: Deutschland', { type: 'button' }),
     button('AMD Ryzen 7 7840HS', { type: 'button' }),
@@ -329,6 +332,7 @@ const CHALLENGE: PageSpec = {
   text: [
     { heading: 'shop.example' },
     'Verifying you are human. This may take a few seconds.',
+    'Verify you are human',
     'shop.example needs to review the security of your connection before proceeding.',
     'Ray ID: 8c1f2a3b4d5e6f70',
     'Performance & security by Cloudflare',
@@ -352,16 +356,17 @@ const SEARCH: PageSpec = {
   text: [
     { heading: 'Suchergebnisse für "framework laptop 16"' },
     '6 Treffer',
-    'Anzeige Gaming-Laptops bis zu 50% reduziert',
+    'Sortieren: Relevanz',
+    'Nur Laptops',
     'Anzeige',
     'Gaming-Laptops bis zu 50% reduziert',
-    ...PRODUCTS.flatMap(([name, detail]) => [`${name} ${detail}`, name, detail]),
+    ...PRODUCTS.flatMap(([name, detail]) => [name, detail]),
     'Weiter',
   ],
   elements: [
     link('PreisFuchs'),
-    input('search', { label: 'Suche', value: 'framework laptop 16' }),
-    button('Suchen', { type: 'submit' }),
+    input('search', { label: 'Suche', value: 'framework laptop 16', form: 'search' }),
+    button('Suchen', { type: 'submit', form: 'search' }),
     button('Sortieren: Relevanz', { type: 'button' }),
     input('checkbox', { label: 'Nur Laptops' }),
     link('Gaming-Laptops bis zu 50% reduziert'),
@@ -384,14 +389,14 @@ for (const [name, page] of [['store', STORE], ['challenge', CHALLENGE], ['search
 // The description
 // ---------------------------------------------------------------------------------------------
 
-test('defaults: no title is "Untitled Page", the page is as tall as its lowest element, and an empty page has no text or elements', () => {
+test('defaults: no title is "Untitled Page", the page is as tall as its lowest element, and an empty page has no elements and says it has no text', () => {
   const empty = pageSnapshot({ url: 'https://empty.test' });
   assert.equal(empty.title, 'Untitled Page');
   assert.equal(empty.url, 'https://empty.test/', 'the URL is shown the way Chrome shows it');
   assert.deepEqual(empty.scrollState, { scrollY: 0, pageHeight: 800, viewportHeight: 800 });
   assert.equal(empty.elementCount, 0);
   assert.equal(empty.elementsText, '');
-  assert.equal(empty.pageText, '');
+  assert.equal(empty.pageText, '[no readable text on this page]');
 
   const tall = pageSnapshot({ url: 'https://tall.test/', elements: [link('Bottom', undefined, { y: 1980 })] });
   assert.equal(tall.scrollState.pageHeight, 2000);

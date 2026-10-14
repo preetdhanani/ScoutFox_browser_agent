@@ -25,8 +25,9 @@
     },
     "2": {
       "role": "link",
-      "label": "Cloudflare"
+      "label": "Cloudflare",
+      "hrefDomain": "127.0.0.1"
     }
   },
-  "pageText": "\n### shop.example\n\nVerifying you are human. This may take a few seconds.\nshop.example needs to review the security of your connection before proceeding.\nRay ID: 8c1f2a3b4d5e6f70\nPerformance & security by Cloudflare"
+  "pageText": "shop.example\nVerifying you are human. This may take a few seconds.\nVerify you are human\nshop.example needs to review the security of your connection before proceeding.\nRay ID: 8c1f2a3b4d5e6f70\nPerformance & security by Cloudflare"
 }

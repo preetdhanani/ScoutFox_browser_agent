@@ -106,7 +106,7 @@ const LOOP_LIMIT = 15;
 // How long a run may stand paused with no hold the harness can answer, before it is stopped.
 const PAUSE_GRACE_MS = 3000;
 
-const SNAPSHOT_PAGES = ['store', 'search', 'compare', 'challenge', 'error'];
+const SNAPSHOT_PAGES = ['store', 'store-spans', 'search', 'compare', 'challenge', 'error'];
 // `page` is the address the task starts on, query included; `name` is the file it is served from.
 const HOST_PAGES = Object.values(TASKS).filter((t) => t.host).map((t) => ({ name: t.page.replace(/[?#].*$/, '').replace(/\.html$/, ''), page: t.page, host: t.host }))
   .filter((p, i, all) => all.findIndex((q) => q.name === p.name) === i);
