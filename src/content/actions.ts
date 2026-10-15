@@ -4,6 +4,7 @@
  */
 
 import { clipWithNote } from '../shared/clip.ts';
+import { formatFindMessage } from './domCompressor.ts';
 import { pageTextPart } from './pageText.ts';
 
 export interface ActionExecutionContext {
@@ -462,6 +463,21 @@ export async function execute(
         message: `Extracted text snippet (${part.note}):\n"""\n${part.text}\n"""`,
         result: { pageText: part.text, note: part.note },
       };
+    }
+    case 'find_element': {
+      // The lookup verb for elements past the listed window. The compressor scans ALL interactive
+      // candidates, scores them against the query, and hands the best ones ids in its own
+      // elementMap, so the ids the reply lists are the ids click and type accept.
+      const query = typeof actionPayload.query === 'string' ? actionPayload.query.trim() : '';
+      if (!query) {
+        return { success: false, error: 'find_element needs a query: the plain words to look for, such as "next page".' };
+      }
+      const compressor = win && (win as any).domCompressor ? (win as any).domCompressor : null;
+      if (!compressor || typeof compressor.findElements !== 'function') {
+        return { success: false, error: 'find_element is not available on this page (no element snapshot engine running).' };
+      }
+      const found = compressor.findElements(query);
+      return { success: true, message: formatFindMessage(found), result: found };
     }
     case 'browser_batch':
       return context.doBrowserBatch(steps, stopOnError);

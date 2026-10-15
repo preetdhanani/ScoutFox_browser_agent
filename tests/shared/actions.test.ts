@@ -34,6 +34,7 @@ const EXAMPLES: Record<string, Record<string, unknown>> = {
   go_back: { action: 'go_back' },
   go_forward: { action: 'go_forward' },
   read_page_text: { action: 'read_page_text' },
+  find_element: { action: 'find_element', query: 'next page button' },
   execute_js: { action: 'execute_js', code: 'return document.title' },
   read_network_requests: { action: 'read_network_requests', filter: { status: 'error', since: 'last_action' }, includeBody: true, limit: 5 },
   browser_batch: {

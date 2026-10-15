@@ -139,6 +139,7 @@ go_back {} / go_forward {} - browser history back / forward
 press_key {key} - Enter, Escape, Tab, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, PageDown, PageUp, Home, End, Backspace, Delete
 wait {amount} - 1 to 5, only while the page is still loading
 read_page_text {} - read more text of this page
+find_element {query} - search the whole page for elements by plain words when the list has no match; the reply lists matches with ids you can click or type
 ask_user {question} - only if you cannot continue without the user
 ${stateActions}${largeActions}Rules:
 1. Work only on the CURRENT SITE and its goal. Code moves you to the next site when it is done.
@@ -293,6 +294,20 @@ export function renderMemorySections(params: Pick<PolicyUserMessageParams, 'reca
   };
 }
 
+/**
+ * The shown and total element counts of an ELEMENTS block, read from the block itself: one line per
+ * listed element ("[N] ..."), and, when the list cap cut elements, the marker line that names the
+ * omitted count. The wall case (a cap cut) is what the count line exists for, so the prompt can
+ * point at find_element without a new parameter threading through every caller.
+ */
+export function elementWindowCounts(elementsText: string): { shown: number; total: number } {
+  const lines = String(elementsText ?? '').split('\n');
+  const shown = lines.filter((line) => /^\[\d+\] /.test(line)).length;
+  const marker = lines.find((line) => /^\[\+\d+ more interactive elements not listed/.test(line));
+  const omitted = marker ? Number((marker.match(/^\[\+(\d+) more/) ?? [])[1] ?? 0) : 0;
+  return { shown, total: shown + omitted };
+}
+
 export function buildPolicyUserMessage(params: PolicyUserMessageParams): string {
   const parts: string[] = [];
   const memory = renderMemorySections(params);
@@ -364,7 +379,13 @@ export function buildPolicyUserMessage(params: PolicyUserMessageParams): string 
 
   const pageText = clipWithNote(params.pageText, params.pageTextBudget ?? PAGE_TEXT_BUDGET.small, { what: 'page text', hint: PAGE_TEXT_MORE_HINT });
   parts.push(`PAGE TEXT:\n"""\n${pageText}\n"""`);
-  parts.push(`ELEMENTS:\n${params.elementsText}`);
+  // When the list cap cut elements, the block opens with the count line that names the wall and the
+  // way past it, so the model does not take the listed window for the whole page.
+  const counts = elementWindowCounts(params.elementsText);
+  const elementsHead = counts.total > counts.shown
+    ? `ELEMENTS:\n${counts.shown} of ${counts.total} shown - use find_element {query} to search the elements past this list\n`
+    : 'ELEMENTS:\n';
+  parts.push(`${elementsHead}${params.elementsText}`);
 
   if (params.correction) {
     parts.push(`CORRECTION: ${params.correction}`);

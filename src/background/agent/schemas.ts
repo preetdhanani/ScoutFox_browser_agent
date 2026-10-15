@@ -344,7 +344,7 @@ export function buildPolicySchema(options: PolicySchemaOptions): JsonSchema {
   }
 
   // mode === 'browse'
-  const baseVerbs = ['click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward', 'wait', 'read_page_text', 'ask_user'];
+  const baseVerbs = ['click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward', 'read_page_text', 'find_element', 'wait', 'ask_user'];
   if (tier === 'large') {
     if (allowExecuteJs) baseVerbs.push('execute_js');
     baseVerbs.push('read_network_requests', 'browser_batch', 'open_window');

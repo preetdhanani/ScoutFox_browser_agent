@@ -76,6 +76,9 @@
  *   go_back, go_forward   walk the pages this fake opened on that tab
  *   read_page_text, extract_page_text   the whole text (no cap) in numbered parts, like the real one;
  *                with element_id that element's text, cut at 2000 characters with a note
+ *   find_element the real compressor's matcher over the described elements: ids continue after the
+ *                window's ids and survive the next snapshot, and a zero match answers the real
+ *                no-match message with the nearest labels
  *   press_key, wait      answer the real message (a missing key is Enter, any other value is quoted as it is).
  *                wait does not really wait
  *   Anything else with a real content-script meaning (browser_batch, or typing into a <select>) is a
@@ -102,7 +105,15 @@
 // The cut, the note and the paging are the real content script's own pure functions, so the fake cannot drift from them.
 import { clipWithNote } from '../../src/shared/clip.ts';
 import { capPageText as realCapPageText, pageTextPart } from '../../src/content/pageText.ts';
-import { omittedElementsNote } from '../../src/content/domCompressor.ts';
+import {
+  omittedElementsNote,
+  rankFindCandidates,
+  nearestFindLabels,
+  formatFindMessage,
+  FIND_MAX_MATCHES,
+  type FindCandidate,
+  type FindFields
+} from '../../src/content/domCompressor.ts';
 
 // ---------------------------------------------------------------------------------------------
 // Types
@@ -318,6 +329,29 @@ function implicitRole(tag: string, type: string): string {
   return TAG_ROLES[tag] || tag;
 }
 
+/** The matcher fields of a described element, the way the real compressor reads them off the DOM node. */
+function findFieldsOf(el: ElementSpec, pageUrl: string): FindFields {
+  const tag = el.tag.toLowerCase();
+  let hrefPath = '';
+  if (tag === 'a') {
+    try {
+      hrefPath = new URL(el.goes ?? '#', pageUrl).pathname;
+    } catch {
+      hrefPath = '';
+    }
+  }
+  return {
+    text: el.text ?? '',
+    ariaLabel: el.label ?? '',
+    placeholder: el.placeholder ?? '',
+    name: el.name ?? '',
+    title: '',
+    alt: '',
+    hrefPath,
+    role: el.role || implicitRole(tag, el.type ?? ''),
+  };
+}
+
 function isCheckable(tag: string, type: string): boolean {
   return tag === 'input' && (type === 'checkbox' || type === 'radio');
 }
@@ -510,6 +544,31 @@ function computeFieldKind(el: ElementSpec): string | undefined {
  * The element window is viewport-first, like the real compressor: the in-viewport elements in
  * document order, then the off-screen ones by distance to the viewport, cut at the cap.
  */
+/** The risk-gate and perception facts of one element, the way build() and the find_element case both compute them. */
+function elementInfoOf(el: ElementSpec, s: SnapshotElement, pageUrl: string): Record<string, any> {
+  return {
+    role: s.role,
+    label: s.text,
+    formKind: el.form,
+    fieldKind: computeFieldKind(el),
+    hrefDomain: hrefDomainOf(el, pageUrl),
+    ...gateFacts(el, s.text),
+  };
+}
+
+/** The nth-of-type of every element among its same-tag siblings in document order, as cssPath needs it. */
+function nthOfElements(elements: ElementSpec[]): Map<ElementSpec, number> {
+  const nthSeen = new Map<string, number>();
+  const nthOf = new Map<ElementSpec, number>();
+  for (const el of elements) {
+    const tag = el.tag.toLowerCase();
+    const nth = (nthSeen.get(tag) ?? 0) + 1;
+    nthSeen.set(tag, nth);
+    nthOf.set(el, nth);
+  }
+  return nthOf;
+}
+
 function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElements: number): { snapshot: DomSnapshot; listed: ElementSpec[] } {
   const viewportHeight = page.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT;
   const inside: ElementSpec[] = [];
@@ -527,14 +586,7 @@ function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElem
   const omittedCount = elements.length - listed.length;
   // The nth-of-type of a cssPath counts same-tag siblings in DOM order, whatever order the window
   // lists them in, so it is computed before the window is cut and reordered.
-  const nthOf = new Map<ElementSpec, number>();
-  const nthSeen = new Map<string, number>();
-  for (const el of elements) {
-    const tag = el.tag.toLowerCase();
-    const nth = (nthSeen.get(tag) ?? 0) + 1;
-    nthSeen.set(tag, nth);
-    nthOf.set(el, nth);
-  }
+  const nthOf = nthOfElements(elements);
   const summaries = listed.map((el, i) => summarize(el, i + 1, nthOf.get(el) ?? 1, scrollY, viewportHeight, page.url));
   const refs = summaries.map((e) => e.id);
   const shownRefs = refs.slice();
@@ -545,14 +597,7 @@ function build(page: PageSpec, elements: ElementSpec[], scrollY: number, maxElem
   const elementInfo: Record<string, any> = {};
   for (const s of summaries) {
     const el = listed[s.id - 1];
-    elementInfo[s.id] = {
-      role: s.role,
-      label: s.text,
-      formKind: el?.form,
-      fieldKind: el ? computeFieldKind(el) : undefined,
-      hrefDomain: el ? hrefDomainOf(el, page.url) : undefined,
-      ...(el ? gateFacts(el, s.text) : {}),
-    };
+    elementInfo[s.id] = el ? elementInfoOf(el, s, page.url) : { role: s.role, label: s.text };
   }
   const elementLines = summaries.map((e) => e.formatted);
   const elementsText = omittedCount > 0
@@ -605,6 +650,8 @@ interface Doc {
   scrollY: number;
   /** The elements of the last snapshot: the ids the model can act on. */
   listed: ElementSpec[];
+  /** The ids find_element handed out, kept across snapshots like the real compressor's foundElements. */
+  found: Array<{ el: ElementSpec; id: number }>;
 }
 
 interface TabState {
@@ -661,7 +708,7 @@ export function fakeDom(options: FakeDomOptions): FakeDom {
       throw violation(`fakeDom: tab ${tabId} is at ${url}, but no page for that URL was declared - add it to fakeDom({ pages: [{ url: '${url}', ... }] })`);
     }
     const elements = (page.elements ?? []).map((el) => ({ ...el }));
-    state.doc = { url, page, elements, scrollY: page.scrollY ?? 0, listed: [] };
+    state.doc = { url, page, elements, scrollY: page.scrollY ?? 0, listed: [], found: [] };
     return state.doc;
   };
 
@@ -683,7 +730,11 @@ export function fakeDom(options: FakeDomOptions): FakeDom {
     }, delayMs);
   };
 
-  const element = (doc: Doc, id: unknown): ElementSpec | undefined => (typeof id === 'number' ? doc.listed[id - 1] : undefined);
+  const element = (doc: Doc, id: unknown): ElementSpec | undefined => {
+    if (typeof id !== 'number') return undefined;
+    if (id >= 1 && id <= doc.listed.length) return doc.listed[id - 1];
+    return doc.found.find((f) => f.id === id)?.el;
+  };
   const gone = (id: unknown): ActionResult => ({ success: false, error: `Element [${String(id)}] no longer resolvable in DOM.` });
 
   const execute = (host: DomHost, tabId: number, doc: Doc, payload: Record<string, unknown>): ActionResult => {
@@ -788,6 +839,42 @@ export function fakeDom(options: FakeDomOptions): FakeDom {
           result: { pageText: part.text, note: part.note },
         };
       }
+      case 'find_element': {
+        // Mirrors the real compressor's findElements(): all candidates scored (not only the listed
+        // window), ids continuing after the window ids and the earlier find ids, in the same
+        // doc-scoped id space, so click and type resolve them.
+        const query = typeof payload.query === 'string' ? payload.query.trim() : '';
+        if (!query) {
+          return { success: false, error: 'find_element needs a query: the plain words to look for, such as "next page".' };
+        }
+        const viewportHeight = doc.page.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT;
+        const records: Array<FindCandidate<ElementSpec>> = doc.elements.map((el) => {
+          const top = (el.y ?? 0) - doc.scrollY;
+          const inViewport = top + ELEMENT_HEIGHT > 0 && top < viewportHeight;
+          const distance = top + ELEMENT_HEIGHT <= 0 ? -(top + ELEMENT_HEIGHT) : top - viewportHeight;
+          return { item: el, fields: findFieldsOf(el, doc.page.url), inViewport, distance };
+        });
+        const ranked = rankFindCandidates(records, query);
+        const foundCount = ranked.length;
+        const top = ranked.slice(0, FIND_MAX_MATCHES);
+        const nthOf = nthOfElements(doc.elements);
+        let nextId = Math.max(doc.listed.length, ...doc.found.map((f) => f.id), 0);
+        const matches = top.map(({ item, score }) => {
+          nextId++;
+          const s = summarize(item, nextId, nthOf.get(item) ?? 1, doc.scrollY, viewportHeight, doc.page.url);
+          doc.found.push({ el: item, id: nextId });
+          return { id: nextId, line: s.formatted, score };
+        });
+        const result: Record<string, unknown> = {
+          query,
+          foundCount,
+          shownCount: matches.length,
+          tied: matches.length >= 2 && matches[0]!.score === matches[1]!.score,
+          matches,
+        };
+        if (foundCount === 0) result.nearestLabels = nearestFindLabels(records, query);
+        return { success: true, message: formatFindMessage(result as never), result };
+      }
       case 'browser_batch':
         throw violation('fakeDom: browser_batch is not simulated - script the EXECUTE_ACTION answer with fc.dom.on(tabId, \'EXECUTE_ACTION\', ...) for this test');
       default:
@@ -804,6 +891,17 @@ export function fakeDom(options: FakeDomOptions): FakeDom {
           const doc = docOf(host, tabId);
           const maxElements = typeof payload.maxElements === 'number' ? payload.maxElements : MAX_ELEMENTS;
           const { snapshot, listed } = build(doc.page, doc.elements, doc.scrollY, maxElements || MAX_ELEMENTS);
+          // The found ids of earlier find_element calls survive the snapshot like the real
+          // compressor's: a window id wins over a found id, and the survivors join the validation
+          // set (refs) with fresh elementInfo, while shownRefs keeps only the rendered window.
+          doc.found = doc.found.filter((f) => f.id > listed.length);
+          const viewportHeight = doc.page.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT;
+          const nthOf = nthOfElements(doc.elements);
+          for (const f of doc.found) {
+            const s = summarize(f.el, f.id, nthOf.get(f.el) ?? 1, doc.scrollY, viewportHeight, doc.page.url);
+            snapshot.refs.push(f.id);
+            snapshot.elementInfo[f.id] = elementInfoOf(f.el, s, doc.page.url);
+          }
           doc.listed = listed;
           reads.push({ tabId, snapshot: structuredClone(snapshot) });
           return { success: true, data: snapshot, docId: 'fake-doc-id' };

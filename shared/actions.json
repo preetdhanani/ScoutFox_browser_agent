@@ -124,6 +124,18 @@
       "aliases": ["extract_text", "read_text", "extract_page_text"]
     },
     {
+      "name": "find_element",
+      "category": "page",
+      "tiers": ["small", "large"],
+      "modes": ["browse"],
+      "prompt": "find_element {query} - search the whole page for elements by plain words, such as \"next page\" or \"size 42\", when the element list has no match; the reply lists up to 8 matches with ids that click and type accept",
+      "schema": {
+        "required": ["query"],
+        "properties": { "query": { "type": "string" } }
+      },
+      "aliases": ["find", "find_control", "lookup_element"]
+    },
+    {
       "name": "execute_js",
       "category": "page",
       "tiers": ["large"],

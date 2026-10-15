@@ -129,7 +129,7 @@
       "input": "{\"action\":\"fly\"}",
       "expect": {
         "kind": "unknown_action",
-        "error": "Unknown action \"fly\". Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, execute_js, read_network_requests, browser_batch, wait, finish, ask_user, open_window."
+        "error": "Unknown action \"fly\". Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, find_element, execute_js, read_network_requests, browser_batch, wait, finish, ask_user, open_window."
       }
     },
     {
@@ -221,7 +221,7 @@
       "input": "{\"finish\": \"done\"}",
       "expect": {
         "kind": "not_an_action",
-        "error": "The reply has no \"action\". Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, execute_js, read_network_requests, browser_batch, wait, finish, ask_user, open_window."
+        "error": "The reply has no \"action\". Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, find_element, execute_js, read_network_requests, browser_batch, wait, finish, ask_user, open_window."
       }
     },
     {
@@ -1820,7 +1820,7 @@
       "input": "{\"action\":\"execute_js\",\"code\":\"return 1\"}",
       "expect": {
         "kind": "unavailable_action",
-        "error": "Action \"execute_js\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, wait, ask_user."
+        "error": "Action \"execute_js\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, find_element, wait, ask_user."
       }
     },
     {
@@ -1832,7 +1832,7 @@
       "input": "{\"action\":\"read_network_requests\",\"limit\":5}",
       "expect": {
         "kind": "unavailable_action",
-        "error": "Action \"read_network_requests\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, wait, ask_user."
+        "error": "Action \"read_network_requests\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, find_element, wait, ask_user."
       }
     },
     {
@@ -1844,7 +1844,7 @@
       "input": "{\"action\":\"browser_batch\",\"steps\":[{\"action\":\"click\",\"element_id\":1}]}",
       "expect": {
         "kind": "unavailable_action",
-        "error": "Action \"browser_batch\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, wait, ask_user."
+        "error": "Action \"browser_batch\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, find_element, wait, ask_user."
       }
     },
     {
@@ -1856,7 +1856,7 @@
       "input": "{\"action\":\"open_window\",\"url\":\"https://example.com\"}",
       "expect": {
         "kind": "unavailable_action",
-        "error": "Action \"open_window\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, wait, ask_user."
+        "error": "Action \"open_window\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, find_element, wait, ask_user."
       }
     },
     {
@@ -1868,7 +1868,7 @@
       "input": "{\"action\":\"run_js\",\"code\":\"return 1\"}",
       "expect": {
         "kind": "unavailable_action",
-        "error": "Action \"execute_js\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, wait, ask_user."
+        "error": "Action \"execute_js\" is not available here. Valid actions are: click, type, scroll, press_key, navigate, go_back, go_forward, read_page_text, find_element, wait, ask_user."
       }
     },
     {

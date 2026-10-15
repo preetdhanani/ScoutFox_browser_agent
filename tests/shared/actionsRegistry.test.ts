@@ -116,10 +116,10 @@ test('the tiers and policy modes name real verbs and say what the design says', 
   // docs/langgraph-design.md, "Policy modes" and "Tiers" (only the verbs that exist in the registry today).
   const power = ['execute_js', 'read_network_requests', 'browser_batch', 'open_window'];
   assert.deepEqual(verbsFor('browse', 'small'),
-    ['click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward', 'read_page_text', 'wait', 'ask_user'],
+    ['click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward', 'read_page_text', 'find_element', 'wait', 'ask_user'],
     'the small tier browse set has no power verbs');
   assert.deepEqual(verbsFor('browse', 'large'),
-    ['click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward', 'read_page_text',
+    ['click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward', 'read_page_text', 'find_element',
       'execute_js', 'read_network_requests', 'browser_batch', 'wait', 'ask_user', 'open_window'],
     'the large tier adds the four power verbs to browse');
   assert.deepEqual(verbsFor('answer', 'small'), ['scroll', 'read_page_text', 'finish', 'ask_user']);
@@ -133,7 +133,7 @@ test('the tiers and policy modes name real verbs and say what the design says', 
 test('page verbs are the ones the design lists, and finish and ask_user are state verbs', () => {
   const page = REGISTRY.verbs.filter((v) => v.category === 'page').map((v) => v.name);
   assert.deepEqual(page, [
-    'click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward', 'read_page_text',
+    'click', 'type', 'scroll', 'press_key', 'navigate', 'go_back', 'go_forward', 'read_page_text', 'find_element',
     'execute_js', 'read_network_requests', 'browser_batch', 'wait', 'open_window'
   ]);
   assert.deepEqual(REGISTRY.verbs.filter((v) => v.category === 'state').map((v) => v.name), ['finish', 'ask_user']);
