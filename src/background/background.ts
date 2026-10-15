@@ -135,6 +135,14 @@ function endSessionForClosedTab(tabId: number): void {
   sessions.delete(tabId);
 
   if (session.ownerTabId !== tabId) {
+    // The run may have been working in this adopted tab (a target="_blank" page the agent
+    // followed, a self-closing OAuth or payment pop-up). The tab is gone, but the session
+    // lives on in its owner tab, so the run must not keep aiming at the dead id: later
+    // sites and the next perceive would all fail against it. Fall back to the owner tab
+    // when it still exists; if it is gone too, its own onRemoved ends the session.
+    if (session.engine.activeTabId === tabId) {
+      void returnRunToOwnerTab(session, tabId);
+    }
     Logger.info('Background', `[SESSION_TAB_CLOSED] Tab [${tabId}] closed, but its session lives on in its owner tab [${session.ownerTabId}].`);
     return;
   }
@@ -152,6 +160,34 @@ function endSessionForClosedTab(tabId: number): void {
   session.engine.dispose?.();
   Logger.info('Background', `[SESSION_CLOSED] Tab [${tabId}] closed. Its session and persisted state are gone.`);
   syncKeepaliveAlarm();
+}
+
+/** True when the tab still exists (chrome.tabs.get answers it), false when it is gone or unknowable. */
+function tabStillExists(tabId: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (typeof chrome === 'undefined' || !chrome.tabs?.get) return resolve(true);
+    const maybePromise: any = chrome.tabs.get(tabId, (t: chrome.tabs.Tab | undefined) => {
+      resolve(Boolean(t) && !lastRuntimeError());
+    });
+    if (maybePromise && typeof maybePromise.then === 'function') {
+      maybePromise.then((t: chrome.tabs.Tab | undefined) => resolve(Boolean(t)), () => resolve(false));
+    }
+  });
+}
+
+/**
+ * Move a run whose working tab just closed back onto its owner tab.
+ *
+ * The engine's activeTabId setter also updates the runtime the graph nodes read, so the next
+ * perceive aims at the owner tab. The history notice itself is written by the worker when its
+ * next perceive sees the switch (that is where the run's history lives), so here only the tab
+ * state moves.
+ */
+async function returnRunToOwnerTab(session: BackgroundSession, closedTabId: number): Promise<void> {
+  const ownerTabId = session.ownerTabId;
+  if (!(await tabStillExists(ownerTabId))) return;
+  session.engine.activeTabId = ownerTabId;
+  Logger.info('Background', `[TAB_FALLBACK] The working tab [${closedTabId}] closed. The run continues on the owner tab [${ownerTabId}].`);
 }
 
 // Clean network request buffers when tab is closed & track ScoutFox tab group removal.
@@ -605,6 +641,12 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
       // no session of its own yet. A tab opened from a tab with no session is nobody's business.
       const session = tab.openerTabId !== undefined ? sessions.get(tab.openerTabId) : undefined;
       if (!session) return; // no session opened this tab - nothing to adopt it into
+
+      // The tab must also live in the session's own window. The opener path exists for the
+      // tabs a click in the working tab opens, and those land in the working tab's window; a
+      // tab in some OTHER window (no ScoutFox session there) is nobody's business. A deliberate
+      // second window comes through the open_window action, which adopts its tab itself.
+      if (session.engine.windowId !== 'default' && tab.windowId !== session.engine.windowId) return;
 
       // The group is keyed by WINDOW even though sessions are keyed by tab: grouping into a
       // DIFFERENT window's group fails outright, since a Chrome tab group cannot span windows.

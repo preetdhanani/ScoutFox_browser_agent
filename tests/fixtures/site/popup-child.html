@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zahlungsvorschau</title>
+</head>
+<body>
+  <!-- The self-closing pop-up: it writes the confirmation code into its opener and closes
+       itself, like an OAuth or payment pop-up does. The delay is long enough that the run's
+       500 ms tab switch lands while the tab is still alive, so the close really happens on
+       the tab the run moved to. -->
+  <h1>Vorschau wird verarbeitet</h1>
+  <p>Dieses Fenster schlie&szlig;t sich automatisch.</p>
+  <script>
+    setTimeout(() => {
+      try {
+        window.opener.document.getElementById('confirmation').textContent = 'Best\u00e4tigungscode: KX-4821';
+      } catch (err) { /* the opener is gone: nothing to fill */ }
+      window.close();
+    }, 1200);
+  </script>
+</body>
+</html>

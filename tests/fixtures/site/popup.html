@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bestellübersicht - Framework Store</title>
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <!-- Fixture for the tab-lifecycle gap: the button opens a self-closing pop-up tab (a
+       stand-in for an OAuth or payment pop-up). The run follows the pop-up tab, the pop-up
+       closes itself, and the run must fall back to this tab and read the confirmation code
+       that appears here - not end the whole task with the fatal tab_gone. -->
+  <header class="bar">
+    <a class="logo" href="index.html">Framework</a>
+  </header>
+  <main>
+    <h1>Bestellübersicht</h1>
+    <p>Warenwert: 42,00 EUR</p>
+    <button type="button" id="open-preview">Zahlungsvorschau öffnen</button>
+    <p id="confirmation"></p>
+  </main>
+  <script>
+    document.getElementById('open-preview').addEventListener('click', () => {
+      // No window features: the pop-up opens as a TAB of this window (the target="_blank"
+      // case the adoption follows), not as a separate pop-up window.
+      window.open('popup-child.html', 'payment_preview');
+      // The preview is a one-shot action: the button goes away, so a second click cannot
+      // open a second pop-up and the page text changes with it.
+      document.getElementById('open-preview').remove();
+    });
+  </script>
+</body>
+</html>

@@ -16,6 +16,7 @@ import { createFakeStorage, type FakeStorage } from '../helpers/fakeStorageSessi
 import { fakeDom, link, type PageSpec } from '../helpers/fakeDom.ts';
 import { fakeChrome } from '../helpers/fakeChrome.ts';
 import { fakeLlm } from '../helpers/fakeLlm.ts';
+import { graphRig, act } from '../helpers/graphHarness.ts';
 import { Logger } from '../../src/shared/logger.ts';
 
 const LIST = 'https://shop.test/laptops';
@@ -225,4 +226,51 @@ test('a closed tab skips the remaining sites instead of running them against the
   const last = engine.history.at(-1) as any;
   assert.equal(last?.type, 'partial_result', JSON.stringify(last)?.slice(0, 200));
   assert.match(String(last?.answer), /tab was closed/i);
+});
+
+// The other half of the tab story: the run silently follows a tab its own click opened (the 500 ms
+// switch in background.ts), and when that ADOPTED tab closes itself (a self-closing OAuth or
+// payment pop-up) the next perceive used to raise the run-fatal tab_gone and ended the whole run,
+// although the owner tab is still there. The run must fall back to the owner tab and continue.
+test('an adopted tab that closes while the owner tab lives hands the run back to the owner tab', async (t) => {
+  const rig = await graphRig({
+    plan: JSON.stringify({
+      taskKind: 'answer',
+      sites: [{ id: 's1', name: 'shop.test', domain: 'shop.test', role: 'reference', kind: 'page', goal: 'Open the payment preview and read the confirmation code' }],
+    }),
+    policy: [
+      act.click(1, 'Open the payment preview'),
+      act.subgoalDone('The confirmation code is KX-4821.', 'Confirmation code: KX-4821'),
+    ],
+  });
+  t.after(() => rig.cleanup());
+
+  // While the engine runs the first action (the click that opens the pop-up), the pop-up is
+  // adopted, the 500 ms switch moves the run into it, and the pop-up closes itself again - all
+  // before the next perceive reads a page.
+  let executes = 0;
+  const rt = rig.runtime;
+  const origExecute = rt.browser.execute.bind(rt.browser);
+  (rt.browser as any).execute = async (tabId: number, action: any, opts: any) => {
+    const res = await origExecute(tabId, action, opts);
+    executes++;
+    if (executes === 1) {
+      rig.fc.tabs.add({ id: 700, windowId: 1, url: 'https://shop.test/popup', openerTabId: 101 });
+      rig.runner.activeTabId = 700; // the 500 ms adoption switch
+      rig.fc.tabs.close(700);       // the self-closing pop-up is gone again
+    }
+    return res;
+  };
+
+  await rig.start('Open the payment preview on this page and tell me the confirmation code shown after it closes.');
+
+  assert.equal(rig.status(), 'idle', `status ${rig.status()}`);
+  assert.equal(rig.entries('partial_result').length, 0, 'the run must not end as the fatal tab-gone partial result');
+  assert.match(rig.finishAnswer() ?? '', /KX-4821/, 'the run continued on the owner tab and answered');
+  const tabNotices = rig.entries('notice').filter((n: any) => n.kind === 'tab');
+  assert.ok(
+    tabNotices.some((n: any) => /closed/i.test(String(n.content)) && /\b101\b/.test(String(n.content))),
+    `no fallback notice in the history, got ${JSON.stringify(tabNotices)}`
+  );
+  assert.equal(rt.tabs.activeTabId, 101, 'the working tab is the owner tab again');
 });

@@ -317,7 +317,31 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
   try {
     rawSnapshot = await runtime.browser.snapshot(tabId, { showBadges, maxElements: 120 });
   } catch (err: any) {
-    const perceiveErr = toPerceiveError(err, (state.perceiveError?.tries ?? 0) + 1);
+    let perceiveErr = toPerceiveError(err, (state.perceiveError?.tries ?? 0) + 1);
+
+    // A tab_gone on a tab that is NOT the owner tab is not the end of the run: the session
+    // still has its owner tab, so the run falls back to it and retries there. Only a tab_gone
+    // on the owner tab itself (or with the owner gone too) stays run-fatal (BUG-24).
+    let fallbackNotice: HistoryEntry | null = null;
+    if (perceiveErr.kind === 'tab_gone' && perceiveErr.fatal && tabId !== runtime.ownerTabId) {
+      const ownerAlive = runtime.ownerTabId !== undefined && runtime.ownerTabId !== null
+        ? Boolean(await runtime.browser.tabInfo(runtime.ownerTabId).catch(() => null))
+        : false;
+      if (ownerAlive) {
+        perceiveErr = { ...perceiveErr, fatal: false, terminal: false };
+        // The run cannot retry against the dead tab: aim it at the owner tab now. The page
+        // history never saw the dead tab (no page was read on it), so this notice is the
+        // only record of the close and the fallback.
+        runtime.tabs.activeTabId = runtime.ownerTabId;
+        fallbackNotice = {
+          type: 'notice',
+          level: 'info',
+          kind: 'tab',
+          content: `The page tab [${tabId}] was closed. The run continues on the owner tab [${runtime.ownerTabId}].`,
+        };
+        Logger.info('Worker', `[TAB_FALLBACK] ${fallbackNotice.content}`);
+      }
+    }
 
     let systemActions = siteRun?.systemActions ?? 0;
     if (!perceiveErr.terminal && perceiveErr.tries < 3) {
@@ -344,6 +368,7 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
     return {
       perceiveError: perceiveErr,
       siteRun: siteRun ? { ...siteRun, systemActions } : null,
+      ...(fallbackNotice ? { history: [fallbackNotice] } : {}),
     };
   }
 
@@ -504,6 +529,20 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
   // the page that is gone now. A new site starts with a fresh siteRun, so it has none.
   const pageChanged = Boolean(state.page && (state.page.url !== page.url || state.page.docId !== page.docId));
 
+  // The working tab changed since the page before this one was read: the run followed a tab its
+  // own click opened, or fell back to the owner tab after that tab closed itself. The model is
+  // told so (and the panel gets the notice) - the switch used to be silent.
+  let tabNotice: HistoryEntry | null = null;
+  const prevPageTabId = state.page?.tabId;
+  if (typeof prevPageTabId === 'number' && prevPageTabId !== tabId) {
+    const now = page.title ? `"${page.title}" (${page.url})` : (page.url || `tab [${tabId}]`);
+    const prevTab = await runtime.browser.tabInfo(prevPageTabId).catch(() => null);
+    tabNotice = prevTab
+      ? { type: 'notice', level: 'info', kind: 'tab', content: `The run moved to tab [${tabId}]: ${now}. The owner tab is [${runtime.ownerTabId}].` }
+      : { type: 'notice', level: 'info', kind: 'tab', content: `The page tab [${prevPageTabId}] was closed. The run continues on tab [${tabId}]: ${now} (owner tab [${runtime.ownerTabId}]).` };
+    Logger.info('Worker', `[TAB_NOTICE] ${tabNotice.content}`);
+  }
+
   return {
     page,
     perceiveError: null,
@@ -514,7 +553,10 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
       visited: withVisit(state.siteRun.visited ?? [], page, state.siteRun.siteId, evidenceEvent.step + 1),
       ...(pageChanged ? { readChunks: [] } : {}),
     } } : {}),
-    history: isDuplicateStepStart ? [] : [stepStartEntry],
+    history: [
+      ...(isDuplicateStepStart ? [] : [stepStartEntry]),
+      ...(tabNotice ? [tabNotice] : []),
+    ],
     evidenceEvents: [evidenceEvent],
   };
 });
@@ -743,9 +785,20 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
   }
 
   const allowExecuteJs = siteIn.allowExecuteJs === true;
+  // The tabs are model-visible state: the step message names the owner tab and the tab the
+  // run currently works in, so a run that followed a tab its own click opened (or fell back
+  // to the owner after that tab closed itself) is not a silent switch the model cannot see.
+  const ownerTabId = runtime.ownerTabId ?? null;
+  const workingTabId = page.tabId ?? runtime.tabs.activeTabId ?? null;
+  const tabsLine = ownerTabId !== null
+    ? (workingTabId !== null && workingTabId !== ownerTabId
+        ? `TABS: owner tab ${ownerTabId}, working tab ${workingTabId}`
+        : `TABS: owner tab ${ownerTabId} (also the working tab)`)
+    : undefined;
   const systemPrompt = buildPolicySystemPrompt(mode, tier, columns, priceLike, goalKind, { allowExecuteJs });
   const userMessage = buildPolicyUserMessage({
     task: siteIn.task,
+    tabsLine,
     siteIndex: siteIn.index,
     totalSites: siteIn.total,
     domain: siteIn.site.domain,

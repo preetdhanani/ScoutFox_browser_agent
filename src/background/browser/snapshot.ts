@@ -67,7 +67,10 @@ export function toPerceiveError(err: unknown, tries = 1): PerceiveError {
 
   const msg = err instanceof Error ? err.message : String(err || '');
 
-  if (/no target tab|no longer exists|probably closed|closed|not found|tabid is required/i.test(msg)) {
+  // A tab_gone message must actually be about a tab. The bare "closed" and "not found"
+  // alternatives also caught "connection closed" and "element not found", which made
+  // unrelated failures run-fatal. Chrome's own "No tab with id: N." belongs here too.
+  if (/no target tab|tabid is required|no tab with id|tab (?:was )?closed|tab[^\n]{0,60}(?:no longer exists|probably closed|not found)/i.test(msg)) {
     return {
       message: msg,
       terminal: true,

@@ -230,6 +230,21 @@ export const TASKS = {
       ...expectFindings(run, ['value'])
     ]
   },
+  // The tab-lifecycle gap: the run follows the tab its own click opened (the payment preview
+  // pop-up), the pop-up closes itself, and the run must fall back to the opener tab and finish
+  // there - not end with the run-fatal tab_gone ("The tab was closed, so the task stopped").
+  // The number of policy steps varies with where the run is when the pop-up closes (a wait on
+  // the preview tab, or straight back on the opener page), so only plan and reflect are pinned.
+  'popup-self-close': {
+    page: 'popup.html',
+    prompt: 'Open the payment preview on this page and tell me the confirmation code shown after it closes.',
+    check: ({ answer }) => /KX-4821/.test(answer),
+    expectMock: (run) => [
+      ...expectSites(run, ['done']),
+      ...expectPlanRows(run, ['done']),
+      ...expectCalls(run, { plan: 1, reflect: 0 })
+    ]
+  },
   'cheapest-offer': {
     page: 'search.html',
     prompt: 'Find the shop with the cheapest total price (price plus shipping) for the Framework Laptop 16 DIY Edition.',

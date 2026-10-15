@@ -421,7 +421,7 @@ export async function runMockSelfTest() {
     // A task whose fixture page has no committed snapshot (it is judged by the smoke run alone,
     // because recording one needs a real browser) is left out of the prompt checks here.
     const noSnapshot = Object.entries(TASKS).filter(([, task]) => !hasSnapshot(task.page.replace(/[?#].*$/, '').replace(/\.html$/, ''))).map(([name]) => name);
-    check('tasks without a committed fixture snapshot are judged by the smoke run alone, and the list of them is pinned', JSON.stringify(noSnapshot) === '["patterns-disclosure"]', JSON.stringify(noSnapshot));
+    check('tasks without a committed fixture snapshot are judged by the smoke run alone, and the list of them is pinned', JSON.stringify(noSnapshot) === '["patterns-disclosure","popup-self-close"]', JSON.stringify(noSnapshot));
     for (const [name, task] of Object.entries(TASKS)) {
       const startPage = task.page.replace(/[?#].*$/, '').replace(/\.html$/, '');
       if (!hasSnapshot(startPage)) continue;

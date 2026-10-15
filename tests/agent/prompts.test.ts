@@ -46,6 +46,36 @@ test('prompts: buildPolicySystemPrompt covers all modes', () => {
   assert.ok(browse.includes('record_finding'));
 });
 
+test('prompts: buildPolicyUserMessage shows the TABS line with owner and working tab', () => {
+  const base = {
+    task: 'Find Framework price',
+    siteIndex: 1,
+    totalSites: 1,
+    domain: 'frame.work',
+    role: 'reference',
+    goal: 'Find price of laptop',
+    usedSteps: 1,
+    allocSteps: 10,
+    meterMode: 'normal' as const,
+    pageTitle: 'Framework Shop',
+    pageUrl: 'https://frame.work',
+    pageType: 'product',
+    scrollY: 0,
+    pageText: 'Framework Laptop 16 ab 1.599 EUR',
+    elementsText: '[1] button "Buy"'
+  };
+  const split = buildPolicyUserMessage({ ...base, tabsLine: 'TABS: owner tab 101, working tab 700' });
+  assert.ok(split.includes('TABS: owner tab 101, working tab 700'), 'the step message names the owner and the working tab');
+  // The line sits before the page blocks, so the mock and the models read it as its own block.
+  assert.ok(split.indexOf('TABS:') < split.indexOf('CURRENT PAGE:'));
+
+  const same = buildPolicyUserMessage({ ...base, tabsLine: 'TABS: owner tab 101 (also the working tab)' });
+  assert.ok(same.includes('TABS: owner tab 101 (also the working tab)'));
+
+  const none = buildPolicyUserMessage(base);
+  assert.ok(!none.includes('TABS:'), 'without tab facts the line stays out');
+});
+
 test('prompts: buildPolicyUserMessage injects budget and failure memory', () => {
   const msg = buildPolicyUserMessage({
     task: 'Find Framework price',

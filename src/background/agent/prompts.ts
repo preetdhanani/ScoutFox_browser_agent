@@ -70,7 +70,10 @@ export function buildPolicySystemPrompt(
   // The Settings opt-in for execute_js; missing is off, so the prompt does not offer it.
   options: { allowExecuteJs?: boolean } = {}
 ): string {
-  const identity = 'You are ScoutFox, a browser agent that controls one browser tab.';
+  // The run usually works in one tab, but a tab its own click opens can become the working tab
+  // and can close again (a self-closing OAuth or payment pop-up); the TABS line in every step
+  // message names the owner tab and the current working tab.
+  const identity = 'You are ScoutFox, a browser agent that drives the tabs of one browser session. It usually works in one tab; the TABS line in each step names the owner tab and the tab you currently work in.';
 
   if (mode === 'extract') {
     const colList = columns.length > 0 ? columns.join(', ') : (priceLike ? 'price, shipping, delivery' : 'value');
@@ -151,6 +154,8 @@ ${stateActions}${largeActions}Rules:
 
 export interface PolicyUserMessageParams {
   task: string;
+  /** The TABS line the worker builds (owner tab, working tab); undefined when no tab facts exist. */
+  tabsLine?: string;
   siteIndex: number;
   totalSites: number;
   domain: string;
@@ -324,6 +329,7 @@ export function buildPolicyUserMessage(params: PolicyUserMessageParams): string 
   const memory = renderMemorySections(params);
 
   parts.push(`TASK: ${params.task}`);
+  if (params.tabsLine) parts.push(params.tabsLine);
   if (memory.recap) parts.push(memory.recap);
   parts.push(
     `CURRENT SITE (${params.siteIndex} of ${params.totalSites}, ${params.domain}, ${params.role}): ${params.goal}`

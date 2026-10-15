@@ -31,6 +31,27 @@ test('toPerceiveError - maps standard Error patterns to structured PerceiveError
   assert.equal(genericErr.fatal, false);
 });
 
+test('toPerceiveError - a tab_gone message must actually be about a tab', () => {
+  // The bare "closed" and "not found" alternatives made every unrelated failure
+  // ("connection closed", "element not found") a run-fatal tab_gone.
+  const elementErr = toPerceiveError(new Error('Element not found: [12]'));
+  assert.equal(elementErr.kind, 'unreadable');
+  assert.equal(elementErr.fatal, false);
+
+  const connErr = toPerceiveError(new Error('The connection was closed unexpectedly'));
+  assert.equal(connErr.kind, 'unreadable');
+  assert.equal(connErr.fatal, false);
+
+  // Real tab-loss messages still map, including Chrome's own "No tab with id".
+  const chromeErr = toPerceiveError(new Error('No tab with id: 700.'));
+  assert.equal(chromeErr.kind, 'tab_gone');
+  assert.equal(chromeErr.fatal, true);
+
+  const goneErr = toPerceiveError(new Error('Tab 101 no longer exists'));
+  assert.equal(goneErr.kind, 'tab_gone');
+  assert.equal(goneErr.fatal, true);
+});
+
 test('takeSnapshot - throws tab_gone on invalid or missing tabId', async () => {
   await assert.rejects(
     async () => takeSnapshot(0 as any, {}, { isTabInScope: async () => true }),

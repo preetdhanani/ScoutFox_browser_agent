@@ -240,6 +240,9 @@ export function kindOfGoal(goal) {
   // Before the facts kind: a disclosure goal names the shipping disclosure, and "shipping" alone
   // would read as a price-and-shipping goal whose facts the closed disclosure does not show yet.
   if (/\bdisclosure\b/i.test(goal)) return 'disclosure';
+  // Before the facts kind too: the pop-up goal names the payment preview, and the code only
+  // appears on the opener page after the preview closed itself.
+  if (/\b(payment preview|zahlungsvorschau)\b/i.test(goal)) return 'popup';
   if (/\b(price|cost|shipping|delivery|preis|versand|lieferung)\b/i.test(goal)) return 'facts';
   return 'unknown';
 }
@@ -457,6 +460,18 @@ function planFor(message) {
     const columns = ['value'];
     return withCompare([planSite({ domain: tabHost, goal: 'Open the shipping and returns disclosure and read the return window', role: 'reference', kind: 'page', fields: columns })], columns);
   }
+  if (kind === 'popup') {
+    // An answer task on the page the tab is on: the run browses to the preview and ends the
+    // site with subgoal_done once the confirmation code is on the opener page.
+    const columns = ['value'];
+    return {
+      task_kind: 'answer',
+      columns,
+      search_query: 'payment preview',
+      compare: { reference_domain: tabHost, field: 'value', threshold_pct: 10 },
+      sites: [planSite({ domain: tabHost, goal: 'Open the payment preview and read the confirmation code shown after it closes', role: 'reference', kind: 'page', fields: columns })]
+    };
+  }
   const columns = kind === 'facts' ? ['price', 'shipping', 'delivery'] : ['value'];
   return withCompare([planSite({
     domain: tabHost,
@@ -509,6 +524,25 @@ function policyFor(request) {
     if (verbs.has('record_finding')) return { reply: { action: 'record_finding', value: fact }, note: 'disclosure: record the return window' };
     if (verbs.has('finish')) return { reply: finish(`The page says: ${fact}`, 'The return window was inside the opened disclosure.'), note: 'disclosure: finish with the return window' };
     return failed('this mode has neither record_finding nor finish, so the return window cannot be handed over.', 'disclosure: no verb for the fact');
+  }
+
+  if (kind === 'popup') {
+    // The self-closing payment preview: until the code is on the opener page there is either
+    // the preview button to click (first step) or nothing to do but wait (the run sits on the
+    // preview tab, or the click already happened and the code is not written back yet). The
+    // preview closes itself, so the run ends up back on the opener page with the code.
+    const code = pageLines(page.pageText).find((l) => /best\u00e4tigungscode|confirmation code/i.test(l));
+    if (code) {
+      if (verbs.has('record_finding')) return { reply: { action: 'record_finding', value: code }, note: 'popup: record the confirmation code' };
+      if (verbs.has('finish')) return { reply: finish(`The page says: ${code}`, 'The confirmation code appeared after the preview closed.'), note: 'popup: finish with the code' };
+      return { reply: { action: 'subgoal_done', summary: code, evidence: code }, note: 'popup: subgoal_done with the code' };
+    }
+    const preview = page.elements.find((e) => /zahlungsvorschau|payment preview/i.test(e.label));
+    if (preview && verbs.has('click')) {
+      return { reply: { action: 'click', element_id: preview.id, reason: `Element [${preview.id}] "${preview.label}" opens the payment preview the goal asks about.` }, note: 'popup: click the preview open' };
+    }
+    if (verbs.has('wait')) return { reply: { action: 'wait', amount: 2, reason: 'The payment preview is still processing; it closes by itself.' }, note: 'popup: wait for the self-closing preview' };
+    return failed('the prompt has no confirmation code, no payment preview element to click and no wait verb.', 'popup: nothing to do');
   }
 
   if (kind === 'cheapest') {

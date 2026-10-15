@@ -71,6 +71,19 @@ test('a tab the AGENT opened (opener is the tab it drives) is adopted into the g
   assert.ok(got700, 'and the running agent must follow it - that is the target="_blank" case the listener exists for');
 });
 
+test('an adopted tab that closes hands the run back to the owner tab (the session lives on)', async () => {
+  // The previous test left the run working in the adopted tab 700.
+  assert.equal(rig.runtime(AUTOMATED_TAB)?.tabs.activeTabId, 700, 'setup: the run followed the adopted tab');
+
+  rig.fc.tabs.close(700);
+  await rig.settle();
+
+  assert.equal(rig.runtime(AUTOMATED_TAB)?.tabs.activeTabId, AUTOMATED_TAB,
+    'the run must fall back to the owner tab instead of staying on the dead adopted id');
+  assert.ok(rig.fc.tabs.get(AUTOMATED_TAB), 'the owner tab is still there and owns the session');
+  assert.equal(rig.fc.tabs.get(700), undefined, 'the adopted tab is gone');
+});
+
 test('a tab the USER opened (Cmd+T, no opener) is left completely alone', async () => {
   const beforeCount = rig.fc.callsTo('tabs.group').length;
   const beforeGetCount = rig.fc.callsTo('tabs.get').length;
