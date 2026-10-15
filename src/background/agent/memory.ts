@@ -100,6 +100,56 @@ export function formatRecentSteps(records: readonly StepRecord[], limit = 5): st
 }
 
 /**
+ * One fold line for the step records older than the recent-steps window of the current site:
+ * verb counts and the pages visited, so a long site run keeps a digest of its own earlier
+ * steps instead of dropping everything past the window. Null when nothing older remains.
+ */
+export function formatSiteFold(records: readonly StepRecord[], windowSize: number): string | null {
+  const older = (records ?? [])
+    .slice(0, Math.max(0, records.length - windowSize))
+    .filter((r) => r.node === 'policy' && r.verb);
+  if (older.length === 0) return null;
+
+  const counts = new Map<string, number>();
+  for (const r of older) counts.set(r.verb as string, (counts.get(r.verb as string) ?? 0) + 1);
+  const verbs = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([verb, n]) => `${n}x ${verb}`)
+    .join(', ');
+
+  const pages: string[] = [];
+  for (const r of older) {
+    if (r.url && !pages.includes(r.url)) pages.push(r.url);
+  }
+  const pagesPart = pages.length > 0
+    ? ` - pages seen: ${pages.slice(-4).map((u) => clipWithNote(u, 100, { inline: true })).join(', ')}`
+    : '';
+
+  const steps = older.map((r) => r.step).filter((s): s is number => s !== null);
+  const first = steps.length > 0 ? Math.min(...steps) : null;
+  const last = steps.length > 0 ? Math.max(...steps) : null;
+  const range = first !== null && last !== null && last !== first ? `steps ${first}-${last}` : first !== null ? `step ${first}` : 'earlier steps';
+  return `EARLIER ON THIS SITE (${range}, older than the recent steps below): ${verbs}${pagesPart}`;
+}
+
+/** The characters of one read chunk the TEXT YOU READ block keeps. */
+export const READ_CHUNK_CAP = 1500;
+/** How many read chunks the worker keeps: the block shows 2, and the newest is usually the live one-shot. */
+export const READ_CHUNKS_KEPT = 3;
+
+/** One retained read_page_text chunk of the current page. */
+export interface ReadChunk { url: string; text: string }
+
+/**
+ * The earlier read_page_text chunks for the TEXT YOU READ block: the last kept chunks of this
+ * page without the one the current one-shot block already shows, oldest first.
+ */
+export function formatReadChunks(chunks: readonly ReadChunk[] | undefined, currentOneShotText: string | null | undefined): string[] {
+  const list = (chunks ?? []).filter((c) => c && c.text && c.text !== currentOneShotText);
+  return list.slice(-2).map((c) => c.text);
+}
+
+/**
  * Formats a OneShot context block (for read_page_text, execute_js, or network activity).
  */
 export function formatOneShotContext(oneShot: OneShot | null | undefined): string | null {

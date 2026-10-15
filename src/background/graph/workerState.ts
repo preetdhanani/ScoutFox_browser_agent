@@ -202,6 +202,7 @@ export interface SiteRun {               // Revision 2's siteRun; its step recor
   stuckLevel: 0 | 1 | 2 | 3;
   readPartNext?: number;                 // the part index the next full-page read returns (paged read_page_text)
   readPartKey?: string;                  // 'url|textHash' of the page the last full-page read happened on
+  readChunks?: Array<{ url: string; text: string }>; // the last read_page_text chunks of this page (TEXT YOU READ); perceive clears them when the page changes
   pendingAction?: PendingAction;         // with its risk classification and journal key
   userAnswers: string[];
   strategyHint?: string;

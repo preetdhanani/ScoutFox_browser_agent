@@ -236,7 +236,7 @@ test('prompts: buildPolicyUserMessage includes userAnswers and oneShotContext wh
   assert.ok(msg.includes('ONESHOT: Here is an example interaction.'));
 });
 
-test('prompts: buildPolicyUserMessage caps recentSteps to last 5 entries', () => {
+test('prompts: buildPolicyUserMessage shows the recent steps the caller passes (the tier window caps upstream)', () => {
   const recent = ['step 1', 'step 2', 'step 3', 'step 4', 'step 5', 'step 6', 'step 7'];
   const msg = buildPolicyUserMessage({
     task: 'Walkthrough',
@@ -257,9 +257,9 @@ test('prompts: buildPolicyUserMessage caps recentSteps to last 5 entries', () =>
     recentSteps: recent,
   });
   assert.ok(msg.includes('RECENT STEPS:'));
-  assert.ok(!msg.includes('step 1'));
-  assert.ok(!msg.includes('step 2'));
-  assert.ok(msg.includes('step 3'));
+  // The tier window (RECENT_STEPS_WINDOW) caps the lines in the worker, so the prompt shows
+  // every line the caller formatted instead of a second hard cut at 5.
+  assert.ok(msg.includes('step 1'));
   assert.ok(msg.includes('step 7'));
 });
 

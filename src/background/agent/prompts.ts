@@ -166,6 +166,10 @@ export interface PolicyUserMessageParams {
   failures?: StepFailure[];
   bannedSignatures?: string[];
   recentSteps?: string[];
+  /** The one fold line for the step records older than the recent-steps window (formatSiteFold). */
+  earlierOnSite?: string;
+  /** The earlier read_page_text chunks of this page (TEXT YOU READ), oldest first. */
+  textYouRead?: string[];
   diffLine?: string | null;
   pageTitle: string;
   pageUrl: string;
@@ -202,6 +206,13 @@ export interface PolicyUserMessageParams {
  * the full size and read_page_text, so the model never takes the head of a long page for the whole page.
  */
 export const PAGE_TEXT_BUDGET: Record<ModelTier, number> = { small: 3000, large: 4500 };
+
+/**
+ * How many recent step lines the policy prompt shows, per model tier. The 200 stored step records
+ * stay untouched; only the window over them scales, and the steps older than the window are
+ * folded into one digest line (formatSiteFold).
+ */
+export const RECENT_STEPS_WINDOW: Record<ModelTier, number> = { small: 6, large: 10 };
 
 /**
  * The per-section caps of the memory blocks. Each line is cut with a visible note (clipWithNote), so a cut line
@@ -348,8 +359,13 @@ export function buildPolicyUserMessage(params: PolicyUserMessageParams): string 
     }
   }
 
+  if (params.earlierOnSite) {
+    parts.push(params.earlierOnSite);
+  }
+
   if (params.recentSteps && params.recentSteps.length > 0) {
-    parts.push(`RECENT STEPS:\n${params.recentSteps.slice(-5).join('\n')}`);
+    // The caller caps the lines to the tier window (RECENT_STEPS_WINDOW), so no second cut here.
+    parts.push(`RECENT STEPS:\n${params.recentSteps.join('\n')}`);
   }
 
   if (params.diffLine) {
@@ -375,6 +391,10 @@ export function buildPolicyUserMessage(params: PolicyUserMessageParams): string 
 
   if (params.evidenceBlock) {
     parts.push(params.evidenceBlock);
+  }
+
+  if (params.textYouRead && params.textYouRead.length > 0) {
+    parts.push(`TEXT YOU READ (earlier read_page_text chunks of this page, oldest first; they stay until you open another page):\n${params.textYouRead.join('\n---\n')}`);
   }
 
   const pageText = clipWithNote(params.pageText, params.pageTextBudget ?? PAGE_TEXT_BUDGET.small, { what: 'page text', hint: PAGE_TEXT_MORE_HINT });

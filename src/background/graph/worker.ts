@@ -4,7 +4,7 @@
 // Erasable TypeScript (no enums, no parameter properties).
 
 import { END, START, StateGraph, type BaseCheckpointSaver } from '@langchain/langgraph/web';
-import { WorkerState, type PageSig, type PageSnapshot, type PendingAction, type PriceCandidate, type SiteIn, type SiteOut, type WorkerHold, type WorkerStateT, type WorkerUpdate } from './workerState.ts';
+import { WorkerState, type OneShot, type PageSig, type PageSnapshot, type PendingAction, type PriceCandidate, type SiteIn, type SiteOut, type WorkerHold, type WorkerStateT, type WorkerUpdate } from './workerState.ts';
 import {
   WORKER_ROUTE_MAPS,
   meterRouter,
@@ -32,8 +32,8 @@ import { actionSignatureOf, nextReadPart } from '../agent/actionSignature.ts';
 import { recordFailure, isSignatureBanned } from '../agent/failureMemory.ts';
 import { createFinding, parsePrice, deduplicateFindings, findingsContentSignature, isAutoValueField, FINDING_QUALITY_RANK } from '../agent/findings.ts';
 import { evaluateSiteCriteria } from '../agent/criteria.ts';
-import { buildPolicySystemPrompt, buildPolicyUserMessage, MEMORY_BUDGET, PAGE_TEXT_BUDGET } from '../agent/prompts.ts';
-import { formatRecentSteps, formatOneShotContext, buildStepRecord } from '../agent/memory.ts';
+import { buildPolicySystemPrompt, buildPolicyUserMessage, MEMORY_BUDGET, PAGE_TEXT_BUDGET, RECENT_STEPS_WINDOW } from '../agent/prompts.ts';
+import { formatRecentSteps, formatOneShotContext, formatSiteFold, formatReadChunks, buildStepRecord, READ_CHUNK_CAP, READ_CHUNKS_KEPT } from '../agent/memory.ts';
 import { evaluateActionRisk } from '../agent/risk.ts';
 import { systemAction } from '../agent/systemAction.ts';
 import { LLM_MAX_ATTEMPTS, callWithRetry, llmPauseText } from '../agent/recovery.ts';
@@ -500,11 +500,20 @@ const perceiveNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', '
     ? decayStuckLevel(state.siteRun.stuckLevel ?? 0)
     : (state.siteRun?.stuckLevel ?? 0);
 
+  // A new document or another URL ends the TEXT YOU READ block: the kept read chunks describe
+  // the page that is gone now. A new site starts with a fresh siteRun, so it has none.
+  const pageChanged = Boolean(state.page && (state.page.url !== page.url || state.page.docId !== page.docId));
+
   return {
     page,
     perceiveError: null,
     // From state.siteRun, not the local copy: a successful read never wrote the tab switch above, and still does not.
-    ...(state.siteRun ? { siteRun: { ...state.siteRun, stuckLevel: stuckLevelAfterDecay, visited: withVisit(state.siteRun.visited ?? [], page, state.siteRun.siteId, evidenceEvent.step + 1) } } : {}),
+    ...(state.siteRun ? { siteRun: {
+      ...state.siteRun,
+      stuckLevel: stuckLevelAfterDecay,
+      visited: withVisit(state.siteRun.visited ?? [], page, state.siteRun.siteId, evidenceEvent.step + 1),
+      ...(pageChanged ? { readChunks: [] } : {}),
+    } } : {}),
     history: isDuplicateStepStart ? [] : [stepStartEntry],
     evidenceEvents: [evidenceEvent],
   };
@@ -756,7 +765,11 @@ const policyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'po
     ])),
     failures: siteRun.failureMemory,
     bannedSignatures: siteRun.banned,
-    recentSteps: formatRecentSteps(state.steps ?? [], 5),
+    // The recent-steps window scales with the tier; the steps older than it are folded into
+    // one digest line, so a long site run keeps a summary of its own earlier steps.
+    recentSteps: formatRecentSteps(state.steps ?? [], RECENT_STEPS_WINDOW[tier]),
+    earlierOnSite: formatSiteFold(state.steps ?? [], RECENT_STEPS_WINDOW[tier]) ?? undefined,
+    textYouRead: formatReadChunks(siteRun.readChunks, state.oneShotContext?.text),
     diffLine: page.diffLine,
     pageTitle: page.title,
     pageUrl: page.url,
@@ -1543,6 +1556,18 @@ const executeNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 'e
     };
   }
 
+  // A successful read_page_text joins the TEXT YOU READ block: the last kept chunks stay in the
+  // prompt until the page changes (perceive clears them) or another site starts, so an answer
+  // built from several chunks does not lose every chunk but the newest.
+  const readOneShot = (result as any).oneShot as OneShot | undefined;
+  if (verb === 'read_page_text' && result.success !== false && readOneShot?.text && siteRunUpdate) {
+    const chunk = { url: state.page?.url ?? '', text: String(readOneShot.text).slice(0, READ_CHUNK_CAP) };
+    siteRunUpdate = {
+      ...siteRunUpdate,
+      readChunks: [...(siteRunUpdate.readChunks ?? []), chunk].slice(-READ_CHUNKS_KEPT),
+    };
+  }
+
   return {
     lastExec: {
       step: (state.siteRun?.used ?? 0) + 1,
@@ -1628,6 +1653,13 @@ const verifyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 've
   const newActionSigs = exec?.signature ? [...(state.siteRun?.actionSigs ?? []), exec.signature] : (state.siteRun?.actionSigs ?? []);
   const newPageSigs = allPageSigs;
 
+  // An A-B-A-B alternation is a loop where every action has an effect, so the perceive decay
+  // (a page change heals one stuck level) would erase it every cycle. The warn_and_ban
+  // escalation therefore bans BOTH alternating signatures right here, which breaks the loop:
+  // the next reply repeating one of them is rejected, and a model that keeps repeating ends
+  // the site through the rejected-replies circuit breaker instead of at the cap.
+  const alternationBans = stuckRes.reason === 'alternating_actions' ? (stuckRes.signaturesToBan ?? []) : [];
+
   return {
     verifyResult,
     siteRun: state.siteRun
@@ -1638,6 +1670,9 @@ const verifyNode = defineNode<WorkerStateT, Partial<WorkerUpdate>>('worker', 've
           noProgressRecords: 0, // an executed action is the model trying something else
           actionSigs: newActionSigs,
           pageSigs: newPageSigs,
+          ...(alternationBans.length > 0
+            ? { banned: [...new Set([...(state.siteRun.banned ?? []), ...alternationBans])] }
+            : {}),
           ...(readNote ? { readPartNext, readPartKey } : {})
         }
       : null,

@@ -16,9 +16,11 @@ export interface StuckCheckOptions {
 
 export interface StuckCheckResult {
   isStuck: boolean;
-  reason?: 'repeated_action' | 'unchanged_page' | null;
+  reason?: 'repeated_action' | 'unchanged_page' | 'alternating_actions' | null;
   detail?: string;
   signatureToBan?: string | null;
+  /** Both signatures of an A-B-A-B alternation; the verify node adds them to the ban list. */
+  signaturesToBan?: string[];
 }
 
 /**
@@ -56,7 +58,9 @@ export function decayStuckLevel(level: number): 0 | 1 | 2 | 3 {
  * Stuck condition 1: the last 3 executed actions have identical action signatures and the page
  * did not change under them (a scroll or a typed query that moves the page is progress, not a loop).
  * Stuck condition 2: the URL, interactiveHash, and textHash did not change across the last 3 actions.
- * A read that returned new text (a paging read) is exempt from both checks.
+ * Stuck condition 3: two different actions alternated over the last 6 executed actions (A-B-A-B),
+ * where every action has an effect, so the page changes and checks 1 and 2 pass the loop.
+ * A read that returned new text (a paging read) is exempt from all three checks.
  */
 export function detectStuck(
   recentActions: ActionRecord[],
@@ -92,6 +96,24 @@ export function detectStuck(
         reason: 'unchanged_page',
         detail: 'The page content and interactive elements did not change after 3 consecutive actions.',
         signatureToBan: lastActionSig
+      };
+    }
+  }
+
+  // Check 3: A-B-A-B alternation. Two different actions alternating over the last 6 executed
+  // actions, each with a visible effect: the page changes under them, so checks 1 and 2 pass
+  // the loop and it used to run to the per-site allocation or the hard cap.
+  if (!opts.readNewText && recentActions.length >= 6) {
+    const last6 = recentActions.slice(-6).map((a) => a.signature);
+    const a = last6[0];
+    const b = last6[1];
+    if (a && b && a !== b && last6.every((s, i) => s === (i % 2 === 0 ? a : b))) {
+      return {
+        isStuck: true,
+        reason: 'alternating_actions',
+        detail: `Two actions alternated 3 times in a row (${a} / ${b}) - an A-B-A-B loop.`,
+        signatureToBan: a,
+        signaturesToBan: [a, b]
       };
     }
   }
