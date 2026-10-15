@@ -12,6 +12,7 @@
     "check:tests": "node scripts/checkTestCount.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p src/content && tsc --noEmit -p tests",
     "test:e2e": "node tests/e2e/smoke.mjs --mock --build",
+    "test:replay": "node tests/e2e/replay-real.mjs",
     "check": "for f in content/*.js sidepanel/*.js; do node --check \"$f\" || exit 1; done",
     "build": "node scripts/build.mjs",
     "evalscan": "node scripts/evalscan.mjs",

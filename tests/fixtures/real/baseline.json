@@ -1,0 +1,94 @@
+{
+  "pages": {
+    "framework-configurator": {
+      "textLength": 4366,
+      "elementCount": 402
+    },
+    "framework-laptops": {
+      "textLength": 108,
+      "elementCount": 203
+    },
+    "idealo-search": {
+      "textLength": 2828,
+      "elementCount": 1852
+    },
+    "geizhals-search": {
+      "textLength": 4291,
+      "elementCount": 286
+    },
+    "geizhals-product": {
+      "textLength": 33,
+      "elementCount": 0
+    },
+    "apple-macbook-air": {
+      "textLength": 4593,
+      "elementCount": 474
+    },
+    "hackernews-front": {
+      "textLength": 4069,
+      "elementCount": 201
+    },
+    "hackernews-item": {
+      "textLength": 549,
+      "elementCount": 40
+    },
+    "github-login": {
+      "textLength": 169,
+      "elementCount": 15
+    },
+    "github-repo": {
+      "textLength": 4581,
+      "elementCount": 414
+    },
+    "duckduckgo-lite": {
+      "textLength": 3058,
+      "elementCount": 18
+    },
+    "wikipedia-laptop": {
+      "textLength": 4455,
+      "elementCount": 1467
+    },
+    "wikipedia-notebook-de": {
+      "textLength": 4366,
+      "elementCount": 638
+    },
+    "heise-front": {
+      "textLength": 300,
+      "elementCount": 430
+    },
+    "tagesschau-front": {
+      "textLength": 4592,
+      "elementCount": 255
+    },
+    "spiegel-front": {
+      "textLength": 4443,
+      "elementCount": 789
+    },
+    "bbc-news": {
+      "textLength": 4567,
+      "elementCount": 192
+    },
+    "python-org": {
+      "textLength": 2166,
+      "elementCount": 349
+    },
+    "mdn-css": {
+      "textLength": 4570,
+      "elementCount": 288
+    },
+    "httpbin-form": {
+      "textLength": 181,
+      "elementCount": 13
+    },
+    "example-com": {
+      "textLength": 911,
+      "elementCount": 1
+    },
+    "cloudflare-challenge": {
+      "textLength": 43,
+      "elementCount": 0
+    }
+  },
+  "updatedAt": "2026-10-15T01:49:12.873Z",
+  "tolerance": 0.05
+}

@@ -1,0 +1,16 @@
+{
+  "name": "idealo-search",
+  "kind": "price-comparison search results",
+  "url": "https://www.idealo.de/preisvergleich/ProductCategory/3751.html?q=laptop&qd=laptop",
+  "requestedUrl": "https://www.idealo.de/preisvergleich/MainSearchProductCategory.html?q=laptop",
+  "title": "Notebook (2026) zum Bestpreis | idealo.de",
+  "capturedAt": "2026-10-15T01:47:49.454Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 112308,
+  "htmlUncompressedBytes": 790636,
+  "textLength": 19732,
+  "htmlSha256": "2f75190120cdd3ee637fedbebf3e159762d30c358b141d5617d7e066dc86278d"
+}

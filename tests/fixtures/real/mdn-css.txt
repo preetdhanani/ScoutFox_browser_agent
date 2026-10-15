@@ -1,0 +1,222 @@
+Skip to main content
+Skip to search
+HTML
+CSS
+JavaScript
+Web APIs
+All
+Learn
+Tools
+About
+Blog
+Web
+CSS
+CSS: Cascading Style Sheets
+
+Cascading Style Sheets (CSS) is a stylesheet language used to describe the presentation of a document written in HTML or XML (including XML dialects such as SVG, MathML or XHTML). CSS describes how elements should be rendered on screen, on paper, in speech, or on other media.
+
+CSS is among the core languages of the open web and is standardized across web browsers according to W3C specifications. Previously, the development of various parts of CSS specification was done synchronously, which allowed the versioning of the latest recommendations. You might have heard about CSS1, CSS2.1, or even CSS3. There will never be a CSS3 or a CSS4; rather, everything is now just "CSS" with individual CSS modules having version numbers.
+
+After CSS 2.1, the scope of the specification increased significantly and the progress on different CSS modules started to differ so much, that it became more effective to develop and release recommendations separately per module. Instead of versioning the CSS specification, W3C now periodically takes a snapshot of the latest stable state of the CSS specification and individual modules progress. CSS modules now have version numbers, or levels, such as CSS Color Module Level 5.
+
+In this article
+Beginner's tutorials
+Guides
+How to
+Tools
+Reference
+See also
+Beginner's tutorials
+
+Our learn web development core modules contain modern, up-to-date tutorials covering CSS fundamentals.
+
+Your first website: Styling the content
+
+This article provides a brief tour of what CSS is and how to use it, aimed at people who are completely new to web development.
+
+CSS styling basics
+
+This module provides all the CSS fundamentals you'll need to start learning the technology effectively, including syntax, features, and techniques.
+
+CSS text styling
+
+Here we look at CSS text fundamentals including setting font, boldness, italics, line and letter spacing, and drop shadows. We round off the module by looking at applying custom fonts to your page, and styling lists and links.
+
+CSS layout
+
+This module looks at floats, positioning, other modern layout tools, and building responsive designs that will adapt to different devices, screen sizes, and resolutions.
+
+Guides
+
+CSS guides are organized by modules and are there to help you learn what you can achieve using CSS. Browse the complete list at CSS guides, which includes topics such as:
+
+CSS syntax including declarations and rulesets.
+Specificity, inheritance, and cascade
+Nesting, scoping and shadow parts
+Media and container queries
+Numeric and textual data types
+Box model and margin collapse
+Containing block
+Stacking and block-formatting contexts
+Property value processing
+Shorthand properties
+Flexible box, multi-column and grid layouts
+Animations, transitions, and transforms
+How to
+CSS layout cookbook
+
+Recipes for common layout patterns you might need to implement in your sites. These recipes provide code you can use as a starting point in your projects. These recipes also highlight the different ways layout specifications can be used and the choices you can make as a developer.
+
+Tools
+Border-image generator
+
+Generate CSS border-image values.
+
+Border-radius generator
+
+Generate CSS border-radius effects.
+
+Box-shadow generator
+
+Add box-shadow effects to your CSS objects.
+
+Color format converter
+
+Enter or pick a color and copy its corresponding value in any CSS color format.
+
+Color mixer
+
+Mix two colors in any color space using the color-mix() function and copy the resulting color in any CSS color format.
+
+Shape generator
+
+Define coordinates and syntax for <basic-shape> features.
+
+You can also use the following resources:
+
+W3C CSS Validation Service: To check if your CSS is valid. This is an invaluable debugging tool.
+Firefox Developer Tools: To view and edit a page's live CSS via the Inspector and the Style Editor tools.
+Web Developer extension: To track and edit live CSS on websites in Firefox.
+Reference
+
+Browse the complete CSS reference documentation.
+
+CSS properties
+
+Reference for all CSS properties.
+
+CSS selectors
+
+Reference for CSS selectors, combinators, pseudo-classes, and pseudo-elements.
+
+CSS at-rules
+
+Reference for CSS at-rules including media queries.
+
+CSS values
+
+Reference for CSS keywords, data types, and functions.
+
+See also
+Web languages to which CSS is often applied: HTML, SVG, MathML, XHTML, and XML.
+Stack Overflow questions about CSS
+Help improve MDN
+Learn how to contribute
+
+This page was last modified on Dec 29, 2025 by MDN contributors.
+
+View this page on GitHub • Report a problem with this content
+CSS
+Guides
+Modules
+Anchor positioning
+Animations
+Backgrounds and borders
+Borders and box decorations
+Box alignment
+Box model
+Box sizing
+Cascade
+Cascading variables
+Colors
+Columns
+Conditional rules
+Containment
+Counters
+CSSOM view
+Custom functions and mixins
+Display
+Environment variables
+Filter effects
+Flexbox
+Fonts
+Grid
+Images
+Lists
+Logical properties
+Masking
+Media queries
+Nesting
+Overflow
+Positioning
+Properties and Values API
+Scroll anchoring
+Scroll-driven animations
+Scroll snap
+Selectors
+Shapes
+Syntax
+Text
+Text decoration
+Transforms
+Transitions
+Values and units
+Writing modes
+How to
+Layout cookbook
+Tools
+Border-image generator
+Border-radius generator
+Box-shadow generator
+Color format converter
+Color mixer
+Shape generator
+Reference
+Properties
+Selectors
+Combinators
+Pseudo-classes
+Pseudo-elements
+At-rules
+Values
+Types
+Functions
+
+Your blueprint for a better internet.
+
+MDN
+About
+Blog
+Mozilla careers
+Advertise with us
+MDN Plus
+Product help
+Contribute
+MDN Community
+Community resources
+Writing guidelines
+MDN Discord
+MDN on GitHub
+Developers
+Web technologies
+Learn web development
+Guides
+Tutorials
+Glossary
+Hacks blog
+Website Privacy Notice
+Telemetry Settings
+Legal
+Community Participation Guidelines
+
+Portions of this content are ©1998–2026 by individual mozilla.org contributors. Content available under a Creative Commons license.

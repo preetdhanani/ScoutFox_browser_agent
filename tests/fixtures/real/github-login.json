@@ -1,0 +1,16 @@
+{
+  "name": "github-login",
+  "kind": "login wall",
+  "url": "https://github.com/login",
+  "requestedUrl": "https://github.com/login",
+  "title": "Sign in to GitHub · GitHub",
+  "capturedAt": "2026-10-14T23:55:01.056Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 12163,
+  "htmlUncompressedBytes": 57743,
+  "textLength": 282,
+  "htmlSha256": "2bce03883448208de0d978c4a99f4362cef672968d98d9bca5e0d4692b951d7d"
+}

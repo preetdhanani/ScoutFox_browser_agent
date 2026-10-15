@@ -1,0 +1,16 @@
+{
+  "name": "duckduckgo-lite",
+  "kind": "search results (server rendered)",
+  "url": "https://lite.duckduckgo.com/lite/?q=laptop",
+  "requestedUrl": "https://lite.duckduckgo.com/lite/?q=laptop",
+  "title": "laptop at DuckDuckGo",
+  "capturedAt": "2026-10-14T23:55:09.676Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 3680,
+  "htmlUncompressedBytes": 22109,
+  "textLength": 3205,
+  "htmlSha256": "2dfff327caefb71bdeba5303405ed5fc5eb66606edaeb5de20dcba07b8671aa7"
+}

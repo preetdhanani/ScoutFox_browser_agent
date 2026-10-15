@@ -1,0 +1,16 @@
+{
+  "name": "example-com",
+  "kind": "minimal page (sanity check)",
+  "url": "https://example.com/",
+  "requestedUrl": "https://example.com/",
+  "title": "Example Domain",
+  "capturedAt": "2026-10-14T23:55:47.049Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 1508,
+  "htmlUncompressedBytes": 2345,
+  "textLength": 917,
+  "htmlSha256": "e2e873bd9e30a3c9ff1decc6b17a39fb28a1810b25de191ef2ff1271612f0360"
+}

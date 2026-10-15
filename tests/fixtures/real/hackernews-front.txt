@@ -1,0 +1,137 @@
+	Hacker Newsnew | past | comments | ask | show | jobs | submit	login
+
+
+
+1.	
+	Things to know when you get cancer – 2026 Edition (jjmaxwell4.com)
+	631 points by jjmaxwell4 4 hours ago | hide | 170 comments
+
+2.	
+	OpenCode 2.0 (anoma.ly)
+	219 points by gmays 3 hours ago | hide | 83 comments
+
+3.	
+	We’re releasing Jev 1.14.0 along with experimental features for dreamers (typesafe.ai)
+	135 points by emschwartz 2 hours ago | hide | 52 comments
+
+4.	
+	Tiny Little Office (tinylittleoffice.com)
+	71 points by donohoe 1 hour ago | hide | 11 comments
+
+5.	
+	Passkeys are not a trap (scotthelme.co.uk)
+	431 points by speckx 8 hours ago | hide | 603 comments
+
+6.	
+	Do dentists know what they're doing? (mapwriting.substack.com)
+	340 points by doitLP 7 hours ago | hide | 266 comments
+
+7.	
+	Better HTTP/1 connection reuse in Go 1.27 (go.dev)
+	184 points by allddd 7 hours ago | hide | 30 comments
+
+8.	
+	Containment and monitoring failures are to blame for AI hacking reports: experts (csoonline.com)
+	814 points by latexr 6 hours ago | hide | 437 comments
+
+9.	
+	Americans' social activity has steeply declined in the past 30 years (dataforprogress.org)
+	159 points by hubraumhugo 7 hours ago | hide | 225 comments
+
+10.	
+	Fancy Curl Sites (nytpu.com)
+	64 points by adunk 4 hours ago | hide | 12 comments
+
+11.	
+	Iosevka is an open-source, sans-serif and slab-serif monospace font (typeof.net)
+	692 points by otobrglez 15 hours ago | hide | 286 comments
+
+12.	
+	Show HN: Petal, open-source CoScreen/ScreenHero finally free (petal.live)
+	102 points by thedracle 5 hours ago | hide | 25 comments
+
+13.	
+	Anthropic's Scion is heavily inspired by Mononoke (sunshowers.io)
+	212 points by sunshowers 3 hours ago | hide | 93 comments
+
+14.	
+	Fire at Starlink site in Bulgaria after suspected sabotage in Poland (dpa-international.com)
+	263 points by ilamont 5 hours ago | hide | 194 comments
+
+15.	
+	Phloem: Git history grown like a slime mold (stemdeck.app)
+	74 points by thclpr 5 hours ago | hide | 19 comments
+
+16.	
+	Banks are now trying to offload the AI data center debt they just underwrote (startupfortune.com)
+	248 points by smartmic 5 hours ago | hide | 198 comments
+
+17.	
+	Yandex outage: data shows that instead of going dark, malicious bots moved (cloudflare.com)
+	189 points by coloneltcb 3 hours ago | hide | 59 comments
+
+18.	
+	Submarine cable resilience (apnic.net)
+	121 points by speckx 8 hours ago | hide | 43 comments
+
+19.	
+	Virtual Oxide Labs: Emulating a Full Oxide Rack (oxide.computer)
+	53 points by tosh 5 hours ago | hide | 4 comments
+
+20.	
+	Has AI tells (theconsensus.dev)
+	63 points by 7777777phil 7 hours ago | hide | 69 comments
+
+21.	
+	Suicide rates highest ever among middle-aged men (telegraph.co.uk)
+	212 points by ivewonyoung 4 hours ago | hide | 270 comments
+
+22.	
+	Google is silently linking your phone number across all signed-in accounts (androidauthority.com)
+	347 points by Brajeshwar 7 hours ago | hide | 92 comments
+
+23.	
+	LittleJS is 2D and 3D now (frankforce.com)
+	88 points by dmit 9 hours ago | hide | 34 comments
+
+24.	
+	Pg_vectorsearch: An index that is faster than pgvector's IVFFlat and HNSW (github.com/timescale)
+	184 points by jascha_eng 12 hours ago | hide | 47 comments
+
+25.	
+	Show HN: I wrote an email app that accepts only one sender per inbox (clova.email)
+	70 points by edpin2000 6 hours ago | hide | 57 comments
+
+26.	
+	How Amazon pushes up prices all across the Internet (not-ship.com)
+	692 points by sighborg 14 hours ago | hide | 586 comments
+
+27.	
+	How I manage persistent Claude Code loops: Spool (github.com/enes-alatas)
+	7 points by enesalatas 1 hour ago | hide | 3 comments
+
+28.	
+	Webster’s Dictionary: The pleasure of finding things out (2014) (jsomers.net)
+	10 points by hangsi 2 hours ago | hide | 3 comments
+
+29.	
+	America didn't lose its rare earth industry, it sold it (lawfaremedia.org)
+	142 points by speckx 6 hours ago | hide | 68 comments
+
+30.	
+	Why is every rationalist blog post way too long? (alexwennerberg.com)
+	159 points by epestr 17 hours ago | hide | 128 comments
+
+
+	More
+
+
+
+
+Consider applying for YC's Winter 2027 batch! Applications are open till November 2.
+
+
+Guidelines | FAQ | Lists | API | Security | Legal | Apply to YC | Contact
+
+
+Search: 

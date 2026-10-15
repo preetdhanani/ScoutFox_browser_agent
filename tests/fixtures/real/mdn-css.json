@@ -1,0 +1,16 @@
+{
+  "name": "mdn-css",
+  "kind": "documentation page",
+  "url": "https://developer.mozilla.org/en-US/docs/Web/CSS",
+  "requestedUrl": "https://developer.mozilla.org/en-US/docs/Web/CSS",
+  "title": "CSS: Cascading Style Sheets | MDN",
+  "capturedAt": "2026-10-14T23:55:40.110Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 26886,
+  "htmlUncompressedBytes": 241970,
+  "textLength": 6007,
+  "htmlSha256": "bd12bd228c1ed190f7f50c2c509cb5b538fb89f0770e2edcd2ef20f4567a6396"
+}

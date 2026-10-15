@@ -1,0 +1,16 @@
+{
+  "name": "github-repo",
+  "kind": "repository page",
+  "url": "https://github.com/react/react",
+  "requestedUrl": "https://github.com/facebook/react",
+  "title": "GitHub - react/react: The library for web and native user interfaces. · GitHub",
+  "capturedAt": "2026-10-14T23:55:05.323Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 60233,
+  "htmlUncompressedBytes": 440158,
+  "textLength": 7061,
+  "htmlSha256": "6ccab9fc0889dd0bd96a7e2f37de21cd8052e63397f17b7d5567c58e1fb9502d"
+}

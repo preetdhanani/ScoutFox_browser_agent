@@ -1,0 +1,16 @@
+{
+  "name": "wikipedia-notebook-de",
+  "kind": "long content article (German)",
+  "url": "https://de.wikipedia.org/wiki/Notebook",
+  "requestedUrl": "https://de.wikipedia.org/wiki/Notebook",
+  "title": "Notebook – Wikipedia",
+  "capturedAt": "2026-10-14T23:55:16.705Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 82843,
+  "htmlUncompressedBytes": 492713,
+  "textLength": 35005,
+  "htmlSha256": "fe17e2416b6299a8b9ab40dbe04e043de129de179bd428a03d90bfc1f5d3d468"
+}

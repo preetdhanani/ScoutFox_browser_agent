@@ -1,0 +1,16 @@
+{
+  "name": "cloudflare-challenge",
+  "kind": "bot-check interstitial",
+  "url": "https://nowsecure.nl/",
+  "requestedUrl": "https://nowsecure.nl/",
+  "title": "nowsecure.nl",
+  "capturedAt": "2026-10-14T23:55:50.915Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 56843,
+  "htmlUncompressedBytes": 179313,
+  "textLength": 43,
+  "htmlSha256": "872aef2858cfc537ba3520abc6cef06cf1b78e8aa3bab983ed06a3748285e7c4"
+}

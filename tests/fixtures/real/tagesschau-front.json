@@ -1,0 +1,16 @@
+{
+  "name": "tagesschau-front",
+  "kind": "news front page",
+  "url": "https://www.tagesschau.de/",
+  "requestedUrl": "https://www.tagesschau.de/",
+  "title": "tagesschau.de - die erste Adresse für Nachrichten und Information | tagesschau.de",
+  "capturedAt": "2026-10-15T01:48:08.445Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 165496,
+  "htmlUncompressedBytes": 1701221,
+  "textLength": 22011,
+  "htmlSha256": "b092436c6f973e5724ac6b91e9315c4f5b2b201751dc7eed339329347c4d7708"
+}

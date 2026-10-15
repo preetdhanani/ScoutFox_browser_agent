@@ -1,0 +1,313 @@
+Zum Inhalt springen
+Hauptmenü
+Suchen
+Jetzt spenden
+Benutzerkonto erstellen
+Anmelden
+	
+
+Teile dein Wissen in der Wikipedia!
+Du bist unter 21 Jahre alt und möchtest regelmäßig mit Anderen Artikel zu deinen Lieblingsthemen schreiben? Dann komm am 15.10. um 19 Uhr zu „Jugend editiert“!
+
+Inhaltsverzeichnis Verbergen
+(Anfang)
+Begriff
+Unterabschnitt Begriff umschalten
+Begriffsgeschichte
+Abgrenzung zu anderen Begriffen
+Geschichte
+Notebooktypen
+Unterabschnitt Notebooktypen umschalten
+Vergleich mit Desktop-PCs
+Robuste Notebooks
+Notebook-Formfaktoren
+Komponenten
+Unterabschnitt Komponenten umschalten
+Prozessor
+Bildschirm
+Zeigegerät
+Tastatur
+Schnittstelle
+Arbeitsspeicher
+Datenspeicher
+Optisches Laufwerk
+Stromversorgung
+Kühler
+Weitere mögliche Komponenten
+Hersteller
+Umweltaspekte
+Weblinks
+Einzelnachweise
+Notebook
+105 Sprachen
+Artikel
+Diskussion
+Lesen
+Bearbeiten
+Quelltext bearbeiten
+Versionsgeschichte
+Werkzeuge
+Erscheinungsbild Verbergen
+Text
+Klein
+Standard
+Groß
+Breite
+Standard
+Breit
+Farbe (Beta)
+Automatisch
+Hell
+Dunkel
+MacBook Pro (Notebook 2016)
+
+Ein Notebook [ˈnəʊtbʊk] (englisch notebook ‚Notizbuch‘), Laptop [ˈlæpˌtɔp] Ausspracheⓘ/? (vom englischen ‚laptop‘ wörtlich für „auf dem Schoß“) oder (veraltet) Klapprechner, ist eine spezielle Bauform eines Personal Computers, die zu den Mobilgeräten zählt. Sie besitzt folgende grundlegende Eigenschaften:
+
+In einem flachen rechteckigen Gehäuse ist auf der Oberseite eine Tastatur flächenbündig integriert. Diese weist im alphanumerischen Bereich üblicherweise den von der ISO 9241-410:2012-12 für effizientes Tippen geforderten Tastenmittenabstand von 19 mm auf und hat eine Tastaturbelegung gemäß ISO/IEC 9995-2, z. B. QWERTZ für den deutschsprachigen Anwendungsbereich.
+An diesem Gehäuse ist ein ähnlich großer Bildschirm beweglich angebracht, der so auf das Gehäuse geklappt werden kann, dass in zugeklapptem Zustand Bildschirmoberfläche und Tastatur innen liegen und das Gesamtgerät so ohne spezielle Schutzanforderungen transportabel wird. Die Gelenke halten durch Haftreibung den aufgeklappten Bildschirm in jeder Position ohne weitere mechanische Stützung; das gesamte Gerät bleibt dabei stets kippsicher, da die gewichtsintensiven Bauteile zusammen mit der Tastatur im Grundgehäuse angeordnet sind.
+Das Gerät ist standortunabhängig verwendbar. Die Stromversorgung erfolgt durch Akkumulatoren.
+
+Von der Größe und Leistungsfähigkeit her liegen Notebooks nach heutigen Maßstäben zwischen den größeren Desktop-Computern und den kleineren Tablets. In den 2010er Jahren sind Notebooks von der Leistung nahe an die klassischen Desktop-Computer herangekommen und haben ihnen Marktanteile abgenommen.
+
+BegriffBearbeitenQuelltext bearbeiten
+[token] bearbeiten
+Mit dem T1100 führte 1987 Toshiba die Bezeichnung Notebook in Deutschland ein
+Laptop mit herausnehmbarer Tastatur (1990)
+
+Ende der 1980er-Jahre führte Toshiba den Begriff Notebook ein, um die geringe Größe und das niedrige Gewicht der Computer in Anlehnung an ein Notizbuch zu betonen.[1] Inzwischen werden die Bezeichnungen Notebook und Laptop im deutschen Sprachraum weitgehend synonym verwendet, wobei die Bezeichnung Notebook tendenziell für die mittelkleinen Ausführungen benutzt wird. Laptop (der, auch das) bezieht sich darauf, dass der mobile Computer auf dem Schoß Platz findet.
+
+Im englischen Sprachraum ist die Bezeichnung Laptop gängig; Notebook und auch Notebook Computer werden ebenfalls verwendet.
+
+Anfang der 2000er Jahre tauchte im deutschen Sprachraum auch der Begriff Klapprechner auf[2][3] und wurde auch in sprachwissenschaftlichen Texten als Beispiel verwendet.[4] Sprachpflegerische Bemühungen, mit dieser Bezeichnung die Anglizismen „Notebook“ und „Laptop“ zu verdrängen,[5][6] können mittlerweile als erfolglos gelten.[7] Trotzdem vergab der Verein Deutsche Sprache e. V. seinen Negativpreis „Sprachpanscher des Jahres 2013“ an „den Duden“ mit ausdrücklichem Verweis in der Begründung darauf, dass das Wort „Klapprechner“ in dessen aktueller Ausgabe nicht aufgeführt sei.[8][9]
+
+Abgrenzung zu anderen BegriffenBearbeitenQuelltext bearbeiten
+
+Der Begriff Netbook wurde seit 2007 für ein deutlich kleineres Gerät ohne optisches Laufwerk verwendet, dessen Tasten auch zu klein für die Verwendung im Zehnfingersystem sein können. Seit ungefähr 2011 wird der Begriff kaum noch verwendet, Tablets oder Convertibles lösten die Netbooks ab.
+
+Der Begriff Portable bezeichnet üblicherweise ein Gerät mit der Technik und den Ausmaßen eines Desktop-Computers, dessen zumeist kofferförmiges Gehäuse jedoch zum regelmäßigen Transport ausgelegt ist und in das ein Bildschirm zumeist unbeweglich integriert ist (speziell bei älteren Geräten mit Bildröhre). Im Gegensatz zu Notebooks sind solche Geräte in der Regel auf externe Stromversorgung angewiesen und haben nicht notwendig eine fest mit dem Gerät verbundene Tastatur. Aufgrund ihrer Größe können zumeist für Desktop-Computer bestimmte Erweiterungskarten der zum Produktionszeitpunkt gängigen Formate eingebaut werden. Computer dieser Art werden seit Mitte der 2010er Jahre nur noch für Spezialanwendungen (z. B. militärisch) verwendet, wo Notebooks nicht eingesetzt werden können.
+
+Der Begriff Mobilrechner bezeichnet allgemein einen zum Einsatz an unterschiedlichen Standorten bestimmten tragbaren Rechner.
+
+In die deutsche Umgangssprache fand zeitweise die verballhornende Bezeichnung Schlepptop Eingang. Diese entstand möglicherweise in der Anfangszeit der mobilen Portable-Computer, die kofferähnlich aussahen und etwa zehn Kilogramm wogen, wie 1981 der Osborne 1, 1985 der Portable 8810/25 der Nixdorf Computer AG (etwa 8000 DM teuer)[10] oder der Kaypro II.
+
+GeschichteBearbeitenQuelltext bearbeiten
+GRiD Compass 1100 (1982)
+
+Das Dynabook ist ein 1972 von Alan Kay am Xerox PARC entworfenes Konzept.[11] Es zeigt ein flaches rechteckiges Gehäuse, in dessen Oberfläche sowohl Bildschirm als auch Tastatur in der gleichen Ebene integriert sind. Somit sind in ihm die Grundideen sowohl des Laptops (nur ohne die Klappbarkeit des Bildschirms) als auch des Tabletcomputers formuliert. Wegen der seinerzeit fehlenden technischen Möglichkeiten wurde das Konzept nicht umgesetzt.
+
+Einer der ersten als Laptop zu bezeichnenden Computer ist der GRiD Compass 1100, der vom britischen Industriedesigner Bill Moggridge 1979 entworfen, aber erst 1982 erstmals verkauft wurde.[12] Dieser Laptop verfügte zwar über seinerzeit beachtliche 340 kB Hauptspeicher, hatte aber aufgrund der fehlenden IBM-Kompatibilität keinen kommerziellen Erfolg. Ebenfalls 1982 erschien der Epson HX-20 mit einem winzigen 4-Zeilen-LCD-Display, einem integrierten Matrixdrucker mit der Breite eines Kassenbons und einem ebenfalls integrierten Mikrokassetten-Laufwerk.
+
+Der Epson HX-20 von 1982, ein akkubetriebener Handheld-Computer mit Bandlaufwerk, LCD, eingebautem BASIC und Drucker, gilt als eines der ersten Notebooks
+
+1986, ein Jahr nach dem Toshiba T1100, erschien mit dem IBM PC Convertible das erste auch kommerziell erfolgreiche Notebook mit einer Taktfrequenz von 4,77 MHz, zwei 3,5-Zoll-Floppy-Laufwerken, 256 kB Speicher, einem LC-Bildschirm und Druckeranschlüssen. Noch im Jahr 1987 kostete der Toshiba T1100 mit zwei 3,5-Zoll-Floppy-Laufwerken und LCD-Bildschirm in der Schweiz um die 3700 Franken, der T3100 mit Plasmabildschirm, 640 kB Speicher und einer Harddisk von 10 Megabyte das Doppelte.[13]
+
+PowerBook 100 (1991)
+
+Das erste Notebook mit heutigen Bedienelementen war das PowerBook 100 von Apple. Der Benutzer konnte erstmals ohne externe Eingabegeräte auskommen, da das PowerBook über einen Trackball sowie seitliche Handauflagen verfügte. Die Begriffe Notebook und Laptop sind mittlerweile ineinander übergegangen und werden gleichermaßen verwendet. Der erste Laptop, der auch offiziell als erster so bezeichnet wurde, war der Gavilan SC, der 1983 veröffentlicht wurde und stark einer Schreibmaschine ähnelte.
+
+Bis in die 1990er Jahre hatte fast jedes Notebook ein Diskettenlaufwerk. Diese kamen wegen der geringen Speicherkapazität von ca. 1,4 MB, deren hohen Bauhöhe[14] und dem Aufkommen von USB-Sticks außer Gebrauch. Aus ähnlichen Gründen werden seit Mitte der 2010er Jahre auch kaum noch optische Laufwerke in Notebooks eingebaut.
+
+[token] bearbeiten
+Subnotebook von Sony (um 2005) mit 10,4″ Bildschirmdiagonale und PCMCIA-WLAN-Karte rechts neben der Tastatur. Streichholzschachtel zum Größenvergleich
+
+Notebooks wiegen in der Regel zwischen 700 g (Subnotebook) und einigen kg und sind nicht nur – wie der Name vielleicht vermuten ließe – als elektronisches Notizbuch, sondern als vollwertiger kompakter Arbeitsplatz-Rechner zu gebrauchen.
+
+Vergleich mit Desktop-PCsBearbeitenQuelltext bearbeiten
+
+Der größte Vorteil eines Notebooks im Vergleich zu den Desktop-PCs liegt in der Transportierbarkeit des kompletten Systems einschließlich Tastatur und Bildschirm in Aktentaschen oder vergleichbarem Handgepäck. Diese ermöglicht die Nutzung des Notebooks an den verschiedensten Orten – nicht nur daheim und im Büro, sondern auch bei Zugfahrten und Flügen. Ferner können Notebooks beispielsweise in Bibliotheken oder in den Geschäftsräumen von Kunden verwendet werden.
+
+Die Leistung typischer Notebooks ist den Desktop-PCs der gleichen Generation aus mehreren Gründen unterlegen. Bei Prozessoren[15] hängt die nutzbare Rechenleistung stark von der Anzahl der Kerne (siehe auch Mehrkernprozessor) und deren Takt ab. Grafikchips profitieren von einer höheren Anzahl an Shader-Einheiten und eigenem dediziertem Grafikspeicher. All diese Faktoren bedingen eine hohe Energieaufnahme sowie die daraus resultierende hohe Wärmeabgabe. Während diese bei Desktop-PCs kein Problem darstellt, werden Notebooks dadurch limitiert. Sie bieten nur begrenzten Platz für Komponenten und Kühlsystem; außerdem ist deren Gewicht eine kritische Größe. Folglich werden – je nach Preiskategorie – meist langsamer getaktete oder Low-Voltage-Prozessoren verbaut und im Leistungsumfang beschnittene Grafikchips oder Onboardlösungen eingesetzt. Bei optischen Laufwerken und Festplatten bedingt die kleinere Bauform und die nötige Toleranz gegenüber Erschütterungen eine niedrigere Drehzahl, was niedrigere Transferraten bedeutet. Solid-State-Drives heben diesen Performance-Malus bei Festplatten jedoch auf.
+
+Seit den späten 2000er Jahren werden vermehrt auch großformatige Notebooks mit über 17 Zoll Bilddiagonale angeboten. Je nach Ausrichtung sind dabei mehrere Festplatten, zwei Grafikkarten und leistungsstarke Desktop-Prozessoren möglich. Unter dieser Ausstattung leidet allerdings die Akkulaufzeit, die im Leerlauf (idle) oft unter zwei Stunden liegt und sich unter Last noch einmal halbiert. Ebenso sind die Geräte sehr schwer – teils über 5 Kilogramm – und daher eher als Ersatz für einen Desktop-PC zu sehen.
+
+Auch Standard-Laptops sind heute durchaus leistungsstark genug, um bei alltäglichen Aufgaben einen Desktop zu ersetzen. Das macht sich auch in den Verkaufszahlen bemerkbar – inzwischen werden in Europa wesentlich mehr Notebooks als Desktop-PCs verkauft. Sie machten 2008 bereits 55 % aller verkauften PCs (bei Privatkunden sogar 70 %) aus.[16] Bei Aufgaben wie CAD, 3D-Spielen und dem Rendering, die hohe Anforderungen an die Hardware stellen, sind Desktoprechner aber weiterhin die bessere Wahl.
+
+Ein Nachteil gegenüber einem Desktop-PC ist die erschwerte Austauschbarkeit und Auswahl einzelner Systemkomponenten. Während der Käufer eines Desktop-PCs auf eine Vielzahl Austauschkomponenten zurückgreifen kann, ist er bei einem Notebook – je nach Hersteller mehr oder weniger – auf die Ersatzteile des Herstellers angewiesen. Probleme ergeben sich beim Austausch weniger durch die technischen Spezifikationen der einzelnen Komponenten, als vielmehr dadurch, dass nur Komponenten bestimmter Abmessungen und Anschlussgestalt im engen Notebookgehäuse Platz haben. Aus dieser Herstellerabhängigkeit ergeben sich im Reparaturfall meistens deutlich höhere Kosten und längere Reparaturzeiten als bei vergleichbaren Defekten an einem Desktop-PC.
+
+Robuste NotebooksBearbeitenQuelltext bearbeiten
+
+Für die Anwendung in besonders rauer Umgebung oder unter klimatisch widrigen Bedingungen wurden die sogenannten Ruggedized-Notebooks konzipiert, die so robust ausgeführt sind, dass sie für Freiluft- und Freilandeinsatz geeignet sind. Es gibt Fully-ruggedized-Geräte, die vollständig gegen äußere Einflüsse geschützt sind, und Semi-ruggedized-Notebooks, die nur teilweise bestimmten Widrigkeiten widerstehen, so etwa Spritzwasser auf die Tastatur (Schutzart IP64) oder Stürzen aus einigen Dezimetern Höhe.
+
+Diese Geräte sind mit speziellen gehärteten Gehäusen versehen, die schlagfest sind und Spritzwasser sowie Hitze standhalten sollen. Anschlussstellen sind durch Gummi geschützt, um das Eindringen von Feuchtigkeit zu verhindern. Die Festplatte ist gel- oder gummigelagert, um sie vor Stößen zu schützen – insbesondere einen Sturz auf den Boden – und oft auch noch extra ummantelt, um das Eindringen von Feuchtigkeit zu verhindern, so dass im Ernstfall (Defekt des Computers) zumindest die Daten gerettet sind. Die Widerstandsfähigkeit dieser Geräte wird durch die DIN/VDE IP und den MIL-STD des US-Militärs angegeben. Sie kommen oft dann zum Einsatz, wenn sie außerhalb von Büros arbeiten müssen, beispielsweise bei der Polizei, beim Militär, bei Pannendiensten, Landvermessern oder ähnlichen Außendienstlern und in industrieller Umgebung, meistens zur Datenerfassung. Man kann sie damit auch als mobile Variante von Industrie-PCs ansehen. Aufgrund ihres vergleichsweise hohen Preises und der teilweise eingeschränkten Funktionalität (z. B. bei Schnittstellen oder Grafikleistung) wegen der speziellen Anpassung sind diese Notebooks für Privatanwender weniger interessant.
+
+Notebook-FormfaktorenBearbeitenQuelltext bearbeiten
+	
+Teile dieses Artikels scheinen seit 2014 nicht mehr aktuell zu sein. Bitte hilf uns, die fehlenden Informationen zu recherchieren und einzufügen.
+Lenovo ThinkPad T410 (2010), seinerzeit typisches Standard-Notebook mit 14-Zoll-Monitor
+
+Eine Abgrenzung ist nicht immer klar möglich.
+
+Allroundnotebook, Standard-Notebook
+Desktop-Replacement: ersetzt den Desktop-Computer, ist schwer und nicht besonders portabel
+Subnotebook: veraltete Bezeichnung für ein besonders kompaktes Notebook mit höherer Leistung als ein Netbook
+Ultrabook: eingetragenes Warenzeichen von Intel für besonders dünne und leichte, dabei aber hochwertige Notebooks mit Intel-Prozessoren, die von Intel in den Jahren 2011–2013 spezifizierte Mindestanforderungen erfüllen
+Netbook: Sehr kompaktes Notebook (kein optisches Laufwerk, relativ geringe Leistung, zum Teil mit sehr schlankem Betriebssystem), das primär auf Internetnutzung ausgelegt ist
+
+Außerdem werden Notebooks nach der Bildschirmdiagonale klassifiziert, da die Größe des Geräts heute hauptsächlich von der Bildschirmdiagonale abhängt. Gängige Notebooks haben heute (2013) eine Bildschirmdiagonale von ca. 13 bis ca. 17 Zoll, d. h. über 33 bis etwa 44 cm. Netbooks haben meist ca. 7 Zoll bis 11,6 Zoll[17][18] große Bildschirmdiagonalen.
+
+Convertible
+
+Als Convertible bezeichnet man einen Laptop, der sich durch einen Klapp- oder Klickmechanismus auch als Tablet nutzen lässt. Die Eingabe kann also ganz normal über die Tastatur erfolgen oder auch, nach der Umwandlung, über einen Touchscreen.
+
+Beispiele sind die Surface-Geräte von Microsoft.
+
+KomponentenBearbeitenQuelltext bearbeiten
+Innenleben eines Sony Vaio VGN-FS115M (um 2007)
+Bei manchen Modellen gewähren Deckel am Gehäuseboden Zugriff auf Module wie Arbeitsspeicher und Datenträger
+
+Die Komponenten eines tragbaren Computers sind für den mobilen Einsatz optimiert. Die grundlegenden Komponenten von Laptops funktionieren identisch mit denen ihrer Desktop-Pendants. Die konstruktionsbedingten Beschränkungen in Bezug auf Leistung, Größe und Kühlung von Laptops begrenzen jedoch die maximale Leistung von Laptop-Komponenten im Vergleich zu Desktop-Komponenten, obwohl sich dieser Unterschied zunehmend verringert hat.[19]
+
+ProzessorBearbeitenQuelltext bearbeiten
+→ Hauptartikel: Prozessor
+
+Der Einbau eines speziellen Notebookprozessors (Intel: Intel Core i, Intel Core Duo, Intel Core 2 Duo, Pentium Dual-Core, Pentium M, Celeron M, Atom; AMD: Athlon XP-M, Sempron, Turion 64, Turion 64 X2; Transmeta Efficeon; IBM/Motorola G4; VIA C7-M) reduziert die Leistungsaufnahme und verlängert so die Akkulaufzeit gegenüber kostengünstigeren Desktop-Prozessoren. In manchen Mobilrechnern werden jedoch aus Kosten- oder Leistungsgründen auch normale Desktop-Prozessoren verwendet.
+
+BildschirmBearbeitenQuelltext bearbeiten
+→ Hauptartikel: Bildschirm
+
+Üblicherweise werden in Notebooks heute TFT-Flachbildschirme in Größen zwischen 10,4 und 20 Zoll und in Bildauflösungen zwischen Full HD (1920 × 1080 Punkte) und UHD (3840 × 2160 Punkte) verbaut, praktisch ausschließlich in den Breitbild-Formaten 16:10 und 16:9, seltener auch 3:2. Häufig werden Bildschirme mit spiegelnder Oberfläche verwendet, es gibt auch Geräte mit entspiegelten Bildschirmen. Transreflektiv ausgeführte Bildschirme sind nur in Nischenanwendungen zu finden. Üblicherweise ist es möglich, über USB-C, HDMI oder (Mini-)DisplayPort einen externen Bildschirm anzuschließen (früher auch VGA und DVI) und diesen zusätzlich oder anstatt des eingebauten Displays zu verwenden.
+
+ZeigegerätBearbeitenQuelltext bearbeiten
+→ Hauptartikel: Zeigegerät
+
+Die seit den 2000er Jahren am weitesten verbreiteten Zeigegeräte in Notebooks sind Touchpads. Diese gibt es mit separaten Maustasten oder mit geteilter Berührungsoberfläche auf den Tasten. Eher selten (hauptsächlich bei höherwertigen Business-Geräten) und herstellergebunden werden auch Trackpoints angeboten, welche erstmals von IBM bei Geräten der ThinkPad-Serie (seit 2005 von Lenovo hergestellt) verbaut wurden, wo auch bis heute (Stand 2021) ein roter Trackpoint verbaut ist.
+
+Manche Notebooks sind mit Touchscreens ausgestattet, etwa um eine gute Bedienbarkeit mit Stiften oder Fingern zu ermöglichen.
+
+Bevor sich Touchpads und Trackpoints durchsetzten, waren Trackballs als Zeigegeräte verbreitet.
+
+TastaturBearbeitenQuelltext bearbeiten
+→ Hauptartikel: Tastatur
+
+Die in Laptops eingebauten Tastaturen lassen meist den üblichen Ziffernblock von Desktop-Tastaturen und manchmal auch die Pos1-Taste und Ende-Taste missen. Ein dedizierter Ziffernblock fehlt bei kompakten Geräten praktisch immer, ab einer Bildschirmdiagonale von 15 Zoll und größer ist genügend Platz dafür. Bei kleineren Geräten ist über die FN-Taste ein Teil der Tastatur als Ziffernblock umbelegbar, der allerdings dann nicht zusammen mit der Buchstabentastatur verwendet werden kann, da diese dann (zumindest teilweise) ausgeblendet ist. In vielen Subnotebooks kommen Tastaturen mit engerem Tastenlayout als den üblichen 19 mm × 19 mm zum Einsatz, was unter Umständen eine gewisse Eingewöhnungszeit benötigt. Laptoptasten lassen sich leichter drücken und sind um einiges leiser als die Tasten normaler Desktop-Tastaturen.
+
+[token] bearbeiten
+Schnittstellen an einem MSI-Laptop (ca. 2023): von links nach rechts: Audio-Anschlüsse für Headset und Mikrofon, USB-A-Anschlüsse, USB-C-Anschluss (SuperSpeed), Ethernet-Port, Schloss-Port. Gerade USB-C und -A sind heute (2024) Standard bei Laptops
+→ Hauptartikel: Schnittstelle
+
+Eine weitere Notebook-Spezialität sind die manchmal noch vorhandenen PCMCIA-Steckplätze (auch PC-Card oder CardBus genannt) zum Einschub von Erweiterungskarten, die mittlerweile durch die modernere Variante ExpressCard ersetzt wird oder ganz weggefallen ist. Die Zahl der Schnittstellen ist gegenüber Desktop-PCs meist reduziert, so fehlen ältere Schnittstellen wie Parallel- oder RS232-Port und es stehen weniger USB-Buchsen zur Verfügung. Der FireWire-Anschluss ist, falls vorhanden, bei den meisten Notebooks nur vier- statt sechspolig ausgeführt, d. h. bietet keine Stromversorgung der angeschlossenen Geräte. Auch sind die Audio-Schnittstellen oft eingeschränkt.
+
+[token] bearbeiten
+→ Hauptartikel: Arbeitsspeicher
+
+Mit Stand Ende 2024 bieten die meisten aktuellen Notebook-Modelle nur zwei Speicher-Steckplätze anstelle der in Desktop-PCs üblichen zwei bis sechs. Gerade bei sehr preisgünstigen Geräten kann es zudem vorkommen, dass ein Speichermodul fest verlötet ist und somit nicht ohne Werkstatteingriff austauschbar ist. Notebooks nutzen zudem in der Regel kleinere Module (SO-DIMM) als Desktop-PCs, was die Bestückung zusätzlich einschränkt. Gerade hochkapazitive Module sind auf die Verwendung der neuesten Chipgeneration angewiesen und daher vergleichsweise teuer. Registered- und ECC-Speicher ist in der Regel nicht verfügbar.
+
+[token] bearbeiten
+→ Hauptartikel: Massenspeicher
+SSDs in Laptops dienen als flotter Massenspeicher
+
+Daten werden heutzutage (Stand 2024) vorrangig auf SSDs gespeichert;[20] der Trend geht von SATA-SSDs zu den schnelleren M.2-SSDs. Festplatten werden quasi gar nicht mehr verbaut. Die meisten Laptop-Modelle haben eine 500-GB- oder 1-TB-SSD eingebaut; theoretisch sind 8 bis 16 TB möglich.[21] Bevor SSD-Speicher günstig genug für den Massenmarkt geworden ist, waren 2,5"- oder 1,8"-HDDs benutzt worden, die langsamer und weniger erschüttungsresistent sind. Diese hatten meist nicht mehr als 1 oder 2 TB Speicherplatz; 3,5"-Festplatten schaffen gemäß dem technischen Fortschritt Ende 2024 etwa 30 bis 32 TB Speicherkapazität.[22] In einer Übergangszeit wurden sogenannte "SSHD"-Datenträger eingesetzt, die die Vorteile der Festplatten (großer, günstiger Speicherplatz) und SSDs (schnelle Schreibe- und Lesegeschwindigkeiten) vereinten, indem Flashspeicher als wenige Gigabyte großer Zwischenspeicher diente und dort häufig benötigte Dateien abgelegt werden.[23]
+
+Für die früher verbauten ATA-Festplatten wurde eine eigene platzsparende Anschlussnorm (ATAPI-44) geschaffen, die neben Daten- und Steuerbus auch die Stromversorgung in die Steckerleiste integriert. Für den Betrieb einer Notebook-Festplatte an einem Desktop-PC (z. B. zur Datenrettung) ist ein entsprechender Adapter erforderlich. Die damaligen (Stand 2017) SATA-Festplatten im Notebookformat sind dagegen völlig pinkompatibel zu 3,5″-Laufwerken und benötigen für einen Einsatz in Desktoprechnern lediglich noch einen Einbaurahmen. Notebookplatten nutzen ausschließlich 5-V-Versorgungsspannung, was sie von Desktoplaufwerken unterscheidet. Die meisten Notebooks haben nur eine einzige Festplatte/SSD, wenige Geräte haben mehrere.
+
+Optisches LaufwerkBearbeitenQuelltext bearbeiten
+→ Hauptartikel: Optisches Laufwerk
+
+Seit Anfang der 2000er Jahre bis in die späten 2010er Jahre verfügten Notebooks üblicherweise über ein optisches Laufwerk. Wegen dessen heute im Vergleich zu anderen Speichermedien geringeren Kapazität ist dies mittlerweile unüblich.[24] Verbaute CD-, DVD- oder Blu-ray-Laufwerke hatten zuletzt zumeist SlimLine-Bauform (übliche Bauhöhe 12,7 mm oder Super Slim 9,5 mm) und die Brennmöglichkeit für CD und DVD. Zum Einbau mussten sie in einen herstellerspezifischen Rahmen gesetzt werden und erhielten zumeist eine dem Notebookdesign entsprechende Frontblende.
+
+[token] bearbeiten
+Ersatzakku mit erweiterter Kapazität
+
+Für den stationären Betrieb verfügen alle Notebooks über eine eingebaute oder externe Stromversorgung zum Betrieb des Gerätes und zum Laden des Akkus für den mobilen Betrieb. Im mobilen Einsatz verwenden fast alle modernen Notebooks Lithium-Ionen-Akkus oder Lithium-Polymer-Zellen zur Stromversorgung. Zuvor waren Akkus mit Nickel-Metall-Hydrid-Technik oder Nickel-Cadmium-Technik verbreitet. Übliche Laufzeiten von Notebooks im Akkubetrieb liegen je nach Energieverbrauch und Akku-Kapazität zwischen wenigen Stunden bis deutlich über 12 Stunden.[25]
+
+Die Akkus können fest eingebaut oder ohne Werkzeug austauschbar sein. Einige Modelle können optional mit einem zweiten Akku bestückt werden, um die Laufzeit zu erhöhen. Der Zusatzakku wird oft statt des optischen Laufwerks in dessen Schacht eingesetzt, bei manchen Modellen kann er aber auch unterhalb des Hauptakkus angebracht werden und daher größer ausfallen. Manche Modelle unterstützen Ersatzakkus mit erweiterter Kapazität.
+
+Geladen werden die Akkus mit Schaltnetzteilen für Netzspannung, der Bordspannungssteckdose von Kraftfahrzeugen oder der vergleichbaren sogenannten EmPower-Steckdose in Verkehrsflugzeugen (meist als Adapter auf den Zigarettenanzünder-Stecker).
+
+Es wurden in der Regel zylinderförmige Verbindungsstecker verwendet. Einige Hersteller wie Lenovo verwendeten zwischenzeitlich rechteckige.[26] Später ermöglichte USB-C mit Stromstärken von bis zu 5 Ampere bei der für Laptop-Netzteile üblichen Spannung von 20 Volt (neu 48 Volt) einen universellen Stecker für Aufladen und Datenübertragungen. Ab Ende April 2026 muss jedes verkaufte Neugerät in der EU über einen USB-C Anschluss verfügen und auch ohne Netzteil im Verkauf angeboten werden.[27][28] Jedoch benötigen Modelle mit höherem Leistungsbedarf wie Gaming-Notebooks einen klassischen Stecker; die größere Bauform ist weniger verschleißanfällig.[29]
+
+Das Aufladen mit inoffiziellen Netzteilen kann bei manchen Modellen gesperrt sein.[30]
+
+KühlerBearbeitenQuelltext bearbeiten
+Mit Staub verschmutzter Kühlkörper aus einem Notebook, der zum Abschalten des Gerätes geführt hat
+
+Viele Notebooks haben einen aktiven Prozessorkühler. Eine Heatpipe nimmt die Wärme der Leistungs-Bauelemente auf und leitet sie an einen Kühlkörper. Ein Lüfter bläst Luft durch Schlitze im Kühlkörper zum Abführen der Wärme aus dem Gehäuse. Verstopfen die Schlitze im Kühlkörper durch Staub und Schmutz, dann wird die Kühlung verschlechtert. Bei zu geringer Kühlleistung besteht die Gefahr der automatischen Drosselung des Prozessortakts oder Abschaltung, um Schädigung durch Überhitzung zu vermeiden. Durch regelmäßige Reinigung des Kühlkörpers kann dem vorgebeugt werden.
+
+Weitere mögliche KomponentenBearbeitenQuelltext bearbeiten
+Kartenleser für Speicherkarten aus Digitalkameras, Mobiltelefonen und MP3-Playern
+Webcam für Videotelefonie
+Fingerabdruckscanner
+Smartcard-Lesegeräte (z. B. für Verschlüsselung, elektronische Signatur oder HBCI)
+Dockingstation oder Portreplikator zum Anschluss von Peripheriegeräten
+Blickschutzfilter
+Notebook-Kühler
+HerstellerBearbeitenQuelltext bearbeiten
+Open-Hardware-Kleinstrechner MNT Reform Pocket (2023)
+
+Am Mobilrechnermarkt gibt es viele Marken, aber nur relativ wenige Hersteller, die für diese produzieren. Das liegt daran, dass namhafte Firmen bei Auftragsherstellern (Original Design Manufacturer (ODM)) die Notebooks einkaufen oder auch leicht modifiziert produzieren lassen, um sie dann unter eigenem Namen zu verkaufen. Wie groß der eigene Anteil an den Geräteentwicklungen ist, lässt sich meist nur schwer abschätzen. Viele Notebookfertiger haben ihren Sitz und die Entwicklung in Taiwan, produziert wird zum großen Teil in der Volksrepublik China. Die Zusammenhänge der Produzenten, namhaften Hersteller und Eigenmarken-Anbieter ändern sich ständig.
+
+Unklar ist oftmals, wo die tatsächliche Endmontage stattfindet. Viele OEM-/ODM-Designs bekommen schon bei der Produktion in Asien ihre gesamte regionale Ausstattung (Tastatur, Handbücher). Andere werden als Barebones (ohne Speicher, CPU, Festplatte, manchmal auch ohne Display) angeliefert und dann in regionalen Fabriken teils nach Kundenwünschen fertig bestückt.
+
+Im Zuge der Diskussion um Kreislaufwirtschaft und Ressourceneffizienz stellen einzelne Hersteller inzwischen die technische Dokumentation ihrer Laptops in Gänze oder in Teilen als Open-Source-Hardware bereit. So sollen etwa die Reparierbarkeit und Langlebigkeit der Produkte gesteigert werden. Beispielhafte Hersteller sind etwa Pine64,[31] Framework[32] und MNT Reform.[33]
+
+[token] bearbeiten
+Treibhausgasemissionen eines Notebooks, kalkulierte Lebensdauer von fünf Jahren (Stand 2012)
+	Herstellung	Distribution	Einkaufsfahrt	Nutzung	End-of-Life	summiert
+Emissionen in kg CO2e[34]	241,2	29,0	1,4	138,5	−1,17	399,4
+relativer Anteil	60,4 %	5,01 %	0,35 %	34,68 %	−0,43 %	100 %
+
+Die meisten Treibhausgasemissionen – gemessen in CO2-Äquivalent (CO2e) – entstehen bei Notebooks während der Herstellung und nicht beim Gebrauch.[34] Das entspräche der Nutzungsdauer von bis zu 88 Jahren, damit sich der Kauf eines Neugerätes „energetisch“ amortisiert.[35] „Der Herstellungsaufwand wurde bisher systematisch unterbewertet.“ Hinsichtlich des Treibhausgases wurden drei verschiedene Datengrundlagen gewählt: EuP Lot 3, Ecoinvent 2.2 und Forschungsplan UBA UBA 2009: damit müsste ein Laptop mit zehn Prozent besserer Effektivität 33 (nach EuP) bis 88 (nach UBA) Jahre genutzt werden. „Ökologisch verhält sich nur, wer einmal erworbene Elektronik so lange und so intensiv wie möglich nutzt.“ Giftige Mittel werden möglichst ersetzt und teure Metalle eingeschränkter verwendet, so etwa Kupfer statt Silber.
+
+Siehe auch: Green IT
+WeblinksBearbeitenQuelltext bearbeiten
+Commons: Laptops – Sammlung von Bildern, Videos und Audiodateien
+Wikibooks: Notebook – Lern- und Lehrmaterialien
+Wiktionary: Notebook – Bedeutungserklärungen, Wortherkunft, Synonyme, Übersetzungen
+Wiktionary: Laptop – Bedeutungserklärungen, Wortherkunft, Synonyme, Übersetzungen
+[token] bearbeiten
+Jörg Wirtgen: Notebook oder Laptop? In: c’t. Nr. 6. Heise, 2004, S. 224 (heise.de [abgerufen am 1. Oktober 2010] 6/2004).
+beispielsweise in: Markus Eckstein: Hitliste der Klapp-Rechner. chip.de, 18. August 2003, abgerufen am 3. September 2013.
+beispielsweise in: Martin Strang: Klapprechner für Koreaner. macwelt.de, 8. November 2006, abgerufen am 3. September 2013.
+beispielsweise in: Innere Mehrsprachigkeit des Deutschen (Varietäten) und Sprachvielfalt der deutschen Standardsprache (Stile). In: Lehrerkommentar zum Themenheft Zentralabitur: Deutsche Sprache der Gegenwart. Ernst Klett Verlag, Leipzig 2009, ISBN [number], S. 22 (klett.de [PDF] abgerufen am 3. September 2013).
+Initiative gegen Denglisch: Der Klapprechner des Herrn Ramsauer. ftd.de (Financial Times), 30. Dezember 2010, archiviert vom Original (nicht mehr online verfügbar) am 2. Januar 2011; abgerufen am 3. September 2013.
+dapd/memo: Anglizismen: Gebt Prallkissen und Klapprechner eine Chance! welt.de, 27. Januar 2011, abgerufen am 3. September 2013.
+Der Klapprechner ist chancenlos! Walter Schmidt, archiviert vom Original (nicht mehr online verfügbar) am 31. Oktober 2014; abgerufen am 3. September 2013.
+Pressemitteilung – Duden ist Sprachpanscher 2013. Verein Deutsche Sprache e. V., 2. September 2013, archiviert vom Original (nicht mehr online verfügbar) am 4. September 2013; abgerufen am 3. September 2013.
+anb/DPA: Sprachpuristen würden Notebook lieber "Klapprechner" nennen. stern.de, 2. September 2013, abgerufen am 3. September 2013.
+Gerald Schröder: Legende aus der Kellerwerkstatt. manager magazin Online, 23. August 2001, abgerufen am 1. Oktober 2010: „Man nannte ihn Schlepptop: Der Nixdorf 8810/25, einer der ersten mobilen PCs, war kein Leichtgewicht. Er wog acht Kilo und kostete bei Markteinführung 1985 rund 8000 Mark.“
+Alan C. Kay: A Personal Computer for Children of All Ages. 1972, abgerufen am 7. Mai 2013 (englisch).
+Wir müssen die Bedürfnisse der Nutzer im Auge behalten, Technology Review, Interview mit Bill Moggridge, 21. Mai 2007
+NZZ, 19. März 1987, Seite 36
+https://books.google.de/books?id=FeIuiOQN-nEC&lpg=PA1&hl=de&pg=PT104#v=onepage&q&f=false The Perfect Notebook Computer by John C. Dvorak PC Mag 11 Februar 1992 S. 93 (englisch)
+Vergleich mobiler Prozessoren. In: Notebookcheck.com. Abgerufen am 1. Oktober 2010.
+Matthias Parbel: Notebooks heizen den europäischen PC-Markt an. In: heise online. 22. April 2008, abgerufen am 1. Oktober 2010.
+Notebook vs Netbook https://www.youtube.com/watch?v=NQgiZd0-DxI igerDirectBlogvom 6. Oktober 2008
+ITWissen Netbook: „Ein Netbook ist ein abgespeckter Subnotebook mit kleineren Abmessungen, kleinerem Display, dessen Größe bei 10″ und darunter liegt“
+Laptop oder PC - Welche Wahl ist die richtige? - HardwarePros. Abgerufen am 16. Mai 2023.
+Michael Günsch: Marktanalyse: HDD als primärer Notebook-Speicher bald Geschichte. 15. Februar 2020, abgerufen am 31. Dezember 2025.
+Marcel Niederste-Berg: PCIe-SSD bis 16 TB: AGI Technology stellt große und schnelle SSDs in Aussicht. 7. Juni 2024, abgerufen am 31. Dezember 2025.
+Michael Günsch: Western Digital: 32 TB HDD, SSDs mit 64 TB oder PCIe 5.0 und neue Roadmaps. 6. Juni 2024, abgerufen am 31. Dezember 2025.
+SSHD - Solid-State Hybrid Drives (Hybrid-Festplatten). Abgerufen am 31. Dezember 2025.
+Mark Kyrnin: Why Do Most New PCs Not Come With DVD or Blu-ray Drives? In: Lifewire. 25. Juni 2019, abgerufen am 27. August 2019 (englisch).
+Rami Tabari: Laptops with Best Battery Life 2019 - Longest Lasting Laptop Batteries. In: Laptopmag. 21. August 2019, abgerufen am 27. August 2019 (englisch).
+Lenovo ThinkPad T440s (2014) – "The laptop ships with a 45 watt compact AC adapter with the new rectangular connector."
+Florian Müssig: Was die USB-C-Pflicht für Notebooks bedeutet. In: heise.de. 24. März 2026, abgerufen am 30. März 2026 (hinter Bezahlschranke).
+USB-C-Pflicht: Laptops bald ohne Netzteil im Handel. Stiftung Warentest, 11. April 2026, abgerufen am 11. April 2026.
+Why you don't want a USB-C charger for your gaming laptop. 16. Juni 2021, abgerufen am 2. August 2021 (englisch).
+Lewin Day: Hacking Dell Laptops To Use Off-Brand Chargers. In: Hackaday. 27. Mai 2020, abgerufen am 2. August 2021 (amerikanisches Englisch).
+Pinebook: Open-Source-Laptop für 99 Dollar im Test. In: Der Standard. Abgerufen am 19. November 2024 (österreichisches Deutsch).
+Abid Ahsan Shanto: Framework stellt 3D-CAD-Dateien für modulares 16-Zoll-Notebook als Open Source zur Verfügung. 14. Juni 2024, abgerufen am 19. November 2024.
+Kim Rixecker: MNT Reform: Notebook setzt auf Open Source und reparierbare Hardware - t3n – digital pioneers. 12. Mai 2020, abgerufen am 19. November 2024.
+Hochspringen nach:
+ Quelle: Öko-Institut, zit. nach VDI nachrichten 41/2012, 12. Oktober 2012
+Zeitlich optimierter Ersatz eines Notebooks unter ökologischen Gesichtspunkten Umweltbundesamt (Deutschland), abgerufen am 22. Oktober 2012
+Normdaten (Sachbegriff): GND: 4296418-0 (GND Explorer, lobid, OGND)
+Kategorien: Wikipedia:Veraltet seit 2014Tragbare Computer
+Diese Seite wurde zuletzt am 4. Oktober 2026 um 20:41 Uhr bearbeitet. Die Seite wurde mit Parsoid gerendert.
+Abrufstatistik · Autoren
+
+
+
+Der Text ist unter der Lizenz „Creative-Commons Namensnennung – Weitergabe unter gleichen Bedingungen“ verfügbar; Informationen zu den Urhebern und zum Lizenzstatus eingebundener Mediendateien (etwa Bilder oder Videos) können im Regelfall durch Anklicken dieser abgerufen werden. Möglicherweise unterliegen die Inhalte jeweils zusätzlichen Bedingungen. Durch die Nutzung dieser Website erklären Sie sich mit den Nutzungsbedingungen und der Datenschutzrichtlinie einverstanden.
+
+
+Wikipedia® ist eine eingetragene Marke der Wikimedia Foundation Inc.
+Datenschutz
+Über Wikipedia
+Haftungsausschluss
+Impressum / Sicherheit
+Verhaltenskodex
+Entwickler
+Statistiken
+Stellungnahme zu Cookies
+Mobile Ansicht

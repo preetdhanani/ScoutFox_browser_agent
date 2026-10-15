@@ -1,0 +1,16 @@
+{
+  "name": "geizhals-search",
+  "kind": "price-comparison search results (bot check)",
+  "url": "https://geizhals.de/?fs=thinkpad",
+  "requestedUrl": "https://geizhals.de/?fs=thinkpad",
+  "title": "thinkpad Geizhals Deutschland",
+  "capturedAt": "2026-10-14T23:54:40.564Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 55181,
+  "htmlUncompressedBytes": 331527,
+  "textLength": 7118,
+  "htmlSha256": "6e3bf456f37013a08ef065ee35e12712c07fd59099839c941f352b8a37b45c4e"
+}

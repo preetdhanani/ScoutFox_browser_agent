@@ -1,0 +1,16 @@
+{
+  "name": "framework-configurator",
+  "kind": "product configurator with variants",
+  "url": "https://frame.work/de/en/products/laptop16-diy-amd-ai300/configuration/new",
+  "requestedUrl": "https://frame.work/de/en/products/laptop16-diy-amd-ai300/configuration/new",
+  "title": "Framework | Configure Framework Laptop 16 DIY Edition (AMD Ryzen™ AI",
+  "capturedAt": "2026-10-15T01:48:24.919Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 94098,
+  "htmlUncompressedBytes": 2278426,
+  "textLength": 3088,
+  "htmlSha256": "5f0399549de8aa32baf5ee1435eb84c2c60047571502c948b91d63405d476050"
+}

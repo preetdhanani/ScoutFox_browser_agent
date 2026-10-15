@@ -1,0 +1,16 @@
+{
+  "name": "apple-macbook-air",
+  "kind": "product with variants (shipping and delivery text)",
+  "url": "https://www.apple.com/de/shop/buy-mac/macbook-air",
+  "requestedUrl": "https://www.apple.com/de/shop/buy-mac/macbook-air",
+  "title": "MacBook Air kaufen - Apple (DE)",
+  "capturedAt": "2026-10-15T01:47:57.193Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 95191,
+  "htmlUncompressedBytes": 594081,
+  "textLength": 28370,
+  "htmlSha256": "432e291c3407ebf450ba762ffb94cddb72b44562d0f4cbeac1047c049d853977"
+}

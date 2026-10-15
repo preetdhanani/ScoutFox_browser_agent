@@ -1,0 +1,16 @@
+{
+  "name": "spiegel-front",
+  "kind": "news front page (cookie wall)",
+  "url": "https://www.spiegel.de/",
+  "requestedUrl": "https://www.spiegel.de/",
+  "title": "DER SPIEGEL | Online-Nachrichten",
+  "capturedAt": "2026-10-15T01:48:13.309Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 265474,
+  "htmlUncompressedBytes": 2031784,
+  "textLength": 35908,
+  "htmlSha256": "5e7997a855e551c0023428ce5734ffb8e71fca15c5ca033b32511e1a243552dc"
+}

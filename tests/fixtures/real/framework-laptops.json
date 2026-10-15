@@ -1,0 +1,16 @@
+{
+  "name": "framework-laptops",
+  "kind": "shop collection page",
+  "url": "https://frame.work/de/en/collections/laptops",
+  "requestedUrl": "https://frame.work/de/en/collections/laptops",
+  "title": "Framework | We’re sorry, we couldn’t find what you were looking for",
+  "capturedAt": "2026-10-14T23:54:31.585Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 21463,
+  "htmlUncompressedBytes": 167437,
+  "textLength": 1170,
+  "htmlSha256": "71f104cdb6f05332cff7a721c0bf6cccf99ff4a444b08052c61bbd492517fcde"
+}

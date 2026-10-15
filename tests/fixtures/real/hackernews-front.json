@@ -1,0 +1,16 @@
+{
+  "name": "hackernews-front",
+  "kind": "news front page",
+  "url": "https://news.ycombinator.com/",
+  "requestedUrl": "https://news.ycombinator.com/",
+  "title": "Hacker News",
+  "capturedAt": "2026-10-14T23:54:54.171Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 5571,
+  "htmlUncompressedBytes": 34694,
+  "textLength": 4202,
+  "htmlSha256": "a916e64e9212b7986d9f4fa03e35574e7c8cb141d6ee11af10b75c6e5f4682c7"
+}

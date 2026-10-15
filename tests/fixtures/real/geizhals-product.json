@@ -1,0 +1,16 @@
+{
+  "name": "geizhals-product",
+  "kind": "price-comparison product page (bot check)",
+  "url": "https://geizhals.de/a1905695.html",
+  "requestedUrl": "https://geizhals.de/a1905695.html",
+  "title": "Just a moment...",
+  "capturedAt": "2026-10-14T23:54:43.845Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 2933,
+  "htmlUncompressedBytes": 5559,
+  "textLength": 33,
+  "htmlSha256": "098f096d58b5d6299af830d40a9ace107e1e478fd4465bb7bf0c759533ec305d"
+}

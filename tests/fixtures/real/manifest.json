@@ -1,0 +1,27 @@
+{
+  "comment": "The real-page corpus manifest. Each entry is one real page the recorder captures (serialized DOM, visible text). The replay job runs the real content scripts over the recorded DOM and asserts the expectations in expectations.json. Add a page here for every new live bug (see README.md).",
+  "pages": [
+    { "name": "framework-configurator", "url": "https://frame.work/de/en/products/laptop16-diy-amd-ai300/configuration/new", "kind": "product configurator with variants" },
+    { "name": "framework-laptops", "url": "https://frame.work/de/en/collections/laptops", "kind": "shop collection page" },
+    { "name": "idealo-search", "url": "https://www.idealo.de/preisvergleich/MainSearchProductCategory.html?q=laptop", "kind": "price-comparison search results" },
+    { "name": "geizhals-search", "url": "https://geizhals.de/?fs=thinkpad", "kind": "price-comparison search results (bot check)" },
+    { "name": "geizhals-product", "url": "https://geizhals.de/a1905695.html", "kind": "price-comparison product page (bot check)" },
+    { "name": "apple-macbook-air", "url": "https://www.apple.com/de/shop/buy-mac/macbook-air", "kind": "product with variants (shipping and delivery text)" },
+    { "name": "hackernews-front", "url": "https://news.ycombinator.com/", "kind": "news front page" },
+    { "name": "hackernews-item", "url": "https://news.ycombinator.com/item?id=1", "kind": "news discussion page" },
+    { "name": "github-login", "url": "https://github.com/login", "kind": "login wall" },
+    { "name": "github-repo", "url": "https://github.com/facebook/react", "kind": "repository page" },
+    { "name": "duckduckgo-lite", "url": "https://lite.duckduckgo.com/lite/?q=laptop", "kind": "search results (server rendered)" },
+    { "name": "wikipedia-laptop", "url": "https://en.wikipedia.org/wiki/Laptop", "kind": "long content article" },
+    { "name": "wikipedia-notebook-de", "url": "https://de.wikipedia.org/wiki/Notebook", "kind": "long content article (German)" },
+    { "name": "heise-front", "url": "https://www.heise.de/", "kind": "news front page (cookie wall)" },
+    { "name": "tagesschau-front", "url": "https://www.tagesschau.de/", "kind": "news front page" },
+    { "name": "spiegel-front", "url": "https://www.spiegel.de/", "kind": "news front page (cookie wall)" },
+    { "name": "bbc-news", "url": "https://www.bbc.com/news", "kind": "news front page" },
+    { "name": "python-org", "url": "https://www.python.org/", "kind": "project home page" },
+    { "name": "mdn-css", "url": "https://developer.mozilla.org/en-US/docs/Web/CSS", "kind": "documentation page" },
+    { "name": "httpbin-form", "url": "https://httpbin.org/forms/post", "kind": "form page" },
+    { "name": "example-com", "url": "https://example.com/", "kind": "minimal page (sanity check)" },
+    { "name": "cloudflare-challenge", "url": "https://nowsecure.nl/", "kind": "bot-check interstitial" }
+  ]
+}

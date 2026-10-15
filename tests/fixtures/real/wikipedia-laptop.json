@@ -1,0 +1,16 @@
+{
+  "name": "wikipedia-laptop",
+  "kind": "long content article",
+  "url": "https://en.wikipedia.org/wiki/Laptop",
+  "requestedUrl": "https://en.wikipedia.org/wiki/Laptop",
+  "title": "Laptop - Wikipedia",
+  "capturedAt": "2026-10-15T01:48:00.804Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 147553,
+  "htmlUncompressedBytes": 970549,
+  "textLength": 86380,
+  "htmlSha256": "a0c21851635ec31039df33bf4b1b4f8720c30dc98d5eae254fe37fb5fdef9341"
+}

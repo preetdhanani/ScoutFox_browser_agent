@@ -1,0 +1,728 @@
+Jump to content
+Main menu
+Search
+Donate
+Create account
+Log in
+Contents hide
+(Top)
+History
+Etymology
+Types of laptops
+Toggle Types of laptops subsection
+Hardware
+Toggle Hardware subsection
+Compared to desktop computers
+Toggle Compared to desktop computers subsection
+Ergonomics and health effects
+Toggle Ergonomics and health effects subsection
+Sales
+Toggle Sales subsection
+Disposal
+Extreme use
+See also
+Notes
+References
+Laptop
+105 languages
+Article
+Talk
+Read
+View source
+View history
+Tools
+Appearance hide
+Text
+Small
+Standard
+Large
+Width
+Standard
+Wide
+Color
+Automatic
+Light
+Dark
+From Wikipedia, the free encyclopedia
+For other uses, see Laptop (disambiguation).
+	
+This article needs to be updated. Please help update this article to reflect recent events or newly available information. (March 2025)
+A variety of laptops. Clockwise from top left: A 2021 MacBook Pro by Apple Inc.; a 2019 Microsoft Surface Pro 7 with detachable hinge (left) and a 2018 Dell XPS 15 9570 with 360 degree hinge (right); a 2014 ThinkPad Helix by Lenovo with detachable screen; and a 2014 Acer Chromebook 11
+
+A laptop[a] is a portable personal computer (PC). Laptops typically have a clamshell form factor with a flat-panel screen on the inside of the upper lid and an alphanumeric keyboard and pointing device on the inside of the lower lid.[1][2] Most of the computer's internal hardware is in the lower part, under the keyboard, although many modern laptops have a built-in webcam at the top of the screen, and some feature touchscreen displays. In most cases, unlike tablet computers which run on mobile operating systems, laptops tend to run on desktop operating systems, which were originally developed for desktop computers.
+
+Laptops are used in a variety of settings, such as at work (especially on business trips), in education[3], for playing games, content creating, web browsing, for personal multimedia, and for general home computer use. They can be powered using either continuous wall power or a rechargeable battery, and can be folded shut for convenient storage and transportation, making them suitable for mobile use.[4] Laptops feature all the standard input and output components of a desktop computer in a single compact unit, including a display screen (usually 11–17 in or 280–430 mm in diagonal size), speakers, a keyboard, and a pointing device (usually a trackpad). Hardware specifications vary significantly between different types, models, and price points.
+
+Design elements, form factors, and construction can also vary significantly between models depending on intended use. Examples of specialized models of laptops include 2-in-1 laptops, with keyboards that either be detached or pivoted out of view from the display (often marketed having a "laptop mode"), and rugged laptops, for use in construction or military applications.
+
+Portable computers, which later developed into modern laptops, were originally considered to be a small niche market, mostly for specialized field applications, such as in the military, for accountants, or travelling sales representatives. As portable computers evolved into modern laptops, they became widely used for a variety of purposes.[5]
+
+History
+Main article: History of laptops
+See also: Portable computer § Early history
+Alan Kay holding the mockup of his Dynabook concept in 2008
+
+The history of the laptop follows closely behind the development of the personal computer itself. A "personal, portable information manipulator" was imagined by Alan Kay at Xerox PARC in 1968,[6] and described in his 1972 paper as the "Dynabook".[7] The IBM Special Computer APL Machine Portable (SCAMP) was demonstrated in 1973.[8] This prototype was based on the IBM PALM processor.[9] The IBM 5100, the first commercially available portable computer, appeared in September 1975, and was based on the SCAMP prototype.[10]
+
+IBM 5100 (1975)
+
+As 8-bit CPU machines became widely accepted, the number of portables increased rapidly. The first "laptop-sized notebook computer" was the Epson HX-20,[11][12] invented (patented) by Suwa Seikosha's Yukio Yokozawa in July 1980,[13] introduced at the COMDEX computer show in Las Vegas by Japanese company Seiko Epson in 1981,[14][12] and released in July 1982.[12][15] It had an LCD screen, a rechargeable battery, and a calculator-size printer, in a 1.6 kg (3.5 lb) chassis, the size of an A4 notebook.[12] It was described as a "laptop" and "notebook" computer in its patent.[13]
+
+The Epson HX-20, the first "notebook computer", was invented in 1980 and introduced in 1982.
+GRiD Compass 1101 (1982)
+
+Both Tandy/RadioShack and Hewlett-Packard (HP) also produced portable computers of varying designs during this period.[16][17] The first laptops using the flip form factor appeared in the early 1980s. The Dulmont Magnum was released in Australia in 1981–82, but was not marketed internationally until 1984–85. The US$8,150 (equivalent to $27,190 in 2025) GRiD Compass 1101, released in 1982, was used at NASA and by the military, among others. The Sharp PC-5000,[18] the Ampere WS-1,[19] and Gavilan SC were released between 1983 and 1985.[20][19][21] The Toshiba T1100 won acceptance by PC experts and the mass market as a way to have PC portability.[22]
+
+From 1983 onward, several new input techniques were developed and included in laptops, including the touch pad (Gavilan SC, 1983), the pointing stick (IBM ThinkPad 700, 1992), and handwriting recognition (Linus Write-Top,[23] 1987). Some CPUs, such as the 1990 Intel i386SL, were designed to use minimum power to increase the battery life of portable computers and were supported by dynamic power management features such as Intel SpeedStep and AMD PowerNow! in some designs.
+
+Some laptops in the 1980s using red plasma displays could only be used when connected to AC power, and had a built in power supply.[24]
+
+The development of memory cards was driven in the 1980s by the need for a floppy-disk-drive alternative, having lower power consumption, less weight, and reduced volume in laptops. The Personal Computer Memory Card International Association (PCMCIA) was an industry association created in 1989 to promote a standard for memory cards in PCs. The specification for PCMCIA type I cards, later renamed PC Cards, was first released in 1990.[25][26]
+
+A Zenith SupersPort laptop, released in 1988
+
+Displays reached 640x480 (VGA) resolution by 1988 (Compaq SLT/286), and color screens started becoming a common upgrade in 1991,[27] with increases in resolution and screen size occurring frequently until the introduction of 17" screen laptops in 2003. Hard drives started to be used in portables, encouraged by the introduction of 3.5" drives in the late 1980s, and became common in laptops starting with the introduction of 2.5" and smaller drives around 1990; capacities have typically lagged behind those of physically larger desktop drives.
+
+By 1992 the laptop market was growing about three times faster than that of desktops.[28] By 1994 laptops were also more profitable than desktops, and accounted for one sixth of the personal computer market, up from one twentieth in 1990. They were so important that Dell risked, experts said, "second-rate status" in the industry for not having a strong laptop product line.[29]
+
+Optical disc drives became common in full-size laptops around 1997: initially these were CD-ROM drives, and these later included writable and higher capacity formats like DVD and Blu-Ray. Starting around 2011, the trend shifted against internal optical drives, and as of 2022, they have largely disappeared, though are still readily available as external peripherals.
+
+Resolutions of laptop webcams have climbed over time, from VGA-resolution to 1080p or even higher on some newer models.[30] The earliest-known laptops with 1080p (Full HD) webcams, like the Samsung 700G7C, were released in the early 2010s.[31]
+
+Etymology
+
+The word laptop, modeled after the term desktop (as in desktop computer), refers to the fact that the computer can be practically placed on the user's lap. As of 2024, in American English, the terms laptop and notebook are used interchangeably;[32] in other dialects of English, one or the other may be preferred.[33] The term notebook originally referred to a type of portable computer that was smaller and lighter than mainstream laptops of the time - approximately similar in size to a paper notebook - but has since come to mean the same thing and no longer refers to any particular size.
+
+The terms laptop and notebook trace their origins to the early 1980s, coined to describe portable computers in a size class smaller than the mainstream units (so-called "luggables") but larger than pocket computers.[34][35] The etymologist William Safire traced the origin of laptop to some time before 1984;[36] the earliest attestation of laptop found by the Oxford English Dictionary dates to 1983.[37] The word is modeled after the term desktop, as in desktop computer.[36] Notebook, meanwhile, emerged earlier in 1982[38] to describe Epson's HX-20 portable, whose dimensions roughly correspond to a letter-sized pad of paper.[35][39]: 9 [40] Notebooks emerged as their own separate market from laptops with the release of the NEC UltraLite in 1988.[41]: 16 
+
+Notebooks and laptops continued to occupy distinct market segments into the mid-1990s,[42] but ergonomic considerations and customer preference for larger screens soon led to notebooks converging with laptops in the late 1990s.[43] Now, the terms laptop and notebook are synonymous, with any preference between the two being a variation in dialect.[43][33]
+
+Types of laptops
+Compaq Armada laptop from the late 1990s
+Apple MacBook Air, an "ultraportable" laptop weighing under 3.0 lb (1.36 kg)
+A Lenovo IdeaPad laptop
+Lenovo's ThinkPad business laptop, originally an IBM product
+Asus Transformer Pad, a hybrid tablet, powered by Android OS
+Microsoft Surface Pro 3, 2-in-1 detachable
+Alienware gaming laptop with backlit keyboard and touch pad
+Samsung Sens laptop
+Panasonic Toughbook CF-M34, a rugged laptop/subnotebook
+
+Since the 1970s introduction of portable computers, their forms have changed significantly, resulting in a variety of visually and technologically differing subclasses. Excepting distinct legal trademark around terms (notably Ultrabook), hard distinctions between these classes were and remain rare, and their usage has varied over time and between sources. Since the late 2010s, more specific terms have become less commonly used, with sizes distinguished largely by the size of the screen.
+
+There were in the past a number of marketing categories for smaller and larger laptop computers; these included "notebook" and "subnotebook" models, low cost "netbooks", and "ultra-mobile PCs" where the size class overlapped with devices like smartphone and handheld tablets, and "Desktop replacement" laptops for machines notably larger and heavier than typical to operate more powerful processors or graphics hardware. All of these terms have fallen out of favor as the size of mainstream laptops has gone down and their capabilities have gone up; except for niche models, laptop sizes tend to be distinguished by the approximate size of the screen (e.g. "13-inch" or "16-inch"), and for more powerful models, by any specialized purpose the machine is intended for, such as a "gaming laptop" or a "mobile workstation" for professional use.
+
+Mobile workstation
+Main articles: Mobile workstation and Desktop replacement computer
+
+A mobile workstation, also known as a desktop-replacement computer, is a type of laptop that is significantly more powerful—and generally more expensive—than a standard laptop computer. They are generally intended for professional use and to serve as desktop replacements. Because of their high performance, however, they also have poorer battery life than most other laptops and require additional cooling systems.[44] Examples of mobile workstations include the Thinkpad P-series and the HP ZBook line.[45][46]
+
+Gaming laptop
+See also: Gaming computer § Gaming laptop computers
+
+A gaming laptop is a type of laptop that is primarily used to play video games. Like mobile workstations, they are more powerful than standard laptops, but gaming laptops tend to prioritize features like a high refresh rate, a GPU that supports ray tracing, and RGB lighting.[47] Examples of gaming laptops include the Lenovo Legion series and Alienware laptops.[48]
+
+Hybrid laptop
+
+Main article: 2-in-1 PC
+
+The latest trend of technological convergence in the portable computer industry spawned a broad range of devices, which combined features of several previously separate device types. The hybrids, convertibles, and 2-in-1s emerged as crossover devices, which share traits of both tablets and laptops. All such devices have a touchscreen display designed to allow users to work in a tablet mode, using either multi-touch gestures or a stylus/digital pen.
+
+Convertibles are devices with the ability to conceal a hardware keyboard. Keyboards on such devices can be flipped, rotated, or slid behind the back of the chassis, thus transforming from a laptop into a tablet. Hybrids have a keyboard detachment mechanism, and due to this feature, all critical components are situated in the part with the display. 2-in-1s can have a hybrid or a convertible form, often dubbed 2-in-1 detachable and 2-in-1 convertibles respectively, but are distinguished by the ability to run a desktop OS, such as Windows 10. 2-in-1s are often marketed as laptop replacement tablets.[49] As with nearly all of these distinctions, they are marketing terms first and technical distinctions secondarily, and vendors are not consistent in using a single name for a given type of device.
+
+2-in-1s are often very thin, around 10 millimetres (0.39 in), and light devices with a long battery life. 2-in-1s are distinguished from mainstream tablets as they feature an x86-architecture CPU (typically a low- or ultra-low-voltage model), such as the Intel Core i5, run a full-featured desktop OS like Windows 10, and have a number of typical laptop I/O ports, such as USB 3 and Mini DisplayPort.
+
+2-in-1s are designed to be used not only as a media consumption device but also as valid desktop or laptop replacements, due to their ability to run desktop applications, such as Adobe Photoshop. It is possible to connect multiple peripheral devices, such as a mouse, keyboard, and several external displays to a modern 2-in-1.
+
+Microsoft Surface Pro-series devices and Surface Book are examples of modern 2-in-1 detachable, whereas Lenovo Yoga-series computers are a variant of 2-in-1 convertibles. While the older Surface RT and Surface 2 have the same chassis design as the Surface Pro, their use of ARM processors and Windows RT do not classify them as 2-in-1s, but as hybrid tablets.[50]
+
+The distinction between a "tablet with a keyboard" and a 2-in-1 laptop generally rests on the operating system; if they run a mobile operating system, such as Android or IOS, they are generally marketed as tablets, while if they run a general purpose operating system like Windows or MacOS, they are generally marketed as laptops.
+
+Ultraportable
+Main articles: Notebook computer, Subnotebook, and Ultrabook
+
+An ultraportable refers to a laptop that is smaller in size than other, contemporary laptops, although as the size and weight of mainstream laptops has decreased the significance of this and other size-specific terms has declined. Historically, laptops around the size of a A4 paper were referred to as notebook computers, and laptops smaller than notebooks were called subnotebooks; however, as laptops became smaller and more portable, "notebook" and "laptop" became interchangeable, leading to the retirement of both notebook and subnotebook in favor of ultraportable.[51][52][53] Examples of ultraportable laptops include the early MacBook Air and the Thinkpad X-series.[54][55].
+
+Netbook
+Main articles: Netbook and Chromebook
+
+A netbook was a marketing category for small, inexpensive laptops that were sold between 2007 and the early 2010s. These were small, had generally low performance, often based on the Intel Atom architecture, and were intended for basic tasks like web browsing and document viewing.[56] Examples of netbooks include the Asus Eee PC line and the Dell Inspiron Mini.[57] The term netbook is no longer actively being used to market small laptops, although similar models remain available; smaller Chromebooks, running Google's ChromeOS, also occupy a similar market niche.[58]
+
+Rugged laptop
+Main article: Rugged computer
+
+A rugged laptop, or rugged computer, is designed to reliably operate in harsh usage conditions such as strong vibrations, extreme temperatures, and wet or dusty environments. Rugged laptops are bulkier, heavier, and much more expensive than regular laptops,[59] and thus are seldom seen in regular consumer use.
+
+Hardware
+	
+This section needs more citations. Please help improve this section by adding citations to reliable sources. Unsourced material may be challenged and removed. (July 2016) (Learn how and when to remove this message)
+Further information: Personal computer and Computer hardware
+Inner view of a MacBook (Retina) laptop
+A SODIMM memory module
+
+The basic components of laptops function identically to their desktop counterparts. Traditionally they were miniaturized and adapted to mobile use, The design restrictions on power, size, and cooling of laptops limit the maximum performance of laptop parts compared to that of desktop components, although that difference has increasingly narrowed.[60]
+
+Most laptop components are not intended to be replaceable or upgradable by the end-user, except for components that can be detached; in the past, batteries and optical drives were commonly exchangeable. In the past, many laptops featured socketed processors but since 2015 virtually all laptops use processors that are soldered to the motherboard.[61] Many laptops come with RAM that is soldered to the motherboard and cannot be easily replaced.
+
+This restriction is one of the major differences between laptops and desktop computers, because the large "tower" cases used in desktop computers are designed so that new motherboards, hard disks, sound cards, RAM, and other components can be added. Memory and storage can often be upgraded with some disassembly, but with the most compact laptops, there may be no upgradeable components at all.[62]
+
+The following sections summarize the differences and distinguishing features of laptop components in comparison to desktop personal computer parts.[63]
+
+Internal components
+Display
+
+The typical laptop has a screen in a clamshell form factor that when unfolded is upright to the user. Detachables typically use a kickstand to stay upright. Laptop screens most commonly use liquid-crystal display (LCD) technology, although OLED panels are becoming increasingly popular.[64] The display interfaces with the motherboard using the embedded DisplayPort protocol via the Low-voltage differential signaling (LVDS) 30 or 40 pin connector. Earlier laptops use the FPD-Link standard. The panels are mainly manufactured by AU Optronics, BOE Technology, LG Display or Samsung Display. Externally, it can be a glossy or a matte (anti-glare) screen.
+
+As of 2021, mainstream consumer laptops tend to range between with 13" and 16" screens. Larger and smaller models are available, but less common – there is no clear dividing line in minimum or maximum size. Machines small enough to be handheld (screens in the 6–8" range) can be marketed either as very small laptops or "handheld PCs", while the distinction between the largest laptops (18" or even larger) and "All-in-One" desktops is whether they fold for travel.
+
+Having a higher resolution display can potentially allow more items to fit onscreen at a time, improving the user's ability to multitask, although, at the higher resolutions on smaller screens, the resolution may only serve to display sharper graphics and text rather than increasing the usable area. Since the introduction of the MacBook Pro with Retina display in 2012, there has been an increase in the availability of "HiDPI" (or high pixel density) displays; as of 2025, this is generally considered to be anything higher than 1920 pixels wide. On PC laptops, this is most often 4K (3840-pixel-wide) resolution, although QHD (2560-pixel-wide) resolution is also a common option, and non-standard display resolutions are becoming more frequent.
+
+Most mainstream laptop displays have a maximum refresh rate of 60 Hz, although higher refresh rates are common on gaming laptops. The Dell M17x and Samsung 700G7A, both released in 2011, were among the first laptops to feature a 120 Hz refresh rate,[65][66] and more such laptops have appeared in the years since. Some laptops have been built with two displays, with the second display partially or completely occupying the space traditionally used by the keyboard and touchpad, such as the Toshiba Libretto W100,[67] Acer Iconia 6120, Lenovo Yoga Book 9i and Asus Zenbook Duo. The second screen can be on the rear of the laptop lid.[68] The touchpad can also act as a screen or there can be a secondary small screen on the bottom part of the laptop.[69][70][71][72]
+
+Central processing unit (CPU)
+
+Laptop CPUs have advanced power-saving features and produce less heat than those intended for desktop use. The number of processor cores has generally increased over time, and as of 2025, mainstream laptops can have as few as 6 cores and as many as 16, with high end workstation laptops having as many as 24, and low end or ultra-portable models still being available with 4 cores. In many cases, this involves a mix of power-optimized and performance-optimized processor cores.
+
+For the low price and mainstream performance, there is no longer a significant performance difference between laptop and desktop CPUs, but at the high end, the fastest desktop CPUs still substantially outperform the fastest laptop processors, at the expense of massively higher power consumption and heat generation. Laptop processors often have a very broad range in their peak power consumption vs. continuous – typically continuous power is around 15–20 watts on mainstream laptops, 45–60 watts on higher performance models, but these tend to be able to go much higher for short periods. By contrast, desktop processors tend to start at a 65W continuous rating with performance models in the 100–120W range being very common, and specialized "high end desktop" and workstation models in some cases exceeding 300W.[73]
+
+There has been a wide range of CPUs designed for laptops available; as of 2025, the market consists almost entirely of the X86 and ARM architectures. Major manufacturers include Intel, AMD, Apple and Qualcomm. In the past, the PowerPC architecture was also common on Apple laptops (iBook and PowerBook). Between around 2000 to 2014, most full-size laptops had socketed, replaceable CPUs; on thinner models, the CPU was soldered on the motherboard and was not replaceable or upgradable without replacing the motherboard. Since 2015, Intel has not offered new laptop CPU models with pins to be interchangeable, preferring ball grid array chip packages which have to be soldered, and as of 2025 this is true for mainstream laptops from all processor lines.[61]
+
+In the past, some laptops have used a desktop processor instead of the laptop version, which resulted in higher performance at the cost of much greater weight, heat, and limited battery life. Since around 2010, the practice has been restricted to small-volume gaming models. Laptop CPUs are rarely able to be overclocked.
+
+In the early 1990s, a small number of laptops were made with other RISC architectures, including SPARC and DEC Alpha (see Tadpole_Computer.)
+
+Graphics processing unit (GPU)
+
+On most laptops, a GPU is integrated into the CPU to conserve power and space. This was introduced by Intel with the Core i-series of mobile processors in 2010, followed by similar AMD APU processors in January 2011. On mainstream models, this is typically the only graphics processor.
+
+Higher-end laptops intended for gaming or professional 3D work tend to come with dedicated graphics processors on the motherboard or as an internal expansion card. Since 2011, these almost always involve switchable graphics so that when there is no demand for the higher performance dedicated graphics processor, the more power-efficient integrated graphics processor will be used. Nvidia Optimus and AMD Hybrid Graphics are examples of this sort of system of switchable graphics.
+
+In the past, laptops lacking a separate graphics processor were limited in their utility for gaming and professional applications involving 3D graphics, but the capabilities of CPU-integrated graphics have converged with the low-end of dedicated graphics processors since the mid-2010s. For laptops possessing limited onboard graphics capability but sufficient I/O throughput, an external GPU (eGPU) can provide additional graphics power at the cost of physical space and portability.
+
+Random-access memory (RAM)
+
+As of 2025, whether laptops use removable memory or memory soldered to the motherboard is highly variable. When removable, most laptops use SO-DIMM slots in which RAM is mounted.[63] A new form factor, the CAMM module, has been introduced but has limited market traction. Before 2000, most laptops used proprietary memory modules if their memory was upgradable.
+
+When upgradeable, memory slots are sometimes accessible from the bottom of the laptop for ease of upgrading; in other cases, accessing them requires significant disassembly. Most laptops have two memory slots, although some will have only one, either for cost savings or because some amount of memory is soldered. In the past, some high end engineering workstations and gaming laptops had four slots, although this is extremely rare in 2025 with engineering workstations converging on a single CAMM slot.
+
+As of 2025, 16 GB RAM is most common, with lower-end models occasionally having 8 GB, and 4 GB configurations being limited to a few very-low-cost models. Higher-end laptops may come with 64 GB of RAM or more. This is in some cases changing as a result of the 2025–present global memory supply shortage.
+
+Integrated audio
+
+Laptops usually have built-in speakers and built-in microphones. However, integrated speakers may be small and of restricted sound quality to conserve space.
+
+Input devices
+Closeup of a touchpad on an Acer laptop, where buttons and the touch-sensitive surface are shared
+Closeup of a TrackPoint cursor and UltraNav buttons on a ThinkPad laptop
+Interfaces on a ThinkPad laptop (2011): Ethernet network port (center), VGA (left), DisplayPort (top right) and USB 2.0 (bottom right). Due to the trend towards very flat laptops and the widespread use of WLAN, the relatively high Ethernet socket is no longer mandatory in today's devices, as is the technically outdated VGA.
+
+An alphanumeric keyboard is used to enter text, data, and other commands (e.g., function keys). A touchpad (also called a trackpad), a pointing stick, or both, are used to control the position of the cursor on the screen, and an integrated keyboard[74] is used for typing. Some touchpads have buttons separate from the touch surface, while others share the surface. A quick double-tap is typically registered as a click, and operating systems may recognize multi-finger touch gestures.
+
+An external keyboard and mouse may be connected using a USB port or wirelessly, via Bluetooth or similar technology. Some laptops have multitouch touchscreen displays, either available as an option or standard. Most laptops have webcams and microphones, which can be used to communicate with other people with both moving images and sound, via web conferencing or video-calling software.
+
+Storage drives
+Early methods of storage
+
+The earliest laptops most often used floppy disks for storage, although a few used either RAM disk or tape. By the late 1980s hard disk drives had become the standard form of storage.
+
+Hard disk drives
+
+Between 1990 and 2009, almost all laptops typically had a hard disk drive (HDD) for storage. Since around 1990, where a hard drive is present it will typically be a 2.5-inch drive; some very compact laptops support even smaller 1.8-inch HDDs, and a very small number used 1" Microdrives.
+
+As of 2025, HDDs are essentially extinct in new laptops – although very large capacity drives remain common in desktops and used externally.
+
+Solid state drives
+
+As of 2025, virtually all laptops use NVME solid-state drives for storage, usually in one or more M.2 slots on non-MacOS laptops. Macs have consistently used permanently attached SSDs (integrated with the motherboard) since 2018, and non-removable SSDs are uncommon but not unknown on other manufacturers' laptops.
+
+Solid-state drives (SSD) have gradually come to replace hard drives in virtually all cases. Solid-state drives are faster and more power-efficient, as well as eliminating the hazard of damage or data corruption caused by a laptop's physical impacts, as they use no moving/mechanical parts.[75]
+
+Between their initial introduction around 2008 and the mid-2010s, most SSDs matched the size/shape of a laptop hard drive, but starting around 2014 they have been increasingly replaced with smaller mSATA or M.2 cards, or as noted above, in some cases integrated into the motherboard. In many cases, they are more compact as well. Initially, in the late 2000s, SSDs were substantially more expensive than HDDs, but prices converged for smaller drives in the late 2010s.
+
+Optical disc drives
+
+Optical disc drives capable of playing CD-ROMs, compact discs (CD), DVDs, and in some cases, Blu-ray discs (BD), were nearly universal on full-sized models between the mid-1990s and the early 2010s. As of 2025, drives are virtually unknown in new laptops, when needed they can be connected via USB instead.
+
+Ports
+Input and output
+
+On a typical laptop, there are several USB ports; if they use only the older USB connectors instead of USB-C, they will typically have an external monitor port (as of 2025, almost always HDMI). An analog audio in/out port (in a combined socket) is common.
+
+Apple, in a 2015 version of its MacBook, transitioned from a number of different I/O ports to a exclusively USB-C ports.[76] This port can be used both for charging and connecting a variety of devices through the use of aftermarket adapters. Apple has since transitioned back to using a number of different ports.
+
+Although common from around 2000 to the early 2010s, built in Ethernet network ports are virtually extinct in mainstream consumer laptops although they can be connected to Ethernet using a USB adapter; they remain built-in in some business and gaming model.
+
+Higher-end systems typically include Thunderbolt ports, which also work as USB-C ports.
+
+Storage
+
+A variety of external HDDs or NAS data storage servers with support of RAID technology can be attached to virtually any laptop over such interfaces as USB, FireWire, eSATA, or Thunderbolt, or over a wired or wireless network to further increase space for the storage of data. Laptops may also incorporate a SD or microSD card slot. This enables users to download digital pictures from an SD card onto a laptop, thus enabling them to delete the SD card's contents to free up space for taking new pictures.
+
+Expansion cards
+
+As of 2025, very few laptops support expansion cards, with the primary means of expansion being via USB or Thunderbolt.
+
+In the past, a PC Card (formerly PCMCIA) or ExpressCard slot for expansion was often present on laptops to allow adding and removing functionality, even when the laptop is powered on.[77]
+
+Mobile PCI Express Module (MXM) is a type of expansion card that is used for graphics cards in some larger, high-end laptops.[78]
+
+Power jacks
+
+As of 2025, laptops are broadly divided between being powered only by USB-C connectors vs. having a dedicated DC power connector; most systems since the mid-2010s that have both connectors can be powered by either.
+
+Dedicated connectors are typically cylindrical/barrel-shaped coaxial power connectors; some vendors such as Lenovo make use of rectangular, and some Apple laptops use their proprietary MagSafe connectors. Before the mid-2000s, specialized connectors were much more common.
+
+Most connector heads feature a center pin to allow the end device to determine the power supply type; this can be via a simple protocol like 1-Wire or by measuring the resistance between it and the connector's negative pole (outer surface). Vendors may block charging if a power supply is not recognized as the original part, which could deny the legitimate use of universal third-party chargers.[79]
+
+With the advent of USB-C, portable electronics made increasing use of it for both power delivery and data transfer. Its support for 20 V (common laptop power supply voltage) and 5 A typically suffices for low to mid-end laptops, but some with higher power demands such as gaming laptops depend on dedicated DC connectors to handle currents beyond 5 A without risking overheating, some even above 10 A. Additionally, dedicated DC connectors are more durable and less prone to wear and tear from frequent reconnection, as their design is less delicate.[80]
+
+Battery and power supply
+See also: Smart battery
+Smart battery used in the late 1990s
+
+Since the late 1990s, laptops have typically used lithium ion or lithium polymer batteries, These replaced the older nickel metal-hydride typically used throughout most of the 1990s, and nickel–cadmium batteries used in most of the earliest laptops. A few of the oldest laptops used non-rechargeable batteries, or lead–acid batteries.
+
+Battery life is highly variable by model and workload and can range from one hour to nearly a day. A battery's performance gradually decreases over time; a noticeable reduction in capacity is typically evident after two to three years of regular use, depending on the charging and discharging pattern and the design of the battery. Innovations in laptops and batteries have seen situations in which the battery can provide up to 24 hours of continued operation, assuming average power consumption levels. An example is the HP EliteBook 6930p when used with its ultra-capacity battery.[81]
+
+Laptops with removable batteries may support larger replacement batteries with extended capacity.
+
+A laptop's battery is charged using an external power supply, which is plugged into a wall outlet. The power supply outputs a DC voltage typically in the range of 7.2—24 volts. The power supply is usually external and connected to the laptop through a DC connector cable. In most cases, it can charge the battery and power the laptop simultaneously. When the battery is fully charged, the laptop continues to run on power supplied by the external power supply, avoiding battery use. If the used power supply is not strong enough to power computing components and charge the battery simultaneously, the battery may charge in a shorter period of time if the laptop is turned off or sleeping. The charger typically adds about 400 grams (0.88 lb) to the overall transporting weight of a laptop, although some models are substantially heavier or lighter. Most 2016-era laptops use a smart battery, a rechargeable battery pack with a built-in battery management system (BMS). The smart battery can internally measure voltage and current, and deduce charge level and State of Health (SoH) parameters, indicating the state of the cells.[citation needed]
+
+Laptop power supply with cylindrical coaxial DC power connector
+
+Laptop charger wattages are highly variable, and have increased substantially over time. One of the earliest laptops, the Epson PX-8, used a charger supplying only around 4 watts[82], while typical 2026 laptops range between 45-140 watts. High-powered gaming/workstation/desktop replacement laptops can use considerably larger chargers; these include 240 watts for models using USB-C power delivery,[83] and 780 watts for aftermarket models.[84]
+
+Up to around the early 2010s, laptop batteries tended to be external, and in many cases, laptops could accept more than one of them, making a single "highest capacity" laptop battery a question of definitions - one extreme example is the Dell Latitude E-series where early models could accept three batteries: a primary one, an additional one replacing the CD, and an attachable "battery slice" with the largest capacities of around 190Wh (watt-hours) across three batteries. However, since the early 2010s, there has been a major shift to internal batteries (requiring partial disassembly if replaceable at all) and as of 2026 virtually all laptops have a single internal battery.
+
+Since 2008, US Federal law and international airlines regulations have put a hard limit on the capacity of batteries at 100Wh,[85] and along with the transition to a single internal battery, as of 2026, the largest laptop batteries typically available are just under 100Wh.
+
+Cooling
+
+Waste heat from the operation is difficult to remove in the compact internal space of a laptop. The earliest laptops used passive cooling, but since the mid-1990s nearly all mainstream laptops have used fans to use forced air cooling - with significant exceptions for models intended to be extremely thin and light (like some generations of the MacBook Air) or to be very low cost.
+
+Earlier laptops used heat sinks, but since the 2000s, virtually all laptops instead rely on heat pipes or move waste heat towards the edges of the device, to allow for a much smaller and compact fan and heat sink cooling system. Waste heat is usually exhausted away from the device operator towards the rear or sides of the device. Multiple air intake paths are used since some intakes can be blocked, such as when the device is placed on a soft conforming surface like a chair cushion. Secondary device temperature monitoring may reduce performance or trigger an emergency shutdown if it is unable to dissipate heat, such as if the laptop were to be left running and placed inside a carrying case. Aftermarket cooling pads with external fans can be used with laptops to reduce operating temperatures.
+
+Accessories
+
+Common protective accessories for laptops include sleeves, skins, or cases. Sleeves, which are distinguished by being relatively thin and flexible, are most commonly made of neoprene, with sturdier ones made of low-resilience polyurethane. Some laptop sleeves are wrapped in ballistic nylon to provide some measure of waterproofing. Bulkier and sturdier cases can be made of metal with polyurethane padding inside and may have locks for added security. Metal, padded cases also offer protection against impacts and drops.
+
+Another common accessory is a laptop cooler (sometimes called a "cooling pad"), a device that helps lower the internal temperature of the laptop either actively or passively. A common active method involves using electric fans to draw heat away from the laptop, while a passive method might involve propping the laptop up on some type of pad so it can receive more airflow. Some stores sell laptop pads that enable a reclining person on a bed to use a laptop.
+
+External equipment
+Docking station
+Docking station and laptop
+
+A docking station (sometimes referred to simply as a dock) is a laptop accessory that contains multiple ports and in some cases expansion slots or bays for fixed or removable drives. A laptop connects and disconnects to a docking station, typically through a single large proprietary connector. A docking station is an especially popular laptop accessory in a corporate computing environment, due to the possibility of a docking station transforming a laptop into a full-featured desktop replacement, yet allowing for its easy release. This ability can be advantageous to "road warrior" employees who have to travel frequently for work, and yet who also come into the office. If more ports are needed, or their position on a laptop is inconvenient, one can use a cheaper passive device known as a port replicator. These devices mate to the connectors on the laptop, such as through USB or FireWire.
+
+Charging trolleys
+
+Laptop charging trolleys, also known as laptop trolleys or laptop carts, are mobile storage containers to charge multiple laptops, netbooks, and tablet computers at the same time. The trolleys are used in schools that have replaced their traditional static computer labs[86] suites of desktop equipped with "tower" computers, but do not have enough plug sockets in an individual classroom to charge all of the devices. The trolleys can be wheeled between rooms and classrooms so that all students and teachers in a particular building can access fully charged IT equipment.[87]
+
+Laptop charging trolleys are also used to deter and protect against opportunistic and organized theft. Schools, especially those with open plan designs, are often prime targets for thieves who steal high-value items. Laptops, netbooks, and tablets are among the highest–value portable items in a school. Moreover, laptops can easily be concealed under clothing and stolen from buildings. Many types of laptop–charging trolleys are designed and constructed to protect against theft. They are generally made out of steel, and the laptops remain locked up while not in use. Although the trolleys can be moved between areas from one classroom to another, they can often be mounted or locked to the floor, support pillars, or walls to prevent thieves from stealing the laptops, especially overnight.[86]
+
+Solar panels
+Main article: Solar notebook
+
+In some laptops, solar panels are able to generate enough solar power for the laptop to operate.[88] The One Laptop Per Child Initiative released the OLPC XO-1 laptop which was tested and successfully operated by use of solar panels.[89] They were designing an OLPC XO-3 laptop with these features. The OLPC XO-3 was planned to operate with 2 watts of electricity.[90][91] Samsung has also designed the NC215S solar–powered notebook that was planned to be sold commercially in the U.S. market.[92]
+
+Feature classifications
+Universally standard
+
+These are features, hardware, or components that can be found on virtually all laptops.
+
+Feature	Function	Introduction date
+USB-C	USB 3.x/4.x data transfer, Thunderbolt data transfer, DisplayPort, Power Delivery, audio (headphone/microphone)	Mid-to-late 2010s
+3.5mm jack	Audio (headphone/speaker/microphone)	Early 1990s
+Common
+
+These are features, hardware, or components that were once very common or completely ubiquitous, have been declining in prominence, but are still widely available among all classes of laptops and can be found on virtually all enterprise-class devices.
+
+Feature	Replacement	Reason for removal	When started disappearing from laptops
+USB-A	USB-C	Large size, not as compatible with other devices, cables and protocols as USB-C. Neither USB-B, nor Mini USB/microUSB were ever standard on laptops; the former is known almost exclusively as the "printer port", while the latter is known as the "phone charging port".	Obsolete 2016 (Apple), mid 2010s-early 2020s (most others)
+HDMI port, standalone DisplayPort	USB-C with Thunderbolt	Large size, standalone display jacks are not usable for other purposes	Obsolete 2016 (Apple), early 2020s (most others). Apple returned HDMI port to some models in 2020.
+Full-size SD Card slot	microSD card slot, none	Standard SD cards are becoming less common while microSD cards are becoming more common	Obsolete 2016 (Apple), early 2020s (most others), Apple returned full-size SD Card port to some models in 2020.
+Ethernet port	None, collapsible Ethernet port	Large size, Ethernet less common as Wi-Fi improves	Obsolete 2016 (Apple), late 2010s-early 2020s (most others)
+Dedicated charging port	USB-C	USB-C charging ports have cross-compatibility between different chargers and laptops, a small size, and can be used for data transfer	Late 2010s-early 2020s. This port continues to be universally standard on Apple laptops.
+Obsolete
+A modem PCMCIA card on a 1990s ThinkPad. The card would normally fully insert into the socket.
+
+These are features, hardware, or components that were once very common or completely ubiquitous, but are found on almost no new laptops today (if at all). Certain modern laptops, like the Panasonic Toughbook line, have continued to maintain support for a few of these features.
+
+Feature	Replacement	Reason for removal	When obsolete
+Reset ("cold restart") button and instant power off button in holes (needed a thin metal tool to press)	Power button	Niche use, inconvenient and cumbersome to press, operating systems became more stable	1990s
+Integrated charger or power adapter inside the laptop	External charger	Made laptop bulkier, bigger, and heavier, and no great drawbacks with an external charger	1990s
+Dedicated Media buttons (Internet, Volume, Play, Pause, Next, Previous)	Media buttons on function keys	Save space, less moving parts, dedicated buttons out of fashion	2010s
+Floppy disk drive	Optical disc drive	Floppy disks were quickly superseded by optical discs in the mid-to-late 1990s	1990s
+Pointing stick	Trackpad, feature never removed (Thinkpad)	As trackpads improved in accuracy, size, and comfort, the pointing stick was gradually made obsolete; except for the Lenovo Thinkpad line, where it continues to feature in almost all laptops as the TrackPoint	Late 1990s-late 2000s
+Serial port, Parallel port, Shared PS/2 input device port	USB	Much smaller size, more common	Mid-to-late 2000s
+S-video port, VGA port, IEEE 1394 port	HDMI, DisplayPort	More common, smaller size, better display quality (for former two)	Early 2010s
+S/PDIF audio port	3.5mm jack	Niche use	2000s-early 2010s
+IrDA	Bluetooth	Niche use	2000s-early 2010s
+PC Card / PCMCIA slot,
+
+ExpressCard slot
+
+	USB, none	The concept of expanding the functionality of a laptop with hardware disappeared. Cards that served as serial data transfer connectors were replaced by USB	2000s-early 2010s
+Dial-up modem, RJ11 port	LTE/5G modem (uncommon), Wi-Fi, Ethernet port	Dial-up connections had become uncommon, Wi-Fi had become much more common, and most dial-up providers issued dial-up modem dongles already	Mid-to-late 2000s
+Docking port	None	The concept of a laptop dock faded away and its purpose was somewhat replaced by dongles	2000s-early 2010s
+CD/DVD Drives	USB, none	Optical discs and drives became uncommon, and the drive made laptops heavier, bigger, and more cumbersome	Early-mid 2010s
+Modularity
+Opened bottom covers allow replacement of RAM and storage modules (Lenovo G555)
+
+Some of the components of earlier models of laptops can easily be replaced without opening completely its bottom part, such as the keyboard, battery, hard disk, memory modules, and CPU cooling fan.
+
+Some of the components of recent models of laptops reside inside. Replacing most of its components, such as the keyboard, battery, hard disk, memory modules, CPU cooling fan, etc., requires the removal of either the top or bottom part, the removal of the motherboard, and returning them.
+
+In some types, solder and glue are used to mount components such as RAM, storage, and batteries, making repairs additionally difficult.[93][94]
+
+Compared to desktop computers
+Advantages
+Feature	Details
+Portability	Laptops are highly portable compared to desktop PCs.[95] Physical portability allows a laptop to be used in many places—not only at home and the office but also during commuting and flights, in coffee shops, in lecture halls and libraries, at clients' locations or a meeting room, etc. Within a home, portability enables laptop users to move their devices from room to room.
+Productivity	Using a laptop in places where a desktop PC cannot be used can help employees and students to increase their productivity on work or school tasks, such as an office worker reading their work e-mails during an hour-long commute by train, or a student doing their homework at the university coffee shop during a break between lectures, for example.
+Up-to-date information	Using a single laptop prevents fragmentation of files across multiple PCs as the files exist in a single location and are always up-to-date.
+Connectivity	A key advantage of laptops is that they almost always have integrated connectivity features such as Wi-Fi and Bluetooth, and sometimes connection to cellular networks either through native integration or use of a hotspot. Wi-Fi networks and laptop programs are especially widespread at university campuses.[96]
+Size	Laptops are smaller than desktop PCs. This is beneficial when space is at a premium, for example in small apartments and student dorms. When not in use, a laptop can be closed and put away in a desk drawer.
+Low power consumption	Laptops are several times more power-efficient than desktops. A typical laptop uses 10–100 W, compared to 200–800W for desktops. This could be particularly beneficial for large businesses, which run hundreds of personal computers thus economies of scale, and homes where there is a computer running 24/7 (such as a home media server, print server, etc.).
+Low noise levels	Laptops are typically much quieter than desktops, due both to the components (often silent solid-state drives replacing hard drives) and to less heat production leading to the use of fewer, sometimes no cooling fans. The latter has given rise to laptops that have no moving parts, resulting in complete silence during use.
+Battery	A charged laptop can continue to be used in case of a power outage and is not affected by short power interruptions and blackouts, an issue that is present with desktop PCs.
+All-in-One	Designed to be portable, most modern laptops have all components integrated into the chassis. For desktops (excluding all-in-ones) this is usually divided into the desktop "tower" (the unit with the CPU, hard drive, power supply, etc.), keyboard, mouse, display screen, and optional peripherals such as speakers.
+A teacher using a laptop as part of a workshop for school children
+A man using a laptop on a park bench
+Disadvantages
+
+Compared to desktop PCs, laptops have disadvantages in the following areas:
+
+Performance
+The performance of laptops is often worse than comparably priced desktops. The upper limits of performance of laptops remain lower than desktops, due to mostly practical reasons, such as decreased battery life, increased size and heat, etc.
+Upgradeability
+The upgradeability of laptops is limited compared to tower desktops, due to technical and economic reasons. In general, hard drives and memory can be upgraded easily. Due to the integrated nature of laptops, however, the motherboard, CPU, and graphics, are seldom officially upgradeable. Some efforts towards industry standard parts and layouts have been attempted, such as Common Building Block, but the industry remains largely proprietary and fragmented. There is no industry-wide standard form factor for laptops; Moreover, starting with 2013 models, laptops have become increasingly integrated (soldered) with the motherboard for most of its components (CPU, SSD, RAM, etc.) to reduce size and upgradeability prospects.[61]
+Durability
+A clogged heat sink on a laptop after 2.5 years of use
+Laptops are less durable than desktops/PCs. However, the durability of the laptop depends on the user; if proper maintenance is done, then the laptop can work longer.
+Laptop keyboard with its keys (except the space bar) removed, revealing crumbs, pet hair, and other detritus to be cleaned away
+
+Because of their portability, laptops are subject to more wear and physical damage than desktops, additionally hindered by their integrated nature. A liquid spill onto the keyboard, while a minor issue with a desktop system, can damage the internals of a laptop and destroy the computer, resulting in a costly repair or entire replacement of laptops. One study found that a laptop is three times more likely to break during the first year of use than a desktop.[97]
+To maintain a laptop, it is recommended to clean it every three months for dirt, debris, dust, and food particles. Most cleaning kits consist of a lint-free or microfiber cloth for the screen and keyboard, compressed air for getting dust out of the cooling fan, and a cleaning solution. Harsh chemicals such as bleach should not be used to clean a laptop, as they can damage it.[98]
+Heating and cooling
+Laptops rely on extremely compact cooling systems involving a fan and heat sink that can fail from blockage caused by accumulated airborne dust and debris. Most laptops do not have any type of removable dust collection filter over the air intake for these cooling systems, resulting in a system that gradually conducts more heat and noise as the years pass. In some cases, the laptop starts to overheat even at idle load levels. This dust is usually stuck inside where the fan and heat sink meet, where it can not be removed by a casual cleaning and vacuuming. Most of the time, compressed air can dislodge the dust and debris but may not entirely remove it. After the device is turned on, the loose debris is reaccumulated into the cooling system by the fans. Complete disassembly is usually required to clean the laptop entirely. However, preventative maintenance such as regular cleaning of the heat sink via compressed air can prevent dust build-up on the heat sink. Many laptops are difficult to disassemble by the average user and contain components that are sensitive to electrostatic discharge (ESD).
+Battery life
+Battery life is limited because the capacity drops with time, eventually warranting replacement after as little as 2–3 years. A new battery typically stores enough energy to run the laptop for five to six hours or more, depending on usage and the battery size. The battery is often easily replaceable and a higher capacity model may be obtained for longer charging and discharging time. Some laptops do not have the usual removable battery and have to be brought to the service center of their manufacturer or a third-party laptop service center to have their battery replaced. Replacement batteries can also be expensive, depending on the availability of the parts. Desktop PCs do not face similar problems since they are reliant on long lasting power supplies.
+Security and privacy
+Main article: Laptop theft
+Because they are valuable, commonly used, portable, and easy to hide in a backpack or other type of bag, laptops are often stolen. Every day, over 1,600 laptops go missing from U.S. airports.[99] The cost of stolen business or personal data, and of the resulting problems (identity theft, credit card fraud, breach of privacy), can be many times the value of the stolen laptop itself. Consequently, the physical protection of laptops and the safeguarding of data contained in them are both of great importance. Some laptops, primarily professional and educational devices, have a Kensington security slot, which can be used to tether them with a security cable and lock. In addition, modern operating systems have features such as Activation Lock or similar that prevents the use of the device without credentials. As of 2015, some laptops also have additional security elements added, including biometric security components such as Windows Hello or Touch ID.[100]
+Software such as GadgetTrak and Find My Mac has been designed to help people locate and recover their stolen laptops in the event of theft. Setting one's laptop with a password on its firmware (protection against going to firmware setup or booting), internal HDD/SSD (protection against accessing it and loading an operating system on it afterward), and every user account of the operating system are additional security measures that a user should do.[101][102] Fewer than 5% of lost or stolen laptops are recovered by the companies that own them,[103] however, that number may decrease due to a variety of companies and software solutions specializing in laptop recovery. In the 2010s, the common availability of webcams on laptops raised privacy concerns. In Robbins v. Lower Merion School District (Eastern District of Pennsylvania 2010), school-issued laptops loaded with special software enabled staff from two high schools to take secret webcam shots of students at home, via their students' laptops.[104][105][106]
+Ergonomics and health effects
+Wrists
+Prolonged use of laptops can cause repetitive strain injury because of their small, flat keyboard and trackpad pointing devices.[107] Usage of separate, external ergonomic keyboards and pointing devices is recommended to prevent injury when working for long periods of time; they can be connected to a laptop easily by USB, Bluetooth or via a docking station. Some health standards require ergonomic keyboards at workplaces.
+Neck and spine
+A laptop's integrated screen often requires users to lean over for a better view, which can cause neck or spinal injuries. A larger and higher-quality external screen can be connected to almost any laptop to alleviate this and to provide additional screen space for more productive work. Another solution is to use a computer stand.
+Possible effect on fertility
+A study by the State University of New York researchers found that heat generated from laptops can increase the temperature of the lap of male users when balancing the computer on their lap, potentially putting sperm count at risk. The study, which included roughly two dozen men between the ages of 21 and 35, found that the sitting position required to balance a laptop can increase scrotum temperature by as much as 2.1 °C (4 °F). However, further research is needed to determine whether this directly affects male sterility.[108] A later 2010 study of 29 males published in Fertility and Sterility found that men who kept their laptops on their laps experienced scrotal hyperthermia (overheating) in which their scrotal temperatures increased by up to 2.0 °C (4 °F). The resulting heat increase, which could not be offset by a laptop cushion, may increase male infertility.[109][110][111][112][113]
+Laptop cooler (silver) under laptop (white), preventing heating of lap and improving laptop airflow
+
+A common practical solution to this problem is to place the laptop on a table or desk or to use a book or pillow between the body and the laptop.[citation needed] Another solution is to obtain a cooling unit for the laptop. These are usually USB powered and consist of a hard thin plastic case housing one, two, or three cooling fans – with the entire assembly designed to sit under the laptop in question – which results in the laptop remaining cool to the touch, and greatly reduces laptop heat buildup.
+Thighs
+Heat generated from using a laptop on the lap can also cause skin discoloration on the thighs known as "toasted skin syndrome".[114][115][116][117]
+Sales
+Manufacturers
+Major laptop brands
+Acer / Gateway / eMachines / Packard Bell: TravelMate, Extensa, Ferrari and Aspire; Easynote; Chromebook
+Apple: MacBook Air and MacBook Pro
+Asus: TUF, ROG, Pro and ProArt, ZenBook, VivoBook, ExpertBook
+Clevo
+Dell: Alienware, Consumer, Pro, Pro Max, Pro Precision and XPS
+Dynabook (formerly Toshiba): Portege, Tecra, Satellite, Qosmio, Libretto
+Falcon Northwest: DRX, TLX, I / O
+Fujitsu: Lifebook, Celsius
+Gigabyte: AORUS
+HCL (India): ME Laptop, ME Netbook, Leaptop and MiLeap
+HP: OmniBook, ProBook, EliteBook, ZBook
+Huawei: Matebook
+Lenovo (formerly IBM): ThinkPad, ThinkBook, IdeaPad, Yoga, Legion and the Essential B and G Series
+LG: Xnote, Gram
+Medion: Akoya (OEM version of MSI Wind)
+MSI: E, C, P, G, V, A, X, U series, Modern, Prestige and Wind Netbook
+Panasonic: Toughbook, Satellite, Let's Note (Japan only)
+Samsung: Sens: N, P, Q, R and X series; Chromebook, ATIV Book
+TG Sambo (Korea): Averatec, Averatec Buddy
+Vaio (formerly Sony)
+Xiaomi: Mi, Mi Gaming and Mi RedmiBook laptops
+vte
+Main article: List of laptop brands and manufacturers
+
+There are many laptop brands and manufacturers. Several major brands that offer notebooks in various classes are listed in the adjacent box. The major brands usually offer good service and support, including well-executed documentation and driver downloads that remain available for many years after a particular laptop model is no longer produced. Capitalizing on service, support, and brand image, laptops from major brands are more expensive than laptops from smaller brands and ODMs. Some brands specialize in a particular class of laptops, such as gaming laptops (Alienware), high-performance laptops (HP Envy), netbooks (EeePC) and laptops for children (OLPC).
+
+Many brands, including the major ones, do not design and do not manufacture their laptops. Instead, a small number of Original Design Manufacturers (ODMs) design new models of laptops, and the brands choose the models to be included in their lineup. In 2006, 7 major ODMs manufactured 7 of every 10 laptops in the world, with the largest one (Quanta Computer) having 30% of the world market share.[118] Therefore, identical models are available both from a major label and from a low-profile ODM in-house brand.
+
+Historic market share
+Further information: Market share of personal computer vendors
+
+As of 1989 Zenith Data Systems, Toshiba, Compaq, and Grid Systems were the leading vendors of a market that InfoWorld described as "small but vital".[119] As of 1992–1993, Toshiba ranked as the global leading vendor in the notebook computer market. In the United States meanwhile, Apple led the market followed by Compaq.[120] In the year 1993, global revenue for the laptop market was led by Compaq, followed by Toshiba, Apple, NEC and IBM, altogether accounting for over 53% of global revenue.[121]
+
+In the United States, the top three vendors for notebooks in market share as of 1996 were: Toshiba, followed by Compaq, and followed by IBM.[122]
+
+As of 1999, Toshiba ranked first in worldwide laptop sales followed by IBM, Compaq, and Dell.[123] Toshiba led the market with a share of 18.6%.[124]
+
+In the first quarter of 2002 in the United States market, Dell controlled 25.2% in the notebook space, well ahead of Toshiba (13.6%) and Compaq (11.7%), the latter of which had been acquired by Hewlett-Packard (HP). At fourth and fifth place were Sony and IBM.[125]
+
+In Europe, the Middle East and Africa (EMEA) territories, Acer was the largest vendor of laptops, in 2004–2005, having overtaken HP and IBM there.[126][127]
+
+In the year 2005 according to IDC, Dell was the top global vendor of notebooks with a market share of 17.29%, followed by: HP (15.7%), Toshiba (10.96%), Acer (10.15%) and Lenovo (8.23%); Lenovo had acquired IBM that same year. The remaining of the top ten was made up of Fujitsu Siemens, Sony, NEC, Apple and Asus.[128]
+
+In the first quarter of 2010, the largest vendor of portable computers, including netbooks, was either HP or Acer, depending on data source. Both had shipped approximately 9 million units each. Dell, Toshiba, Asus and Lenovo followed, each with approximate sales of 5 to 6 million each. Apple, Samsung and Sony sold under 2 million each.[129]
+
+As of the third quarter of 2020, HP was cited as the leading vendor for notebook computers closely followed by Lenovo, both with a share of 23.6% each. They were followed by Dell (13.7%), Apple (9.7%) and Acer (7.9%).[130]
+
+Adoption by users
+
+Battery-powered portable computers had just 2% worldwide market share in 1986.[131] However, laptops have become increasingly popular, both for business and personal use.[132] The third quarter of 2008 was the first time when worldwide notebook PC shipments exceeded desktops, with 38.6 million units versus 38.5 million units.[132][133][134][135] In 2023, it was estimated that 166 million laptops were sold,[136] and in the first quarter of 2024, around 64% of personal computers sold were laptops or detachable tablets.[137] Due to the advent of tablets and affordable laptops, many computer users now have laptops due to the convenience offered by the device.
+
+Price
+
+Before 2008, laptops were very expensive. In May 2005, the average notebook sold for $1,131 while desktops sold for an average of $696.[138] Around 2008, however, prices of laptops decreased substantially due to low-cost netbooks, drawing an average US$689 at U.S. retail stores in August 2008. Starting with the 2010s, laptops have decreased substantially in price at the low end due to inexpensive and low power Arm processors, less demanding operating systems such as ChromeOS, and SoC's. As of 2023, a new laptop can be obtained for $299.[139]
+
+Disposal
+See also: E-Waste
+
+The list of materials that go into a laptop computer is long, and many of the substances used, such as beryllium, lead, chromium, and mercury compounds, are toxic or carcinogenic to humans. Although these toxins are relatively harmless when the laptop is in use, concerns that discarded laptops cause a serious health and environmental risks when improperly discarded have arisen. The Waste Electrical and Electronic Equipment Directive (WEEE Directive) in Europe specified that all laptop computers must be recycled by law. Similarly, the U.S. Environmental Protection Agency (EPA) has outlawed landfill dumping or the incinerating of discarded laptop computers.
+
+Most laptop computers begin the recycling process with a method known as Demanufacturing, which involves the physical separation of the components of the laptop.[140] These components are then either grouped into materials (e.g. plastic, metal and glass) for recycling or more complex items that require more advanced materials separation (e.g.) circuit boards, hard drives and batteries.
+
+Corporate laptop recycling can require an additional process known as data destruction. The data destruction process ensures that all information or data that has been stored on a laptop hard drive can never be retrieved again. Below is an overview of some of the data protection and environmental laws and regulations applicable for laptop recycling data destruction:
+
+Data Protection Act 1998 (DPA)
+EU Privacy Directive (Due 2016)
+Financial Conduct Authority
+Sarbanes-Oxley Act
+PCI-DSS Data Security Standard
+Waste, Electronic & Electrical Equipment Directive (WEEE)
+Basel Convention
+Bank Secrecy Act (BSA)
+FACTA Sarbanes-Oxley Act
+FDA Security Regulations (21 C.F.R. part 11)
+Gramm-Leach-Bliley Act (GLBA)
+HIPAA (Health Insurance Portability and Accountability Act)
+NIST SP 800–53
+Add NIST SP 800–171
+Identity Theft and Assumption Deterrence Act
+Patriot Act of 2002
+PCI Data Security Standard
+US Safe Harbor Provisions
+Various state laws[141][142]
+6/3 JAN
+Gramm-leach-Bliley Act
+DCID
+Extreme use
+See also: International Space Station § Communications and computers
+ISS laptops in the US lab
+
+The ruggedized Grid Compass computer was used since the early days of the Space Shuttle program. The first commercial laptop used in space was a Macintosh portable in 1990 on Space Shuttle mission STS-41 and again in 1991 aboard STS-43.[143][144][145][146] Apple and other laptop computers continue to be flown aboard crewed spaceflights, though the only long-duration flight certified computer for the International Space Station is the ThinkPad.[147] As of 2011, over 100 ThinkPads were aboard the ISS. Laptops used aboard the International Space Station and other spaceflights are generally the same ones that can be purchased by the general public but needed modifications are made to allow them to be used safely and effectively in a weightless environment such as updating the cooling systems to function without relying on hot air rising and accommodation for the lower cabin air pressure.[148] Laptops operating in harsh usage environments and conditions, such as strong vibrations, extreme temperatures, and wet or dusty conditions differ from those used in space in that they are custom designed for the task and do not use commercial off-the-shelf hardware.
+
+See also
+List of computer size categories
+List of laptop brands and manufacturers
+Smartbook
+Subscriber Identity Module
+Mobile broadband
+Mobile Internet device (MID)
+Personal digital assistant
+VIA OpenBook
+Tethering
+XJACK
+Open-source computer hardware
+Novena
+Mobile modem
+Stereoscopy glasses
+Cloudbook
+Laptop–tablet convergence
+Notes
+ Also known as laptop computer, notebook computer, notebook, or portable computer. There are also names for specific types of laptops, such as ultrabook or netbook. See laptop terminology.
+References
+ "Introducing Pixel Slate – Pixel Slate Help". support.google.com. Retrieved 21 September 2022.
+ "Microsoft Surface Pro 8 review: the best of both worlds". The Verge. 5 October 2021. Retrieved 21 September 2022.
+ https://files.eric.ed.gov/fulltext/EJ1030425.pdf Laptop research article
+ Beal, Vangie (September 1996). "What is Laptop Computer? Webopedia Definition". Webopedia. Retrieved 1 December 2022.
+ "U.S. Commercial Channel Computing Device Sales Set to End 2013 with Double-Digit Growth, According to NPD". NPD Group. Archived from the original on 9 August 2019. Retrieved 23 September 2014.
+ John W. Maxwell (2006). Tracing the Dynabook: A Study of Technocultural Transformations (PDF) (PhD). University of British Columbia. Archived from the original (PDF) on 24 January 2007. Retrieved 17 October 2008.
+ Alan C. Kay (August 1972). A Personal Computer for Children of All Ages (PDF). Proceedings of the ACM National Conference. Boston: Xerox Palo Alto Research Center. Retrieved 17 October 2008.
+ "IBM Archives: IBM Personal Computer". ibm.com. 23 January 2003. Retrieved 16 May 2021.
+ "IBM Personal Computer". IBM Inc. 23 January 2003. Archived from the original on 9 December 2004.
+ "IBM 5100 computer". oldcomputers.net. Retrieved 6 July 2009.
+ "Epson SX-20 Promotional Brochure" (PDF). Epson America, Inc. 1987. Retrieved 2 November 2008.
+Jump up to:
+ "HC-20-Computer Museum". museum.ipsj.or.jp.
+Jump up to:
+ "portable computer system small". google.com.
+ Epson HX-20, Old Computers
+ Michael R. Peres, The Focal Encyclopedia of Photography, page 306, Taylor & Francis
+ "Tandy/Radio Shack model 100 portable computer". oldcomputers.net. Retrieved 6 July 2009.
+ "Hewlett-Packard model 85". oldcomputers.net. Retrieved 6 July 2009.
+ Sharp PC-5000 Archived 4 April 2019 at the Wayback Machine, Old Computers
+Jump up to:
+ "Bob Armstrong". cosy.com. Retrieved 21 November 2024.
+ "Gavilian SC computer". oldcomputers.net. Retrieved 7 July 2009.
+ Japanese PCs (1984) (13:13), Computer Chronicles
+ "Milestones:Toshiba T1100, a Pioneering Contribution to the Development of Laptop PC, 1985 – Engineering and Technology History Wiki". ethw.org. 3 November 2021.
+ "Linus Write-Top". Retrieved 18 October 2008.
+ "InfoWorld". 10 November 1986.
+ Anderson, Don (27 January 1995). PCMCIA System Architecture: 16-bit PC Cards. Addison-Wesley Professional. ISBN [number].
+ "PC Mag". 21 December 1993.
+ "IBM PS/2 CL57SX | Laptop Pics". Retrieved 5 December 2020.
+ "BUSINESS TECHNOLOGY; I.B.M. Enters U.S. Notebook PC Market". The New York Times. 25 March 1992.
+ Lohr, Steve (22 February 1994). "Dell's Second Stab at Portables". The New York Times. pp. D1.
+ "In The Age Of Zoom, Bad Laptop Webcams Are A Big Problem". Digital Trends. 8 April 2020.
+ Stein, Scott. "Samsung 700G7C review: Samsung 700G7C". CNET.
+ "Laptop vs desktop: which should you buy?". TechRadar. Retrieved 1 August 2021.
+Jump up to:
+ Naik, Abhijit. "Notebook Vs. Laptop". Buzzle.com. Archived from the original on 14 February 2015. Retrieved 23 September 2014.
+ Reid, T. R. (10 October 1988). "The Latest Wave in Personal Computers Is Small but Fast". The Washington Post. p. F28.
+Jump up to:
+ Williams, Gregg (April 1982). "The First Byte-Sized Computer". Byte. 7 (4). McGraw-Hill: 104–105 – via the Internet Archive.
+Jump up to:
+ Safire, William (2011) [1993]. Quoth the Maven: More on Language from William Safire. Random House Publishing Group. p. 352. ISBN [number] – via Google Books.
+ "laptop, n. & adj". Oxford English Dictionary. Oxford University Press. n.d. Archived from the original on 5 May 2024.
+ "notebook computer, n." Oxford English Dictionary. Oxford University Press. n.d. Archived from the original on 5 May 2024.
+ Needle, David (13 December 1982). "Crowds converge on NE Computer Show". InfoWorld. 4 (49). IDG Publications: 1, 9–11 – via Google Books.
+ Needle, David (14 May 1984). "Epson's PX-8 lap computer". InfoWorld. 6 (20). IDG Publications: 9 – via Google Books.
+ Gookin, Dan (2005). Laptops for Dummies. Wiley. pp. 7–17. ISBN [number] – via Google Books.
+ Vowels, Andrew (March 1995). "Have computer, will travel". CMA. 69 (2). Society of Management Accountants of Canada: 16–19. ProQuest 197745301.
+Jump up to:
+ Mueller, Scott (2004). Upgrading and Repairing Laptops. Que. p. 2. ISBN [number] – via Google Books.
+ "What is a mobile workstation?". Hewlett-Packard.
+ "Lenovo Introduces New ThinkPad Mobile Workstations and Business Laptops Designed for the AI-Ready Workforce". TechPowerUp Forums. Retrieved 15 November 2025.
+ "I've Used HP's First 18-Inch ZBook Workstation, and It's Plump With Power". PCMAG. 18 March 2025. Retrieved 15 November 2025.
+ "Gaming Laptops Guide". Lenovo.
+ "The Best Gaming Laptops We've Tested for 2025". PCMAG. 6 October 2025. Retrieved 15 November 2025.
+ "Best 2-in-1 PCs in 2020 for when you need a laptop and tablet in one". CNET. Retrieved 1 April 2020.
+ "What Is a Hybrid Laptop? | Advantages & Buying Guide | Lenovo US". lenovo.com. Retrieved 1 April 2020.
+ Hart, Norman; Stapleton, John (12 November 2012). The CIM Marketing Dictionary. Routledge. ISBN [number].
+ "Definition of SUBNOTEBOOK". www.merriam-webster.com. Retrieved 15 November 2025.
+ "ultralight laptop - CLC Definition". www.computerlanguage.com. Retrieved 15 November 2025.
+ "The Best Ultraportable Laptops We've Tested for 2025". PCMAG. 5 November 2025. Retrieved 15 November 2025.
+ Kurtukova, Ana (25 February 2025). "Lenovo ThinkPad Series: E vs. P vs. X vs. T – Which One is Right for You? | Skycomp Solutions". Retrieved 15 November 2025.
+ "Netbook". Lenovo.
+ Bsales, Jamie (23 January 2009). "Four Favorite Netbooks". Datamation. Retrieved 15 November 2025.
+ "Lap Of Honor: Chromebook Or Netbook". Blog | Cloud Server & Hosting News | VPS.NET. 28 April 2016. Retrieved 15 November 2025.
+ "Rugged Laptop: Choices, Pointers & Specs of Buying Rugged Laptops". Linux-on-laptops.com. Retrieved 27 November 2008.
+ Dé specialist voor smartphone, tablet en laptop reparaties (4 January 2013). "Laptop reparatie". Smartrepair Den Bosch, Nijmegen, Tilburg, Almere en Utrecht (in Netherlands Dutch). smart-repair.nl. Retrieved 30 March 2017.
+Jump up to:
+ btarunr (26 November 2012). "Is Haswell the Last Interchangeable Intel Client Processor?". TechPowerUp. Retrieved 30 May 2021.
+ "Microsoft Surface Pro 3 Teardown". iFixit.com. 23 June 2014. Retrieved 1 October 2014.
+Jump up to:
+ Catherine Roseberry. "What Makes Laptops Work – The Laptop Motherboard". About.com. Archived from the original on 10 December 2008. Retrieved 15 November 2008.
+ "List of laptops with OLED displays | OLED-Info". www.oled-info.com. Retrieved 4 September 2025.
+ "Dell refreshes Alienware M17x, Dell XPS 17 with 120Hz 3D HD screens, Sandy Bridge CPUs". Engadget. 6 January 2011. Retrieved 28 April 2021.
+ "Samsung 700G7A GAMER". pocket-lint.com. 11 April 2012. Retrieved 28 April 2021.
+ Dignan, Larry (21 June 2010). "Toshiba's Libretto W100: Interesting concept but questions abound". ZDNET. Retrieved 14 August 2026.
+ "First Look: Lenovo ThinkBook Plus Updated With Larger E-Ink Display". PCMag UK. 12 January 2021.
+ bio, See full (9 April 2012). "Razer Blade Switchblade UI (photos) - CNET".
+ Westover, Brian (20 October 2022). "Lenovo ThinkBook Plus Gen 3 Review". PCMAG.
+ bio, See full (4 June 2003). "Toshiba Satellite 5200 - CNET".
+ Brant, Tom (27 May 2019). "In ScreenPad 2.0, Asus Makes Its Touchpad Display Much Easier to Use". PCMAG.
+ "AMD Ryzen™ Threadripper™ Processors for Desktop Workstations". AMD. 23 May 2025. Retrieved 23 May 2025.
+ Most keyboards are not illuminated. Some models of laptops feature an illuminated keyboard.
+ Edwards, Benj (17 January 2012). "Evolution of the Solid-State Drive". PCWorld.com. Archived from the original on 1 October 2012. Retrieved 1 October 2014.
+ "Apple — MacBook — Tech Specs". apple.com. Retrieved 2 April 2015.
+ Gabriel Torres (25 November 2004). "Innovations in Notebook Expansion". Hardware Secrets, LLC. Archived from the original on 28 April 2005. Retrieved 15 November 2008.
+ "Notebook Video Card Upgrade / Replacement". NotebookCheck.
+ "Hacking Dell Laptops To Use Off-Brand Chargers". 27 May 2020.
+ "What Is USB-C? An Explainer". PCMAG. 19 February 2025.
+ "HP EliteBook 6930p Notebook PC specifications – HP Products and Services Products". HP. 25 May 2009. Archived from the original on 1 June 2012. Retrieved 17 June 2013.
+ "Epson PX-8 Technical Manual" (PDF).
+ "Laptop Daya Tahan Baterai Terbaik Dari HP". www.hp.com.
+ "780W AC Adapter – Unleash Full Power of your Laptop!". eurocom.com.
+ "US DOT Hazmat Safety Rule to Place Limits on Lithium Batteries Carried by Passengers Aboard Aircraft Effective January 1, 2008".
+Jump up to:
+ Woods, Dough. "Getting rid of the ICT suite". Blog. Archived from the original on 6 October 2010.
+ Wilce, Hilary (1 December 2000). "Welcome to Lapland". TES Magazine. Archived from the original on 26 May 2015. Retrieved 5 June 2012.
+ Clarke, Gavin. "The SOLAR-POWERED Ubuntu laptop". The Register. Retrieved 7 August 2013.
+ Archived at Ghostarchive and the Wayback Machine: OLPC XO laptop powered by a solar panel. 9 January 2012. Retrieved 23 October 2012 – via YouTube.
+ Elizabeth Woyke (18 April 2012). "A Look at OLPC's XO 3.0 Tablet's Solar And Kinetic Chargers". Forbes. Retrieved 23 October 2012.
+ "One Laptop per Child (OLPC): Frequently Asked Questions". Laptop.org. Archived from the original on 18 March 2017. Retrieved 23 October 2012.
+ "Samsung's Solar Powered Laptop Will Be First Sun Powered Laptop Sold in US | Inhabitat – Sustainable Design Innovation, Eco Architecture, Green Building". Inhabitat. 21 June 2011. Retrieved 23 October 2012.
+ Melanie Pinola Contributions from Sean Riley (8 June 2022). "How to upgrade the RAM (memory) on a laptop". LaptopMag.
+ "Need a New MacBook Pro Battery? Here's Your Guide!". Digital Trends. 15 March 2021.
+ "Should I buy a laptop or desktop?". IT Division – the University of Wisconsin. 19 March 2008. Archived from the original on 22 January 2009. Retrieved 27 November 2008.
+ Josh Fischman (7 August 2008). "Faster Wi-Fi Predicted for Colleges". The Chronicle of Higher Education. Retrieved 27 November 2008.
+ "Gartner: Notebook PCs still prone to hardware failure". IDG News Service / ITWorld. 27 June 2006. Archived from the original on 10 December 2011. Retrieved 27 November 2008.
+ Geier, Eric (6 August 2012). "Zen and the Art of Laptop Maintenance". PC World. Retrieved 25 January 2014.
+ PDF, Ponemon Institute, Airport Insecurity: The Case of Lost Laptops, June 2008
+ "Secure File Sharing". Biometric Devices and Laptop Security. Laptop Security Pro. Retrieved 7 February 2015.
+ Hoffman, Chris (3 April 2014). "How to Secure Your Computer With a BIOS or UEFI Password". How-To Geek.
+ Hoffman, Chris (14 April 2014). "Hard Disk Passwords Explained: Should You Set One to Secure Your Files?". How-To Geek.
+ . Archived 6 June 2013 at the Wayback Machine. Ponemon Institute, The Billion Dollar Lost Laptop Problem. September 2010.
+ Holmes, Kristin E. (31 August 2010). "Lower Merion School District ordered to pay plaintiff's lawyer $260,000". The Philadelphia Inquirer. Retrieved 20 September 2010.
+ "Judge: Lower Merion must pay attorney in laptop case". Main Line Media News. 18 September 2010. Archived from the original on 5 March 2016. Retrieved 20 September 2010.
+ "A lawyer in the Lower Merion webcam case wants to be paid now", Philly.com Archived 1 September 2010 at the Wayback Machine
+ Toub, Allegra (23 May 2017). "Take It Easy on Those Keyboards". Backlight Resumes. Retrieved 23 May 2017.
+ "You Asked: Can Using a Laptop Make You Infertile?". Time. Retrieved 9 November 2021.
+ Yefim Sheynkin; Robert Welliver; Andrew Winer; Farshid Hajimirzaee; Hongshik Ahn; Kyewon Lee (8 November 2010). "Protection from scrotal hyperthermia in laptop computer users". Fertility and Sterility. 95 (2): 647–651. doi:10.1016/j.fertnstert.[number]. ISSN 0015-0282. PMID 21055743.
+ Yin, Sara (8 November 2010). "Study: Laptop Pads Don't Prevent Male Infertility". PC Magazine. Retrieved 8 November 2010.
+ "Is your laptop cooking your testicles?". Reuters. 8 November 2010. Retrieved 8 November 2010.
+ Caulfield, Philip (7 November 2010). "Study finds men who place laptop computer on lap put testicles at risk of overheating, infertility". Daily News. Archived from the original on 10 November 2010. Retrieved 8 November 2010.
+ Joelving, Frederik (8 November 2010). "Is your laptop cooking your testicles?". Reuters. Retrieved 8 November 2010.
+ Levinbook, WS.; Mallet J; Grant-Kels JM (October 2007). "Laptop computer—associated erythema ab igne". Cutis. 80 (4). Quadrant HealthCom: 319–20. PMID 18038695.
+ Diaz, Jesus (7 October 2010). "What Is Toasted Skin Syndrome?". Gizmodo. Archived from the original on 10 November 2010. Retrieved 8 November 2010.
+ Hendrick, Bill (4 October 2010). "Laptop Risk: 'Toasted Skin Syndrome'". WebMD. Retrieved 8 November 2010.
+ Tanner, Lindsey (10 April 2010). "Laptops lead to 'toasted skin syndrome'". Associated Press. Archived from the original on 1 March 2013. Retrieved 8 November 2010.
+ "Identical Laptops, Different Prices: Don't Be Fooled by Branding". Info-Tech Research Group. 10 October 2006. Retrieved 11 November 2011.
+ Pane, Patricia J. (28 August 1989). "IBM Tries End Run on Laptop Market". InfoWorld. Vol. 11, no. 35. pp. 1, 93. Retrieved 25 April 2025.
+ Lohr, Steve (23 June 1993). "Notebooks May Hold Key to I.B.M.'s Revival". The New York Times.
+ "Compaq Tops in Laptops". The New York Times. 12 May 1994.
+ Lohr, Steve (17 June 1996). "At '96 PC Expo, Laptops Reserve Center Stage". The New York Times.
+ Tom Fowler (15 August 1999). "Dell to produce laptops at home". www.bizjournals.com. Retrieved 19 November 2024.
+ "Dell Embraces Brand-New Push: Cheaper Laptops Built to Order". Wall Street Journal. 17 June 1999.
+ admin-ectnews (3 June 2002). "Toshiba Topples Dell in Global Notebook Battle". E-Commerce Times. Retrieved 19 November 2024.
+ O'Brien, Kevin J. (23 March 2005). "New laptops, made to be manhandled". The New York Times.
+ "Acer reshuffles execs amid growth". CNET. Retrieved 19 November 2024.
+ "IDC 2005 top 10 global notebook computer vendors; Apple #9 with 2.171 million units shipped". MacDailyNews. 7 February 2006. Retrieved 19 November 2024.
+ Schofield, Jack (27 April 2010). "The top notebook suppliers and the future of netbooks". The Guardian. ISSN 0261-3077. Retrieved 19 November 2024.
+ "Apple fourth largest seller of laptops". Macworld. Retrieved 19 November 2024.
+ "Lap-top computers gain stature as power grows". Daily News of Los Angeles (CA). 12 April 1987. Retrieved 1 November 2008.
+Jump up to:
+ "The Falling Costs of Mobile Computing". Falling Costs of Mobile Computing Drive Corporate Adoption. Computer Economics, Inc. December 2005. Archived from the original on 24 February 2021. Retrieved 1 November 2008.
+ Notebook PC Shipments Exceed Desktops for First Time in Q3, isuppli.com, accessed at 13 January 2009
+ Randall Stross (18 April 2008). "The PC Doesn't Have to Be an Anchor". The New York Times. Retrieved 20 April 2009.
+ "Intel: laptop/desktop crossover coming sooner than expected". The Register, UK. Archived from the original on 7 October 2008. Retrieved 10 October 2008.
+ Huang, Sanesha. "Global Notebook Market Demand to Grow by 3.6% in 2024, with AI Innovation Applications Key to Future Growth, Says TrendForce". TrendForce. Retrieved 23 November 2024.
+ "IDC - Personal Computing Devices Market Insights". IDC. 26 September 2024. Retrieved 23 November 2024.
+ Michael Singer. "PC milestone—notebooks outsell desktops". 2005.
+ Hanson, Matt (13 July 2022). "The best laptop 2023: top portable picks for all budgets". TechRadar. Retrieved 20 September 2023.
+ Recycling, Newtech. "Laptop Disposal Ewaste Recycling and IT asset disposition (ITAD)". www.newtechrecycling.com. Archived from the original on 12 June 2018. Retrieved 11 June 2018.
+ "Act 1410" (PDF). 14 February 2006. Archived from the original (PDF) on 14 February 2006. Retrieved 26 September 2022.
+ Kuhlenbeck, Phil (9 June 2006). "Law holds businesses responsible for disposal of computers". Austin Business Journal. Retrieved 23 August 2024.
+ Lewis, Peter H. (12 August 1991). "SHUTTLE MISSION PUTS COMPUTERS TO THE TEST NASA makes Grid, Macintosh space-friendly". Baltimore Sun. Archived from the original on 22 October 2020. Retrieved 27 May 2022.
+ "Macintosh Portable: Used in Space Shuttle". Support.apple.com. Retrieved 23 October 2012.
+ Linzmayer, Owen W. (2004). Apple confidential 2.0 : the definitive history of the world's most colorful company ([Rev. 2. ed.]. ed.). San Francisco, Calif.: No Starch Press. ISBN [number].
+ "This Week in Apple History – August 22–31: "Welcome, IBM. Seriously", Too Late to License". The Mac Observer. 31 October 2004. Archived from the original on 17 April 2023. Retrieved 23 October 2012.
+ "IBM Archives: IBM ThinkPads in space". www.ibm.com. 23 January 2003. Archived from the original on 20 July 2011.
+ "2001: A Space Laptop – SpaceRef – Your Space Reference". www.spaceref.com. 18 September 2000. Archived from the original on 19 March 2023. Retrieved 10 June 2011.
+ Media related to Laptops at Wikimedia Commons
+show
+vte
+Computer sizes and classes
+
+
+show
+vte
+Electronics
+
+
+show
+Authority control databases 
+
+
+Categories: LaptopsClasses of computersMobile computingOffice equipmentPersonal computers1980s neologisms
+This page was last edited on 25 September 2026, at 07:32 (UTC). Page was rendered with Parsoid.
+Text is available under the Creative Commons Attribution-ShareAlike 4.0 License; additional terms may apply. By using this site, you agree to the Terms of Use and Privacy Policy. Wikipedia® is a registered trademark of the Wikimedia Foundation, Inc., a non-profit organization.
+Privacy policy
+About Wikipedia
+Disclaimers
+Contact Wikipedia
+Legal & safety contacts
+Code of Conduct
+Developers
+Statistics
+Cookie statement
+Mobile view

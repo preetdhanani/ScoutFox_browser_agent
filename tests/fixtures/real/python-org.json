@@ -1,0 +1,16 @@
+{
+  "name": "python-org",
+  "kind": "project home page",
+  "url": "https://www.python.org/",
+  "requestedUrl": "https://www.python.org/",
+  "title": "Welcome to Python.org",
+  "capturedAt": "2026-10-14T23:55:36.845Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 11060,
+  "htmlUncompressedBytes": 58320,
+  "textLength": 3922,
+  "htmlSha256": "43bf60dbd23ca45d64329fdd7d5f18c24c9cc4e88f99ced197ccae1ed29f960a"
+}

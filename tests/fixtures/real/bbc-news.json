@@ -1,0 +1,16 @@
+{
+  "name": "bbc-news",
+  "kind": "news front page",
+  "url": "https://www.bbc.com/news",
+  "requestedUrl": "https://www.bbc.com/news",
+  "title": "BBC News - Breaking news, video and the latest top stories from the U.S. and around the world",
+  "capturedAt": "2026-10-14T23:55:33.151Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 50169,
+  "htmlUncompressedBytes": 320880,
+  "textLength": 8742,
+  "htmlSha256": "cc966317b1ee0dd569bb40c290c0606c613e66bdfec0afd9c5f2e2d57fff708c"
+}

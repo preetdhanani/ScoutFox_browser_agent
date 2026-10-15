@@ -1,0 +1,16 @@
+{
+  "name": "httpbin-form",
+  "kind": "form page",
+  "url": "https://httpbin.org/forms/post",
+  "requestedUrl": "https://httpbin.org/forms/post",
+  "title": "",
+  "capturedAt": "2026-10-14T23:55:43.654Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 511,
+  "htmlUncompressedBytes": 1404,
+  "textLength": 207,
+  "htmlSha256": "c4fd57fdf39f174d1456f4fa032a9ceee4348a0453f5ae1c3a94051fccf01222"
+}

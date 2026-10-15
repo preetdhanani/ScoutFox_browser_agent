@@ -1,0 +1,16 @@
+{
+  "name": "heise-front",
+  "kind": "news front page (cookie wall)",
+  "url": "https://www.heise.de/",
+  "requestedUrl": "https://www.heise.de/",
+  "title": "heise online - IT-News, Nachrichten und Hintergründe | heise online",
+  "capturedAt": "2026-10-15T01:48:04.774Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 104303,
+  "htmlUncompressedBytes": 784819,
+  "textLength": 31305,
+  "htmlSha256": "dfd29df01dcffd22e163318a9a4b68aded34c756680931f449e0238cf02eaf68"
+}

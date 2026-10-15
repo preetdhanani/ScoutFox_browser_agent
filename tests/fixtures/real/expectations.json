@@ -1,0 +1,26 @@
+{
+  "comment": "Hand-written expectations the replay asserts against the real content scripts' output on each recorded page. A line named here must survive extraction; a control named here must be in the element list. Add the expectations of a new page with the page itself (see README.md).",
+  "pages": {
+    "framework-configurator": [
+      { "type": "full-text-contains", "value": "Ships within 5 business days" },
+      { "type": "full-text-contains", "value": "Free shipping on laptop and desktop orders" },
+      { "type": "element-label-matches", "regex": "add to bag|add to cart|in den warenkorb" }
+    ],
+    "apple-macbook-air": [
+      { "type": "full-text-contains", "value": "Kostenloser Versand" }
+    ],
+    "github-login": [
+      { "type": "page-text-contains", "value": "Sign in to GitHub" },
+      { "type": "element-label-matches", "regex": "sign in" }
+    ],
+    "httpbin-form": [
+      { "type": "page-text-contains", "value": "Customer name" }
+    ],
+    "example-com": [
+      { "type": "page-text-contains", "value": "This domain is for use in documentation examples" }
+    ],
+    "hackernews-front": [
+      { "type": "element-count-at-least", "min": 30 }
+    ]
+  }
+}

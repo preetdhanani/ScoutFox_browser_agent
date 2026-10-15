@@ -1,0 +1,16 @@
+{
+  "name": "hackernews-item",
+  "kind": "news discussion page",
+  "url": "https://news.ycombinator.com/item?id=1",
+  "requestedUrl": "https://news.ycombinator.com/item?id=1",
+  "title": "Y Combinator | Hacker News",
+  "capturedAt": "2026-10-14T23:54:57.407Z",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "htmlBytes": 1914,
+  "htmlUncompressedBytes": 6576,
+  "textLength": 595,
+  "htmlSha256": "5811de217f859442acc182a100c5c6c3c26a94de8449da433abf5b56f0b61cfa"
+}
