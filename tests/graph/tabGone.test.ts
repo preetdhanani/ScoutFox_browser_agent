@@ -167,7 +167,18 @@ test('a tab_gone perceive error ends the site as failed with the fatal kind (BUG
   }
 });
 
-const THREE_SITE_PLAN = '["shop.test: Find the price", "deal.test: Find the deal", "third.test: Find the third"]';
+// A proper plan object: the old bare-array fixture would now be a parse error that asks the
+// model for a repair (planner-fallback-invented-plan), so the plan is spelled out here. It keeps
+// the shape the old array reply produced for this task (research kind, page sites, value field).
+const THREE_SITE_PLAN = JSON.stringify({
+  task_kind: 'research',
+  columns: ['value'],
+  sites: [
+    { domain: 'shop.test', name: 'shop.test: Find the price', goal: 'shop.test: Find the price', kind: 'page', required_fields: ['value'] },
+    { domain: 'deal.test', name: 'deal.test: Find the deal', goal: 'deal.test: Find the deal', role: 'compare', kind: 'page', required_fields: ['value'] },
+    { domain: 'third.test', name: 'third.test: Find the third', goal: 'third.test: Find the third', role: 'compare', kind: 'page', required_fields: ['value'] },
+  ],
+});
 
 test('a closed tab skips the remaining sites instead of running them against the dead tab (BUG-24)', async (t) => {
   const PAGES: PageSpec[] = [

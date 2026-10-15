@@ -1078,8 +1078,11 @@ export class AgentRunner {
         || snapshot.values?.planPrev == null;
 
       const pausePending = this.runtime.control.pauseRequested;
+      // A fallback plan (the planner reply stayed unreadable) is never auto-approved: the plan
+      // card shows its banner and the user decides (planner-fallback-invented-plan).
+      const isFallbackPlan = approvalPlanMeta?.source === 'fallback';
       const autoAnswered = !pausePending && (
-        (interrupt?.kind === 'approve_plan' && this.autoApprovePlan && isFirstPlan) ||
+        (interrupt?.kind === 'approve_plan' && this.autoApprovePlan && isFirstPlan && !isFallbackPlan) ||
         (interrupt?.kind === 'confirm_action' && this.autoConfirmAction && !opts.restoring)
       );
       if (autoAnswered) {

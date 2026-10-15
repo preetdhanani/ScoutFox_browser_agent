@@ -89,7 +89,69 @@ const WEB: PageSpec[] = [
 ];
 
 const GOAL = 'What does the Framework Laptop 16 cost?';
-const PLAN_2 = '["Open the Framework Laptop 16 page", "Read the price there"]';
+// A proper plan object: the old bare-array fixture would now be a parse error that asks the
+// model for a repair (planner-fallback-invented-plan), so the plan is spelled out here. It keeps
+// the shape the old array reply produced for this task (answer kind, page sites, value field).
+const PLAN_2 = JSON.stringify({
+  task_kind: 'answer',
+  columns: ['value'],
+  sites: [
+    { name: 'Open the Framework Laptop 16 page', goal: 'Open the Framework Laptop 16 page', kind: 'page', required_fields: ['value'] },
+    { name: 'Read the price there', goal: 'Read the price there', role: 'compare', kind: 'page', required_fields: ['value'] },
+  ],
+});
+const TWO_SITE_PLAN = JSON.stringify({
+  task_kind: 'answer',
+  columns: ['value'],
+  sites: [
+    { domain: 'shop.test', name: 'shop.test: Find the price', goal: 'shop.test: Find the price', kind: 'page', required_fields: ['value'] },
+    { domain: 'deal.test', name: 'deal.test: Find the deal price', goal: 'deal.test: Find the deal price', role: 'compare', kind: 'page', required_fields: ['value'] },
+  ],
+});
+const PLAN_SITES = JSON.stringify({
+  task_kind: 'answer',
+  columns: ['value'],
+  sites: [
+    { domain: 'shop.test', name: 'shop.test: Find the price', goal: 'shop.test: Find the price', kind: 'page', required_fields: ['value'] },
+    { domain: 'deal.test', name: 'deal.test: Find the deal price', goal: 'deal.test: Find the deal price', role: 'compare', kind: 'page', required_fields: ['value'] },
+    { name: 'Compile the answer', goal: 'Compile the answer', kind: 'page', required_fields: ['value'] },
+  ],
+});
+const TWITTER_PLAN = JSON.stringify({
+  task_kind: 'research',
+  columns: ['value'],
+  sites: [
+    { domain: 'twitter.com', name: 'Open twitter.com', goal: 'Open twitter.com', kind: 'page', required_fields: ['value'] },
+    { name: 'Read the newest post', goal: 'Read the newest post', role: 'compare', kind: 'page', required_fields: ['value'] },
+  ],
+});
+const DEAL_PLAN = JSON.stringify({
+  task_kind: 'answer',
+  columns: ['value'],
+  sites: [
+    { name: 'Read the laptop list', goal: 'Read the laptop list', kind: 'page', required_fields: ['value'] },
+    { name: 'Check Deal for the same laptop', goal: 'Check Deal for the same laptop', role: 'compare', kind: 'page', required_fields: ['value'] },
+    { name: 'Write the answer', goal: 'Write the answer', role: 'compare', kind: 'page', required_fields: ['value'] },
+  ],
+});
+const READ_PRICE_PLAN = JSON.stringify({
+  task_kind: 'answer',
+  columns: ['value'],
+  sites: [
+    { domain: 'shop.test', name: 'shop.test: read the price', goal: 'shop.test: read the price', kind: 'page', required_fields: ['value'] },
+    { domain: 'deal.test', name: 'deal.test: read the deal price', goal: 'deal.test: read the deal price', role: 'compare', kind: 'page', required_fields: ['value'] },
+    { name: 'Write the answer', goal: 'Write the answer', role: 'compare', kind: 'page', required_fields: ['value'] },
+  ],
+});
+// A research variant of PLAN_2 for the goal whose wording must not read as an answer task.
+const PLAN_2_RESEARCH = JSON.stringify({
+  task_kind: 'research',
+  columns: ['value'],
+  sites: [
+    { name: 'Open the Framework Laptop 16 page', goal: 'Open the Framework Laptop 16 page', kind: 'page', required_fields: ['value'] },
+    { name: 'Read the price there', goal: 'Read the price there', role: 'compare', kind: 'page', required_fields: ['value'] },
+  ],
+});
 const act = (action: Record<string, unknown>): string => JSON.stringify(action);
 const finishWith = (answer: string, reason = 'I have all the information'): string => act({ action: 'finish', answer, reason });
 const navigateTo = (url: string): string => act({ action: 'navigate', url, reason: 'Go there' });
@@ -400,7 +462,7 @@ describe('the engine clamps the finish policy', () => {
     const { engine, policyCalls, llm } = await runTask(t, {
       goal: 'Compare the Framework Laptop 16 price on shop.test and deal.test.',
       policy: () => 'send_back',
-      script: ['["shop.test: Find the price", "deal.test: Find the deal price"]', honest, honest],
+      script: [TWO_SITE_PLAN, honest, honest],
     });
 
     assert.equal(policyCalls.length, 2, 'asked about both finishes');
@@ -449,7 +511,7 @@ describe('the engine clamps the finish policy', () => {
       goal: 'Compare the Framework Laptop 16 price on shop.test and deal.test.',
       maxSteps: 2,
       policy: () => 'send_back',
-      script: ['["shop.test: Find the price", "deal.test: Find the deal price"]', honest, honest],
+      script: [TWO_SITE_PLAN, honest, honest],
     });
     const clamp = Logger.getLogsHistory().find((e) => e.message.startsWith('[FINISH_POLICY_CLAMPED]'));
     assert.equal(clamp?.level, 'WARN');
@@ -460,7 +522,7 @@ describe('the engine clamps the finish policy', () => {
     const honest = finishWith('shop.test: EUR 1.399,00. deal.test: not checked, I never opened it.');
     const { engine, llm } = await runTask(t, {
       goal: 'Compare the Framework Laptop 16 price on shop.test and deal.test.',
-      script: ['["shop.test: Find the price", "deal.test: Find the deal price"]', honest, honest],
+      script: [TWO_SITE_PLAN, honest, honest],
     });
 
     assert.equal(refusals(engine).length, 1);
@@ -573,7 +635,7 @@ describe('the log says what the gate did', () => {
     await runTask(t, {
       goal: 'Compare the Framework Laptop 16 price on shop.test and deal.test.',
       policy: () => 'annotate',
-      script: ['["shop.test: Find the price", "deal.test: Find the deal price"]', finishWith('shop.test: EUR 1.399,00. deal.test: not checked, I never opened it.')],
+      script: [TWO_SITE_PLAN, finishWith('shop.test: EUR 1.399,00. deal.test: not checked, I never opened it.')],
     });
 
     assert.ok(hasLog('[FINISH_AUDIT] verdict=partial lies=0 gaps=1'));
@@ -602,7 +664,7 @@ describe('a verified answer', () => {
   test('a finish with no answer is audited as what it is and is not sent back for that (a site that collects, not an answer site)', async (t) => {
     // The goal must not read as an answer task ("what", "price", "cost", ...): an ANSWER site does not accept an empty finish at
     // all (next test), so the audit would never see one.
-    const { engine } = await runTask(t, { goal: 'Open the Framework Laptop 16 listing on shop.test', script: [PLAN_2, act({ action: 'finish', reason: 'done' })] });
+    const { engine } = await runTask(t, { goal: 'Open the Framework Laptop 16 listing on shop.test', script: [PLAN_2_RESEARCH, act({ action: 'finish', reason: 'done' })] });
 
     const [entry] = finishes(engine);
     assert.match(entry?.answer ?? '', /did not provide an answer/);
@@ -651,7 +713,7 @@ describe('the step message block', () => {
     const { llm } = await runTask(t, {
       goal: 'Compare the Framework Laptop 16 price on shop.test and deal.test.',
       policy: () => 'annotate',
-      script: ['["shop.test: Find the price", "deal.test: Find the deal price"]', clickOn('Deal of the day'), finishWith('shop.test: EUR 1.399,00. deal.test: EUR 1.299,00.')],
+      script: [TWO_SITE_PLAN, clickOn('Deal of the day'), finishWith('shop.test: EUR 1.399,00. deal.test: EUR 1.299,00.')],
     });
 
     assert.match(stepMessage(llm, 1), /Not opened yet: deal\.test/);
@@ -680,7 +742,6 @@ describe('the step message block', () => {
 // ---------------------------------------------------------------------------------------------
 
 describe('the plan never claims a site that was not read', () => {
-  const PLAN_SITES = JSON.stringify(['shop.test: Find the price', 'deal.test: Find the deal price', 'Compile the answer']);
   const SITES_GOAL = 'Compare the Framework Laptop 16 price on shop.test and deal.test.';
   const HONEST_PARTIAL = 'shop.test: EUR 1.399,00 (https://shop.test/laptops/16). deal.test: not checked, I never opened it.';
 
@@ -907,7 +968,7 @@ describe('a site that redirects counts as opened through the page it led to', ()
       redirects: { [TWITTER]: X_HOME },
       goal: 'Read the newest post on twitter.com',
       policy: () => 'send_back',
-      script: ['["Open twitter.com", "Read the newest post"]', navigateTo(TWITTER), finishWith('The newest post on twitter.com says hello world.')],
+      script: [TWITTER_PLAN, navigateTo(TWITTER), finishWith('The newest post on twitter.com says hello world.')],
     });
 
     assert.equal(engine.evidence.hasOpened('twitter.com'), true);
@@ -935,7 +996,7 @@ describe('the plan names sources by brand', () => {
     const { llm, engine } = await runTask(t, {
       goal: 'Compare the Framework Laptop 16 price on shop.test and deal.test.',
       policy: () => 'annotate',
-      script: ['["Read the laptop list", "Check Deal for the same laptop", "Write the answer"]', navigateTo(PRODUCT), navigateTo(LIST), clickOn('Deal of the day'), finishWith('shop.test: EUR 1.399,00. deal.test: EUR 1.299,00.')],
+      script: [DEAL_PLAN, navigateTo(PRODUCT), navigateTo(LIST), clickOn('Deal of the day'), finishWith('shop.test: EUR 1.399,00. deal.test: EUR 1.299,00.')],
     });
 
     assert.match(stepMessage(llm, 3), /2\. \[>\] Check Deal for the same laptop/);
@@ -944,9 +1005,11 @@ describe('the plan names sources by brand', () => {
   });
 
   test('the fallback plan does not put the whole goal into its first step', async (t) => {
-    const { engine } = await runTask(t, { goal: 'Compare the Framework Laptop 16 price on shop.test and deal.test.', policy: () => 'annotate', script: ['not a plan at all', finishWith('shop.test: EUR 1.399,00. deal.test: not checked.')] });
-    assert.equal(engine.planSteps[0]?.text, 'Analyze the page state for the task');
-    assert.ok(engine.planSteps.every((s) => !/shop\.test|deal\.test/.test(s.text)));
+    // The fallback plan is shown with a banner and waits for the user now (planner-fallback-invented-plan),
+    // so no policy reply is needed: the run pauses at the plan hold with the plan steps already set.
+    const { engine } = await runTask(t, { goal: 'What does the Framework Laptop 16 cost?', policy: () => 'annotate', script: ['not a plan at all', 'still not a plan'] });
+    assert.equal(engine.planSteps[0]?.text, 'shop.test');
+    assert.ok(engine.planSteps.every((s) => !/Framework Laptop 16 cost/.test(s.text)));
   });
 });
 
@@ -961,7 +1024,7 @@ describe('the step message follows the page the tab is on', () => {
       pages,
       goal: 'Compare the Framework Laptop 16 price on shop.test and deal.test.',
       policy: () => 'annotate',
-      script: ['["shop.test: read the price", "deal.test: read the deal price", "Write the answer"]', typeInto('Search', 'laptop'), typeInto('Search', 'laptop 16'), clickOn('Deal of the day'), finishWith('shop.test: EUR 1.399,00. deal.test: EUR 1.299,00.')],
+      script: [READ_PRICE_PLAN, typeInto('Search', 'laptop'), typeInto('Search', 'laptop 16'), clickOn('Deal of the day'), finishWith('shop.test: EUR 1.399,00. deal.test: EUR 1.299,00.')],
     });
     assert.match(stepMessage(llm, 3), /2\. \[>\] deal\.test: read the deal price/);
     assert.match(stepMessage(llm, 4), /2\. \[x\] deal\.test: read the deal price/);
@@ -1061,7 +1124,9 @@ test('a two-step task: the model reads the list page, clicks the product, reads 
   const world = await rig(t, {
     pages,
     script: [
-      '["Open the Framework Laptop 16 page", "Read the price there"]',
+      // A proper plan object: the old bare-array fixture would now be a parse error that asks
+      // the model for a repair (planner-fallback-invented-plan).
+      PLAN_2,
       { reasoning: 'The list has the Laptop 16, so I open it.', text: JSON.stringify({ action: 'click', element_id: 2, reason: 'Open the product page' }) },
       JSON.stringify({ action: 'finish', answer: 'The Framework Laptop 16 DIY Edition costs 1.399,00 EUR.', reason: 'The price is on the page' }),
     ],

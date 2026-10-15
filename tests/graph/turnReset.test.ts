@@ -50,8 +50,24 @@ const WEB: PageSpec[] = [
 
 const GOAL1 = 'What does the Framework Laptop 16 cost?';
 const GOAL2 = 'What does the deal of the day cost?';
-const PLAN_1 = '["Open the Framework Laptop 16 page", "Read the price there"]';
-const PLAN_2 = '["Open the deal of the day"]';
+// Proper plan objects: the old bare-array fixtures would now be a parse error that asks the
+// model for a repair (planner-fallback-invented-plan), so the plans are spelled out here. They
+// keep the shape the old array replies produced for these tasks (answer kind, page sites, value field).
+const PLAN_1 = JSON.stringify({
+  task_kind: 'answer',
+  columns: ['value'],
+  sites: [
+    { name: 'Open the Framework Laptop 16 page', goal: 'Open the Framework Laptop 16 page', kind: 'page', required_fields: ['value'] },
+    { name: 'Read the price there', goal: 'Read the price there', role: 'compare', kind: 'page', required_fields: ['value'] },
+  ],
+});
+const PLAN_2 = JSON.stringify({
+  task_kind: 'answer',
+  columns: ['value'],
+  sites: [
+    { name: 'Open the deal of the day', goal: 'Open the deal of the day', kind: 'page', required_fields: ['value'] },
+  ],
+});
 const act = (action: Record<string, unknown>): string => JSON.stringify(action);
 const finishWith = (answer: string): string => act({ action: 'finish', answer, reason: 'I have all the information' });
 

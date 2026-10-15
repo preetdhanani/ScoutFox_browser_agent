@@ -433,10 +433,13 @@ function planFor(message) {
   const { task, tabUrl } = parsePlanMessage(message);
   const tabHost = hostnameOf(tabUrl);
   const kind = kindOfGoal(task);
-  const base = { task_kind: 'research', search_query: 'Framework Laptop 16', compare: { reference_domain: '', field: '', threshold_pct: 0 } };
+  // The compare block names its reference site: an empty reference_domain is a schema hole the
+  // plan node now asks the model to repair (planner-fallback-invented-plan).
+  const base = { task_kind: 'research', search_query: 'Framework Laptop 16' };
+  const withCompare = (sites, columns) => ({ ...base, columns, compare: { reference_domain: sites[0]?.domain ?? tabHost, field: 'price', threshold_pct: 10 }, sites });
   if (kind === 'sources') {
     const columns = ['price', 'shipping', 'delivery'];
-    return { ...base, columns, sites: namedShops(task).map((host, i) => planSite({
+    return withCompare(namedShops(task).map((host, i) => planSite({
       domain: host,
       // The first shop is the page the tab is on. The others have to be opened.
       url: host === tabHost ? '' : `https://www.${host}/`,
@@ -444,24 +447,24 @@ function planFor(message) {
       role: i === 0 ? 'reference' : 'compare',
       kind: 'store',
       fields: columns
-    })) };
+    })), columns);
   }
   if (kind === 'cheapest') {
     const columns = ['shop', 'price', 'shipping', 'total'];
-    return { ...base, columns, sites: [planSite({ domain: tabHost, goal: 'Open the offers page of the product and note the offer with the lowest total of price and shipping', role: 'reference', kind: 'listing', fields: columns })] };
+    return withCompare([planSite({ domain: tabHost, goal: 'Open the offers page of the product and note the offer with the lowest total of price and shipping', role: 'reference', kind: 'listing', fields: columns })], columns);
   }
   if (kind === 'disclosure') {
     const columns = ['value'];
-    return { ...base, columns, sites: [planSite({ domain: tabHost, goal: 'Open the shipping and returns disclosure and read the return window', role: 'reference', kind: 'page', fields: columns })] };
+    return withCompare([planSite({ domain: tabHost, goal: 'Open the shipping and returns disclosure and read the return window', role: 'reference', kind: 'page', fields: columns })], columns);
   }
   const columns = kind === 'facts' ? ['price', 'shipping', 'delivery'] : ['value'];
-  return { ...base, columns, sites: [planSite({
+  return withCompare([planSite({
     domain: tabHost,
     goal: kind === 'facts' ? 'Read the price, shipping cost and delivery time of the product on this page' : 'Read the current page',
     role: 'reference',
     kind: kind === 'facts' ? 'store' : 'page',
     fields: columns
-  })] };
+  })], columns);
 }
 
 /**

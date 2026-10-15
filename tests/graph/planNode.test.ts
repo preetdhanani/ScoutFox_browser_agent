@@ -31,7 +31,188 @@ test('planNode: passes earlier completed turn recap into follow-up plan prompt',
   assert.ok(secondPlanMsg.includes('Item 42 costs 99 USD.'));
 });
 
-test('planNode: logs [PLANNER_FALLBACK] when fallback plan is used', async (t) => {
+// A plan reply the repair retry can succeed with: the full schema shape the planner is asked for.
+function validPlanJson(): string {
+  return JSON.stringify({
+    task_kind: 'research',
+    columns: ['price'],
+    search_query: 'item 42 price',
+    sites: [
+      { domain: 'shop.test', goal: 'Find the price of item 42', role: 'reference', kind: 'store', difficulty: 1, required_fields: ['price'], done_when: 'all_required', check: { type: 'none', value: '' } },
+    ],
+  });
+}
+
+test('planNode: an unparseable plan reply triggers exactly one repair retry whose prompt carries the parse error', async (t) => {
+  const rig = await graphRig({
+    autoApprove: false,
+    plan: null,
+    policy: [act.finish('Item 42 costs 99 USD.')],
+  });
+  t.after(rig.cleanup);
+  rig.llm.pushFor('plan', 'I cannot plan that.', validPlanJson());
+
+  await rig.start('Find the price of item 42');
+  assert.equal(rig.status(), 'paused', 'the repaired plan waits at the approval hold');
+
+  const planCalls = rig.llm.callsOf('plan');
+  assert.equal(planCalls.length, 2, `exactly one repair retry, got ${planCalls.length} plan calls`);
+  const repairPrompt = planCalls[1]?.messages?.at(-1)?.content ?? '';
+  assert.match(repairPrompt, /could not be parsed/, `the retry prompt names the parse problem, got: ${repairPrompt.slice(0, 200)}`);
+  assert.match(repairPrompt, /I cannot plan that\./, 'the failed reply is sent back to the model');
+
+  const notice = rig.history().find((h) => h.type === 'notice' && String((h as any).content).includes('could not be parsed'));
+  assert.ok(notice, 'the parse failure is a visible history entry');
+
+  const approval = rig.pending().approval as any;
+  assert.equal(approval?.planMeta?.source, 'llm', 'the repaired plan is a model plan the card can show');
+
+  await rig.approvePlan();
+  assert.equal(rig.status(), 'idle');
+  assert.equal(rig.finishAnswer(), 'Item 42 costs 99 USD.');
+});
+
+test('planNode: a bare array reply is no longer turned into sites by regex - it triggers one repair retry', async (t) => {
+  const rig = await graphRig({
+    autoApprove: false,
+    plan: null,
+    policy: [act.finish('Item 42 costs 99 USD.')],
+  });
+  t.after(rig.cleanup);
+  rig.llm.pushFor('plan', '["shop.test: find the price", "shop2.test: compare the price"]', validPlanJson());
+
+  await rig.start('Find the price of item 42');
+  assert.equal(rig.status(), 'paused');
+
+  const planCalls = rig.llm.callsOf('plan');
+  assert.equal(planCalls.length, 2, `the bare array gets one repair retry, got ${planCalls.length} plan calls`);
+
+  const approval = rig.pending().approval as any;
+  const plan = approval?.planMeta;
+  assert.equal(plan?.source, 'llm');
+  assert.equal(plan?.sites?.[0]?.goal, 'Find the price of item 42', `the repaired plan is used, not regex-derived sites, got: ${JSON.stringify(plan?.sites?.[0])}`);
+  assert.ok(rig.history().some((h) => h.type === 'notice'), 'the repair is a visible history entry');
+
+  await rig.approvePlan();
+  assert.equal(rig.status(), 'idle');
+});
+
+test('planNode: a compare object without a reference triggers one repair retry', async (t) => {
+  const rig = await graphRig({
+    autoApprove: false,
+    plan: null,
+    policy: [act.finish('Item 42 costs 99 USD.')],
+  });
+  t.after(rig.cleanup);
+  const withoutReference = JSON.stringify({
+    task_kind: 'research',
+    columns: ['price'],
+    search_query: 'item 42 price',
+    compare: { field: 'price', threshold_pct: 10 },
+    sites: [
+      { domain: 'shop.test', goal: 'Find the price of item 42', role: 'reference', kind: 'store', difficulty: 1, required_fields: ['price'], done_when: 'all_required', check: { type: 'none', value: '' } },
+    ],
+  });
+  const withReference = JSON.stringify({
+    task_kind: 'research',
+    columns: ['price'],
+    search_query: 'item 42 price',
+    compare: { reference_domain: 'shop.test', field: 'price', threshold_pct: 10 },
+    sites: [
+      { domain: 'shop.test', goal: 'Find the price of item 42', role: 'reference', kind: 'store', difficulty: 1, required_fields: ['price'], done_when: 'all_required', check: { type: 'none', value: '' } },
+    ],
+  });
+  rig.llm.pushFor('plan', withoutReference, withReference);
+
+  await rig.start('Find the price of item 42');
+  assert.equal(rig.status(), 'paused');
+
+  const planCalls = rig.llm.callsOf('plan');
+  assert.equal(planCalls.length, 2, `a compare without a reference gets one repair retry, got ${planCalls.length} plan calls`);
+
+  const approval = rig.pending().approval as any;
+  assert.equal(approval?.planMeta?.compare?.reference_domain, 'shop.test', 'the repaired compare names its reference');
+  assert.ok(rig.history().some((h) => h.type === 'notice'), 'the repair is a visible history entry');
+
+  await rig.approvePlan();
+  assert.equal(rig.status(), 'idle');
+});
+
+test('planNode: when the repair retry also fails the run pauses with the fallback banner instead of silently continuing', async (t) => {
+  const rig = await graphRig({
+    plan: null,
+    policy: [act.finish('Should not run silently.')],
+  });
+  t.after(rig.cleanup);
+  rig.llm.pushFor('plan', 'garbage one', 'garbage two');
+
+  await rig.start('Check prices');
+  assert.equal(rig.status(), 'paused', 'the fallback plan is never auto-approved - the user decides');
+
+  const approval = rig.pending().approval as any;
+  assert.ok(approval, 'the plan card is shown');
+  assert.equal(approval?.planMeta?.source, 'fallback');
+
+  const banner = rig.history().find((h) => h.type === 'notice' && String((h as any).content).includes('Planner reply was unreadable'));
+  assert.ok(banner, `the banner is a visible history entry, got: ${JSON.stringify(rig.history().map((h) => (h as any).content))}`);
+  assert.equal((banner as any)?.level, 'warn');
+  assert.equal(rig.llm.callsOf('plan').length, 2, 'still exactly one repair retry');
+  assert.equal(rig.state().stepCount, 1, 'the repair retry is counted in the step budget');
+
+  await rig.approvePlan();
+  assert.equal(rig.status(), 'idle');
+});
+
+test('planNode: a task naming two or more sites pauses with llm_failure instead of an invented fallback plan', async (t) => {
+  const rig = await graphRig({
+    plan: null,
+    policy: [act.finish('Should not run.')],
+  });
+  t.after(rig.cleanup);
+  rig.llm.pushFor('plan', 'garbage one', 'garbage two');
+
+  await rig.start('Compare the price on shop1.test and shop2.test');
+  assert.equal(rig.status(), 'paused');
+  assert.equal(rig.state().pauseReason, 'llm_failure', 'the multi-site rule uses the existing llm_failure pause');
+  assert.equal(rig.pending().approval, null, 'no fallback plan card is offered');
+  assert.equal(rig.llm.callsOf('plan').length, 2, 'exactly one repair retry before the pause');
+
+  const errRow = rig.history().find((h) => h.type === 'error') as any;
+  assert.ok(errRow, 'the pause is a visible history entry');
+  assert.match(String(errRow?.content), /shop1\.test/, 'the error names the sites no plan was invented for');
+});
+
+test('planNode: missing plan fields are filled by default and listed, without a repair retry', async (t) => {
+  const rig = await graphRig({
+    autoApprove: false,
+    plan: null,
+    policy: [act.finish('Item 42 costs 99 USD.')],
+  });
+  t.after(rig.cleanup);
+  const sparsePlan = JSON.stringify({
+    sites: [
+      { domain: 'shop.test', goal: 'Find the price', required_fields: ['price'] },
+      { goal: 'Compare the price' },
+    ],
+  });
+  rig.llm.pushFor('plan', sparsePlan);
+
+  await rig.start('Find the price of item 42');
+  assert.equal(rig.status(), 'paused');
+
+  assert.equal(rig.llm.callsOf('plan').length, 1, 'missing fields are defaults, not parse errors - no retry');
+  const plan = (rig.pending().approval as any)?.planMeta;
+  assert.equal(plan?.source, 'llm');
+  const defaulted: string[] = plan?.defaulted ?? [];
+  assert.ok(defaulted.includes('task_kind'), `task_kind is listed as defaulted, got: ${JSON.stringify(defaulted)}`);
+  assert.ok(defaulted.includes('sites[2].domain'), `the second site's domain is listed, got: ${JSON.stringify(defaulted)}`);
+  assert.ok(defaulted.includes('sites[2].difficulty'), `the second site's difficulty is listed, got: ${JSON.stringify(defaulted)}`);
+
+  await rig.approvePlan();
+  assert.equal(rig.status(), 'idle');
+});
+
+test('planNode: logs [PLANNER_FALLBACK] and pauses with the fallback banner when the planner reply stays unreadable', async (t) => {
   const logs: string[] = [];
   const origInfo = Logger.info;
   Logger.info = (tag: string, msg: string) => {
@@ -43,14 +224,19 @@ test('planNode: logs [PLANNER_FALLBACK] when fallback plan is used', async (t) =
   });
 
   const rig = await graphRig({
-    plan: 'Invalid non-json response from planner',
+    plan: null,
     policy: [act.finish('Done with fallback.')],
   });
   t.after(rig.cleanup);
+  rig.llm.pushFor('plan', 'Invalid non-json response from planner', 'still not a plan');
 
   await rig.start('Check prices');
-  assert.equal(rig.status(), 'idle');
+  assert.equal(rig.status(), 'paused', 'the fallback plan waits for the user instead of running silently');
+  assert.equal((rig.pending().approval as any)?.planMeta?.source, 'fallback');
   assert.ok(logs.some((l) => l.includes('[PLANNER_FALLBACK]')));
+
+  await rig.approvePlan();
+  assert.equal(rig.status(), 'idle');
 });
 
 test('planNode: pauses at approve_plan hold when autoApprove is false', async (t) => {

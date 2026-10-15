@@ -10,6 +10,7 @@ import {
   type BlockedSource,
   type Finding,
   type FindingsTable,
+  type GoalKind,
   type HistoryEntry,
   type EndReason,
   type Offer,
@@ -132,6 +133,106 @@ function overridePlanToAnswer(state: AgentStateT, plan: PlanMeta | null): PlanMe
         doneWhen: 'all_required' as const,
       },
     })),
+  };
+}
+
+// -------------------------------------------------------------------------------------------
+// Planner reply parsing and the fallback plan (planner-fallback-invented-plan)
+// -------------------------------------------------------------------------------------------
+
+/**
+ * Parses a planner reply into a plan object, or says why it cannot be used. A reply with no
+ * plan-like JSON, invalid JSON, a bare array of strings, no sites list, or a compare object with
+ * no reference site is unusable: the plan node asks the model to repair it once instead of filling
+ * the gaps with regex guesses and silent defaults.
+ */
+export function parsePlanReply(replyText: string): { plan: any; error: string | null } {
+  const cleaned = replyText.replace(/<(?:think|thought|reasoning)>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\{\[][\s\S]*?[\}\]])\s*```/i);
+  const jsonStr = fenceMatch ? fenceMatch[1] : (cleaned.match(/[\{\[][\s\S]*[\}\]]/)?.[0] ?? '');
+  if (!jsonStr) return { plan: null, error: 'the reply contains no JSON plan object' };
+  let raw: any;
+  try {
+    raw = JSON.parse(jsonStr);
+  } catch (err: any) {
+    return { plan: null, error: `the reply is not valid JSON (${err?.message ?? 'parse error'})` };
+  }
+  if (Array.isArray(raw)) return { plan: null, error: 'the reply is a bare array, not a plan object with a sites list' };
+  if (!raw || typeof raw !== 'object') return { plan: null, error: 'the reply is not a plan object' };
+  if (!Array.isArray(raw.sites) || raw.sites.length === 0) return { plan: null, error: 'the plan has no sites list' };
+  const compare = raw.compare;
+  if (compare && typeof compare === 'object' && !Array.isArray(compare)) {
+    const referenceDomain = typeof compare.reference_domain === 'string' ? compare.reference_domain.trim() : '';
+    const referenceSiteId = typeof compare.referenceSiteId === 'string' ? compare.referenceSiteId.trim() : '';
+    if (!referenceDomain && !referenceSiteId) {
+      return { plan: null, error: 'the compare object names no reference site (reference_domain is missing)' };
+    }
+  }
+  return { plan: raw, error: null };
+}
+
+// The fallback plan's own classifiers (docs/langgraph-design.md, the plan node): research words
+// plus a domain named in the task give collect sites, summarize words give an answer site, and
+// everything else gets one do site.
+const FALLBACK_SUMMARIZE_PATTERN = /\b(summari[sz]e|summary|summaries|overview|describe|explain|tl;?dr|what does this page)\b/i;
+const FALLBACK_RESEARCH_PATTERN = /\b(price|preis|cost|kosten|compare|vergleich|find|check)\b/i;
+
+/**
+ * The designed code fallback plan: one collect site per domain the task names when research words
+ * ask for one, one answer site for the current page on a summarize or roundup ask, else one do
+ * site with the task text as its goal and no predicate. Every field is code-made, so the plan
+ * carries source 'fallback' and the list of what was filled by default - the plan card shows both,
+ * and the runner never auto-approves this plan.
+ */
+export function buildFallbackPlan(task: string, currentDomain: string, currentUrl: string): PlanMeta {
+  const summarizeAsk = FALLBACK_SUMMARIZE_PATTERN.test(task) || isRoundupTask(task) || isSearchAskTask(task);
+  const researchWords = FALLBACK_RESEARCH_PATTERN.test(task);
+  const domains = goalSources(task);
+  const defaulted = ['task_kind', 'columns', 'search_query', 'sites'];
+
+  const siteOf = (idx: number, domain: string, goalKind: GoalKind, kind: SiteSpec['kind'], difficulty: 1 | 2 | 3, criteria: SiteSpec['criteria']): SiteSpec => ({
+    id: `s${idx + 1}`,
+    name: domain,
+    domain,
+    goal: task,
+    goalKind,
+    startUrl: domain === currentDomain && currentUrl.startsWith('http') ? currentUrl : undefined,
+    role: idx === 0 ? 'reference' : 'compare',
+    kind,
+    difficulty,
+    namedByUser: true,
+    criteria,
+  });
+  const answerSite = (idx: number): SiteSpec =>
+    siteOf(idx, currentDomain, 'answer', 'page', 1, { fields: [], doneWhen: 'all_required' });
+
+  let taskKind: TaskKind;
+  let sites: SiteSpec[];
+  if (summarizeAsk) {
+    taskKind = 'answer';
+    sites = [answerSite(0)];
+  } else if (domains.length > 0 && researchWords) {
+    taskKind = 'research';
+    sites = domains.slice(0, PLAN_MAX_STEPS).map((domain, idx) =>
+      siteOf(idx, domain, 'collect', 'listing', 2, { fields: [{ name: 'value', required: true }], doneWhen: 'all_required' })
+    );
+  } else if (isAnswerLikeTask(task)) {
+    taskKind = 'answer';
+    sites = [answerSite(0)];
+  } else {
+    taskKind = 'action';
+    sites = [siteOf(0, currentDomain, 'do', 'page', 1, { fields: [], doneWhen: 'predicate' })];
+  }
+
+  return {
+    version: 1,
+    taskKind,
+    columns: taskKind === 'research' ? ['value'] : [],
+    priceLike: false,
+    searchQuery: task.slice(0, 40),
+    sites,
+    source: 'fallback',
+    defaulted,
   };
 }
 
@@ -388,17 +489,20 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
   const schema = buildGraphPlanSchema({ mode: 'initial' });
   const stepSignal = runtime.control.stepSignal();
   let parsedPlan: any = null;
+  let parseError: string | null = null;
   const retryNotices: HistoryEntry[] = [];
+  const planNotices: HistoryEntry[] = [];
+  let repairAttempts = 0;
 
-  try {
-    const res = await callWithRetry(
+  const callPlanLlm = (messages: Array<{ role: 'user' | 'assistant'; content: string }>) =>
+    callWithRetry(
       () =>
         runtime.llm.complete({
           node: 'plan',
           mode: 'initial',
           role: 'planner',
           system,
-          messages: [{ role: 'user', content: userMessage }],
+          messages,
           schema,
           signal: stepSignal,
         }),
@@ -422,40 +526,45 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
       }
     );
 
-    const replyText = res.text || '';
-    const cleaned = replyText.replace(/<(?:think|thought|reasoning)>[\s\S]*?<\/(?:think|thought|reasoning)>/gi, '').trim();
-    const fenceMatch = cleaned.match(/```(?:json)?\s*([\{\[][\s\S]*?[\}\]])\s*```/i);
-    const jsonStr = fenceMatch ? fenceMatch[1] : (cleaned.match(/[\{\[][\s\S]*[\}\]]/)?.[0] ?? '');
-    if (jsonStr) {
-      try {
-        const raw = JSON.parse(jsonStr);
-        if (Array.isArray(raw)) {
-          const stringItems = raw.filter((item: any) => typeof item === 'string');
-          if (stringItems.length > 0) {
-            const sites = stringItems.map((str: string, idx: number) => {
-              const domainMatch = str.match(/([a-z0-9-]+\.[a-z]{2,})/i);
-              const domain = domainMatch ? domainMatch[1].toLowerCase() : currentDomain;
-              return {
-                id: `s${idx + 1}`,
-                name: str,
-                domain,
-                goal: str,
-                role: idx === 0 ? 'reference' : 'compare',
-                kind: 'page',
-              };
-            });
-            const isAnswerTask = /\b(what|who|where|when|why|how|price|cost|is|are|can)\b/i.test(state.task);
-            parsedPlan = {
-              task_kind: isAnswerTask ? 'answer' : 'research',
-              sites,
-            };
-          }
-        } else if (raw && typeof raw === 'object') {
-          parsedPlan = raw;
-        }
-      } catch {
-        parsedPlan = null;
+  try {
+    const res = await callPlanLlm([{ role: 'user', content: userMessage }]);
+    const first = parsePlanReply(res.text || '');
+    if (first.error) {
+      // One schema-repair retry: the parse error goes back to the model together with its own
+      // reply, and the attempt counts in the step budget (the design doc's two-attempt intent).
+      repairAttempts = 1;
+      Logger.warn('Orchestrator', `[PLAN_PARSE_FAILED] ${first.error} - asking the model to repair its reply.`);
+      planNotices.push({
+        type: 'notice',
+        step: state.stepCount ?? 0,
+        level: 'warn',
+        kind: 'plan',
+        content: `The planner reply could not be parsed (${first.error}) - the model was asked to repair it (attempt 2 of 2).`,
+      });
+      const repairRes = await callPlanLlm([
+        { role: 'user', content: userMessage },
+        { role: 'assistant', content: (res.text || '').slice(0, 4000) },
+        {
+          role: 'user',
+          content: `Your reply could not be parsed as a plan: ${first.error}. Your reply was: "${(res.text || '').slice(0, 1000)}". Reply again with only the plan as JSON that matches the schema (task_kind, columns, search_query, compare with reference_domain, sites).`,
+        },
+      ]);
+      const second = parsePlanReply(repairRes.text || '');
+      if (second.error) {
+        parseError = second.error;
+        Logger.warn('Orchestrator', `[PLAN_PARSE_FAILED] The repair reply is unusable too: ${second.error}.`);
+      } else {
+        parsedPlan = second.plan;
+        planNotices.push({
+          type: 'notice',
+          step: state.stepCount ?? 0,
+          level: 'info',
+          kind: 'plan',
+          content: 'The repaired planner reply parsed - its plan is used.',
+        });
       }
+    } else {
+      parsedPlan = first.plan;
     }
   } catch (err: any) {
     if (runtime.control.isUserAbort(err, stepSignal)) {
@@ -479,7 +588,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
         reason: 'llm_failure',
         error: err.message ?? 'LLM request failed',
       },
-      history: [...retryNotices, errEntry],
+      history: [...retryNotices, ...planNotices, errEntry],
       resumeRoute: 'plan',
     };
   }
@@ -490,11 +599,13 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
     : isAnswerLikeTask(state.task) ? 'answer' : 'research';
 
   let planMeta: PlanMeta;
-  const planNotices: HistoryEntry[] = [];
+  const defaulted: string[] = [];
+  if (rawTaskKind !== taskKind) defaulted.push('task_kind');
   if (parsedPlan && Array.isArray(parsedPlan.sites) && parsedPlan.sites.length > 0) {
     const parsedColumns: string[] = Array.isArray(parsedPlan.columns)
       ? parsedPlan.columns.map((c: string) => String(c).toLowerCase().replace(/[^a-z0-9_]/g, '_')).slice(0, 5)
       : ['value'];
+    if (!Array.isArray(parsedPlan.columns)) defaulted.push('columns');
     // The engine records the page url itself, so a url/link column carries no new information:
     // it would become a required field no finding can ever satisfy (a URL is not part of the
     // page text) and a schema the model is forced to fill every reply - the summarize loop's fuel.
@@ -519,6 +630,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
 
     const sites: SiteSpec[] = orderedSites.slice(0, PLAN_MAX_STEPS).map((s: any, idx: number) => {
       const id = `s${idx + 1}`;
+      const siteLabel = `sites[${idx + 1}]`;
       const domain = s.domain || currentDomain;
       const goalKind = s.goalKind || s.goal_kind || (taskKind === 'action' ? 'do' : taskKind === 'answer' ? 'answer' : 'collect');
       const rawDoneWhen = s.done_when || s.doneWhen || s.criteria?.doneWhen || s.criteria?.done_when || s.criteria?.type;
@@ -526,6 +638,16 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
         rawDoneWhen === 'predicate' || rawDoneWhen === 'any' || rawDoneWhen === 'all_required'
           ? rawDoneWhen
           : (goalKind === 'do' ? 'predicate' : 'all_required');
+
+      // What the code filled in for this site, listed on the plan card (planner-fallback-invented-plan).
+      if (!s.domain) defaulted.push(`${siteLabel}.domain`);
+      if (!s.name) defaulted.push(`${siteLabel}.name`);
+      if (!s.goal) defaulted.push(`${siteLabel}.goal`);
+      if (!(s.goalKind || s.goal_kind)) defaulted.push(`${siteLabel}.goalKind`);
+      if (!rawDoneWhen) defaulted.push(`${siteLabel}.doneWhen`);
+      if (!s.kind) defaulted.push(`${siteLabel}.kind`);
+      if (s.difficulty !== 1 && s.difficulty !== 2 && s.difficulty !== 3) defaulted.push(`${siteLabel}.difficulty`);
+      if (idx > 0 && !s.role) defaulted.push(`${siteLabel}.role`);
 
       let predicate: Predicate | undefined = undefined;
       if (s.predicate?.type && s.predicate?.value) {
@@ -557,6 +679,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
         fields = [];
       } else {
         fields = columns.map((col) => ({ name: col, required: true }));
+        defaulted.push(`${siteLabel}.required_fields`);
       }
 
       return {
@@ -579,6 +702,13 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
       };
     });
 
+    const compareRaw = parsedPlan.compare as any;
+    if (compareRaw && typeof compareRaw === 'object' && !Array.isArray(compareRaw)) {
+      if (!compareRaw.field) defaulted.push('compare.field');
+      if (compareRaw.threshold_pct === undefined && compareRaw.thresholdPct === undefined) defaulted.push('compare.threshold_pct');
+    }
+    if (!parsedPlan.search_query && !parsedPlan.searchQuery) defaulted.push('search_query');
+
     planMeta = {
       version: 1,
       taskKind,
@@ -588,6 +718,7 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
       compare: parsedPlan.compare,
       sites,
       source: 'llm',
+      ...(defaulted.length > 0 ? { defaulted } : {}),
     };
 
     if (droppedSites.length > 0) {
@@ -602,33 +733,44 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
       });
     }
   } else {
-    // Deterministic fallback
-    Logger.info('Orchestrator', '[PLANNER_FALLBACK] Using deterministic fallback plan.');
-    const implicitSite: SiteSpec = {
-      id: 's1',
-      name: 'Analyze the page state for the task',
-      domain: currentDomain,
-      goal: 'Analyze the page state for the task',
-      goalKind: taskKind === 'action' ? 'do' : taskKind === 'answer' ? 'answer' : 'collect',
-      role: 'reference',
-      kind: 'page',
-      difficulty: 1,
-      namedByUser: true,
-      criteria: {
-        fields: [{ name: 'value', required: true }],
-        doneWhen: 'all_required',
-      },
-    };
-
-    planMeta = {
-      version: 1,
-      taskKind,
-      columns: ['value'],
-      priceLike: false,
-      searchQuery: state.task.slice(0, 40),
-      sites: [implicitSite],
-      source: 'fallback',
-    };
+    // The planner reply stayed unreadable after the one repair attempt.
+    const namedDomains = goalSources(state.task);
+    if (namedDomains.length >= 2) {
+      // A task that names two or more sites never gets an invented plan: the existing llm_failure
+      // pause asks the user instead (the multi-site rule this ticket owns for the parse-failure path).
+      const detail = `The planner reply could not be parsed after 2 attempts (${parseError ?? 'no usable plan'}). The task names several sites (${namedDomains.join(', ')}), so no fallback plan is invented.`;
+      Logger.warn('Orchestrator', `[PLANNER_FALLBACK_REFUSED] ${detail}`);
+      const errEntry: HistoryEntry = {
+        type: 'error',
+        step: state.stepCount ?? 0,
+        content: detail,
+      };
+      return {
+        lastDecision: {
+          kind: 'llm_failed',
+          error: detail,
+          node: 'plan',
+        },
+        pendingHold: {
+          kind: 'paused',
+          reason: 'llm_failure',
+          error: detail,
+        },
+        history: [...planNotices, errEntry],
+        resumeRoute: 'plan',
+      };
+    }
+    // The designed fallback plan, behind a visible banner: the plan card shows it with the
+    // banner and the runner never auto-approves it, so the user decides.
+    Logger.info('Orchestrator', '[PLANNER_FALLBACK] Using deterministic fallback plan after an unreadable planner reply.');
+    planMeta = buildFallbackPlan(state.task || '', currentDomain, currentUrl);
+    planNotices.push({
+      type: 'notice',
+      step: state.stepCount ?? 0,
+      level: 'warn',
+      kind: 'plan',
+      content: 'Planner reply was unreadable, using a one-step plan on this page.',
+    });
   }
 
   // A clearly-prose research plan ("Summarize the main articles on ...") becomes answer mode -
@@ -670,6 +812,8 @@ const planNode = defineNode<AgentStateT, Partial<AgentUpdate>>('orchestrator', '
       budgetEstimate,
     },
     ...(planNotices.length > 0 ? { history: planNotices } : {}),
+    // The schema-repair attempt is not free: it counts in the step budget.
+    ...(repairAttempts > 0 ? { stepCount: (state.stepCount ?? 0) + repairAttempts } : {}),
   };
 });
 

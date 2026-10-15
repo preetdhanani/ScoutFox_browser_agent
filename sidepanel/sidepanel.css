@@ -1996,6 +1996,35 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   gap: 6px;
 }
 
+.plan-fallback-banner {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid var(--warning);
+  border-radius: 5px;
+  padding: 6px;
+  font-size: 11px;
+  color: var(--warning);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.plan-card-source {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.plan-card-defaulted {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 /* Action Confirmation Details */
 .action-summary-box {
   background: var(--surface);

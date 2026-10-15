@@ -84,6 +84,50 @@ test('cards: renderPlanApprovalCard shows revision and overbudget warning', () =
   assert.ok(html.includes('btn-level-chip active" data-level="high"'), 'High should be active');
 });
 
+// planner-fallback-invented-plan: a fallback plan is never silent - banner, source and defaulted fields.
+
+test('cards: renderPlanApprovalCard shows the fallback banner, the plan source and the defaulted fields', () => {
+  const approval = {
+    planMeta: {
+      version: 1,
+      source: 'fallback',
+      defaulted: ['task_kind', 'sites[1].domain'],
+      sites: [{ domain: 'shop.test', role: 'reference', goal: 'Analyze the page state for the task' }],
+      columns: ['value'],
+    },
+    budget: { workingTotal: 20, hardCap: 250 },
+    effortProfile: { level: 'medium' },
+  };
+
+  const html = renderPlanApprovalCard(approval);
+  assert.ok(html.includes('plan-fallback-banner'), 'Should show the fallback banner');
+  assert.ok(html.includes('Planner reply was unreadable, using a one-step plan on this page.'), 'Should use the banner wording');
+  assert.ok(html.includes('Plan source'), 'Should show the plan source');
+  assert.ok(html.includes('code fallback'), 'Should name the fallback source');
+  assert.ok(html.includes('Filled by default'), 'Should list the defaulted fields');
+  assert.ok(html.includes('task_kind'), 'Should name task_kind as defaulted');
+  assert.ok(html.includes('sites[1].domain'), 'Should name the defaulted site domain');
+});
+
+test('cards: renderPlanApprovalCard shows the model source and no banner for a normal plan', () => {
+  const approval = {
+    planMeta: {
+      version: 1,
+      source: 'llm',
+      sites: [{ domain: 'store.test', role: 'primary', goal: 'Find product' }],
+      columns: ['price'],
+    },
+    budget: { workingTotal: 50, hardCap: 250 },
+    effortProfile: { level: 'medium' },
+  };
+
+  const html = renderPlanApprovalCard(approval);
+  assert.ok(!html.includes('plan-fallback-banner'), 'No fallback banner for a model plan');
+  assert.ok(html.includes('Plan source'), 'Should still show the plan source');
+  assert.ok(html.includes('the model'), 'Should name the model as the source');
+  assert.ok(!html.includes('Filled by default'), 'No defaulted list when nothing was defaulted');
+});
+
 // replan-domain-auto-approved: a revision that adds a domain gets its own card.
 
 test('cards: renderReplanApprovalCard returns empty string on null', () => {

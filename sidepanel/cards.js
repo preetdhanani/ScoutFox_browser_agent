@@ -80,6 +80,24 @@ export function renderPlanApprovalCard(approval, planSteps = [], effortProfile =
        </div>`
     : '';
 
+  // planner-fallback-invented-plan: a fallback plan is never silent. The card shows the banner,
+  // the plan source, and the fields the code filled by default.
+  const isFallbackPlan = planMeta.source === 'fallback';
+  const defaultedFields = Array.isArray(planMeta.defaulted) ? planMeta.defaulted : [];
+  const fallbackBannerHtml = isFallbackPlan
+    ? `<div class="plan-fallback-banner">
+         <span class="warn-icon">⚠️</span>
+         <span>Planner reply was unreadable, using a one-step plan on this page.</span>
+       </div>`
+    : '';
+  const sourceHtml = `<div class="plan-card-source"><span class="columns-label">Plan source:</span> <span class="plan-source-value">${isFallbackPlan ? 'code fallback' : 'the model'}</span></div>`;
+  const defaultedHtml = defaultedFields.length > 0
+    ? `<div class="plan-card-defaulted">
+         <span class="columns-label">Filled by default:</span>
+         ${defaultedFields.map((d) => `<span class="column-chip">${escapeHtml(d)}</span>`).join('')}
+       </div>`
+    : '';
+
   return `
     <div class="approval-card plan-approval-card" data-version="${version}">
       <div class="card-header">
@@ -91,6 +109,7 @@ export function renderPlanApprovalCard(approval, planSteps = [], effortProfile =
       </div>
 
       <div class="card-body">
+        ${fallbackBannerHtml}
         <p class="plan-summary-lead">The agent generated an execution plan for your review:</p>
 
         <div class="plan-sites-container">
@@ -98,6 +117,10 @@ export function renderPlanApprovalCard(approval, planSteps = [], effortProfile =
         </div>
 
         ${columnsHtml}
+
+        ${sourceHtml}
+
+        ${defaultedHtml}
 
         <div class="plan-estimates-row">
           <div class="estimate-item">

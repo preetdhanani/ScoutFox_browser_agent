@@ -159,6 +159,7 @@ export interface PlanMeta {
   compare?: { referenceSiteId: string; field: string; thresholdPct: number };
   sites: SiteSpec[];                     // at most MAX_SITES; finished sites are immutable
   source: 'llm' | 'fallback';
+  defaulted?: string[];                  // fields the code filled by default (planner-fallback-invented-plan), shown on the plan card
 }
 export interface SiteState {
   status: SiteStatus; criteriaMet: boolean; reason?: string;
