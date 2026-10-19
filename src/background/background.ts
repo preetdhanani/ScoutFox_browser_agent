@@ -481,7 +481,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onConnect)
  *   - use Logger.warnSilent for diagnostics about the broadcast channel itself, so the entry
  *     is still recorded and persisted but is not pushed back through the broadcast path.
  */
-function broadcastToSession(session: BackgroundSession, type: string, payload: unknown): void {
+export function broadcastToSession(session: BackgroundSession, type: string, payload: unknown): void {
   if (session.ports.size === 0) {
     if (!session.lastBroadcastHadNoListeners) {
       session.lastBroadcastHadNoListeners = true; // set BEFORE logging

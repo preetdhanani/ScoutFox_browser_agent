@@ -24,6 +24,41 @@ export { fetchAvailableModels, getFallbackModels } from './models.ts';
 export { ProviderTimeoutError, isUserAbort, userAbortReason } from './deadline.ts';
 export type { ChatTurn, CompletionOptions, LlmSettings } from './types.ts';
 
+// Tool calling support
+export interface ToolCall {
+  id: string;
+  function: { name: string; arguments: string };
+}
+
+export interface ProviderOptions {
+  tools?: any[];
+  toolChoice?: 'auto' | 'none';
+}
+
+export async function callProviderWithTools(
+  providerId: string,
+  settings: LlmSettings,
+  messages: any[],
+  systemPrompt: string,
+  options: ProviderOptions = {}
+): Promise<{ text?: string; tool_calls?: ToolCall[] }> {
+  const formattedMessages = [
+    { role: 'system', content: systemPrompt },
+    ...messages.filter(m => m.role !== 'system')
+  ];
+
+  if (providerId === 'ollama') {
+    return callOllamaWithTools(settings, formattedMessages, options.tools, options.toolChoice ?? 'auto');
+  }
+
+  if (['openai', 'openrouter', 'groq', 'nvidia', 'agent_router', 'anthropic'].includes(providerId)) {
+    return callOpenAICompatibleWithTools(settings, formattedMessages, options.tools, options.toolChoice ?? 'auto', providerId);
+  }
+
+  // Fallback: simulate tool calling via prompt
+  return callWithPromptEngineering(settings, formattedMessages, options.tools);
+}
+
 /**
  * One call to one provider, with no deadline of its own. The abort signal in `options` goes straight to
  * the request. Errors have today's texts (errors.ts), and a missing key fails before any model is built.
@@ -93,4 +128,179 @@ export async function generateCompletion(
     Logger.warn('ApiClients', `[NETWORK_ABORTED] Completion via [${provider}] ended after ${Date.now() - startedAt}ms: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
   }
+}
+
+// ============================================================================
+// Tool Calling Support
+// ============================================================================
+
+async function callOllamaWithTools(
+  settings: LlmSettings,
+  messages: any[],
+  tools: any[] | undefined,
+  toolChoice: 'auto' | 'none'
+): Promise<{ text?: string; tool_calls?: ToolCall[] }> {
+  const baseUrl = settings.baseUrl || 'http://localhost:11434';
+  const url = `${baseUrl}/api/chat`;
+  
+  const ollamaTools = (tools || []).map(t => ({
+    type: 'function',
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema
+    }
+  })) || [];
+
+  const payload = {
+    model: settings.model,
+    messages,
+    tools: ollamaTools,
+    tool_choice: toolChoice === 'none' ? 'none' : 'auto',
+    stream: false,
+    options: { temperature: 0.1, num_ctx: 8192 }
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(settings.llmTimeoutMs || 120000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Ollama error: ${response.status} ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  const message = data.message || {};
+  
+  if (message.tool_calls && message.tool_calls.length > 0) {
+    return {
+      tool_calls: message.tool_calls.map((tc: any, i: number) => ({
+        id: tc.id || `call_${i}`,
+        function: {
+          name: tc.function.name,
+          arguments: JSON.stringify(tc.function.arguments)
+        }
+      }))
+    };
+  }
+
+  return { text: message.content || '' };
+}
+
+async function callOpenAICompatibleWithTools(
+  settings: LlmSettings,
+  messages: any[],
+  tools: any[] | undefined,
+  toolChoice: 'auto' | 'none',
+  providerId: string
+): Promise<{ text?: string; tool_calls?: ToolCall[] }> {
+  const baseUrl = getDefaultBaseUrl(settings, providerId);
+  const url = `${baseUrl}/chat/completions`;
+  
+  const openaiTools = (tools || []).map(t => ({
+    type: 'function',
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema
+    }
+  })) || [];
+
+  const payload = {
+    model: settings.model,
+    messages,
+    tools: openaiTools,
+    tool_choice: toolChoice === 'none' ? 'none' : 'auto',
+    temperature: 0.1,
+    max_tokens: 8192
+  };
+
+  const apiKey = getApiKey(settings, providerId);
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(settings.llmTimeoutMs || 120000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status} ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  const choice = data.choices?.[0];
+  const message = choice?.message || {};
+
+  if (message.tool_calls && message.tool_calls.length > 0) {
+    return {
+      tool_calls: message.tool_calls.map((tc: any) => ({
+        id: tc.id,
+        function: {
+          name: tc.function.name,
+          arguments: typeof tc.function.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function.arguments)
+        }
+      }))
+    };
+  }
+
+  return { text: message.content || '' };
+}
+
+function getDefaultBaseUrl(settings: LlmSettings, provider: string): string {
+  const custom = settings.customProviders?.[provider];
+  if (custom?.baseUrl) return custom.baseUrl.replace(/\/+$/, '');
+  
+  const defaults: Record<string, string> = {
+    openai: 'https://api.openai.com/v1',
+    openrouter: 'https://openrouter.ai/api/v1',
+    groq: 'https://api.groq.com/openai/v1',
+    nvidia: 'https://integrate.api.nvidia.com/v1',
+    agent_router: 'https://agentrouter.org/v1',
+    anthropic: 'https://api.anthropic.com/v1'
+  };
+  return defaults[provider] || defaults.openai;
+}
+
+async function callWithPromptEngineering(
+  settings: LlmSettings,
+  messages: any[],
+  tools: any[] | undefined
+): Promise<{ text?: string; tool_calls?: ToolCall[] }> {
+  const toolDescriptions = (tools || []).map(t => 
+    `${t.name}: ${t.description}\nArgs: ${JSON.stringify(t.inputSchema)}`
+  ).join('\n\n') || '';
+
+  const enhancedMessages = [
+    ...messages,
+    { 
+      role: 'user', 
+      content: `Available tools:\n${toolDescriptions}\n\nReply with a tool call in this format:\n\`\`\`json\n{"name": "tool_name", "arguments": {...}}\n\`\`\`` 
+    }
+  ];
+
+  const text = await callProvider(settings.provider ?? 'ollama', settings, enhancedMessages, '', {});
+  
+  const toolCall = parseToolCallFromText(text);
+  if (toolCall) {
+    return { tool_calls: [{ id: `call_${Date.now()}`, function: toolCall }] };
+  }
+  
+  return { text };
+}
+
+function parseToolCallFromText(text: string): { name: string; arguments: any } | null {
+  const jsonMatch = text.match(/```json\s*(\{[\s\S]*?\})\s*```/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1]);
+      if (parsed.name && parsed.arguments) return parsed;
+    } catch {}
+  }
+  return null;
 }

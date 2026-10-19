@@ -2,7 +2,7 @@
 // Action journal persisted to chrome.storage.session to prevent double-dispatch
 // across service worker restarts.
 import type { ActionJournal, ExecResult } from './runtimeRegistry.ts';
-import type { PageAction } from '../graph/workerState.ts';
+import type { PageAction } from '../types.ts';
 
 export interface JournalEntry {
   key: string; // '<runId>:<step>'

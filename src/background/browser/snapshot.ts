@@ -5,7 +5,7 @@
 import { describeRestrictedUrl, lastRuntimeError } from './tabs.ts';
 import { CONTENT_SCRIPT_FILES, NET_RECORDER_FILE, ALL_FRAMES_ISOLATED_FILES } from './contentFiles.ts';
 import { Logger } from '../../shared/logger.ts';
-import type { PerceiveError } from '../graph/workerState.ts';
+import type { PerceiveError } from '../types.ts';
 
 export interface SnapshotOptions {
   showBadges?: boolean;

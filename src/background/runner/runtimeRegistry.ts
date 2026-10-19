@@ -1,18 +1,16 @@
 // src/background/runner/runtimeRegistry.ts
-// Non-serializable per-thread dependencies. Nodes of both graphs look them up by thread_id, so
-// nothing with functions, keys or signals is ever placed in config.configurable, a checkpoint or a
-// trace. The worker's config carries the same thread_id (only checkpoint_ns differs).
-import { isGraphInterrupt, type LangGraphRunnableConfig } from '@langchain/langgraph/web';
+// Non-serializable per-thread dependencies. The MCP client and browser APIs look them up by
+// thread_id. Nothing with functions, keys or signals is ever placed in a checkpoint or trace.
 import type { Settings } from '../../shared/storage.ts';
-import type { ControlSnapshot, Effect, HistoryEntry, NodeName, PolicyMode, TrailEntry } from '../graph/state.ts';
-import type { NetFilter, OneShot, PageAction, PageSig } from '../graph/workerState.ts';
-import type { GateContext, GateDecision } from '../agent/finishPolicy.ts';
+import type {
+  ControlSnapshot, Effect, HistoryEntry, NodeName, PolicyMode, TrailEntry,
+  NetFilter, OneShot, PageAction, PageSig, GateContext, GateDecision,
+} from '../types.ts';
 
 export interface RunControl {
   pauseRequested: boolean;
   stopRequested: boolean;
-  stepSignal(): AbortSignal;                            // fresh AbortController per LLM call or wait; already
-                                                        // aborted (reason tagged user) if pause or stop is set
+  stepSignal(): AbortSignal;                            // fresh AbortController per LLM call or wait
   abortStep(reason: 'user_pause' | 'user_stop'): void;  // signal.reason = { scoutfox: 'user', reason }
   isUserAbort(err: unknown, signal?: AbortSignal): boolean; // checks the reason tag, never error text
   snapshot(): ControlSnapshot;
@@ -20,9 +18,9 @@ export interface RunControl {
 
 export interface LlmPort {
   complete(req: {
-    node: 'plan' | 'policy' | 'reflect';
-    mode?: PolicyMode | 'initial' | 'revise';
-    role: 'policy' | 'planner' | 'reflect';             // picks settings.model, planModel or reflectModel
+    node: string;
+    mode?: string;
+    role: string;
     system: string;
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
     schema: object | null;
@@ -48,16 +46,13 @@ export interface ExecResult {
   via: 'cdp' | 'synthetic' | 'background';
   effect: Effect;
   urlAfter?: string;
-  /** Why the input dropped to synthetic DOM events, when via is 'synthetic'. */
   syntheticReason?: string;
   oneShot?: OneShot;
 }
 
 export interface BrowserPort {
   tabInfo(tabId: number): Promise<{ url: string; title: string; windowId: number; groupId: number; status: string } | null>;
-  snapshot(tabId: number, opts: { showBadges: boolean; maxElements: number }): Promise<unknown>; // scope wall + restricted gate + auto-inject inside
-  pageSig(tabId: number, opts: { words: string[] }): Promise<{ sig: Omit<PageSig, 'pageType'>;
-    priceHits: number; found: string[] } | null>;       // GET_PAGE_SIG: a light read for verify
+  snapshot(tabId: number, opts: { showBadges: boolean; maxElements: number }): Promise<unknown>;
   execute(tabId: number, action: PageAction, opts: { docId: string; mode: 'cdp' | 'synthetic' }): Promise<ExecResult>;
   navigate(tabId: number, url: string): Promise<void>;
   reload(tabId: number): Promise<void>;
@@ -74,34 +69,31 @@ export interface BrowserPort {
 
 export interface ActionJournal {
   get(key: string): Promise<{ dispatchedAt: number; bootId: string; result: ExecResult | null } | null>;
-  begin(key: string, action: PageAction): Promise<void>;   // written BEFORE dispatch
+  begin(key: string, action: PageAction): Promise<void>;
   finish(key: string, result: ExecResult): Promise<void>;
   clearRun(runId: string): Promise<void>;
 }
 
 export interface RunRuntime {
-  threadId: string;                    // String(owner tabId)
+  threadId: string;
   ownerTabId: number;
   bootId: string;
   control: RunControl;
-  tabs: { activeTabId: number | null }; // the only truth: background.ts writes it on target=_blank adoption,
-                                        // the runner getter/setter use it, stream mirroring never writes it
+  tabs: { activeTabId: number | null; ownerTabId: number };
   windowId: number | 'default';
-  scoutFoxGroupIds: Map<number, number>; // windowId -> groupId, whole map persisted in sf:meta
-  attachedTabIds: Set<number>;         // debugger attachments, mirrored to sf:meta
-  resumedAfterRestart: boolean;        // the first node wrapper after a restart adds a notice
-  settings(): Promise<Settings>;       // Storage.getSettings() on every call; never copied into state
+  scoutFoxGroupIds: Map<number, number>;
+  attachedTabIds: Set<number>;
+  resumedAfterRestart: boolean;
+  settings(): Promise<Settings>;
   llm: LlmPort;
   browser: BrowserPort;
   journal: ActionJournal;
-  net: {                               // shared view of AgentRunner.networkBuffers (lives as long as the runner)
-    marker(): string;                  // stamp for new entries: '<runId>:<stepCount>' while a model action runs,
-                                       // 'sys:<systemActionCount>' while a system action runs
-    read(tabId: number, filter: NetFilter, includeBody: boolean, limit: number): string; // 'since last_action' =
-                                       // entries stamped with the last model action's marker
+  net: {
+    marker(): string;
+    read(tabId: number, filter: NetFilter, includeBody: boolean, limit: number): string;
   };
   emit: {
-    enterNode(n: NodeName, graph: 'orchestrator' | 'worker', phase?: string): void;
+    enterNode(n: string, graph: string, phase?: string): void;
     setPhase(text: string): void;
   };
   clock: {
@@ -129,88 +121,3 @@ export const runtimeRegistry = {
     registry.clear();
   },
 };
-
-export function getRuntime(config: LangGraphRunnableConfig): RunRuntime {
-  const id = String(config.configurable?.thread_id ?? '');
-  const rt = registry.get(id);
-  if (!rt) throw new Error(`No runtime registered for thread ${id}.`);
-  return rt;
-}
-
-export function defineNode<S extends Record<string, any> = any, U extends Record<string, any> = Record<string, any>>(
-  graph: 'orchestrator' | 'worker',
-  name: NodeName,
-  fn: (state: S, config: LangGraphRunnableConfig) => Promise<U> | U,
-) {
-  return async (state: S, config: LangGraphRunnableConfig): Promise<U> => {
-    const runtime = getRuntime(config);
-    runtime.emit.enterNode(name, graph);
-
-    let rawUpdate: U;
-    try {
-      rawUpdate = await fn(state, config);
-    } catch (err) {
-      if (isGraphInterrupt(err)) {
-        throw err;
-      }
-      throw err;
-    }
-
-    const ctl = runtime.control.snapshot();
-    const trailEntry: TrailEntry = {
-      node: name,
-      step: state.stepCount ?? 0,
-      at: runtime.clock.now(),
-    };
-
-    let update = { ...rawUpdate };
-
-    // Handle restart notice on first node execution after worker resurrection
-    if (runtime.resumedAfterRestart) {
-      runtime.resumedAfterRestart = false;
-      const restartNotice: HistoryEntry = {
-        type: 'notice',
-        kind: 'restart',
-        level: 'info',
-        content: 'Service worker restarted; resuming task execution.',
-        step: state.stepCount ?? 0,
-      };
-      const existingHistory: HistoryEntry[] = Array.isArray(update.history)
-        ? update.history
-        : [];
-      update = {
-        ...update,
-        history: [restartNotice, ...existingHistory],
-      };
-    }
-
-    // LLM node cancellation check: if stop/pause requested during or right after LLM call
-    if (name === 'policy' && (ctl.stopRequested || ctl.pauseRequested)) {
-      const why = ctl.stopRequested ? 'stopped' : 'paused';
-      const discardResult: HistoryEntry = {
-        type: 'execution_result',
-        step: state.stepCount ?? 0,
-        success: false,
-        message: `Action was discarded because the task was ${why}.`,
-        via: 'state',
-        effect: 'none',
-      };
-      update = {
-        ...update,
-        lastDecision: { kind: 'aborted', mode: (update as any).lastDecision?.mode ?? 'browse' },
-        history: [...(Array.isArray(update.history) ? update.history : []), discardResult],
-      };
-    } else if ((name === 'plan' || name === 'reflect') && (ctl.stopRequested || ctl.pauseRequested)) {
-      update = {
-        ...update,
-        lastDecision: { kind: 'aborted', node: name },
-      };
-    }
-
-    return {
-      ...update,
-      ctl,
-      nodeTrail: [trailEntry],
-    };
-  };
-}

@@ -9,7 +9,7 @@ import { runBatch } from './batch.ts';
 import { inputDispatcher } from './input.ts';
 import { ensureScoutFoxGroup } from './groups.ts';
 import type { ExecResult, RunRuntime } from '../runner/runtimeRegistry.ts';
-import type { OneShot } from '../graph/workerState.ts';
+import type { OneShot } from '../types.ts';
 
 /**
  * The shape of one find_element match, as the content script's findElements() returns it
