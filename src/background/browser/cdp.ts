@@ -6,8 +6,12 @@
 
 export interface AttachedTabInfo {
   attachedAt: number;
+  /** The last attach or CDP command on this tab; the leak sweep leaves a recently used tab alone. */
+  lastUsedAt?: number;
   pauseTimer?: ReturnType<typeof setTimeout>;
   userDetached?: boolean;
+  /** Whether Page.enable was already sent for this attachment, so it stays off the hot path. */
+  pageEnabled?: boolean;
 }
 
 export interface CDPManagerOptions {
@@ -15,19 +19,37 @@ export interface CDPManagerOptions {
   attachTimeoutMs?: number;
   /** Timer for one CDP command. */
   commandTimeoutMs?: number;
+  /** The leak sweep does not detach a tab that ran an attach or a command within this window. */
+  recentUseGraceMs?: number;
 }
+
+/** Which tabs the leak sweep keeps: a set of ids, or a predicate for callers whose set is large or dynamic. */
+export type KeepTabs = ReadonlySet<number> | ((tabId: number) => boolean);
 
 const DEFAULT_ATTACH_TIMEOUT_MS = 10_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
+/** A tab that took a CDP command within this window is in use, whatever the caller's keep set says. */
+const DEFAULT_RECENT_USE_GRACE_MS = 5 * 60 * 1000;
 /** The foreign-extension iframe case often clears within moments: four tries, short backoff. */
 const FOREIGN_ATTACH_TRIES = 4;
 const FOREIGN_ATTACH_BACKOFF_MS = 100;
+
+/** A CDP timer ran out. For an attach, the attach itself may still finish later. */
+class CdpTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CdpTimeoutError';
+  }
+}
 
 export class CDPManager {
   private attachedTabs = new Map<number, AttachedTabInfo>();
   private initialized = false;
   private attachTimeoutMs: number;
   private commandTimeoutMs: number;
+  private recentUseGraceMs: number;
+  /** Tabs whose debugger session ended while their attach round was still running, with the reason. */
+  private detachedMidAttach = new Map<number, string>();
   /** In-flight attach per tab, so concurrent callers share one debugger.attach round. */
   private attaching = new Map<number, Promise<void>>();
   /** Tabs with an attach in flight; sendCommand must not re-attach from inside one. */
@@ -36,6 +58,7 @@ export class CDPManager {
   constructor(options: CDPManagerOptions = {}) {
     this.attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    this.recentUseGraceMs = options.recentUseGraceMs ?? DEFAULT_RECENT_USE_GRACE_MS;
     this.setupListeners();
   }
 
@@ -48,6 +71,11 @@ export class CDPManager {
     if (this.hasDebugger() && chrome.debugger.onDetach) {
       chrome.debugger.onDetach.addListener((source, reason) => {
         if (source.tabId !== undefined) {
+          // A session that ends while its attach round is still settling: the round must not
+          // mark the tab attached afterwards.
+          if (this.attaching.has(source.tabId)) {
+            this.detachedMidAttach.set(source.tabId, String(reason));
+          }
           const info = this.attachedTabs.get(source.tabId);
           if (info) {
             if (info.pauseTimer) {
@@ -101,14 +129,16 @@ export class CDPManager {
       return;
     }
 
-    // Already tracked as attached: nothing to do (dedupe)
-    if (this.isAttached(tabId)) {
-      return;
-    }
-
+    // An attach in flight first: a second caller waits for the same round, settle wait included,
+    // instead of returning while Page.enable and the debugger bar are still in progress.
     const inFlight = this.attaching.get(tabId);
     if (inFlight) {
       return await inFlight;
+    }
+
+    // Already tracked as attached: nothing to do (dedupe). Only a finished round marks a tab.
+    if (this.isAttached(tabId)) {
+      return;
     }
 
     const round = this.attachRound(tabId).finally(() => {
@@ -127,14 +157,29 @@ export class CDPManager {
     const target = { tabId };
     let lastForeignError: Error | undefined;
 
+    this.detachedMidAttach.delete(tabId);
+
     for (let attempt = 1; attempt <= FOREIGN_ATTACH_TRIES; attempt++) {
+      const pending = Promise.resolve(chrome.debugger.attach(target, '1.3')) as Promise<void>;
       try {
         await this.withTimeout(
-          Promise.resolve(chrome.debugger.attach(target, '1.3')) as Promise<void>,
+          pending,
           this.attachTimeoutMs,
           `Debugger attach timed out after ${Math.round(this.attachTimeoutMs / 1000)} s (DevTools may be open or the renderer crashed).`
         );
       } catch (err: any) {
+        if (err instanceof CdpTimeoutError) {
+          // The timer won, but chrome.debugger.attach can still succeed later. That session would
+          // be held by nobody and every later attach would fail "Another debugger is already
+          // attached", so a late success is detached again.
+          pending.then(
+            () => {
+              Promise.resolve(chrome.debugger.detach(target)).catch(() => {});
+            },
+            () => {}
+          );
+          throw err;
+        }
         const msg = (err && err.message) || String(err);
         if (!msg.includes('Another debugger is already attached')) {
           throw err;
@@ -149,10 +194,6 @@ export class CDPManager {
         throw lastForeignError;
       }
 
-      this.attachedTabs.set(tabId, {
-        attachedAt: Date.now()
-      });
-
       // Enable focus emulation so elements act as focused in the background
       try {
         await this.sendCommand(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true });
@@ -160,16 +201,41 @@ export class CDPManager {
         // Non-fatal if emulation is not supported on this target
       }
 
+      // Enable the Page domain once per attachment. chrome.debugger.attach does not reliably
+      // enable it, and a Page.captureScreenshot that fails with "wasn't found" is a confusing
+      // first-run surprise. Page.enable is idempotent; the flag keeps it off the hot path.
+      let pageEnabled = false;
+      try {
+        await this.sendCommand(tabId, 'Page.enable', {});
+        pageEnabled = true;
+      } catch (_) {
+        // A target without the Page domain still takes every other command.
+      }
+
       // Wait for the yellow warning bar to settle
       await this.waitForYellowBarSettle(tabId);
+
+      // The tab is marked attached only now, after the settle wait, so isAttached never reports
+      // a tab whose viewport is still moving. A session that ended during the round is not marked.
+      const endedReason = this.detachedMidAttach.get(tabId);
+      this.detachedMidAttach.delete(tabId);
+      if (endedReason !== undefined) {
+        if (endedReason === 'canceled_by_user') {
+          this.attachedTabs.set(tabId, { attachedAt: Date.now(), userDetached: true });
+          return;
+        }
+        throw new Error(`Debugger detached from the tab while attaching (${endedReason}).`);
+      }
+      const now = Date.now();
+      this.attachedTabs.set(tabId, { attachedAt: now, lastUsedAt: now, pageEnabled });
       return;
     }
   }
 
-  /** Rejects with the named error when the promise does not settle within the timer. */
+  /** Rejects with the named error (a CdpTimeoutError) when the promise does not settle within the timer. */
   private withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      const timer = setTimeout(() => reject(new CdpTimeoutError(message)), timeoutMs);
       if (typeof (timer as any)?.unref === 'function') {
         (timer as any).unref();
       }
@@ -242,6 +308,9 @@ export class CDPManager {
       (method === 'Input.dispatchKeyEvent' && params?.type === 'keyUp');
 
     const effectiveControl = control ?? this.activeControl;
+
+    const used = this.attachedTabs.get(tabId);
+    if (used) used.lastUsedAt = Date.now();
 
     if (!isExempt) {
       if (effectiveControl?.signal?.aborted || effectiveControl?.stopRequested || effectiveControl?.pauseRequested) {
@@ -321,18 +390,29 @@ export class CDPManager {
 
   /**
    * Reconcile leaked attachments at boot or on alarm.
-   * Detaches any attached target not in activeTabIds.
+   * Detaches any attached target the caller does not keep. `keep` is a set of tab ids or a
+   * predicate. Whatever it says, a tab with an attach in flight, or one that ran an attach or a
+   * CDP command within the recent-use grace, is in use and never treated as a leak: the caller's
+   * set can lag behind a run that just reached a new tab.
    */
-  async reconcileLeakedTargets(activeTabIds: Set<number>): Promise<void> {
+  async reconcileLeakedTargets(keep: KeepTabs): Promise<void> {
     if (!this.hasDebugger() || !chrome.debugger.getTargets) {
       return;
     }
+
+    const kept = typeof keep === 'function' ? keep : (tabId: number) => keep.has(tabId);
+    const inUse = (tabId: number): boolean => {
+      if (this.attaching.has(tabId)) return true;
+      const info = this.attachedTabs.get(tabId);
+      const lastUsedAt = info?.lastUsedAt ?? info?.attachedAt;
+      return lastUsedAt !== undefined && Date.now() - lastUsedAt < this.recentUseGraceMs;
+    };
 
     try {
       const targets = await chrome.debugger.getTargets();
       for (const target of targets) {
         if (target.attached && target.tabId !== undefined) {
-          if (!activeTabIds.has(target.tabId)) {
+          if (!kept(target.tabId) && !inUse(target.tabId)) {
             try {
               await chrome.debugger.detach({ tabId: target.tabId });
             } catch (_) {}

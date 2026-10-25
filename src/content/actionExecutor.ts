@@ -13,6 +13,7 @@ import {
   removeCursorOverlay,
   highlightElement
 } from './cursor.ts';
+import { maskSensitiveFields, removeSensitiveMasks, describePoint, snapPoint, maskedFieldRefusal, type PointDescription, type PointSnap } from './screenshotPrivacy.ts';
 import { resolveElement, resolveElementDetailed } from './resolve.ts';
 import { waitForDomQuiet } from './domQuiet.ts';
 import {
@@ -32,6 +33,8 @@ export class ActionExecutor implements ActionExecutionContext {
   cursorContainer: HTMLElement | null;
   cursorEl: HTMLElement | null;
   cursorFadeTimer: ReturnType<typeof setTimeout> | null;
+  /** The overlays a screenshot hid, and the visibility each had, so showAgentUi restores it. */
+  hiddenUi = new Map<HTMLElement, string>();
   doc?: Document;
   win?: Window & typeof globalThis;
 
@@ -99,6 +102,51 @@ export class ActionExecutor implements ActionExecutionContext {
 
   highlightElement(el: HTMLElement | null): void {
     highlightElement(el);
+  }
+
+  /**
+   * Hides the extension's own overlays for a screenshot, without removing them.
+   *
+   * "Hide" must not mean "remove": removeBadges and removeCursorOverlay delete the elements from
+   * the page, nothing brings them back, and the cursor overlay's references are nulled with them.
+   * So the containers are made invisible, and the visibility they had is remembered here so it
+   * can be put back exactly.
+   */
+  hideAgentUi(): void {
+    const doc = this.getDoc();
+    if (!doc || !doc.getElementById) return;
+    const containers = ['scoutfox-badge-container', 'scoutfox-cursor-container'];
+    for (const id of containers) {
+      const el = doc.getElementById(id);
+      if (!el || !el.style) continue;
+      if (!this.hiddenUi.has(el)) this.hiddenUi.set(el, el.style.visibility);
+      el.style.visibility = 'hidden';
+    }
+    // The values the text path refuses to read must not leave as pixels.
+    maskSensitiveFields(doc, this.getWin());
+  }
+
+  /** Puts back what hideAgentUi hid, and removes the privacy covers. */
+  showAgentUi(): void {
+    for (const [el, visibility] of this.hiddenUi) {
+      if (el && el.style) el.style.visibility = visibility;
+    }
+    this.hiddenUi.clear();
+    removeSensitiveMasks(this.getDoc());
+  }
+
+  /** What is at a viewport point, for a click at coordinates read off a picture. */
+  describePoint(x: number, y: number): PointDescription {
+    return describePoint(this.getDoc(), x, y);
+  }
+
+  snapPoint(x: number, y: number): PointSnap | null {
+    return snapPoint(this.getDoc(), x, y);
+  }
+
+  /** The refusal a click on a sensitive field gets. */
+  maskedFieldRefusal(kind: string): string {
+    return maskedFieldRefusal(kind);
   }
 
   resolveElement(elementId: number | string): Element | null {

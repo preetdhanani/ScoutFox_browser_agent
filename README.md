@@ -1,246 +1,33 @@
-# ScoutFox AI Browser Agent 🦊
+# ScoutFox AI Browser Agent
 
-**ScoutFox** is an open-source, production-ready Chrome Extension (Manifest V3) and Python automation runner that empowers local models (Ollama 8B/14B/27B) and cloud APIs (Google Gemini, OpenAI, Claude, Groq, NVIDIA NIM) to autonomously control your web browser.
+ScoutFox is an open-source Chrome extension that uses an AI model to work in your browser for you.
+You write a task in plain words in the side panel, and ScoutFox opens the websites, reads them, clicks, types and scrolls until it has your answer.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Manifest V3](https://img.shields.io/badge/Chrome-Manifest--V3-brightgreen.svg)](public/manifest.json)
 
----
+## What it can do
 
-## 🌟 Key Features
+- **Answer questions from the web.** Ask "What is the latest React version on npm?" and it finds the right site, reads the page and answers with its source.
+- **Do multi-step tasks.** It plans the work as a checklist, visits several sites, compares what it finds and checks off each step.
+- **Use the page like a person.** It clicks links and buttons, fills in fields, searches, scrolls, goes back, and handles cookie banners.
+- **Look at the page.** With a model that can see pictures, it takes a screenshot when the text is not enough and can click what it sees.
+- **Work with many AI models.** OpenRouter, AgentRouter, Google Gemini, OpenAI, Anthropic Claude, NVIDIA NIM, Groq and other OpenAI-compatible servers, local models through Ollama, or your own custom endpoint.
 
-* 🦊 **ScoutFox UI**: Glassmorphism Side Panel interface built with Vanilla CSS.
-* 📋 **Batch Plan Checklist**: Automatically generates high-level execution checklists and checks off sub-goals as it navigates.
-* 📜 **Multi-Session History**: Save, restore, and switch between past browser automation runs like ChatGPT / Claude.
-* 📡 **Backend Telemetry Console**: Filter step-by-step DOM snapshots, raw LLM outputs, parser results, and network latency (`(842ms)`).
-* ⚡ **Persistent Storage Model Caching**: Instant 0ms model dropdown loading on panel open.
-* 🦙 **Universal Multi-Provider LLM Support**:
-  * **Google Gemini API** (`gemini-2.0-flash`, `gemini-1.5-flash`, `gemini-1.5-pro`)
-  * **NVIDIA NIM (`build.nvidia.com`)** (`meta/llama-3.3-70b-instruct`, `deepseek-ai/deepseek-r1`, `nvidia/llama-3.1-nemotron-70b-instruct`)
-  * **Ollama (Local Host)** (`qwen2.5:14b`, `llama3.1:8b`, `gemma2:9b`)
-  * **Groq Cloud / OpenAI-Compatible** (`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`)
-  * **OpenAI Official** (`gpt-4o-mini`, `gpt-4o`)
-  * **Anthropic Claude** (`claude-3-5-sonnet-20241022`)
-  * **OpenRouter** (`anthropic/claude-3.5-sonnet`, `deepseek/deepseek-r1`, and any other model OpenRouter hosts)
-  * **AgentRouter** (`claude-3-5-sonnet`, `gpt-4o`, `deepseek-r1`)
-* 🐍 **Standalone Python Playwright Agent**: Run terminal-based Playwright browser automation without registering a Web Store developer account!
+## How it works for you
 
----
+- **One session per tab.** Each tab has its own task, history and Stop button, so two tabs can run different tasks at the same time.
+- **Your tabs stay yours.** Tabs the agent works in go into an orange ScoutFox tab group, and tabs you open yourself are never touched.
+- **You can watch every step.** The side panel shows each action as it happens, and you can pause, resume or stop the run at any time.
+- **Honest results.** The final card says whether the task is done, unconfirmed, failed, or stopped by you, so a run that did not work never looks like a success.
+- **History and logs.** You can reopen past runs, and the Logs tab shows every model call and step when you want to know what happened.
 
-## 🚀 Quick Setup (Chrome Extension)
+## Safety
 
-You need:
-- Node.js 22.18 or newer, to build the extension and run the tests.
-- Google Chrome.
+- It never types passwords, card numbers or one-time codes.
+- It never tries to solve a CAPTCHA or bot check: it stops and tells you that a person has to pass it.
+- Password, card and code fields are hidden before a screenshot is sent to the model.
 
-1. Clone the repository and build the extension:
-   ```bash
-   git clone https://github.com/preetdhanani/ScoutFox_browser_agent.git
-   cd ScoutFox_browser_agent
-   npm ci
-   npm run build
-   ```
-   The build writes the extension into the `dist/` folder.
+## License
 
-2. Load unpacked extension in Chrome:
-   - Open **`chrome://extensions/`** in Google Chrome.
-   - Enable **Developer Mode** (toggle in top-right corner).
-   - Click **Load unpacked** and select the **`dist/`** folder, not the repository folder.
-   - Chrome ties saved data (settings, API keys, sessions) to the extension's ID, and an unpacked extension's ID comes from its folder.
-   - So an extension loaded from `dist/` is a new extension for Chrome, and you enter your settings once again.
-
-3. Start Automating:
-   - Open any web page (e.g. `https://google.com` or `https://news.ycombinator.com`).
-   - Click the 🦊 ScoutFox icon in your toolbar to open the Side Panel.
-   - Select your LLM Provider (e.g. Google Gemini or Ollama Local) and click **Run Task**!
-
-After you change the code:
-- Run `npm run build` again.
-- Press **Reload** on the ScoutFox card in `chrome://extensions/`.
-
----
-
-## 🧭 How to Use the Extension
-
-### Give it a task
-1. Click the 🦊 icon to open the Side Panel - it opens on the **Agent** tab.
-2. Type your goal in the box at the bottom (e.g. *"Find the price of product X and click Add to Cart"*) and hit the **send** button (▶).
-3. Clicking the icon opens the panel and nothing else - no tab group, no rearranging your tabs. That happens when you actually give it a task.
-4. Clicking the icon on an idle panel starts fresh, unless it has a finished run on screen - a result you haven't read yet is never wiped just because you reopened the panel.
-
-### One session per tab
-- Each **tab** gets its own independent session: its own history, its own running task, its own Stop button. Two tabs side by side in the same window can run completely different tasks without noticing each other.
-- The panel shows up only on tabs that have a session, so switching to one of your own tabs hides it rather than following you around.
-- A session lives as long as its tab. Closing the tab ends it; a background restart mid-task doesn't.
-
-### Watch it work
-- ScoutFox automates the tab its panel is attached to - the one you're looking at. If that tab is an empty new-tab page it reuses it in place; if it's a page it can't script and shouldn't navigate away from (settings, the Web Store), it opens a new tab right beside it.
-- Once a task starts, the tabs it touches get grouped into an orange **ScoutFox** tab group, so you always know which tabs are sandboxed for automation. A tab you open yourself stays independent and is never pulled in - even when Chrome tries to add it for you.
-- The status pill in the header (Idle / Running / Paused) and the progress bar under the input box show what step it's on and out of how many.
-- Each action it takes (click, type, scroll, navigate, ...) appears as its own line in the timeline, with its reasoning available if you click the row.
-
-### Stay in control
-- **Pause** freezes the run mid-step; **Resume** (the same button) picks it back up from exactly where it left off.
-- **Stop Task** ends the run for good.
-- If a single LLM call to your provider fails, ScoutFox retries it automatically before giving up - and if it does give up, the task pauses (not dies), so **Resume** continues from the exact step that failed instead of you having to start over.
-- If the agent needs to ask you something mid-task, a question box appears right in the timeline - type your answer and hit **Send**, and it continues with that answer.
-
-### Read the result honestly
-- A green **"✓ Done"** card means the agent finished and verified the answer against visited page evidence.
-- An amber **"⚠ Partial answer"** card means the answer is missing data from one or more planned sites that were not opened.
-- A red **"⚠ Unverified answer"** card means the answer cited links, prices, or numbers not observed on visited pages.
-- An amber **"⚠ Unconfirmed answer"** card means the model replied in plain text instead of a structured action - the run still ended, but the answer was not explicitly confirmed as final.
-- A turn marked **"did not finish"** (no card at all) means it ran out of its step budget or hit an error before completing - it is never silently shown as done.
-
-### Configure it (Settings tab)
-- **LLM Provider / Model**: pick from OpenRouter, AgentRouter, Gemini, Ollama, OpenAI, Anthropic, NVIDIA NIM, or Groq, and search/select the exact model.
-- **Custom endpoint** (own provider): pick **Custom endpoint…** at the bottom of the provider dropdown to add any OpenAI Chat Completions or Anthropic Messages server by its base URL, protocol and models - a relay, a self-hosted vLLM/LM Studio/llama.cpp box, or a paid gateway the built-in list does not know. The dialog shows the exact request URLs it will send, fetches the model list when the endpoint offers one, accepts ids typed by hand when it does not, and its **Test** button makes the same chat call a run would. The API key is stored like every credential and is cleared automatically if you later point the provider at a different host. Up to 20 custom providers; they can be edited or deleted from Settings at any time.
-- **Model Overrides**: configure dedicated Planner Model and Reflect Model overrides for the graph engine.
-- **Max Steps** (default 250, up to 1,000), **Delay (ms)**, and **LLM Timeout (ms)**: tune how long a task can run, how long it pauses between actions, and how long it waits for a single LLM reply before retrying (default 120s, or 300s for NVIDIA NIM).
-- **Show Floating Element Badges**: toggle the numbered `[1]`, `[2]` overlays ScoutFox draws on page elements it can see.
-- **Engine**: configure `settings.engine` (`'graph'` vs `'legacy'`, defaulting to `'graph'`) to choose between the LangGraph orchestrator/worker engine and the legacy execution loop.
-- **Default Effort Level**: select from Medium (default), Low, High, XHigh, or Max as the baseline effort.
-
-### Everything else
-- **History (top-right)**: browse, reopen, or delete past runs.
-- **Logs tab**: filterable, real-time backend telemetry (DOM snapshots, raw LLM output, parser results, timings) - the first place to look if a run misbehaves.
-
----
-
-## 🦙 Running Local Models with Ollama
-
-To use ScoutFox 100% locally and privately without sending data to cloud APIs:
-
-1. Install [Ollama](https://ollama.com).
-2. Pull a recommended model:
-   ```bash
-   ollama pull qwen2.5:14b
-   ```
-3. Start Ollama with browser origin access enabled:
-   ```bash
-   OLLAMA_ORIGINS="*" ollama serve
-   ```
-   Quit the Ollama menu-bar app first, or port 11434 will be busy.
-   If you use the macOS menu-bar app instead, set the variable once and restart the app:
-   ```bash
-   launchctl setenv OLLAMA_ORIGINS "chrome-extension://*"
-   ```
-4. In ScoutFox Settings, select **Ollama (Local Host)** and pick `qwen2.5:14b`!
-
-### Troubleshooting: HTTP 403 from Ollama
-
-Ollama rejects requests from `chrome-extension://` origins unless `OLLAMA_ORIGINS` was set when the server started.
-Check it with this command (`200` is good, `403` means the variable did not reach the running server):
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" -H "Origin: chrome-extension://test" http://localhost:11434/api/tags
-```
-
-Plain `curl` without the `Origin` header always works, so it cannot detect this problem.
-The `launchctl` setting is lost after a reboot, so run it again if the error comes back.
-
----
-
-## 🟢 Running NVIDIA NIM Hosted Models
-
-To use NVIDIA NIM hosted models with 1,000 free inference credits:
-1. Create a free account at `build.nvidia.com`.
-2. Generate an API key starting with `nvapi-` (public model catalog listing also works keylessly).
-3. In ScoutFox Settings, select **NVIDIA NIM (build.nvidia.com)**.
-4. Enter your `nvapi-...` key and click **Save Settings**.
-5. Select a hosted model such as `meta/llama-3.3-70b-instruct` or `deepseek-ai/deepseek-r1`.
-6. Rate limit is typically 40 requests per minute (RPM) on the free tier.
-
----
-
-## 🐍 Standalone Terminal Python Runner
-
-No Chrome extension setup needed!
-Run ScoutFox directly from your Mac terminal using Playwright:
-
-```bash
-cd python_runner
-pip install -r requirements.txt
-playwright install chromium
-
-# List available models (Ollama, OpenAI, or NVIDIA NIM)
-python agent.py --list-models
-
-# Run with local Ollama
-python agent.py --goal "Find top 3 trending python repositories on GitHub and summarize them"
-
-# Run with NVIDIA NIM (reads $NVIDIA_API_KEY or pass --api-key)
-export NVIDIA_API_KEY="nvapi-..."
-python agent.py --provider nvidia --goal "Search for open source browser agents"
-
-# Run with OpenAI (reads $OPENAI_API_KEY or pass --api-key)
-export OPENAI_API_KEY="sk-..."
-python agent.py --provider openai --goal "Search for open source browser agents"
-```
-
----
-
-## 🗺️ Roadmap
-
-### Next version (planned, decided 2026-09-28)
-
-The next version is a rework of the agent on [LangGraph.js](https://github.com/langchain-ai/langgraphjs).
-Phases P0 through P7b are built, including real CDP clicks, visual cursor overlay, long-horizon multi-site graph runtime, risk gating, side panel UI card overhaul, default graph engine switch, xhigh/max effort profiles, and interactive holds.
-Everything above in this README describes the extension as it works today.
-
-What will change for you:
-
-* **Plans run without an approval gate**: the agent still plans the sites and the effort it will use, but it approves the plan itself and starts immediately.
-  The interactive Plan Approval Card (and its in-card effort picker) is gone.
-* **Real clicks (built in phase P3)**: while a task runs, the agent clicks through Chrome's debugger, like a real mouse, with animated cursor overlay and click ripples.
-  Chrome shows a yellow "is debugging this browser" bar during the task.
-  If the debugger cannot attach (for example when DevTools is open), it falls back to synthetic clicks.
-* **Better long tasks**: a notebook where the agent saves what it finds, a longer memory of past steps, and an honest checklist.
-  A checklist step is marked done only when its goal is really met.
-* **Blocked sites are skipped**: if a site shows a challenge or error page again and again, the agent marks it blocked and moves on.
-  The result shows what it found and which sources were blocked, instead of retrying forever.
-* **Effort levels (updated in phase P7b)**: you pick Auto, Low, Medium, High, XHigh, or Max before a task (Medium is the default).
-  Auto selects an effort level from task keywords and target sites.
-  You can also set the default effort in Settings, and an active badge shows the current effort during execution.
-  A higher level gives each site more steps, more retries and stricter checks, and it takes longer.
-  XHigh adds multi-site key field cross-checking and 4x step budgets.
-  Max adds full-field cross-checking, interactive bot challenge assistance, budget soft-cap holds, and mid-site reflection.
-* **Interactive human assistance (built in phase P7b)**: when encountering bot verification screens or reaching soft budget limits, the agent shows Challenge Help or Continue Budget cards.
-  You can solve the captcha directly in the tab and continue, or skip to other sources.
-* **Cross-checking and dispute flags (built in phase P7b)**: findings across multiple websites are compared for numerical variance (>20%) and textual consistency.
-  Conflicting or deviating findings are marked with dispute notes and downgraded to unverified status.
-* **Reflection and replanning**: after each site finishes, the agent can reflect on findings to continue, stop early when goals are met, or replan alternative sites.
-* **One worker per site**: every website is handled on its own, with its own step budget.
-  The result says which sites are done, partial or blocked.
-* **Checks after every action**: the agent checks whether an action changed the page, and it stops loops instead of repeating the same click.
-* **Asks before risky actions (built in phases P5d and P6)**: buying, logging in, submitting a form, or leaving the sites you approved trigger an interactive Action Confirmation Card.
-  The risk gate evaluates keyword-based heuristics for speed and determinism.
-  The agent never types passwords, card numbers or one-time codes.
-* **Sources for every number (built in phase P6)**: each value in the Provenance Findings Table links to its page, with verification status and a snippet of the evidence text.
-* **Live graph view (built in phase P6)**: the side panel displays a nested live graph breadcrumb strip that shows which step of the graph the agent is in right now.
-* **Default graph engine (built in phase P7)**: the LangGraph engine is now the default engine for all new tasks.
-  You can switch back to the legacy engine anytime in Settings.
-* **Python runner too**: `python_runner/agent.py` also moves to LangGraph (Python).
-* **LangSmith tracing**: opt-in in Settings, off by default.
-* **Local models keep working**: small local Ollama models stay supported.
-* **Architecture rework (built in phases P0-P7b)**: the project now has a Vite build step.
-  You run `npm run build` and load the `dist/` folder in Chrome, as in the Quick Setup above.
-  The shared core is TypeScript (phase P1).
-  Providers use LangChain clients behind the API client surface (phase P2).
-  Final answers are audited against visited page evidence before completion.
-  Real clicks run through Chrome debugger (CDP) trusted events with visual cursor animation and fallback (phase P3).
-  The LangGraph runtime foundation and AgentRunner are the primary engine (phases P4 and P7).
-  Long-horizon multi-site orchestration, dynamic scheduling, multi-mode worker policy, budgeting with slack recycling, blocked escalation ladders, loop/stuck detection, effort profiles, and LLM reflection with plan revisions are available in the graph engine (phase P5).
-  Deterministic keyword-based risk gating and banned action recovery protect against hazardous executions (phase P5d).
-  The side panel UI features Action Confirmation, Security Challenge Help, Continue Budget, and Provenance Findings cards with Studio Mono styling and live graph breadcrumbs (phases P6 and P7b); plans are approved automatically instead of through a Plan Approval card.
-  The legacy engine, content scripts, and side panel core are still plain JavaScript, and they move in later phases.
-
-See [PRD.md](PRD.md) for the details.
-
----
-
-## 📜 Community & Governance
-
-* **[License](LICENSE)**: MIT License
-* **[Code of Conduct](CODE_OF_CONDUCT.md)**: Contributor Covenant v2.1
-* **[Contributing Guide](CONTRIBUTING.md)**: How to submit issues and Pull Requests.
+ScoutFox is released under the [MIT License](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md) to help, and [DEVELOPMENT.md](DEVELOPMENT.md) for building and testing it.

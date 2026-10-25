@@ -7,7 +7,7 @@ import type { LlmSettings } from '../../src/background/llm/types.ts';
 
 test('the settings the extension stores are accepted as they are (this file is type-checked)', () => {
   const stored: LlmSettings = DEFAULT_SETTINGS;
-  assert.equal(providerOf(stored), 'openrouter');
+  assert.equal(providerOf(stored), 'ollama');
   assert.equal(timeoutMsOf(stored), DEFAULT_SETTINGS.llmTimeoutMs);
   assert.equal(getApiKey(stored, 'openai'), '');
 });

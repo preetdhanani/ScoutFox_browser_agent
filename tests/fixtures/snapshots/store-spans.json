@@ -4,11 +4,12 @@
   "domain": "127.0.0.1",
   "scrollState": {
     "scrollY": 0,
-    "pageHeight": 779,
-    "viewportHeight": 779
+    "pageHeight": 772,
+    "viewportHeight": 772
   },
   "elementCount": 8,
-  "elementsText": "[1] a \"Framework\"\n[2] a \"Laptops\"\n[3] a \"Marketplace\"\n[4] a \"Support\"\n[5] button[button] \"Warenkorb (0)\"\n[6] button[button] \"In den Warenkorb\"\n[7] a \"Versand & Rückgabe\"\n[8] a \"Impressum\"",
+  "omittedCount": 0,
+  "elementsText": "[1] a \"Framework\" (href=\"/index.html\")\n[2] a \"Laptops\"\n[3] a \"Marketplace\"\n[4] a \"Support\"\n[5] button[button] \"Warenkorb (0)\"\n[6] button[button] \"In den Warenkorb\"\n[7] a \"Versand & Rückgabe\"\n[8] a \"Impressum\"",
   "refs": [
     1,
     2,

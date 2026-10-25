@@ -15,6 +15,7 @@ import {
 import {
   generateDocId,
   getElementFromMap,
+  isAttached,
   resolveElementWithStatus,
   type ElementMap,
   type ResolveElementResult
@@ -345,7 +346,7 @@ export class DOMCompressor {
       }
       const ref = this.foundElements.get(id)!;
       const el = ref instanceof WeakRef ? ref.deref() : ref;
-      if (!el || (doc && typeof doc.contains === 'function' && !doc.contains(el))) {
+      if (!el || !isAttached(el, doc)) {
         this.foundElements.delete(id);
         continue;
       }

@@ -23,27 +23,29 @@ globalThis.chrome = {
 const { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } = await import('../../src/shared/storage.ts');
 
 test('Storage - DEFAULT_SETTINGS sanity check', () => {
-  assert.equal(DEFAULT_SETTINGS.provider, 'openrouter');
+  assert.equal(DEFAULT_SETTINGS.provider, 'ollama');
   assert.equal(DEFAULT_SETTINGS.maxSteps, 250);
   assert.equal(DEFAULT_SETTINGS.effortDefault, 'medium');
   assert.ok(DEFAULT_SETTINGS.providerConfigs);
   assert.equal(DEFAULT_PROVIDER_CONFIGS.nvidia.baseUrl, 'https://integrate.api.nvidia.com/v1');
   assert.equal(DEFAULT_PROVIDER_CONFIGS.nvidia.model, 'meta/llama-3.3-70b-instruct');
   assert.equal(DEFAULT_PROVIDER_CONFIGS.nvidia.llmTimeoutMs, 300000);
+  assert.equal(DEFAULT_PROVIDER_CONFIGS.ollama.model, 'qwen3.8:27b-mlx');
 });
 
-test('Storage - execute_js is opt-in: off by default, and only a stored true turns it on', async () => {
-  assert.equal(DEFAULT_SETTINGS.allowExecuteJs, false);
-  // An existing user has no stored value: off.
+test('Storage - execute_js is always on', async () => {
+  // JavaScript execution is mandatory: no toggle, the model can always run it.
+  assert.equal(DEFAULT_SETTINGS.allowExecuteJs, true);
   mockStorageData['agent_settings'] = { provider: 'openrouter', maxSteps: 250 };
-  assert.equal((await Storage.getSettings()).allowExecuteJs, false);
-  // A malformed stored value is not a yes.
-  mockStorageData['agent_settings'] = { provider: 'openrouter', allowExecuteJs: 'true' };
-  assert.equal((await Storage.getSettings()).allowExecuteJs, false);
-  await Storage.saveSettings({ allowExecuteJs: true });
   assert.equal((await Storage.getSettings()).allowExecuteJs, true);
-  await Storage.saveSettings({ allowExecuteJs: false });
-  assert.equal((await Storage.getSettings()).allowExecuteJs, false);
+  delete mockStorageData['agent_settings'];
+});
+
+test('Storage - screenshots is always on', async () => {
+  // Every page load gets an image; there is no off/auto/vision toggle anymore.
+  assert.equal(DEFAULT_SETTINGS.screenshots, true);
+  mockStorageData['agent_settings'] = { provider: 'openrouter', maxSteps: 250 };
+  assert.equal((await Storage.getSettings()).screenshots, true);
   delete mockStorageData['agent_settings'];
 });
 

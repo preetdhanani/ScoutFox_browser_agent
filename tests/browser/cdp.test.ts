@@ -7,7 +7,8 @@ test('CDPManager: attach attaches debugger and enables focus emulation', async (
   const fc = fakeChrome({
     debugger: {
       commands: {
-        'Emulation.setFocusEmulationEnabled': {}
+        'Emulation.setFocusEmulationEnabled': {},
+        'Page.enable': {}
       }
     },
     tabs: { list: [{ id: 101, url: 'https://example.com' }] },
@@ -26,8 +27,10 @@ test('CDPManager: attach attaches debugger and enables focus emulation', async (
   assert.equal(fc.debugger.attached.includes(101), true);
 
   const calls = fc.callsTo('debugger.sendCommand');
-  assert.equal(calls.length, 1);
+  // Two commands on attach: focus emulation first, then Page.enable for the screenshot path.
+  assert.equal(calls.length, 2);
   assert.equal(calls[0]?.args[1], 'Emulation.setFocusEmulationEnabled');
+  assert.equal(calls[1]?.args[1], 'Page.enable');
 });
 
 test('CDPManager: attach tolerates already attached debugger', async () => {
@@ -152,7 +155,8 @@ test('CDPManager: reconcileLeakedTargets detaches untracked attached tabs', asyn
   });
   (globalThis as any).chrome = fc.chrome;
 
-  const cdp = new CDPManager();
+  // No recent-use grace: this models a tab that has sat idle, which is what a leak is.
+  const cdp = new CDPManager({ recentUseGraceMs: 0 });
   await cdp.attach(101);
   await cdp.attach(102);
 
@@ -275,4 +279,46 @@ test('CDPManager: a command that never answers times out with a named error', as
     /timed out/,
     'a hanging command must reject under the timer, not hang the run'
   );
+});
+
+test('CDPManager: attach enables the Page domain once, so Page.captureScreenshot exists', async () => {
+  const fc = fakeChrome({
+    debugger: {
+      commands: {
+        'Emulation.setFocusEmulationEnabled': {},
+        'Page.enable': {}
+      }
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: [{ result: 800 }] }
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  await cdp.attach(101);
+
+  const methods = fc.callsTo('debugger.sendCommand').map((c) => c.args[1]);
+  assert.equal(methods.includes('Page.enable'), true, 'a capture would fail with "wasn\'t found" without it');
+});
+
+test('CDPManager: Page.enable is sent once per attachment, not on every command', async () => {
+  const fc = fakeChrome({
+    debugger: {
+      commands: {
+        'Emulation.setFocusEmulationEnabled': {},
+        'Page.enable': {},
+        'Page.captureScreenshot': { data: 'AAAA' }
+      }
+    },
+    tabs: { list: [{ id: 101, url: 'https://example.com' }] },
+    scripting: { executeScript: [{ result: 800 }] }
+  });
+  (globalThis as any).chrome = fc.chrome;
+
+  const cdp = new CDPManager();
+  await cdp.attach(101);
+  await cdp.attach(101); // already attached: the dedupe path
+
+  const pageEnables = fc.callsTo('debugger.sendCommand').filter((c) => c.args[1] === 'Page.enable');
+  assert.equal(pageEnables.length, 1);
 });

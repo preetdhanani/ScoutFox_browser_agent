@@ -191,7 +191,7 @@ test('a model is built for every call: two calls do not share a client or a key'
 test('a good answer from the Messages endpoint is logged as the old code did and needs no fallback', async (t) => {
   spyFetch(t);
   const logs = await logsOf(() => ask());
-  assert.match(logs.find((line) => /\[NETWORK\]/.test(line)) ?? '', /^INFO ApiClients \[NETWORK\] 200 OK \(\d+ms\) - Retrieved output from AgentRouter \(claude-3-5-sonnet\), length: 17 chars$/);
+  assert.match(logs.find((line) => /\[NETWORK\]/.test(line)) ?? '', /^DEBUG ApiClients \[NETWORK\] 200 OK \(\d+ms\) - Retrieved output from AgentRouter \(claude-3-5-sonnet\), length: 17 chars$/);
 });
 
 test('a 401 ends the call with the authentication text and no second request', async (t) => {
@@ -278,7 +278,7 @@ test('a 200 of the Messages endpoint in the OpenAI shape is read as it was, with
     const logs = await logsOf(async () => { text = await ask(); });
     assert.equal(text, expected, name);
     assert.equal(sent.length, 1, `${name}: one request`);
-    assert.match(logs.find((line) => /\[NETWORK\]/.test(line)) ?? '', /^INFO ApiClients \[NETWORK\] 200 OK \(\d+ms\) - Retrieved output from AgentRouter \(claude-3-5-sonnet\), length: \d+ chars$/, name);
+    assert.match(logs.find((line) => /\[NETWORK\]/.test(line)) ?? '', /^DEBUG ApiClients \[NETWORK\] 200 OK \(\d+ms\) - Retrieved output from AgentRouter \(claude-3-5-sonnet\), length: \d+ chars$/, name);
   }
 });
 
@@ -329,7 +329,7 @@ test('the first error is logged, not lost, and the fallback\'s success is logged
   const first = logs.find((line) => /Messages endpoint failed/.test(line));
   assert.ok(first, logs.join('\n'));
   assert.match(first, /^WARN AgentRouterClient \[NETWORK\] Messages endpoint failed, trying the chat completions endpoint \| AgentRouter API Error \(529\): .*Overloaded/);
-  assert.match(logs.find((line) => /completions fallback/.test(line)) ?? '', /^INFO ApiClients \[NETWORK\] 200 OK \(\d+ms\) - Retrieved output via completions fallback, length: 17 chars$/);
+  assert.match(logs.find((line) => /completions fallback/.test(line)) ?? '', /^DEBUG ApiClients \[NETWORK\] 200 OK \(\d+ms\) - Retrieved output via completions fallback, length: 17 chars$/);
   assert.equal(logs.filter((line) => /^ERROR/.test(line)).length, 0, 'a fallback that worked is not an error');
 });
 

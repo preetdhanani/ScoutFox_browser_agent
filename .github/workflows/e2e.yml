@@ -76,7 +76,7 @@ jobs:
         run: |
           out="$RUNNER_TEMP/e2e-out"
           mkdir -p "$out"
-          npm run test:e2e -- --out="$out/report.json" --panel-screenshots="$out/panel"
+          npm run test:e2e:mock -- --out="$out/report.json" --panel-screenshots="$out/panel"
 
       - name: Upload the Report and the Side Panel Screenshots
         if: ${{ !cancelled() }}

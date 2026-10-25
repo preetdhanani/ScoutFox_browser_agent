@@ -49,6 +49,11 @@ jobs:
       - name: Execute Automated QA Test Suite
         run: npm test
 
+      # The floor is what stops a refactor from deleting a hundred tests quietly. It only does
+      # that job if it runs on every push, so it runs here and not only on a developer's machine.
+      - name: Check the test count against the floor
+        run: npm run check:tests
+
       - name: Build Extension into dist/
         run: npm run build
 

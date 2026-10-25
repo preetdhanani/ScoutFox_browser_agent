@@ -274,7 +274,9 @@ export function zodJitlessProblems(file, code, program, staticImports = 0) {
 function checkZodJitless({ manifest }) {
   const files = [];
   if (manifest.background?.service_worker) files.push(manifest.background.service_worker.replace(/^\/+/, ''));
-  const page = manifest.side_panel?.default_path?.replace(/^\/+/, '');
+  // The panel page is not in the manifest any more (no global default_path: see background.ts),
+  // so it is named here. It is still the page Chrome loads through sidePanel.setOptions.
+  const page = (manifest.side_panel?.default_path || 'sidepanel/sidepanel.html').replace(/^\/+/, '');
   if (page && fs.existsSync(distPath(page))) {
     const html = fs.readFileSync(distPath(page), 'utf8');
     for (const [, tag] of html.matchAll(/<script\b([^>]*)>/gi)) {

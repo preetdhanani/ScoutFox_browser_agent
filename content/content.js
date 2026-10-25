@@ -44,8 +44,19 @@
       // Extension context may already be invalidated (e.g. page navigating away) - ignore.
     }
   };
-  window.addEventListener('error', (event) => reportContentError(window.location.href, event.error || event.message));
-  window.addEventListener('unhandledrejection', (event) => reportContentError(window.location.href, event.reason));
+  // The window's error events carry the PAGE's errors too (a site's own broken script, a
+  // ResizeObserver loop). Only what comes from the extension's own files is ours to log.
+  const OWN_SCRIPT = /chrome-extension:\/\//;
+  window.addEventListener('error', (event) => {
+    const stack = (event.error && event.error.stack) || '';
+    if (!OWN_SCRIPT.test(String(event.filename || '')) && !OWN_SCRIPT.test(stack)) return;
+    reportContentError(window.location.href, event.error || event.message);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    const stack = (event.reason && event.reason.stack) || '';
+    if (!OWN_SCRIPT.test(stack)) return;
+    reportContentError(window.location.href, event.reason);
+  });
 
   // Mutation tracking for DOM quiet and effect probes
   window.__scoutfox_mutations = 0;
@@ -73,9 +84,27 @@
       const cls = el.className.trim().split(/\s+/).slice(0, 2).join('.');
       if (cls) desc += `.${cls}`;
     }
-    const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 30);
+    // innerText is what a person reads; textContent would also give a host's <style> text
+    // ("@font-face{...}"), which names nothing. textContent is only the fallback.
+    const text = (typeof el.innerText === 'string' ? el.innerText : (el.textContent || '')).trim().replace(/\s+/g, ' ').slice(0, 30);
     if (text) desc += ` "${text}"`;
     return desc;
+  }
+
+  /**
+   * The element really at a point. document.elementFromPoint stops at a shadow host, so a page
+   * built from web components answers its outer host for every point; this goes on into each
+   * open shadow root to the innermost element.
+   */
+  function deepElementFromPoint(x, y) {
+    if (typeof document.elementFromPoint !== 'function') return null;
+    let hit = document.elementFromPoint(x, y);
+    for (let depth = 0; hit && hit.shadowRoot && typeof hit.shadowRoot.elementFromPoint === 'function' && depth < 32; depth++) {
+      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    return hit;
   }
 
   function isAcceptedHit(target, hit) {
@@ -84,6 +113,7 @@
     if (typeof target.contains === 'function' && target.contains(hit)) return true;
     if (typeof hit.contains === 'function' && hit.contains(target)) return true;
     if (hit.shadowRoot && typeof hit.shadowRoot.contains === 'function' && hit.shadowRoot.contains(target)) return true;
+    if (composedContains(hit, target) || composedContains(target, hit)) return true;
     if (hit.tagName === 'IFRAME') return true;
 
     // Both target and hit are inside the same interactive container (e.g. button, anchor, input, label)
@@ -106,6 +136,16 @@
       } catch (_) {}
     }
 
+    return false;
+  }
+
+  /** Whether `outer` contains `inner` across shadow boundaries (a host contains its shadow tree). */
+  function composedContains(outer, inner) {
+    for (let node = inner, depth = 0; node && depth < 4096; depth++) {
+      if (node === outer) return true;
+      const root = typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+      node = node.parentNode || (root && root.host) || null;
+    }
     return false;
   }
 
@@ -177,7 +217,8 @@
           ...(payload || {})
         };
         const snapshot = window.domCompressor.getSnapshot(effectivePayload);
-        if (effectivePayload.showBadges && window.actionExecutor) {
+        // Numbers on the page only on an explicit request: element badges are off by default.
+        if (effectivePayload.showBadges === true && window.actionExecutor) {
           window.actionExecutor.renderBadges(snapshot.elements);
         }
         const elementInfo = window.domCompressor.elementInfo || {};
@@ -223,10 +264,7 @@
             const x = Math.round(rect.left + rect.width / 2);
             const y = Math.round(rect.top + rect.height / 2);
 
-            let hit = null;
-            if (typeof document.elementFromPoint === 'function') {
-              hit = document.elementFromPoint(x, y);
-            }
+            const hit = deepElementFromPoint(x, y);
 
             if (hit && !isAcceptedHit(el, hit)) {
               const obscuredBy = describeElement(hit);
@@ -338,6 +376,69 @@
           window.actionExecutor.removeBadges();
         }
         sendResponse({ success: true });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+      return true;
+    }
+
+    if (action === 'HIDE_AGENT_UI') {
+      // Success only when the privacy covers are up: the executor draws them. A page where the
+      // executor did not load answers a failure, and the capture refuses rather than send a
+      // password field as pixels (fail closed).
+      try {
+        if (!window.actionExecutor || typeof window.actionExecutor.hideAgentUi !== 'function') {
+          sendResponse({ success: false, error: 'The page executor is not loaded, so the privacy covers could not be put up.' });
+          return true;
+        }
+        window.actionExecutor.hideAgentUi();
+        sendResponse({ success: true });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+      return true;
+    }
+
+    if (action === 'SHOW_AGENT_UI') {
+      try {
+        if (window.actionExecutor && typeof window.actionExecutor.showAgentUi === 'function') {
+          window.actionExecutor.showAgentUi();
+        }
+        sendResponse({ success: true });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+      return true;
+    }
+
+    if (action === 'DESCRIBE_POINT') {
+      // What is actually at a pixel a model read off a screenshot, so a coordinate click says
+      // what it hit. A point on a password, card or OTP field refuses the click.
+      try {
+        if (!window.actionExecutor || typeof window.actionExecutor.describePoint !== 'function') {
+          return sendResponse({ success: false, error: 'ActionExecutor engine not initialized on page.' });
+        }
+        let x = Number(payload && payload.x);
+        let y = Number(payload && payload.y);
+        // A point just next to a control is moved onto it (see snapPoint): small buttons are easy
+        // to miss by a few pixels, and a click on the banner around a button does nothing.
+        const snap = payload && payload.snap && typeof window.actionExecutor.snapPoint === 'function'
+          ? window.actionExecutor.snapPoint(x, y)
+          : null;
+        if (snap) {
+          x = snap.x;
+          y = snap.y;
+        }
+        const point = window.actionExecutor.describePoint(x, y);
+        if (point && point.fieldKind) {
+          return sendResponse({
+            success: false,
+            fieldKind: point.fieldKind,
+            what: point.what,
+            error: window.actionExecutor.maskedFieldRefusal(point.fieldKind)
+          });
+        }
+        sendResponse({ success: true, what: point && point.what, interactive: !!(point && point.interactive), ...(snap ? { snapped: snap } : {}) });
       } catch (err) {
         sendResponse({ success: false, error: err.message });
       }

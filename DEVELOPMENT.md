@@ -35,7 +35,8 @@ With nothing committed, `-dirty` is the same for every build, so the time is wha
 | `npm test` | Runs the unit tests (`tests/**/*.test.js` and `tests/**/*.test.ts`) with `node --test`, no browser and no build step needed: Node runs the `.ts` files by stripping their types. |
 | `npm run evalscan` | Fails when `dist/` calls `eval`, `new Function` or `Function()` (five hits are allowed, see "Worker Bundle and CSP" in section 3), so run `npm run build` first. |
 | `npm run zip` | Zips the contents of `dist/` into `scoutfox-chrome-extension.zip` in the repository root, without sourcemaps, so run `npm run build` first. |
-| `npm run test:e2e` | Builds, then runs the browser smoke test in Chromium against an offline mock model (needs a one-time setup, see "E2E Smoke" in section 3). |
+| `npm run test:e2e` | Builds, then runs the open-web tasks in Chromium on NVIDIA NIM (`nvidia/nemotron-3.5-super-vl-120b-a12b`): each starts on a neutral page with only a question, and the model picks and opens the real websites itself. Needs `NVIDIA_API_KEY` in the shell or `NVIDIA_API` in the repo `.env` (one-time setup, see "E2E Smoke" in section 3). Add `-- --fixtures` for the local fixture tasks on the same model. |
+| `npm run test:e2e:mock` | The same smoke test against the offline scripted mock model: no key, no network. CI runs this one. |
 
 ### CI
 `.github/workflows/ci.yml` runs on every push to `main` or `dev` and on every pull request into them, on Node 22.x and 24.x.
@@ -270,12 +271,16 @@ npm test
 `shared/fixtures/answer-audit-cases.json` holds the cases of the audit as data.
 If an existing engine test finishes with a number or a link, the page it runs on must show it, or the gate correctly refuses the answer.
 
-### Effort Profiles and Reflection (Phases P5b, P5c)
-Effort profiles are defined in `shared/effort.json` (`auto`, `low`, `medium`, `high`, `xhigh`, `max`).
-They configure `searchDepth`, `maxSites`, `stepBudgetPerSite`, `tokenBudgetPerSite`, `reflectMode`, `workerPlanning`, `replanBudgetPerSite`, `replanMaxRounds`, and `screenshotMode`.
-`src/background/agent/profile.ts` loads the matrix and provides heuristic level suggestion (`suggestEffortLevel`) when Auto mode is selected.
-The side panel provides segmented effort controls for Auto, Low, Medium, High, XHigh, and Max, and Settings stores the user default in `effortDefault`.
-An active effort badge in the processing banner displays the running task's level.
+### Effort: the model's reasoning level
+Effort sets how hard the model thinks, never how many steps a run takes (that is `maxSteps`).
+`src/background/llm/effort.ts` maps one level (`auto`, `off`, `low`, `medium`, `high`, `max`) onto each provider's own request fields.
+It resolves what a model takes in this order: a custom endpoint takes nothing; a model that refused the fields at run time takes nothing; what the endpoint reported wins (OpenRouter `supported_parameters` and `reasoning.supported_efforts`, Gemini `thinking`, Anthropic `capabilities`, Ollama `capabilities` and `thinking.values`); then the built-in list of model families.
+Discovery is kept in `chrome.storage.local` under `effort_capabilities`.
+The tool calls in `src/background/llm/index.ts` apply the fields, and a 400 that refuses one is sent again without it, or with a value from the "expected one of" list of the error.
+The tool loop (`src/background/mcp/client.ts`) sends the chosen level on the first round, after a failed tool and at the step limit, and one level less on routine rounds unless `effortAdaptive` is false.
+Each "Model call" log event carries the effort as chosen and as sent, and the model's reasoning text when the provider returns it.
+The side panel asks `GET_EFFORT_SUPPORT` whenever the model changes and offers only the supported levels.
+Tests: `tests/llm/effort.test.ts`, and the effort wire check of `tests/e2e/smoke.mjs` (negative control `--tamper=no-effort`).
 
 Reflection and replanning run between sites in `reflectNode` (`src/background/graph/orchestrator.ts`).
 `src/background/agent/reflectPrompt.ts` generates structured reflection prompts and parses model decisions (`continue`, `stop_early`, `replan`).
@@ -316,9 +321,7 @@ Phase P6 upgrades the side panel with specialized event-delegated cards and live
   Changes auto-save on change and blur.
   `AgentRunner.ts` applies `plannerModel` to planner calls, `reflectModel` to reflection calls, and `maxSteps` to run limits.
 - **Message Dispatch**: `background/background.js` handles `APPROVE_PLAN`, `CONFIRM_ACTION`, `RESOLVE_CHALLENGE`, and `CONTINUE_BUDGET` messages from the side panel, forwarding resumes into `AgentRunner`.
-- **Effort Levels & Profiles (Phases P5b, P7b)**: supports 6 effort levels (`Auto`, `Low`, `Medium`, `High`, `XHigh`, `Max`) defined in `shared/effort.json`.
-  `XHigh` applies a 4x budget with key-field cross-checking.
-  `Max` applies an 8x budget with mid-site worker reflection, alternate entry points, full cross-checking, interactive challenge assistance, and soft-cap budget holds.
+- **Effort Levels**: six levels (`Auto`, `Off`, `Low`, `Medium`, `High`, `Max`) of the model's reasoning; see "Effort: the model's reasoning level" above.
 Tests in `tests/sidepanel/cards.test.js` and `tests/runner/agentRunnerCards.test.ts` cover card HTML rendering, event handlers, and runner state synchronization.
 
 ### Test Approach
@@ -366,10 +369,13 @@ One-time setup:
 You also need a Chromium binary, because branded Chrome ignores `--load-extension`.
 Set `CHROMIUM_PATH` if it is not at the macOS default (`/Applications/Chromium.app/Contents/MacOS/Chromium`).
 
-Run:
+Run (on NVIDIA NIM, with your key in the shell):
 ```bash
+export NVIDIA_API_KEY=nvapi-...
 npm run test:e2e
 ```
+The key stays in the harness: a local proxy adds it to each request, and the extension only holds a placeholder.
+To run offline on the scripted mock instead, use `npm run test:e2e:mock`.
 It builds first, runs the tasks, and ends with `SMOKE PASSED` or `SMOKE FAILED`.
 It fails on a console error or an exception in the worker, on a CSP violation in the worker or in the side panel, and on an error on a fixture page.
 See [tests/e2e/README.md](tests/e2e/README.md) for all options, what a run checks, and the negative controls.

@@ -12,7 +12,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { routerRig } from './helpers/routerRig.ts';
-import { SHOP_LIST_URL, act, shopPages, shopPlan } from './helpers/graphHarness.ts';
+import { SHOP_LIST_URL, act, shopPages, shopPlan } from './helpers/shopPages.ts';
 import { AgentRunner } from '../src/background/runner/AgentRunner.ts';
 
 test('two tabs in the SAME window get fully independent sessions', async (t) => {
@@ -155,7 +155,6 @@ test('the hard access wall: a session cannot read a tab outside its own ScoutFox
     /outside this session's ScoutFox group/,
     'acting on a tab outside this session\'s group must be refused outright, not silently succeed'
   );
-  runnerA.dispose();
 });
 
 test('closing a tab ends its session and forgets its persisted state', async (t) => {

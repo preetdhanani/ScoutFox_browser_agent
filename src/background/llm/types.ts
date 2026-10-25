@@ -13,6 +13,21 @@ export interface ChatTurn {
   content: string;
 }
 
+/**
+ * One block of a message that carries a picture.
+ *
+ * This is the WIRE shape, the one OpenAI-compatible servers accept in a `role:'user'` message.
+ * Ollama has a different shape (a plain `content` string plus a sibling `images` array), and the
+ * one conversion between the two lives in llm/index.ts, so no provider re-derives it.
+ *
+ * Only a `role:'user'` message may carry one. The OpenAI type for a `role:'tool'` message is
+ * `content: string | Array<ChatCompletionContentPartText>` - text only - and Ollama's converter
+ * builds `images` only for a user message. A picture in a tool message is dropped or rejected.
+ */
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 /** What a provider needs from the settings. The stored `Settings` fits, and so does a partial test object. */
 export interface LlmSettings {
   provider?: string;
@@ -22,6 +37,8 @@ export interface LlmSettings {
   providerConfigs?: Record<string, { baseUrl?: string; apiKey?: string; model?: string; llmTimeoutMs?: number } | undefined>;
   /** User-added third-party providers, keyed by id. A provider id outside this map and the built-in set is unsupported. */
   customProviders?: CustomProviders;
+  /** Per-provider per-model context window override, keyed by "provider|model" (see storage.ts). */
+  contextWindow?: Record<string, number>;
   temperature?: number;
   llmTimeoutMs?: number;
   /** Anthropic and AgentRouter max_tokens. No settings screen sets it, so it is 8192 unless someone stored a value. */
@@ -39,6 +56,8 @@ export interface CompletionOptions {
   json?: boolean;
   /** JSON schema for constrained decoding. Only Ollama acts on it (format: the schema); the cloud providers get nothing. */
   schema?: object | null;
+  /** Gemini only: the thinkingConfig of the request (llm/effort.ts). The other providers get nothing from it. */
+  thinkingConfig?: { thinkingBudget?: number; thinkingLevel?: 'LOW' | 'MEDIUM' | 'HIGH' };
   /** Forwarded into model.invoke for opt-in tracing, because there is no AsyncLocalStorage parent lookup. */
   callbacks?: Callbacks;
 }

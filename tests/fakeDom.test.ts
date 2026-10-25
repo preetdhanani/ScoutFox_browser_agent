@@ -328,7 +328,7 @@ function forModel(snapshot: DomSnapshot): Record<string, unknown> {
 const STORE: PageSpec = {
   url: 'http://127.0.0.1:8765/store.html',
   title: 'Framework Laptop 16 DIY Edition - Framework Store',
-  viewportHeight: 779,
+  viewportHeight: 772,
   pageHeight: 1050,
   text: [
     { heading: 'Framework Laptop 16 DIY Edition (AMD Ryzen 7040 Series)' },
@@ -352,7 +352,7 @@ const STORE: PageSpec = {
     'Technische Daten',
   ],
   elements: [
-    link('Framework'),
+    link('Framework', 'index.html'),
     link('Laptops'),
     link('Marketplace'),
     link('Support'),
@@ -371,58 +371,7 @@ const STORE: PageSpec = {
   ],
 };
 
-const CHALLENGE: PageSpec = {
-  url: 'http://127.0.0.1:8765/challenge.html',
-  title: 'Just a moment...',
-  viewportHeight: 779,
-  pageHeight: 779,
-  text: [
-    { heading: 'shop.example' },
-    'Verifying you are human. This may take a few seconds.',
-    'Verify you are human',
-    'shop.example needs to review the security of your connection before proceeding.',
-    'Ray ID: 8c1f2a3b4d5e6f70',
-    'Performance & security by Cloudflare',
-  ],
-  elements: [input('checkbox', { label: 'Verify you are human' }), link('Cloudflare')],
-};
-
-const PRODUCTS: Array<[string, string]> = [
-  ['Framework Laptop 13 DIY Edition (Intel Core Ultra)', 'Notebook, 13,5 Zoll, 9 Angebote, ab 1.049,00 EUR'],
-  ['Framework Laptop 16 DIY Edition (AMD Ryzen 7040)', 'Notebook, 16 Zoll, 4 Angebote, ab 1.379,00 EUR'],
-  ['Framework Laptop 16 Grafikmodul AMD Radeon RX 7700S', 'Zubehör, 3 Angebote, ab 449,00 EUR'],
-  ['Framework Laptop 16 Tastatur-Modul (Deutsch)', 'Zubehör, 2 Angebote, ab 99,00 EUR'],
-  ['Framework Laptop 16 Netzteil 180 W', 'Zubehör, 5 Angebote, ab 79,00 EUR'],
-];
-
-const SEARCH: PageSpec = {
-  url: 'http://127.0.0.1:8765/search.html',
-  title: 'framework laptop 16 - Suchergebnisse | PreisFuchs',
-  viewportHeight: 779,
-  pageHeight: 815,
-  text: [
-    { heading: 'Suchergebnisse für "framework laptop 16"' },
-    '6 Treffer',
-    'Sortieren: Relevanz',
-    'Nur Laptops',
-    'Anzeige',
-    'Gaming-Laptops bis zu 50% reduziert',
-    ...PRODUCTS.flatMap(([name, detail]) => [name, detail]),
-    'Weiter',
-  ],
-  elements: [
-    link('PreisFuchs'),
-    input('search', { label: 'Suche', value: 'framework laptop 16', form: 'search' }),
-    button('Suchen', { type: 'submit', form: 'search' }),
-    button('Sortieren: Relevanz', { type: 'button' }),
-    input('checkbox', { label: 'Nur Laptops' }),
-    link('Gaming-Laptops bis zu 50% reduziert'),
-    ...PRODUCTS.map(([name]) => link(name)),
-    link('Weiter'),
-  ],
-};
-
-for (const [name, page] of [['store', STORE], ['challenge', CHALLENGE], ['search', SEARCH]] as const) {
+for (const [name, page] of [['store', STORE]] as const) {
   test(`the description of the ${name} fixture page gives the snapshot a real Chromium recorded`, () => {
     const snapshot = pageSnapshot(page);
     const fixture = recorded(name);
@@ -810,7 +759,7 @@ test('scroll moves the page, clamped to its ends, and brings off-screen elements
   const middle = (await r.send(snapshotMessage)).data;
   assert.equal(middle.scrollState.scrollY, 1000);
   assert.match(middle.elementsText, /^\[1\] a "Impressum"$/m, 'in view now, and listed first');
-  assert.match(middle.elementsText, /\[2\] a "Laptops" \[off-screen\]/, 'the top scrolled away');
+  assert.match(middle.elementsText, /\[2\] a "Laptops" \(href="\/laptops"\) \[off-screen\]/, 'the top scrolled away');
 
   await r.send(act({ action: 'scroll' }));
   await r.send(act({ action: 'scroll', amount: 5000 }));

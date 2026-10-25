@@ -130,17 +130,23 @@ export interface LlmCall {
   reply: string | undefined;
   /** What the call threw. */
   error: unknown;
-  /** port() only: which graph node asked ('plan', 'policy' or 'reflect'). */
-  node?: 'plan' | 'policy' | 'reflect';
+  /** port() only: which graph node asked. The port takes any node name as a string, so a new node needs no change here. */
+  node?: string;
   /** port() only: the mode of the node (a policy mode, or 'initial' or 'revise' for the plan). undefined when the request had none. */
   mode?: string;
   /** port() only: which model setting the request picks ('policy', 'planner' or 'reflect'). */
-  role?: 'policy' | 'planner' | 'reflect';
+  role?: string;
   /** port() only: the system prompt, the same text as systemPrompt. */
   system?: string;
 }
 
-export type PortNode = 'plan' | 'policy' | 'reflect';
+/**
+ * The nodes the port() queues know by name. The port itself takes any node name as a string (see
+ * LlmPort), so this list is only the set a queue may be named after: 'plan', 'policy' or
+ * 'reflect', and 'mcp' for the MCP tool loop, which is one node with no modes. A queue named
+ * after anything else is a typo, and fails when the test writes it.
+ */
+export type PortNode = 'plan' | 'policy' | 'reflect' | 'mcp';
 /** The name of a port() queue: a node ('plan'), or a node and its mode ('policy:browse'). */
 export type PortKey = PortNode | `${PortNode}:${string}`;
 
@@ -340,7 +346,7 @@ class FakeChatModel extends BaseChatModel<FakeChatCallOptions> {
 // The fake
 // ---------------------------------------------------------------------------------------------
 
-const PORT_NODES: readonly string[] = ['plan', 'policy', 'reflect'];
+const PORT_NODES: readonly string[] = ['plan', 'policy', 'reflect', 'mcp'];
 
 /** A port() queue name must be a node, or a node and a mode, so a typo ("polcy") fails at the line that wrote it. */
 function checkPortKey(key: string): PortKey {
@@ -389,10 +395,12 @@ export function fakeLlm(script: LlmScript = []): FakeLlm {
   /** The queue that answers this port call: "node:mode" first, then "node". undefined when the test made neither. */
   const queueFor = (call: LlmCall): { key: PortKey; list: ReplyEntry[] } | undefined => {
     if (call.via !== 'port' || !call.node) return undefined;
-    const keys: PortKey[] = call.mode ? [`${call.node}:${call.mode}`, call.node] : [call.node];
+    // A call may name a node that has no queue of its own (the port takes any node name), so the
+    // lookup is by string: the keys of the map are what a queue was written under.
+    const keys = call.mode ? [`${call.node}:${call.mode}`, call.node] : [call.node];
     for (const key of keys) {
-      const list = keyed.get(key);
-      if (list) return { key, list };
+      const list = keyed.get(key as PortKey);
+      if (list) return { key: key as PortKey, list };
     }
     return undefined;
   };

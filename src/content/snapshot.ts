@@ -86,7 +86,7 @@ export function getCssPath(
  * The control a <label> stands for: the labeled control property, then for="", then a control the
  * label wraps. Null when the label has none.
  */
-function labeledControl(label: Element, doc: Document): Element | null {
+function labeledControl(label: Element, doc: Pick<Document, 'getElementById'>): Element | null {
   const control = (label as HTMLLabelElement).control;
   if (control && control.nodeType === 1) return control;
   const forId = label.getAttribute('for');
@@ -106,12 +106,54 @@ function labeledControl(label: Element, doc: Document): Element | null {
 
 /** True when an ancestor of the element is already listed, so the ancestor covers the click. */
 function hasListedAncestor(el: Element, kept: Set<Element>): boolean {
-  let parent = el.parentElement;
+  let parent = composedParent(el);
   while (parent) {
     if (kept.has(parent)) return true;
-    parent = parent.parentElement;
+    parent = composedParent(parent);
   }
   return false;
+}
+
+/** The parent of an element, crossing out of a shadow root to its host. */
+function composedParent(el: Element): Element | null {
+  if (el.parentElement) return el.parentElement;
+  const root = (el as Element & { parentNode?: { host?: Element } | null }).parentNode;
+  return root && root.host ? root.host : null;
+}
+
+/** A document or a shadow root: where the passes below look for elements. */
+type Scope = Pick<Document, 'querySelectorAll'> & Partial<Pick<Document, 'getElementById'>>;
+
+/**
+ * Every open shadow root under a root, at any depth, in tree order. A cookie banner or a booking
+ * widget built from web components keeps its buttons in one, where document.querySelectorAll never
+ * looks. Closed roots cannot be reached from a page script.
+ */
+function openShadowRoots(root: Scope): Scope[] {
+  const out: Scope[] = [];
+  for (const el of Array.from(root.querySelectorAll('*'))) {
+    const shadow = (el as Element).shadowRoot as unknown as Scope | null | undefined;
+    if (shadow && typeof shadow.querySelectorAll === 'function') out.push(shadow, ...openShadowRoots(shadow));
+  }
+  return out;
+}
+
+/**
+ * The position of every element in tree order, with the content of a shadow root placed right
+ * after its host. compareDocumentPosition has no order between two trees, so this is how elements
+ * from the document and from shadow roots are put in one order.
+ */
+function composedOrder(doc: Scope): Map<Element, number> {
+  const order = new Map<Element, number>();
+  const visit = (root: Scope): void => {
+    for (const el of Array.from(root.querySelectorAll('*'))) {
+      order.set(el as Element, order.size);
+      const shadow = (el as Element).shadowRoot as unknown as Scope | null | undefined;
+      if (shadow && typeof shadow.querySelectorAll === 'function') visit(shadow);
+    }
+  };
+  visit(doc);
+  return order;
 }
 
 /**
@@ -172,29 +214,41 @@ export function findInteractiveElements(
     listed.push(el);
     kept.add(el);
   };
+  // The document first, then each open shadow root: the same three passes in every one.
+  const shadows = openShadowRoots(doc);
+  for (const scope of [doc as Scope, ...shadows]) collectFrom(scope, doc, add, kept, scope !== doc);
 
-  for (const el of Array.from(doc.querySelectorAll(INTERACTIVE_SELECTOR))) {
-    if (isVisible(el)) add(el);
+  if (shadows.length === 0) return inDocumentOrder(listed);
+  const order = composedOrder(doc);
+  return [...listed].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+}
+
+/** The three passes of findInteractiveElements over one document or shadow root. */
+function collectFrom(scope: Scope, doc: Document, add: (el: Element) => void, kept: Set<Element>, inShadow = false): void {
+  // A label's for="" names an id in its own tree, so a shadow root looks it up in itself.
+  const idScope = typeof scope.getElementById === 'function' ? (scope as Pick<Document, 'getElementById'>) : doc;
+  for (const el of Array.from(scope.querySelectorAll(INTERACTIVE_SELECTOR))) {
+    // A control inside a host that is listed already (<x-btn role="button"> around its own
+    // <button>) is the same target: one id for it, not two.
+    if (isVisible(el) && !(inShadow && hasListedAncestor(el, kept))) add(el);
   }
 
-  for (const label of Array.from(doc.querySelectorAll('label'))) {
+  for (const label of Array.from(scope.querySelectorAll('label'))) {
     if (kept.has(label) || !isVisible(label) || hasListedAncestor(label, kept)) continue;
-    const control = labeledControl(label, doc);
+    const control = labeledControl(label, idScope);
     if (!control || (control.getAttribute('type') || '').toLowerCase() === 'hidden' || isVisible(control)) continue;
     add(label);
   }
 
-  for (const el of Array.from(doc.querySelectorAll('*'))) {
+  for (const el of Array.from(scope.querySelectorAll('*'))) {
     if (kept.has(el) || !isVisible(el) || hasListedAncestor(el, kept)) continue;
     if ((el.tagName || '').toLowerCase() === 'label') {
-      const control = labeledControl(el, doc);
+      const control = labeledControl(el, idScope);
       if (control && isVisible(control)) continue;
     }
     if (!isClickableLeaf(el, doc.defaultView)) continue;
     add(el);
   }
-
-  return inDocumentOrder(listed);
 }
 
 /**

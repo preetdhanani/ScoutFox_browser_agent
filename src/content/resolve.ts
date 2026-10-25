@@ -8,6 +8,7 @@
  */
 
 import type { ElementLocator } from './perception.ts';
+import { isAttached } from './refMap.ts';
 
 export interface ResolvedElement {
   element: Element | null;
@@ -41,7 +42,7 @@ export function resolveElementDetailed(
   const liveNode = compressor && typeof compressor.getElement === 'function' ? compressor.getElement(elementId) : null;
 
   // 1. Live Node Reference (if still attached to DOM)
-  if (liveNode && doc && typeof doc.contains === 'function' && doc.contains(liveNode)) {
+  if (liveNode && doc && isAttached(liveNode, doc)) {
     return { element: liveNode };
   }
 
@@ -54,7 +55,9 @@ export function resolveElementDetailed(
     }
   }
 
-  if (!locator || !doc) {
+  // A shadow-root element's id and name mean nothing in the document: a light-DOM element with the
+  // same id would be a different control. Such an element is gone once its live node is gone.
+  if (!locator || !doc || locator.inShadow) {
     return { element: null };
   }
 

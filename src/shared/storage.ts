@@ -9,6 +9,8 @@ export interface ProviderConfig {
   apiKey: string;
   model: string;
   llmTimeoutMs?: number;
+  /** Per-model context window (tokens). Populated by fetching model info from the endpoint. */
+  modelContextWindow?: Record<string, number>;
 }
 
 /** Keyed by provider id. A stored value can hold ids this build does not know, so the key is a plain string. */
@@ -52,6 +54,9 @@ export const BUILTIN_PROVIDER_IDS: readonly string[] = ['openrouter', 'agent_rou
 /** How many user-added providers one settings object may hold. */
 export const MAX_CUSTOM_PROVIDERS = 20;
 
+/** Default context window (tokens) when the endpoint does not report one. */
+export const DEFAULT_CONTEXT_WINDOW = 262144; // 256k tokens - safe for most modern models
+
 export interface Settings {
   provider: string;
   baseUrl: string;
@@ -63,23 +68,39 @@ export interface Settings {
   llmTimeoutMs: number;
   ollamaNumCtx: number;
   ollamaNumPredict: number;
+  /** Per-provider per-model context window override. Keyed by "provider|model". */
+  contextWindow?: Record<string, number>;
   actionDelayMs: number;
-  showElementBadges: boolean;
   autoScroll: boolean;
   theme: string;
   systemInstructions: string;
-  effortDefault?: 'low' | 'medium' | 'high';
-  plannerModel?: string;
-  reflectModel?: string;
+  /** The composer's starting effort: how hard the model thinks (background/llm/effort.ts). 'xhigh' from older builds reads as 'max'. */
+  effortDefault?: 'auto' | 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /** Routine steps (not the first, not after a failed tool) get one effort level less. On unless stored false. */
+  effortAdaptive?: boolean;
+  /**
+   * Default approval mode for a new task. true: the agent approves its plan and runs.
+   * false: the plan is shown and the run waits for APPROVE_PLAN.
+   */
+  autoApprove?: boolean;
   modelTier?: 'auto' | 'small' | 'large';
   /**
    * Opt-in for execute_js (arbitrary JavaScript in the page, with the page's cookies). Off by default: the model is not
    * offered the verb and the executor refuses it. Only a stored `true` turns it on.
    */
   allowExecuteJs: boolean;
+  /**
+   * Whether the agent captures images of pages it opens. Always on: every new page load gets a
+   * screenshot for clarity. Kept as a stored flag only so the panel can read "is it on"; there is
+   * no user toggle for it.
+   */
+  screenshots: boolean;
   /** User-added third-party providers, keyed by id. Absent in older settings, so reads default to {}. */
   customProviders?: CustomProviders;
 }
+
+/** Whether the agent captures images of pages it opens. Always on: every new page load gets a screenshot for clarity. */
+export const screenshotsAlwaysOn = true;
 
 /** A session as the side panel saves it into the history drawer. */
 export interface SavedSession {
@@ -102,7 +123,7 @@ export const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', model: 'anthropic/claude-3.5-sonnet' },
   agent_router: { baseUrl: 'https://agentrouter.org/v1', apiKey: '', model: 'claude-3-5-sonnet' },
   gemini: { baseUrl: '', apiKey: '', model: 'gemini-1.5-flash' },
-  ollama: { baseUrl: 'http://localhost:11434', apiKey: '', model: 'qwen2.5:14b' },
+  ollama: { baseUrl: 'http://localhost:11434', apiKey: '', model: 'qwen3.8:27b-mlx' },
   openai: { baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o-mini' },
   openai_compatible: { baseUrl: 'https://api.groq.com/openai/v1', apiKey: '', model: 'llama-3.3-70b-versatile' },
   anthropic: { baseUrl: 'https://api.anthropic.com', apiKey: '', model: 'claude-3-5-sonnet-20241022' },
@@ -110,10 +131,10 @@ export const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  provider: 'openrouter',
-  baseUrl: 'https://openrouter.ai/api/v1',
+  provider: 'ollama',
+  baseUrl: 'http://localhost:11434',
   apiKey: '',
-  model: 'anthropic/claude-3.5-sonnet',
+  model: 'qwen3.8:27b-mlx',
   providerConfigs: DEFAULT_PROVIDER_CONFIGS,
   customProviders: {},
   temperature: 0.1,
@@ -131,15 +152,15 @@ export const DEFAULT_SETTINGS: Settings = {
   // while still bounding a model that never stops.
   ollamaNumPredict: 8192,
   actionDelayMs: 1000,
-  showElementBadges: true,
   autoScroll: true,
   theme: 'system',
   systemInstructions: 'You are ScoutFox, an autonomous web browsing AI agent. Your goal is to help the user complete tasks on the web efficiently and accurately.',
   effortDefault: 'medium',
-  plannerModel: '',
-  reflectModel: '',
+  effortAdaptive: true,
+  autoApprove: true,
+  allowExecuteJs: true,
   modelTier: 'auto',
-  allowExecuteJs: false,
+  screenshots: true,
 };
 
 /**
@@ -342,10 +363,15 @@ export const Storage = {
           model,
           providerConfigs: mergedConfigs,
           customProviders,
-          // Settings stored before the opt-in existed have no value: off. Anything but a real true is off too.
-          allowExecuteJs: loaded.allowExecuteJs === true
+          contextWindow: loaded.contextWindow || {},
+          // JavaScript execution is always on: there is no user toggle for it.
+          allowExecuteJs: true,
+          // Screenshots are always on: every new page load gets an image for clarity.
+          screenshots: true
         };
         delete (settings as any).engine;
+        // Element badges have no setting any more (they are always off); an old stored flag is dropped.
+        delete (settings as any).showElementBadges;
         resolve(settings);
       });
     });
@@ -401,7 +427,8 @@ export const Storage = {
       apiKey,
       baseUrl,
       model,
-      providerConfigs: updatedProviderConfigs
+      providerConfigs: updatedProviderConfigs,
+      contextWindow: current.contextWindow
     };
     delete (updated as any).engine;
 

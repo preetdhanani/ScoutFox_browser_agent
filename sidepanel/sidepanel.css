@@ -117,18 +117,21 @@ a:hover { color: var(--text-main); }
 }
 
 .logo-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-  background: var(--accent-soft);
-  border: 1px solid var(--border);
+  width: 22px;
+  height: 22px;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  color: var(--accent);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 19px;
-  line-height: 1;
   flex-shrink: 0;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.logo-icon svg {
+  width: 19px;
+  height: 19px;
 }
 
 .brand-text h1 {
@@ -140,20 +143,27 @@ a:hover { color: var(--text-main); }
   line-height: 1.2;
 }
 
+.brand-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-top: 1px;
+}
+
 .badge-tag {
   display: block;
+  min-width: 0;
   font-size: 9.5px;
   font-family: var(--font-mono);
   color: var(--text-muted);
   letter-spacing: 0.02em;
-  margin-top: 1px;
   /* Model ids are long and slash-separated ("anthropic/claude-3.5-sonnet"), so left to wrap
      they take two or three lines and the header grows to match. One line, truncated, with
      the full id on hover via the title attribute. */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 100%;
 }
 
 .header-actions {
@@ -177,6 +187,33 @@ a:hover { color: var(--text-main); }
   transition: color 0.15s ease, border-color 0.15s ease;
 }
 
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.icon-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  color: var(--text-faint);
+  border-color: var(--border);
+}
+
 .theme-toggle:hover {
   color: var(--accent);
   border-color: var(--accent);
@@ -186,12 +223,11 @@ a:hover { color: var(--text-main); }
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
   font-size: 10.5px;
   color: var(--text-muted);
-  background: var(--card);
-  padding: 5px 10px;
-  border-radius: 20px;
-  border: 1px solid var(--border);
+  white-space: nowrap;
+  padding: 0 2px;
 }
 
 .status-dot {
@@ -278,14 +314,6 @@ a:hover { color: var(--text-main); }
 
 .tab-panel.active {
   display: flex;
-}
-
-.chat-header-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
 }
 
 /* SESSION HISTORY DRAWER */
@@ -393,17 +421,18 @@ a:hover { color: var(--text-main); }
   padding: 24px 12px;
 }
 
-.empty-icon-tile {
-  width: 44px;
-  height: 44px;
-  margin: 0 auto 14px;
-  border-radius: 12px;
-  background: var(--accent-soft);
-  border: 1px solid var(--border);
+.empty-glyph {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 18px;
   color: var(--accent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  opacity: 0.22;
+}
+
+.empty-glyph svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 .empty-state h3 {
@@ -445,6 +474,37 @@ a:hover { color: var(--text-main); }
 .sample-chip:hover {
   border-color: var(--accent);
 }
+
+/* STALE WORKER BANNER: the panel is newer than the background worker */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: var(--warning-soft);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-main);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.update-banner[hidden] { display: none; }
+
+.update-banner-text { flex: 1; min-width: 0; }
+
+.update-banner-btn {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--text-main);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.update-banner-btn:hover { border-color: var(--accent); }
 
 /* LIVE PROCESSING BANNER */
 .processing-banner {
@@ -525,17 +585,6 @@ a:hover { color: var(--text-main); }
   transition: width 0.3s ease;
 }
 
-/* Timeline Cards */
-.timeline-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 10px 11px;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
 .user-goal-card {
   display: flex;
   align-items: baseline;
@@ -590,40 +639,6 @@ a:hover { color: var(--text-main); }
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-muted);
-}
-
-.timeline-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 11px;
-  gap: 8px;
-}
-
-.timeline-header > span:last-child {
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.step-badge {
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  color: var(--accent);
-  background: var(--accent-soft);
-  padding: 2px 6px;
-  border-radius: 5px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.thought-text {
-  font-size: 11.5px;
-  color: var(--text-muted);
-  font-style: italic;
-  padding-left: 9px;
-  border-left: 2px solid var(--border);
 }
 
 .result-badge {
@@ -682,6 +697,12 @@ a:hover { color: var(--text-main); }
 .finish-card.unverified { border-left-color: var(--danger); }
 .finish-card.unconfirmed .finish-title svg,
 .finish-card.unverified .finish-title svg { color: var(--danger); }
+
+/* A step of the run failed (a click that never reached the page). The run said so in the
+   answer, but the answer being honest does not make the task a success: the card must not
+   show a green tick on a run that did not do what it was asked. */
+.finish-card.failed { border-left-color: var(--danger); }
+.finish-card.failed .finish-title svg { color: var(--danger); }
 
 /* One-line explanation under the title of an audited card. */
 .finish-card.has-sub .finish-title { margin-bottom: 3px; }
@@ -805,7 +826,8 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
 
 /* Input Panel */
 .input-panel {
-  padding: 12px;
+  position: relative;
+  padding: 10px 12px 12px;
   background: var(--surface);
   border-top: 1px solid var(--border);
   display: flex;
@@ -818,90 +840,317 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
   gap: 8px;
 }
 
-.effort-selector-bar {
+/* Composer: one rounded card, textarea on top, controls underneath (the reference layout). */
+.composer {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-soft);
+  transition: border-color 0.15s ease;
+}
+
+.composer:focus-within {
+  border-color: var(--border-strong);
+}
+
+.composer-input {
+  display: block;
+  width: 100%;
+  min-height: 42px;
+  max-height: 160px;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  color: var(--text-main);
+  padding: 12px 14px 2px;
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.composer-input::placeholder { color: var(--text-faint); }
+
+.composer-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.composer-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  user-select: none;
+  gap: 6px;
+  padding: 6px 8px 8px;
 }
 
-.effort-label {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--text-muted);
-}
-
-.effort-segmented-control {
-  display: inline-flex;
-  flex: 1;
-  min-width: 0;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 2px;
-  gap: 2px;
-}
-
-.effort-btn {
-  border: none;
-  flex: 1 1 0;
-  min-width: 0;
+.composer-icon-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
+  border: none;
+  border-radius: 8px;
   color: var(--text-muted);
-  font-family: var(--font-body);
-  font-size: 10.5px;
-  font-weight: 500;
-  padding: 3px 2px;
-  border-radius: 4px;
   cursor: pointer;
-  text-align: center;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
+  flex-shrink: 0;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
-.effort-btn:hover {
+.composer-icon-btn:hover,
+.composer-icon-btn[aria-expanded="true"] {
+  background: var(--surface);
   color: var(--text-main);
 }
 
-.effort-btn.active {
+.composer-icon-btn:disabled,
+.composer-meta-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-icon-btn:disabled:hover,
+.composer-meta-btn:disabled:hover {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.composer-icon-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.composer-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.composer-meta-btn {
+  border: none;
+  background: transparent;
+  padding: 2px 3px;
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.composer-meta-btn:hover {
+  color: var(--text-main);
+  background: var(--surface);
+}
+
+.composer-sep {
+  color: var(--text-faint);
+}
+
+.composer-model {
+  border: none;
+  background: transparent;
+  padding: 2px 3px;
+  border-radius: 5px;
+  cursor: pointer;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.composer-model:hover,
+.composer-model[aria-expanded="true"] {
+  color: var(--text-main);
+  background: var(--surface);
+}
+
+/* Locked while a run is live, like the approval and effort buttons beside it. */
+.composer-model:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-model:disabled:hover {
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.composer-send {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
   background: var(--accent);
   color: var(--accent-ink);
-  font-weight: 600;
-}
-
-.input-wrapper {
   display: flex;
-  gap: 8px;
-  align-items: flex-end;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity 0.15s ease;
 }
 
-#taskInput {
-  flex: 1;
+.composer-send:hover { opacity: 0.9; }
+
+.composer-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Dropdown menus of the composer (approval mode, effort) */
+.menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 8px;
+  z-index: 30;
+  min-width: 210px;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+  padding: 5px;
+}
+
+.menu[hidden] { display: none; }
+
+#effortMenu {
+  left: 40px;
+  min-width: 150px;
+  max-width: 220px;
+}
+
+.menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: none;
+  background: transparent;
   color: var(--text-main);
-  padding: 10px 12px;
   font-family: var(--font-body);
-  font-size: 12px;
-  resize: none;
+  font-size: 12.5px;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.menu-item:hover { background: var(--surface); }
+
+.menu-item[hidden] { display: none; }
+
+/* One line under the effort levels: why this model has the levels it has. */
+.menu-note {
+  padding: 6px 10px 4px;
+  margin-top: 3px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-muted);
+  white-space: normal;
+}
+
+.menu-note:empty { display: none; }
+
+.menu-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  color: var(--text-muted);
+}
+
+.menu-label { flex: 1; white-space: nowrap; }
+
+.menu-check {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+
+.menu-check svg { width: 15px; height: 15px; }
+
+/* The model menu: a scrollable list over the composer, search on top, a hand-typed id below. */
+.menu-scroll {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  min-width: 250px;
+  max-width: min(320px, calc(100vw - 24px));
+  padding: 6px;
+}
+
+.menu-search {
+  padding: 0 2px 6px;
+}
+
+.menu-search-input {
+  width: 100%;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-main);
+  font-family: var(--font-body);
+  font-size: 11.5px;
   outline: none;
   transition: border-color 0.15s ease;
 }
 
-#taskInput::placeholder { color: var(--text-faint); }
+.menu-search-input::placeholder { color: var(--text-faint); }
 
-#taskInput:focus {
-  border-color: var(--accent);
+.menu-search-input:focus { border-color: var(--accent); }
+
+.menu-scroll-list {
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
-#taskInput:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+.menu-scroll .menu-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.menu-empty {
+  padding: 14px 10px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.menu-custom {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.menu-custom .menu-search-input {
+  flex: 1;
+  min-width: 0;
 }
 
 /* Buttons */
@@ -1027,28 +1276,6 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
   border-color: var(--accent);
 }
 
-.toggle-group {
-  background: var(--card);
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-}
-
-.toggle-label {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.toggle-label input[type="checkbox"] {
-  accent-color: var(--accent);
-  width: 15px;
-  height: 15px;
-  cursor: pointer;
-}
-
 /* Logs Console & Telemetry */
 .logs-container {
   padding: 12px;
@@ -1108,52 +1335,167 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px;
-  font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1.6;
+  line-height: 1.5;
   color: var(--text-main);
   overflow: auto;
-  white-space: pre-wrap;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
+.log-empty {
+  text-align: center;
+  padding: 20px;
+}
+
 .log-entry {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   border-bottom: 1px solid var(--border);
-  padding-bottom: 6px;
+  padding-bottom: 8px;
 }
 .log-entry:last-child { border-bottom: none; }
 
 .log-meta {
   display: flex;
+  align-items: center;
   gap: 6px;
   font-size: 9px;
   font-weight: 600;
   text-transform: uppercase;
+  letter-spacing: 0.02em;
   color: var(--text-faint);
 }
-.log-time { color: var(--text-muted); }
+.log-time { color: var(--text-muted); font-family: var(--font-mono); }
+.log-module { color: var(--text-faint); }
+.log-level-DEBUG { color: var(--text-faint); }
 .log-level-INFO { color: var(--text-main); }
-.log-level-WARN { color: var(--accent); }
+.log-level-WARN { color: var(--warning); }
 .log-level-ERROR { color: var(--danger); }
+
+/* The kind of an entry, as a small tag: what the reader scans for. */
+.log-kind {
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--card);
+}
+.log-kind-badge-agent { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.log-kind-badge-tool { color: var(--success); border-color: var(--success); background: var(--success-soft); }
+.log-kind-badge-llm { color: var(--text-main); border-color: var(--border-strong); }
+
+.log-copy {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.log-copy:hover { color: var(--text-main); border-color: var(--border-strong); }
+.log-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .log-msg {
   color: var(--text-main);
-  word-break: break-all;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
+.log-entry-WARN .log-msg { color: var(--warning); }
+.log-entry-ERROR .log-msg { color: var(--danger); }
+
 .log-payload {
+  font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-muted);
   background: var(--bg);
   padding: 4px 8px;
   border-radius: 4px;
-  margin-top: 4px;
+  margin: 0;
   border: 1px solid var(--border);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
+
+/* The details of an entry as a JSON tree: objects and arrays open and close on their toggle. */
+.jt {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.55;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.jt-children {
+  margin-left: 6px;
+  padding-left: 9px;
+  border-left: 1px solid var(--border);
+}
+.jt-leaf {
+  padding-left: 14px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.jt-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.jt-toggle:hover { background: var(--accent-soft); }
+.jt-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.jt-caret {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.jt-caret::before {
+  content: '';
+  border-left: 4px solid var(--text-muted);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 0.12s ease;
+}
+.jt-toggle[aria-expanded="true"] .jt-caret::before { transform: rotate(90deg); }
+.jt-key { color: var(--accent); }
+.jt-index { color: var(--text-faint); }
+.jt-colon { color: var(--text-faint); }
+.jt-brace { color: var(--text-faint); margin-left: 2px; }
+.jt-str { color: var(--success); }
+.jt-num { color: var(--warning); }
+.jt-bool { color: var(--danger); }
+.jt-null { color: var(--text-faint); font-style: italic; }
+.jt-more {
+  margin-left: 6px;
+  padding: 0 5px;
+  font: inherit;
+  font-size: 9.5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.jt-more:hover { color: var(--text-main); }
 
 /* Custom Searchable Combobox Component */
 .custom-combobox {
@@ -1420,6 +1762,40 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
 }
 @keyframes actPulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
+/* --- the picture a step took ---
+   The slot is a sibling of the action row, indented to the text column (the 16px icon column and
+   the 9px gap above it, plus the row's 4px inset) so it lines up with the words and not with the
+   icon. The box keeps the picture's own shape, which stops the timeline from jumping when the
+   bytes arrive, and never grows taller than 180px: a tall picture is shown whole, smaller. */
+.act-shot-slot {
+  margin: 0 4px 8px 29px;
+  max-width: calc(100% - 33px);
+  max-height: 180px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.act-shot-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  object-position: top left;
+  /* The capture is a screenshot: its own pixels are the truth, so no smoothing tricks. */
+  image-rendering: auto;
+}
+/* A picture whose bytes the session no longer has (a long run, or a reloaded session). It is a
+   state, not an error: the picture was taken, and the bytes are not kept. */
+.act-shot-gone {
+  display: block;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
 /* --- reasoning, revealed per row --- */
 .act-why {
   margin: 0 0 6px 25px;
@@ -1510,6 +1886,14 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
 .audit { margin-bottom: 10px; }
 /* On a checked answer it is only a receipt: sit below the answer, behind a hairline. */
 .audit.verified {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* The evidence of a structured answer. It is not a verdict, so it has no hairline above it:
+   the answer is the answer, and this is the material behind it. */
+.audit.answer-evidence {
   margin: 10px 0 0;
   padding-top: 8px;
   border-top: 1px solid var(--border);
@@ -1623,53 +2007,7 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   .act-state.live { animation: none; opacity: 0.85; }
 }
 
-/* Utility: used by renderState() to show/hide the sandbox indicator. */
-.hidden {
-  display: none !important;
-}
-
-/* Shown while the active tab is inside the ScoutFox tab group. */
-.sandbox-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  margin-left: 4px;
-  border-radius: 5px;
-  background: var(--success-soft);
-  color: var(--success);
-  border: 1px solid var(--success-soft);
-  font-family: var(--font-body);
-  font-size: 8.5px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-/* Compact enough to sit beside the theme toggle and status pill at 320px. */
-.btn-history-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 7px;
-  border-radius: 7px;
-  border: 1px solid var(--border);
-  background: var(--card);
-  color: var(--text-muted);
-  font-family: var(--font-body);
-  font-size: 10px;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease;
-}
-
-.btn-history-toggle:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.btn-history-toggle:focus-visible,
+.icon-btn:focus-visible,
 .history-session-item:focus-visible,
 .btn-delete-session:focus-visible {
   outline: 2px solid var(--accent);
@@ -1690,16 +2028,15 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   flex-shrink: 0;
 }
 
-/* A Chrome side panel can be dragged down to roughly 320px. At that width the History
-   button's label is what overflows, so drop the word and keep the icon and the count. */
-@media (max-width: 380px) {
-  .history-toggle-label {
+/* A Chrome side panel can be dragged down to roughly 320px. Below 340px the status word is
+   the first thing to go, leaving the dot and the two icon controls. */
+@media (max-width: 340px) {
+  #statusPill .status-text {
     display: none;
   }
 
-  .btn-history-toggle {
-    gap: 3px;
-    padding: 4px 6px;
+  .header-actions {
+    gap: 5px;
   }
 }
 
@@ -1781,7 +2118,62 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 }
 
 .plan-approval-card {
-  border-left: 3px solid var(--accent);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 2px 0 10px;
+  box-shadow: var(--shadow-soft);
+}
+
+.plan-approval-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.plan-approval-icon {
+  display: flex;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.plan-approval-copy { min-width: 0; }
+
+.plan-approval-title {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.plan-approval-lead {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.plan-approval-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 10px 0 12px;
+  padding-left: 20px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-main);
+}
+
+.plan-approval-steps li::marker {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.plan-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .action-confirmation-card {
@@ -1821,7 +2213,7 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   font-size: 13px;
   color: var(--text-main);
 }
-.version-badge, .variant-tag {
+.variant-tag {
   font-family: var(--font-mono);
   font-size: 9.5px;
   font-weight: 600;
@@ -1855,174 +2247,6 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   margin: 0;
   color: var(--text-muted);
   font-size: 11.5px;
-}
-
-.plan-sites-container {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 140px;
-  overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px;
-  background: var(--surface);
-}
-
-.plan-card-site-row {
-  display: flex;
-  flex-direction: column;
-  padding: 4px;
-  border-radius: 4px;
-  font-size: 11px;
-}
-.plan-card-site-row:not(:last-child) {
-  border-bottom: 1px solid var(--border);
-}
-.site-header-col {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.site-domain {
-  font-family: var(--font-mono);
-  color: var(--text-main);
-}
-.plan-role-badge {
-  font-size: 9px;
-  padding: 1px 4px;
-  border-radius: 3px;
-  text-transform: uppercase;
-  font-weight: 600;
-}
-.badge-primary { background: rgba(14, 165, 233, 0.15); color: #0284c7; }
-.badge-info { background: rgba(139, 92, 246, 0.15); color: #7c3aed; }
-.badge-neutral { background: var(--surface); color: var(--text-muted); }
-
-.site-goal-text {
-  color: var(--text-muted);
-  font-size: 10.5px;
-}
-
-.plan-card-columns {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  font-size: 11px;
-}
-.columns-label {
-  color: var(--text-muted);
-  font-weight: 600;
-}
-.column-chip {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 5px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-
-.plan-estimates-row {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  background: var(--surface);
-  padding: 6px;
-  border-radius: 6px;
-  text-align: center;
-}
-.estimate-item {
-  display: flex;
-  flex-direction: column;
-}
-.estimate-label {
-  font-size: 9.5px;
-  color: var(--text-muted);
-}
-.estimate-value {
-  font-weight: 700;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-main);
-}
-
-.plan-level-picker {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 4px;
-}
-.picker-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-.level-chips-group {
-  display: flex;
-  gap: 4px;
-}
-.btn-level-chip {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 2px 7px;
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.btn-level-chip:hover {
-  border-color: var(--accent);
-  color: var(--text-main);
-}
-.btn-level-chip.active {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
-}
-
-.plan-overbudget-banner {
-  background: rgba(245, 158, 11, 0.15);
-  border: 1px solid var(--warning);
-  border-radius: 5px;
-  padding: 6px;
-  font-size: 11px;
-  color: var(--warning);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.plan-fallback-banner {
-  background: rgba(245, 158, 11, 0.15);
-  border: 1px solid var(--warning);
-  border-radius: 5px;
-  padding: 6px;
-  font-size: 11px;
-  color: var(--warning);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.plan-card-source {
-  margin-top: 8px;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.plan-card-defaulted {
-  margin-top: 6px;
-  font-size: 11px;
-  color: var(--text-muted);
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
 }
 
 /* Action Confirmation Details */
@@ -2258,88 +2482,6 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   color: var(--text-muted);
 }
 
-/* Two-tier Nested Live Graph View */
-.nested-graph-strip {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px 8px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin: 6px 0;
-  font-size: 10.5px;
-}
-.graph-tier-main, .graph-tier-sub {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  overflow-x: auto;
-  white-space: nowrap;
-}
-.graph-tier-label {
-  font-weight: 700;
-  font-size: 10px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-}
-.chips-list, .subchips-list {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.chip-arrow, .subchip-arrow {
-  color: var(--text-faint);
-  font-size: 11px;
-}
-.graph-chip {
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: var(--surface);
-  color: var(--text-muted);
-  font-weight: 500;
-}
-.graph-chip.active {
-  background: var(--accent);
-  color: #fff;
-  font-weight: 700;
-  box-shadow: 0 0 6px rgba(14, 165, 233, 0.4);
-}
-.graph-chip.past {
-  color: var(--text-muted);
-  opacity: 0.7;
-}
-
-.site-chip {
-  background: rgba(139, 92, 246, 0.15);
-  color: #7c3aed;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.graph-subchip {
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: var(--surface);
-  color: var(--text-muted);
-  font-size: 10px;
-}
-.graph-subchip.active {
-  background: #0284c7;
-  color: #fff;
-  font-weight: 600;
-  animation: pulse-node 1.5s infinite;
-}
-
-@keyframes pulse-node {
-  0% { opacity: 1; }
-  50% { opacity: 0.65; }
-  100% { opacity: 1; }
-}
-
-
 /* ==========================================================================
    Custom provider dialog (featere/custom-endpoint: user-added endpoints)
    ========================================================================== */
@@ -2556,6 +2698,33 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   font-size: 11px;
   line-height: 1.45;
   padding: 8px 10px;
+}
+
+/* The one fix the error names ("Add model", "Use http://..."), on its own line under the text.
+   Sized like .btn-xs, and drawn in the error's own red so it reads as part of the message. */
+.cp-error-action {
+  display: block;
+  margin-top: 7px;
+  padding: 5px 9px;
+  border: 1px solid var(--danger);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--danger);
+  font-family: var(--font-body);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.cp-error-action:hover {
+  background: var(--danger-soft);
+}
+
+.cp-error-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .cp-actions {

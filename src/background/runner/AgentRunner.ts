@@ -6,6 +6,7 @@ import { Logger } from '../../shared/logger.ts';
 import { BUILD_STAMP } from '../../shared/build.ts';
 import { SessionActionJournal } from './actionJournal.ts';
 import { SessionRunnerMeta } from './runnerMeta.ts';
+import { RunSnapshotStore, restoredRun, runSnapshotKey, type RunSnapshot } from './runSnapshot.ts';
 import { runtimeRegistry, type RunRuntime } from './runtimeRegistry.ts';
 import { generateCompletion } from '../llm/index.ts';
 import { inputDispatcher } from '../browser/input.ts';
@@ -16,11 +17,9 @@ import { ensureScoutFoxGroup, isTabInScope, groupIdForWindow } from '../browser/
 import { openNewWindow } from '../browser/windows.ts';
 import { takeSnapshot } from '../browser/snapshot.ts';
 import { executeAction } from '../browser/execute.ts';
-import { ScoutFoxMCPClient } from '../mcp/client.js';
+import { ScoutFoxMCPClient } from '../mcp/client.ts';
+import { normalizeEffort } from '../llm/effort.ts';
 import type { RunStatus, HistoryEntry, Limits, EffortChoice, EffortProfile, RunStats } from '../types.ts';
-
-// Make sessions accessible globally for MCP client
-(globalThis as any).__scoutfoxSessions = (globalThis as any).__scoutfoxSessions || new Map();
 
 export class AgentRunner {
   public threadId: string;
@@ -38,7 +37,6 @@ export class AgentRunner {
   public history: HistoryEntry[] = [];
   public planSteps: any[] = [];
   public currentPhase = '';
-  public graphLocation = { phase: 'Starting' };
   public pendingQuestion: string | null = null;
   public pendingApproval: any | null = null;
   public pendingConfirm: any | null = null;
@@ -54,25 +52,20 @@ export class AgentRunner {
   public scoutFoxGroupIds = new Map<number, number>();
   public networkBuffers = new NetworkBuffers(100);
   public autoApprovePlan = true;
-  public autoConfirmAction = false;
 
   private taskClaimed = false;
   private adoptedTabIds = new Set<number>();
   private stopDuringClaim = false;
   private pauseDuringClaim = false;
-  private isLoopActive = false;
   private _activeTabId: number | null = null;
   private onStateChangeCb: ((state: Record<string, any>) => void) | null = null;
   private onTabAdoptedCb: ((tabId: number, windowId: number) => void) | null = null;
 
-  private saver: { deleteThread: (threadId: string) => Promise<void>; revive: (threadId: string) => void };
   private journal: SessionActionJournal;
   private meta: SessionRunnerMeta;
+  /** The panel-visible run, kept across worker restarts (see runSnapshot.ts). */
+  private snapshots: RunSnapshotStore;
   private runtime: RunRuntime;
-  private currentDrive: Promise<void> | null = null;
-  private activeAbort: AbortController | null = null;
-  private pauseTimer: ReturnType<typeof setTimeout> | null = null;
-  private clearPromise: Promise<void> = Promise.resolve();
 
   // MCP Client (replaces graph engine)
   private mcpClient: ScoutFoxMCPClient | null = null;
@@ -88,29 +81,30 @@ export class AgentRunner {
       ? crypto.randomUUID()
       : `boot_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
 
-    this.saver = {
-      deleteThread: async () => { /* no-op: LangGraph checkpoints removed */ },
-      revive: () => { /* no-op: LangGraph checkpoints removed */ },
-    };
     this.journal = new SessionActionJournal(this.threadId, this.bootId);
     this.meta = new SessionRunnerMeta(this.threadId);
+    this.snapshots = new RunSnapshotStore(this.threadId);
 
     this.runtime = this.createRuntime();
     runtimeRegistry.set(this.runtime);
 
-    // Register session globally for MCP client
-    (globalThis as any).__scoutfoxSessions.set(this.sessionId, {
-      engine: this,
-      ports: new Set(),
-      ownerTabId: this.ownerTabId
-    });
-
     this.restorePromise = this.restoreState();
-    Logger.info('AgentRunner', `[INIT] Session ${this.sessionId} created (build ${BUILD_STAMP})`);
+    Logger.debug('AgentRunner', `[INIT] Session ${this.sessionId} created (build ${BUILD_STAMP})`);
   }
 
   get activeTabId(): number | null {
     return this._activeTabId;
+  }
+
+  /**
+   * The picture a run took, by id, for the panel's thumbnail.
+   *
+   * The bytes live in the MCP server's per-session registry and never in a history row, so this
+   * is the one way back to them. Null when the run is over or the picture was dropped: the panel
+   * then says the picture is no longer kept, which is what is true.
+   */
+  getScreenshot(imageId: string): Promise<{ data: string; mediaType: string } | null> {
+    return this.mcpClient ? this.mcpClient.getScreenshot(imageId) : Promise.resolve(null);
   }
 
   set activeTabId(tabId: number | null) {
@@ -123,15 +117,6 @@ export class AgentRunner {
       { windowId: this.windowId, groupIds: this.scoutFoxGroupIds, persist: () => this.persistState() },
       this.windowId
     );
-  }
-
-  set scoutFoxGroupId(groupId: number | null) {
-    if (groupId === null) {
-      if (typeof this.windowId === 'number') this.scoutFoxGroupIds.delete(this.windowId);
-    } else {
-      const win = typeof this.windowId === 'number' ? this.windowId : 0;
-      this.scoutFoxGroupIds.set(win, groupId);
-    }
   }
 
   private createRuntime(): RunRuntime {
@@ -169,23 +154,15 @@ export class AgentRunner {
     const llm = {
       complete: async (req: any) => {
         const settings = await Storage.getSettings();
-        let effectiveSettings = settings;
-        if (req.role === 'planner' && settings.plannerModel) {
-          effectiveSettings = { ...settings, model: settings.plannerModel };
-        } else if (req.role === 'reflect' && settings.reflectModel) {
-          effectiveSettings = { ...settings, model: settings.reflectModel };
-        }
         const chatMessages = req.messages.map((m: any) => ({ role: m.role, content: m.content }));
-        let systemPrompt = req.system;
-        if (effectiveSettings.systemInstructions?.trim()) {
-          systemPrompt = `${effectiveSettings.systemInstructions.trim()}\n\n${systemPrompt}`;
-        }
-        const text = await generateCompletion(effectiveSettings, chatMessages, systemPrompt, {
+        const extra = settings.systemInstructions?.trim();
+        const systemPrompt = extra ? `${extra}\n\n${req.system}` : req.system;
+        const text = await generateCompletion(settings, chatMessages, systemPrompt, {
           signal: req.signal,
           schema: req.schema,
           callbacks: req.callbacks
         });
-        return { text, provider: effectiveSettings.provider, model: effectiveSettings.model, meta: {} };
+        return { text, provider: settings.provider, model: settings.model, meta: {} };
       }
     };
 
@@ -313,11 +290,58 @@ export class AgentRunner {
   }
 
   // -----------------------------------------------------------------------
-  // Public API — SIMPLIFIED
+  // Public API
   // -----------------------------------------------------------------------
 
+  /**
+   * One row for the side panel's timeline, written by the MCP client. Pushes the entry, keeps
+   * stepCount in step with the action rows, and broadcasts the state so the panel streams live.
+   */
+  recordEntry(entry: HistoryEntry): void {
+    this.dirty = true;
+    this.history.push(entry);
+    this.stepCount = this.history.reduce((n, h) => (h.type === 'agent_response' ? n + 1 : n), 0);
+    this.notifyStateChange();
+  }
+
+  /** The run's status as the panel sees it ('idle' and 'error' are terminal; 'paused' carries its reason). */
+  setRunStatus(status: RunStatus, pauseReason: 'user' | 'llm_failure' | 'worker_restart' | null = null): void {
+    this.dirty = true;
+    this.status = status;
+    this.pauseReason = status === 'paused' ? pauseReason : null;
+    this.notifyStateChange();
+    void this.detachIfDone();
+  }
+
+  /** The plan checklist of the current run (update_plan), replacing any previous one. */
+  setPlanSteps(steps: Array<{ text: string; status: string }>): void {
+    this.dirty = true;
+    this.planSteps = steps;
+    this.notifyStateChange();
+  }
+
+  /** The plan waiting for the user's approval in manual mode, or null once it is decided. */
+  setPendingApproval(value: any): void {
+    this.dirty = true;
+    this.pendingApproval = value;
+    this.notifyStateChange();
+  }
+
+  /**
+   * Ends the manual-approve hold. The card and the status change in one broadcast: clearing the
+   * card while still "paused" would flash a Resume button with nothing to resume.
+   */
+  resolvePendingApproval(status: RunStatus, pauseReason: 'user' | 'llm_failure' | 'worker_restart' | null = null): void {
+    this.dirty = true;
+    this.pendingApproval = null;
+    this.status = status;
+    this.pauseReason = status === 'paused' ? pauseReason : null;
+    this.notifyStateChange();
+    void this.detachIfDone();
+  }
+
   claimForTask() {
-    if (this.status === 'running' || this.status === 'paused' || this.isLoopActive || this.taskClaimed) {
+    if (this.status === 'running' || this.status === 'paused' || this.taskClaimed) {
       return { success: false, error: 'A task is already active or paused.' };
     }
     this.taskClaimed = true;
@@ -338,45 +362,70 @@ export class AgentRunner {
       return { success: false, error: 'Cannot start empty prompt.' };
     }
 
-    await this.restorePromise;
-    await this.clearPromise;
-    this.dirty = true;
-    this.activeTabId = tabId;
-    this.currentTask = userPrompt.trim();
-    Logger.info('AgentRunner', `[START_TASK] ${this.currentTask} on tab [${tabId}]`);
-
-    await this.ensureScoutFoxGroup(tabId);
-
-    const stopLanded = this.stopDuringClaim;
-    const pauseLanded = this.pauseDuringClaim;
-    this.stopDuringClaim = false;
-    this.pauseDuringClaim = false;
-    if (stopLanded) {
-      this.releaseTaskClaim();
-      this.status = 'stopped';
-      this.currentTask = '';
-      this.notifyStateChange({ stopped: true });
-      return { success: false, error: 'Task stopped before it started.' };
-    }
-
-    this.status = 'running';
-    this.pauseReason = null;
-    this.stepCount = 0;
-    this.runtime.control.stopRequested = false;
-    this.runtime.control.pauseRequested = pauseLanded === true;
-
+    // Everything after the claim is inside the try, so a failure anywhere (restore, the tab
+    // group) still releases it: a claim left behind locks the tab out of every later task.
     try {
-      const settings = await this.runtime.settings();
-      const maxSteps = settings?.maxSteps ?? 250;
+      await this.restorePromise;
+      this.dirty = true;
+      this.activeTabId = tabId;
+      this.currentTask = userPrompt.trim();
+      Logger.event('agent', 'AgentRunner', `Started the task "${this.currentTask}" on tab [${tabId}]`, { task: this.currentTask, tabId, autoApprovePlan: autoApprove !== false });
 
-      // Initialize and start MCP client (replaces graph)
-      this.mcpClient = new ScoutFoxMCPClient(this.runtime, this.sessionId as number);
-      await this.mcpClient.startTask(userPrompt);
-      
+      await this.ensureScoutFoxGroup(tabId);
+
+      const stopLanded = this.stopDuringClaim;
+      const pauseLanded = this.pauseDuringClaim;
+      this.stopDuringClaim = false;
+      this.pauseDuringClaim = false;
+      if (stopLanded) {
+        this.status = 'stopped';
+        this.currentTask = '';
+        this.notifyStateChange({ stopped: true });
+        return { success: false, error: 'Task stopped before it started.' };
+      }
+
+      // A Pause clicked while the task was still being claimed lands as a real pause: the turn
+      // is set up, then the run waits in 'paused' for Resume. The step signal is never left
+      // aborted, so the actions after Resume run normally.
+      this.status = pauseLanded ? 'paused' : 'running';
+      this.pauseReason = pauseLanded ? 'user' : null;
+      this.stepCount = 0;
+      // A new task starts with no plan hold and the approval mode the panel chose. A missing
+      // field keeps the old default (autonomous), which is what every non-panel caller wants.
+      this.autoApprovePlan = autoApprove !== false;
+      this.pendingApproval = null;
+      this.runtime.control.stopRequested = false;
+      this.runtime.control.pauseRequested = false;
+
+      // Initialize and start MCP client (replaces graph). The runner is handed over so the
+      // client can record the history rows the side panel renders from, and so the run ends
+      // in a terminal status instead of "running" forever.
+      // The effort is the model's reasoning level (llm/effort.ts). A start without one (a caller
+      // other than the composer) takes the default of Settings.
+      const settings = await Storage.getSettings();
+      const level = normalizeEffort(requestedEffort ?? settings.effortDefault);
+      this.effort = { requested: level, level, suggestedBy: requestedEffort ? 'user' : 'default' };
+      this.mcpClient = new ScoutFoxMCPClient(this.runtime, this);
+      await this.mcpClient.startTask(userPrompt, { startPaused: pauseLanded, effort: level });
+
       return { success: true };
     } finally {
       this.releaseTaskClaim();
     }
+  }
+
+  /**
+   * Releases the debugger from every tab of the run once it has ended, so the "is debugging this
+   * browser" bar goes away with the run. A paused run keeps it, so Resume does not pay the attach
+   * again. Called on every status change; a running or paused status makes it a no-op.
+   */
+  private async detachIfDone(): Promise<void> {
+    if (this.status === 'running' || this.status === 'paused') return;
+    const ids = new Set<number>([this.ownerTabId, ...this.adoptedTabIds]);
+    if (typeof this._activeTabId === 'number') ids.add(this._activeTabId);
+    // No isAttached filter: detach is idempotent and only ever touches this extension's own
+    // session, and a tab whose attach is still settling must not be skipped.
+    await Promise.allSettled(Array.from(ids).map((id) => cdp.detach(id)));
   }
 
   pause(): { success: boolean; error?: string } {
@@ -391,11 +440,9 @@ export class AgentRunner {
     this.dirty = true;
     this.status = 'paused';
     this.pauseReason = 'user';
-    this.activeAbort?.abort({ scoutfox: 'user', reason: 'user_pause' });
     this.runtime.control.abortStep('user_pause');
     this.mcpClient?.stop();
     this.notifyStateChange({ paused: true });
-    this.startPauseDetachTimer();
     return { success: true };
   }
 
@@ -403,13 +450,13 @@ export class AgentRunner {
     if (this.status !== 'paused') {
       return { success: false, error: `Cannot resume when status is "${this.status}".` };
     }
-    this.clearPauseDetachTimer();
     this.dirty = true;
     this.status = 'running';
     this.pauseReason = null;
     this.runtime.control.pauseRequested = false;
     this.notifyStateChange({ resumed: true });
-    // MCP client handles resume via its own loop
+    // The MCP client re-enters its loop from the message history it still holds.
+    this.mcpClient?.resume();
     return { success: true };
   }
 
@@ -422,18 +469,17 @@ export class AgentRunner {
       }
       return { success: false, error: 'No task is running or paused.' };
     }
-    const wasPaused = this.status === 'paused';
-    this.clearPauseDetachTimer();
     this.dirty = true;
     this.status = 'stopped';
     this.pauseReason = null;
-    this.activeAbort?.abort({ scoutfox: 'user', reason: 'user_stop' });
+    this.pendingApproval = null;
     this.runtime.control.abortStep('user_stop');
     this.mcpClient?.stop();
     this.notifyStateChange({ stopped: true });
+    void this.detachIfDone();
 
     const targetTabId = this._activeTabId ?? this.ownerTabId;
-    if (targetTabId && this.runtime.browser?.clearBadges) {
+    if (targetTabId) {
       this.runtime.browser.clearBadges(targetTabId);
     }
     return { success: true };
@@ -467,6 +513,7 @@ export class AgentRunner {
     this.history = [];
     this.currentTask = '';
     this.planSteps = [];
+    this.pendingApproval = null;
     this.findings = [];
     this.status = 'idle';
     this.pauseReason = null;
@@ -475,9 +522,7 @@ export class AgentRunner {
     this.runtime.typedTexts = [];
     this.runtime.navigatedFrom = null;
     void this.meta.clear();
-    if (this.saver?.deleteThread) {
-      this.clearPromise = this.saver.deleteThread(this.threadId).then(() => this.saver.revive(this.threadId)).catch(() => {});
-    }
+    void this.snapshots.clear();
     this.notifyStateChange();
   }
 
@@ -489,7 +534,6 @@ export class AgentRunner {
       history: this.history,
       planSteps: this.planSteps,
       currentPhase: this.currentPhase,
-      graphLocation: this.graphLocation,
       pauseReason: this.pauseReason,
       budget: this.budget,
       pendingQuestion: this.pendingQuestion,
@@ -519,7 +563,7 @@ export class AgentRunner {
   }
 
   // -----------------------------------------------------------------------
-  // Tab Sandboxing (unchanged)
+  // Tab Sandboxing
   // -----------------------------------------------------------------------
 
   async ensureScoutFoxGroup(tabId: number, explicitWindowId?: number) {
@@ -601,6 +645,17 @@ export class AgentRunner {
   // Static: forget a session when its owner tab closes
   static forgetSession(sessionId: number | string): void {
     runtimeRegistry.delete(String(sessionId));
+    AgentRunner.dropStoredState(sessionId);
+  }
+
+  /**
+   * Removes what a tab's session kept in storage.session (its run and its meta). Also called for a
+   * tab whose session this worker never built: after a worker restart a closed tab may have state
+   * in storage and no runner in memory.
+   */
+  static dropStoredState(threadId: number | string): void {
+    if (typeof chrome === 'undefined' || !chrome.storage?.session?.remove) return;
+    void chrome.storage.session.remove([runSnapshotKey(threadId), `sf:meta:${threadId}`]).catch(() => {});
   }
 
   // groupIdForWindow: returns the ScoutFox group id for a window
@@ -613,26 +668,67 @@ export class AgentRunner {
 
   // recordNetworkRequest: record a network request for a tab
   recordNetworkRequest(tabId: number, payload: any): void {
-    // Network requests are buffered in networkBuffers; this is a no-op in the simplified loop
-    // because the MCP client doesn't use network recording directly.
+    // The content scripts' net recorder feeds this buffer; read_network_requests reads it back.
+    this.networkBuffers.record(tabId, payload, this.runtime.net.marker());
   }
 
   private notifyStateChange(extra?: Record<string, any>) {
     this.stateVersion++;
+    // Every state the panel sees is kept for a worker restart. A state the run rests in (ended,
+    // paused, waiting on the user) goes out at once: that is when the worker may be stopped next.
+    const resting = this.status !== 'running' || this.pendingApproval !== null;
+    this.snapshots.save(this.runSnapshot(), resting);
     if (this.onStateChangeCb) {
       this.onStateChangeCb({ ...this.getState(), ...extra });
     }
   }
 
-  private startPauseDetachTimer() { /* no-op in simplified version */ }
-  private clearPauseDetachTimer() { /* no-op in simplified version */ }
-  dispose() { /* no-op in simplified version */ }
+  private runSnapshot(): RunSnapshot {
+    return {
+      status: this.status,
+      task: this.currentTask,
+      history: this.history,
+      planSteps: this.planSteps,
+      stepCount: this.stepCount,
+      pauseReason: this.pauseReason,
+      stateVersion: this.stateVersion,
+      savedAt: Date.now()
+    };
+  }
 
   private async restoreState(): Promise<void> {
+    // The run the panel showed before the worker restarted. Restored before restorePromise
+    // resolves, which the port connect and GET_AGENT_STATE both wait for.
+    try {
+      const kept = await this.snapshots.read();
+      if (kept) {
+        const run = restoredRun(kept);
+        this.status = run.status;
+        this.currentTask = run.task || '';
+        this.history = Array.isArray(run.history) ? run.history : [];
+        this.planSteps = Array.isArray(run.planSteps) ? run.planSteps : [];
+        this.stepCount = Number(run.stepCount) || 0;
+        this.pauseReason = run.pauseReason ?? null;
+        this.stateVersion = Math.max(this.stateVersion, Number(run.stateVersion) || 0);
+        if (run !== kept) {
+          Logger.info('AgentRunner', `[RUN_RESTORED] The worker restarted during the run on tab [${this.ownerTabId}]; its steps are kept and the run is marked interrupted.`);
+          this.snapshots.save(this.runSnapshot(), true);
+        }
+      }
+    } catch {
+      // A run that cannot be read back starts clean, like before.
+    }
     try {
       const saved = await this.meta.read();
       if (saved) {
         this.status = 'idle';
+        // The tab group map is what lets a restarted worker keep grouping and adopting this
+        // session's tabs; persistState writes it, so it is read back here.
+        for (const [windowId, groupId] of saved.scoutFoxGroupIds || []) {
+          if (typeof windowId === 'number' && typeof groupId === 'number' && !this.scoutFoxGroupIds.has(windowId)) {
+            this.scoutFoxGroupIds.set(windowId, groupId);
+          }
+        }
       }
     } catch {
       // Ignore restore errors

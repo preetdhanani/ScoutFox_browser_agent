@@ -30,6 +30,16 @@ export function generateDocId(cryptoObj: Crypto = typeof crypto !== 'undefined' 
 }
 
 /**
+ * Whether an element is still in the document. An element inside a shadow root is not
+ * document.contains()'d, so isConnected (which crosses shadow roots) decides when the element has it.
+ */
+export function isAttached(el: Element, doc?: Document | null): boolean {
+  const connected = (el as Element & { isConnected?: boolean }).isConnected;
+  if (typeof connected === 'boolean') return connected && (!doc || !el.ownerDocument || el.ownerDocument === doc);
+  return !(doc && typeof doc.contains === 'function' && !doc.contains(el));
+}
+
+/**
  * Retrieve element by assigned ID from map, ensuring it is attached to the document.
  */
 export function getElementFromMap(
@@ -44,9 +54,7 @@ export function getElementFromMap(
     : (entry as Element);
   if (!el) return null;
 
-  if (doc && typeof doc.contains === 'function' && !doc.contains(el)) {
-    return null;
-  }
+  if (!isAttached(el, doc)) return null;
   return el;
 }
 

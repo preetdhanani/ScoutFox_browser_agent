@@ -128,7 +128,7 @@ test('delete removes the descriptor, the credentials and the model cache, and he
   assert.ok(after);
   assert.equal(after.customProviders?.['doomed'], undefined);
   assert.equal(after.providerConfigs?.['doomed'], undefined);
-  assert.equal(after.provider, 'openrouter', 'the active selection falls back to the built-in default');
+  assert.equal(after.provider, 'ollama', 'the active selection falls back to the built-in default');
   const cache = await Storage.getCachedModels(cacheKey);
   assert.equal(cache, null, 'the stale model list of a gone endpoint is not served (null means no cache)');
 
@@ -137,7 +137,7 @@ test('delete removes the descriptor, the credentials and the model cache, and he
 
 test('the cap refuses one more provider past the limit, naming the number', async () => {
   // A fresh settings object: earlier tests in this file saved their own providers into the same mock.
-  mockStorageData['agent_settings'] = { provider: 'openrouter' };
+  mockStorageData['agent_settings'] = { provider: 'ollama' };
   for (let i = 0; i < MAX_CUSTOM_PROVIDERS; i++) {
     const result = await saveCustomProvider({ ...VALID, id: `cap-${i}` });
     assert.ok(result.ok, `provider ${i} should save: ${result.ok ? '' : result.error}`);
@@ -154,7 +154,7 @@ test('sanitize drops entries this build cannot use and keeps the rest, and getSe
   const kept = sanitizeCustomProviders({
     good: { id: 'good', protocol: 'openai', baseUrl: 'https://g.example', models: ['m'], keyMode: 'none' },
     badId: { id: 'BAD', protocol: 'openai', baseUrl: 'x' },
-    builtinId: { id: 'openrouter', protocol: 'openai', baseUrl: 'x' },
+    builtinId: { id: 'ollama', protocol: 'openai', baseUrl: 'x' },
     badProtocol: { id: 'ok-id', protocol: 'websocket', baseUrl: 'x' },
     notAnObject: 'nope'
   });
@@ -178,6 +178,6 @@ test('a provider id from a newer build that this build dropped does not wedge th
   // When the entry is gone (deleted by another panel), the selection heals to the default.
   mockStorageData['agent_settings'] = { provider: 'vanished-provider', customProviders: {} };
   const healed = await Storage.getSettings();
-  assert.equal(healed.provider, 'openrouter');
+  assert.equal(healed.provider, 'ollama');
   delete mockStorageData['agent_settings'];
 });

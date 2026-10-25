@@ -80,7 +80,7 @@ test('every relative import names an existing file exactly as written (Node cann
   // The scan really did look at the code: this is not a pass because nothing was read.
   assert.ok(files.length >= 100, `only ${files.length} files were scanned`);
   assert.ok(checked >= 150, `only ${checked} relative imports were checked`);
-  assert.ok(files.some((file) => relative(ROOT, file) === join('src', 'background', 'agent', 'parse.ts')));
+  assert.ok(files.some((file) => relative(ROOT, file) === join('src', 'background', 'mcp', 'client.ts')));
   assert.ok(files.some((file) => relative(ROOT, file) === join('src', 'background', 'background.ts')));
 });
 

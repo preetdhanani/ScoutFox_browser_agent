@@ -14,7 +14,7 @@
  * bytes gains nothing from being passed on piece by piece.
  */
 import http from 'node:http';
-import { buildCallRecord, collapseChatResponse } from './callRecord.mjs';
+import { buildCallRecord, collapseChatResponse } from '../../mcp/callRecord.mjs';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',

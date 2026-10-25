@@ -140,13 +140,19 @@ export async function executeJs(
 
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutHandle = setTimeout(() => reject(new Error('execute_js timed out after 5000ms')), timeoutMs);
+      timeoutHandle = setTimeout(() => reject(new Error(`execute_js timed out after ${timeoutMs}ms`)), timeoutMs);
     });
 
     let abortCleanup: (() => void) | undefined;
     const abortPromise = opts?.signal
       ? new Promise<never>((_, reject) => {
           const onAbort = () => reject(new Error(opts.signal?.reason ? String(opts.signal.reason) : 'Aborted'));
+          // The signal can abort while the script is being injected (before this listener
+          // exists); an 'abort' event that already fired never fires again, so check first.
+          if (opts.signal?.aborted) {
+            onAbort();
+            return;
+          }
           opts.signal?.addEventListener('abort', onAbort);
           abortCleanup = () => opts.signal?.removeEventListener('abort', onAbort);
         })

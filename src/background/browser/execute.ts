@@ -384,7 +384,7 @@ export async function executeAction(
       (res.success && !viaSynthetic ? 'dom_changed' : 'none');
     // A lookup never changes the page, whatever the effect probe counted.
     if (verb === 'find_element') effect = 'none';
-    const isClick = verb === 'click';
+    const isClick = verb === 'click' || verb === 'click_at';
     const isTypeSubmit = verb === 'type' && (res.submitted || Boolean(action?.submit));
 
     let urlAfter = '';

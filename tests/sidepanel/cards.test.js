@@ -3,14 +3,11 @@ import assert from 'node:assert/strict';
 import {
   escapeHtml,
   formatTime,
-  renderPlanApprovalCard,
-  renderReplanApprovalCard,
   renderActionConfirmationCard,
   renderChallengeHelpCard,
   renderContinueBudgetCard,
   renderProvenanceFindingsTable
 } from '../../sidepanel/cards.js';
-import { renderGraphStrip } from '../../sidepanel/graphStrip.js';
 import fs from 'node:fs';
 
 const CSS = fs.readFileSync(new URL('../../sidepanel/sidepanel.css', import.meta.url), 'utf8');
@@ -20,146 +17,6 @@ test('cards: escapeHtml escapes dangerous characters', () => {
   assert.equal(escapeHtml('foo & bar \'baz\''), 'foo &amp; bar &#39;baz&#39;');
   assert.equal(escapeHtml(null), '');
   assert.equal(escapeHtml(undefined), '');
-});
-
-test('cards: renderPlanApprovalCard returns empty string on null', () => {
-  assert.equal(renderPlanApprovalCard(null), '');
-});
-
-test('cards: renderPlanApprovalCard renders sites, columns, and estimates', () => {
-  const approval = {
-    planMeta: {
-      version: 1,
-      sites: [
-        { domain: 'store.test', role: 'primary', goal: 'Find product' },
-        { domain: 'compare.test', role: 'reseller', goal: 'Check price' },
-      ],
-      columns: ['price', 'shipping'],
-    },
-    budgetEstimate: {
-      estimatedSteps: '~15-25',
-      roughTimeSec: 45,
-    },
-    budget: {
-      workingTotal: 50,
-      hardCap: 250,
-    },
-    effortProfile: {
-      level: 'medium',
-    },
-  };
-
-  const html = renderPlanApprovalCard(approval);
-  assert.ok(html.includes('Plan Approval Required'), 'Should show title');
-  assert.ok(html.includes('store.test'), 'Should render site domain');
-  assert.ok(html.includes('badge-primary'), 'Should render primary badge');
-  assert.ok(html.includes('compare.test'), 'Should render reseller site');
-  assert.ok(html.includes('column-chip'), 'Should render column chips');
-  assert.ok(html.includes('price'), 'Should render price chip');
-  assert.ok(html.includes('~15-25'), 'Should render estimated steps');
-  assert.ok(html.includes('~45s'), 'Should render rough time');
-  assert.ok(html.includes('btn-level-chip active" data-level="medium"'), 'Medium should be active');
-  assert.ok(!html.includes('plan-overbudget-banner'), 'Should not show overbudget banner');
-});
-
-test('cards: renderPlanApprovalCard shows revision and overbudget warning', () => {
-  const approval = {
-    planMeta: {
-      version: 2,
-      sites: [{ domain: 'huge.test', role: 'primary', goal: 'Scrape everything' }],
-    },
-    budget: {
-      workingTotal: 300,
-      hardCap: 250,
-    },
-    effortProfile: {
-      level: 'high',
-    },
-  };
-
-  const html = renderPlanApprovalCard(approval);
-  assert.ok(html.includes('Plan Revision #2'), 'Should show revision header');
-  assert.ok(html.includes('plan-overbudget-banner'), 'Should display overbudget warning');
-  assert.ok(html.includes('exceeding the limit of 250 steps'), 'Should state overbudget limit');
-  assert.ok(html.includes('btn-level-chip active" data-level="high"'), 'High should be active');
-});
-
-// planner-fallback-invented-plan: a fallback plan is never silent - banner, source and defaulted fields.
-
-test('cards: renderPlanApprovalCard shows the fallback banner, the plan source and the defaulted fields', () => {
-  const approval = {
-    planMeta: {
-      version: 1,
-      source: 'fallback',
-      defaulted: ['task_kind', 'sites[1].domain'],
-      sites: [{ domain: 'shop.test', role: 'reference', goal: 'Analyze the page state for the task' }],
-      columns: ['value'],
-    },
-    budget: { workingTotal: 20, hardCap: 250 },
-    effortProfile: { level: 'medium' },
-  };
-
-  const html = renderPlanApprovalCard(approval);
-  assert.ok(html.includes('plan-fallback-banner'), 'Should show the fallback banner');
-  assert.ok(html.includes('Planner reply was unreadable, using a one-step plan on this page.'), 'Should use the banner wording');
-  assert.ok(html.includes('Plan source'), 'Should show the plan source');
-  assert.ok(html.includes('code fallback'), 'Should name the fallback source');
-  assert.ok(html.includes('Filled by default'), 'Should list the defaulted fields');
-  assert.ok(html.includes('task_kind'), 'Should name task_kind as defaulted');
-  assert.ok(html.includes('sites[1].domain'), 'Should name the defaulted site domain');
-});
-
-test('cards: renderPlanApprovalCard shows the model source and no banner for a normal plan', () => {
-  const approval = {
-    planMeta: {
-      version: 1,
-      source: 'llm',
-      sites: [{ domain: 'store.test', role: 'primary', goal: 'Find product' }],
-      columns: ['price'],
-    },
-    budget: { workingTotal: 50, hardCap: 250 },
-    effortProfile: { level: 'medium' },
-  };
-
-  const html = renderPlanApprovalCard(approval);
-  assert.ok(!html.includes('plan-fallback-banner'), 'No fallback banner for a model plan');
-  assert.ok(html.includes('Plan source'), 'Should still show the plan source');
-  assert.ok(html.includes('the model'), 'Should name the model as the source');
-  assert.ok(!html.includes('Filled by default'), 'No defaulted list when nothing was defaulted');
-});
-
-// replan-domain-auto-approved: a revision that adds a domain gets its own card.
-
-test('cards: renderReplanApprovalCard returns empty string on null', () => {
-  assert.equal(renderReplanApprovalCard(null), '');
-});
-
-test('cards: renderReplanApprovalCard names the added domain and the reason, with Allow and Deny', () => {
-  const html = renderReplanApprovalCard({
-    kind: 'approve_plan',
-    planMeta: { version: 2, sites: [{ id: 's3', domain: 'altshop.test', goal: 'Find the price' }] },
-    addedDomains: ['altshop.test'],
-    replanReason: 'The competitor shop is unreachable, try the alternate shop',
-  });
-  assert.ok(html.includes('replan-approval-card'), 'own card class');
-  assert.ok(html.includes('The agent wants to add'), 'the ticket wording');
-  assert.ok(html.includes('altshop.test'), 'the added domain');
-  assert.ok(html.includes('The competitor shop is unreachable, try the alternate shop'), 'the replan reason');
-  assert.ok(html.includes('btn-approve-replan'), 'Allow button');
-  assert.ok(html.includes('btn-deny-replan'), 'Deny button');
-  assert.ok(html.includes('Allow'), 'Allow label');
-  assert.ok(html.includes('Deny'), 'Deny label');
-});
-
-test('cards: renderReplanApprovalCard escapes the domain and reason and falls back without them', () => {
-  const html = renderReplanApprovalCard({
-    kind: 'approve_plan',
-    planMeta: { version: 2, sites: [] },
-    addedDomains: ['<script>alert(1)</script>'],
-    replanReason: '',
-  });
-  assert.ok(!html.includes('<script>alert(1)'), 'no raw markup from the domain');
-  assert.ok(html.includes('&lt;script&gt;'), 'the domain, escaped');
 });
 
 test('cards: renderActionConfirmationCard renders variants and details', () => {
@@ -295,23 +152,6 @@ test('cards: renderProvenanceFindingsTable renders findings and snippets', () =>
   assert.ok(html.includes('Framework Laptop 16 starts from 1.599 EUR'), 'Should include snippet quote');
   assert.ok(html.includes('Step #4'), 'Should display step number');
   assert.ok(html.includes('btn-copy-findings-table'), 'Should include copy table button');
-});
-
-test('graphStrip: renderGraphStrip renders orchestrator and worker tiers', () => {
-  const stripOrch = renderGraphStrip({ orchestratorNode: 'alloc' });
-  assert.ok(stripOrch.includes('nested-graph-strip'), 'Should render container');
-  assert.ok(stripOrch.includes('class="graph-chip active" data-node="alloc"'), 'Alloc chip should be active');
-  assert.ok(stripOrch.includes('class="graph-chip past" data-node="plan"'), 'Plan chip should be past');
-  assert.ok(!stripOrch.includes('graph-tier-sub'), 'Should not render worker sub-tier when not in worker');
-
-  const stripWorker = renderGraphStrip({
-    orchestratorNode: 'site',
-    workerNode: 'risk',
-    siteDomain: 'shop.test',
-  });
-  assert.ok(stripWorker.includes('graph-tier-sub'), 'Should render worker sub-tier');
-  assert.ok(stripWorker.includes('🌐 shop.test'), 'Should show active site domain');
-  assert.ok(stripWorker.includes('class="graph-subchip active" data-subnode="risk"'), 'Risk gate subchip should be active');
 });
 
 test('cards: renderChallengeHelpCard renders challenge details and action buttons', () => {

@@ -20,9 +20,6 @@
     "service_worker": "background/sw.js",
     "type": "module"
   },
-  "side_panel": {
-    "default_path": "sidepanel/sidepanel.html"
-  },
   "action": {
     "default_title": "Open ScoutFox AI Agent"
   },

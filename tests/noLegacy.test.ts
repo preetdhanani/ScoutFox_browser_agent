@@ -100,7 +100,17 @@ test('5. tests/test-count-floor.json floor is valid and enforced by npm run chec
   assert.ok(fs.existsSync(floorFile), 'tests/test-count-floor.json must exist');
   const data = JSON.parse(fs.readFileSync(floorFile, 'utf8'));
   assert.equal(typeof data.floor, 'number', 'floor must be a number');
-  assert.ok(data.floor >= 3257, `floor (${data.floor}) must be >= 3257`);
+  // The floor was 3446 when the LangGraph-era engine was the one under test. Commit 87367c0
+  // replaced that engine with the MCP one and deleted the ~35k lines of tests that came with
+  // it, so the floor was guarding a suite that no longer existed. It was lowered on 2026-10-20
+  // to the real count of the suite that is here now, and the MCP engine's own modules each
+  // have a test file of their own (tests/mcp/, tests/runner/).
+  //
+  // This number is a second lock on the same thing the floor file locks, so it has to move
+  // with it. A lower number here than in the floor file would let the floor file be lowered
+  // again and again without anybody noticing.
+  const floor = data.floor;
+  assert.ok(floor >= 1195, `floor (${floor}) must be >= 1195`);
   // The floor used to be decoration: nothing compared it to the real count
   // (BUG-47). The checker parses the node --test summary and fails on a drop;
   // these asserts keep it wired.
@@ -109,4 +119,8 @@ test('5. tests/test-count-floor.json floor is valid and enforced by npm run chec
   assert.match(checker, /process\.exit\(1\)/, 'the checker must fail when the count drops');
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(pkg.scripts['check:tests'], 'node scripts/checkTestCount.mjs', 'the floor check must stay wired into npm scripts');
+  // The floor check must run in CI, not only on a developer's machine: a floor that nobody
+  // checks is decoration again.
+  const ci = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+  assert.match(ci, /npm run check:tests/, 'the floor check must run in CI');
 });

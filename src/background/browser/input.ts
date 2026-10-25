@@ -88,6 +88,9 @@ export class InputDispatcher {
       case 'click':
         return await this.handleClick(tabId, actionPayload, docId, signal, sleep, control);
 
+      case 'click_at':
+        return await this.handleClickAt(tabId, actionPayload, signal, sleep, control);
+
       case 'type':
         return await this.handleType(tabId, actionPayload, docId, signal, sleep, control);
 
@@ -208,6 +211,71 @@ export class InputDispatcher {
   }
 
   /**
+   * A click at a viewport coordinate: the model read the point off a screenshot, so there is no
+   * element to resolve and no element check to make - the server already asked the page what is
+   * at the point and refused a sensitive field. Everything after the dispatch is the same as an
+   * element click: the probe, the URL capture and the settle all live in executeAction.
+   */
+  private async handleClickAt(
+    tabId: number,
+    payload: Record<string, any>,
+    signal?: AbortSignal,
+    sleep?: (ms: number, signal?: AbortSignal) => Promise<void>,
+    control?: { stopRequested?: boolean; pauseRequested?: boolean; signal?: AbortSignal }
+  ): Promise<DispatchResult> {
+    const x = Number(payload.x);
+    const y = Number(payload.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return { success: false, error: 'A coordinate click needs a numeric x and y.', via: 'synthetic' };
+    }
+
+    let urlBefore = '';
+    try {
+      const tab = await this.getTab(tabId);
+      urlBefore = tab?.url || '';
+    } catch (_) {}
+
+    const attach = await this.ensureCdpAttached(tabId);
+    if (!attach.ok) {
+      return {
+        success: false,
+        error: `A coordinate click needs the debugger, which could not attach: ${attach.reason}. Use click with an element_id instead.`,
+        via: 'synthetic',
+        syntheticReason: attach.reason
+      };
+    }
+
+    await this.safeProbeBegin(tabId);
+    try {
+      await this.clickCoordinates(tabId, x, y, signal, sleep, control);
+    } catch (err: any) {
+      return { success: false, error: err.message || 'The coordinate click failed.', via: 'cdp' };
+    }
+
+    if (sleep) {
+      await sleep(300, signal);
+    } else {
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    let effect = await this.safeProbeEnd(tabId);
+    let urlAfter = '';
+    try {
+      const tab = await this.getTab(tabId);
+      urlAfter = tab?.url || '';
+    } catch (_) {}
+    if (urlAfter && urlBefore !== urlAfter) effect = 'url_changed';
+
+    return {
+      success: true,
+      message: `Clicked at (${Math.round(x)}, ${Math.round(y)})`,
+      effect,
+      urlAfter: urlAfter || undefined,
+      via: 'cdp'
+    };
+  }
+
+  /**
    * Runs the synthetic fallback and reports the URL change of a click-like action.
    */
   private async syntheticWithUrlChange(
@@ -287,7 +355,8 @@ export class InputDispatcher {
 
       if (signal?.aborted || control?.stopRequested || control?.pauseRequested) throw new Error('Action aborted');
 
-      // 2. Select all existing text via selectAll command
+      // 2. Select all existing text via selectAll command. A rawKeyDown without text:
+      // the editing command does the work and no character can be inserted.
       let selectAllDownSent = false;
       try {
         await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
@@ -295,8 +364,6 @@ export class InputDispatcher {
           key: 'a',
           code: 'KeyA',
           windowsVirtualKeyCode: 65,
-          text: 'a',
-          unmodifiedText: 'a',
           commands: ['selectAll']
         }, control);
         selectAllDownSent = true;
@@ -323,8 +390,10 @@ export class InputDispatcher {
         if (signal?.aborted || control?.stopRequested || control?.pauseRequested) throw new Error('Action aborted');
         let enterDownSent = false;
         try {
+          // keyDown (not rawKeyDown) because it carries text: Chromium fires keypress
+          // only for a keyDown with text, and keypress is what submits the form.
           await this.cdp.sendCommand(tabId, 'Input.dispatchKeyEvent', {
-            type: 'rawKeyDown',
+            type: 'keyDown',
             key: 'Enter',
             code: 'Enter',
             windowsVirtualKeyCode: 13,
@@ -517,8 +586,11 @@ export class InputDispatcher {
       unmodifiedText: key.length === 1 ? key : undefined
     };
 
+    // Same rule as Puppeteer: a key that carries text is a keyDown, so Chromium fires
+    // keypress and inserts the character or submits on Enter. A rawKeyDown with text is
+    // swallowed. Keys without text (Tab, arrows, Escape) stay rawKeyDown.
     const downParams: Record<string, unknown> = {
-      type: 'rawKeyDown',
+      type: def.text ? 'keyDown' : 'rawKeyDown',
       key,
       code: def.code,
       windowsVirtualKeyCode: def.windowsVirtualKeyCode

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Framework shop with a consent banner - fixture</title>
+  <link rel="stylesheet" href="site.css">
+  <style>
+    /* Like iubenda on frame.work: the overlay lets the pointer through (pointer-events: none), and
+       a page script swallows every link click until the banner is answered. */
+    #consent-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.3); pointer-events: none; }
+    #consent-banner { position: fixed; left: 0; right: 0; bottom: 0; padding: 16px; background: #fff; pointer-events: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Framework Laptop 16</h1>
+    <p><a href="configurator.html?model=laptop16">Configure now</a></p>
+  </main>
+  <div id="consent-overlay"></div>
+  <div id="consent-banner">
+    <p>We use cookies.</p>
+    <button type="button" id="consent-accept">Accept all cookies</button>
+  </div>
+  <script>
+    let answered = false;
+    document.addEventListener('click', (event) => {
+      if (!answered && event.target.closest('a')) event.preventDefault();
+    }, true);
+    document.getElementById('consent-accept').addEventListener('click', () => {
+      answered = true;
+      document.getElementById('consent-overlay').remove();
+      document.getElementById('consent-banner').remove();
+    });
+  </script>
+</body>
+</html>

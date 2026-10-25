@@ -40,11 +40,11 @@ import { Logger } from '../../shared/logger.ts';
 import { ProviderError, classifyProviderFailure, describeOllamaFailure, statusOf } from './errors.ts';
 import { toLangChainMessages, watchFetch } from './factory.ts';
 import { baseUrlOf, modelOf } from './settings.ts';
+import { fetchModelContextWindow, getEffectiveContextWindow } from './models.ts';
 import type { ChatTurn, CompletionOptions, LlmSettings } from './types.ts';
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
 const DEFAULT_MODEL = 'qwen2.5:14b';
-const DEFAULT_NUM_CTX = 8192;
 
 /** Models that rejected the `think` field once. Remembered, so the retry is paid at most once per model per worker lifetime. */
 const THINK_UNSUPPORTED = new Set<string>();
@@ -166,11 +166,13 @@ export async function callOllama(settings: LlmSettings, messages: ChatTurn[], sy
   const baseUrl = (baseUrlOf(settings) || DEFAULT_BASE_URL).replace(/\/$/, '');
   const url = `${baseUrl}/api/chat`;
   const model = modelOf(settings) || DEFAULT_MODEL;
-  const numCtx = Number(settings.ollamaNumCtx) > 0 ? Number(settings.ollamaNumCtx) : DEFAULT_NUM_CTX;
   const numPredict = Number(settings.ollamaNumPredict) > 0 ? Number(settings.ollamaNumPredict) : undefined;
   const signal = options.signal ?? undefined;
   const turns = toLangChainMessages(messages, systemPrompt);
   const startTime = Date.now();
+
+  // Use dynamic context window: fetch from endpoint, fallback to stored setting, then to model-specific default
+  const numCtx = await getEffectiveContextWindow(settings);
 
   let sendThink = !THINK_UNSUPPORTED.has(model);
   let format: string | object | undefined;
@@ -254,6 +256,6 @@ export async function callOllama(settings: LlmSettings, messages: ChatTurn[], sy
     Logger.warn('ApiClients', `[OLLAMA_EMPTY] Model [${model}] returned no usable text (done_reason=${meta.done_reason || 'unknown'}). The reply had ${text.length} content chars and ${typeof reasoning === 'string' ? reasoning.length : 0} thinking chars.`);
   }
 
-  Logger.info('ApiClients', `[NETWORK] 200 OK (${elapsed}ms) - Output length: ${content.length} chars`);
+  Logger.debug('ApiClients', `[NETWORK] 200 OK (${elapsed}ms) - Output length: ${content.length} chars`);
   return content;
 }

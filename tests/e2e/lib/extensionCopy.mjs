@@ -25,6 +25,14 @@ export const TAMPERS = {
     does: 'deletes content/content.js, which the manifest lists (Chromium refuses to load the extension)',
     apply: (dir) => fs.rmSync(inside(dir, 'content/content.js'))
   },
+  'no-effort': {
+    does: 'makes the tool loop drop the effort the run was started with (every request goes out with no reasoning field; the effort wire check must fail)',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'this.effort = normalizeEffort(effort);', 'this.effort = "auto";')
+  },
+  'stale-worker': {
+    does: 'gives background/sw.js a different build stamp than the side panel, like a worker Chrome kept running after a rebuild (the panel must show its reload bar and the side panel gate must fail)',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'var BUILD_STAMP = "', 'var BUILD_STAMP = "older ')
+  },
   'worker-error': {
     does: 'adds console.error("boom") at the top of background/sw.js (worker errors must fail the run)',
     apply: (dir) => prepend(inside(dir, 'background/sw.js'), 'console.error(\'boom (tamper=worker-error)\');\n')
@@ -51,22 +59,32 @@ export const TAMPERS = {
     does: 'removes the statement that switches zod code generation off from background/sw.js, so zod probes new Function under the CSP (the CSP violation in the worker must fail the run)',
     apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'globalThis.__zod_globalConfig = { jitless: true };', '')
   },
-  'stale-paused-status': {
-    does: 'puts back the old status bug in background/sw.js: an auto-approved plan hold leaves the runner status "paused" for the whole run, so the panel shows a Resume button with no reason (the paused-without-a-reason check must fail the run)',
-    apply: (dir) => {
-      const file = inside(dir, 'background/sw.js');
-      const code = fs.readFileSync(file, 'utf8');
-      // The needle is the one place that answers a plan hold by itself and sets the status; whitespace is not matched literally
-      // so a change of indentation in the build does not turn this control into a silent no-op.
-      const needle = /(if \(!opts\.restoring\) \{\s*this\.status = )"running"(;[^}]{0,120}?return new Command\(\{ resume: \{ kind: "approve" \} \}\);)/g;
-      const count = [...code.matchAll(needle)].length;
-      if (count !== 1) throw new Error(`tamper=stale-paused-status: expected exactly one auto-approve status write in sw.js, found ${count} (did deriveStatus change?)`);
-      fs.writeFileSync(file, code.replace(needle, '$1"paused"$2'));
-    }
+  'no-history-rows': {
+    does: 'makes the runner drop every history row (recordEntry pushes nothing), so the side panel timeline stays empty and the run is invisible (the harness must fail: the run never starts visibly)',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'this.history.push(entry)', ';')
   },
   'broken-net-recorder': {
     does: 'makes content/net-recorder.js (the MAIN-world content script) throw when it loads (the fixture page checks must fail)',
     apply: (dir) => prepend(inside(dir, 'content/net-recorder.js'), 'throw new Error(\'recorder boom (tamper=broken-net-recorder)\');\n')
+  },
+  'bad-tool-schema': {
+    does: 'sets get_page_text inputSchema.required to null in the copy - a provider answers HTTP 400 "null is not of type array" and kills the run; the extension must fail locally instead, with an error naming the tool',
+    apply: (dir) => {
+      const file = inside(dir, 'background/sw.js');
+      const from = '\t\t\tname: "get_page_text",\n\t\t\tdescription: "Read ALL visible text content from the current page. Use FIRST to understand page content.",\n\t\t\tinputSchema: {\n\t\t\t\ttype: "object",\n\t\t\t\tproperties: {},';
+      replaceOnce(file, from, from + ',\n\t\t\t\t\trequired: null');
+    }
+  },
+  'no-fox-mark': {
+    does: 'takes the fox mark out of the panel header in the copy (the mark check must fail: the panel shows no fox next to the name)',
+    apply: (dir) => {
+      const file = inside(dir, 'sidepanel/sidepanel.html');
+      const code = fs.readFileSync(file, 'utf8');
+      // Only the mark in the header goes: it is the one inside .logo-icon.
+      const header = /(<div class="logo-icon"[^>]*>)\s*<svg[\s\S]*?<\/svg>/;
+      if (!header.test(code)) throw new Error('tamper=no-fox-mark: the panel header has no .logo-icon svg (was it moved?)');
+      fs.writeFileSync(file, code.replace(header, '$1'));
+    }
   }
 };
 
@@ -115,10 +133,10 @@ export function missingManifestFiles(dir) {
 }
 
 /**
- * @param {{distDir: string, driverHtml: string, tamper?: string}} options
+ * @param {{distDir: string, driverHtml: string, panelTriggerHtml?: string, panelTriggerJs?: string, tamper?: string}} options
  * @returns {{dir: string, files: string[], remove: () => void}}
  */
-export function prepareExtensionCopy({ distDir, driverHtml, tamper }) {
+export function prepareExtensionCopy({ distDir, driverHtml, panelTriggerHtml, panelTriggerJs, tamper }) {
   if (tamper && !TAMPERS[tamper]) {
     throw new Error(`Unknown --tamper "${tamper}". Known: ${Object.keys(TAMPERS).join(', ')}`);
   }
@@ -130,6 +148,13 @@ export function prepareExtensionCopy({ distDir, driverHtml, tamper }) {
       filter: (source) => !NOT_SHIPPED.test(POSIX(path.relative(distDir, source)))
     });
     fs.copyFileSync(driverHtml, path.join(dir, 'driver.html'));
+    // The panel trigger needs both files or neither: a page whose script 404s would report
+    // 'pending' forever and the harness would blame the panel for its own missing helper.
+    if (Boolean(panelTriggerHtml) !== Boolean(panelTriggerJs)) throw new Error('panel trigger: pass both panelTriggerHtml and panelTriggerJs');
+    if (panelTriggerHtml) {
+      fs.copyFileSync(panelTriggerHtml, path.join(dir, 'panel-trigger.html'));
+      fs.copyFileSync(panelTriggerJs, path.join(dir, 'panel-trigger.js'));
+    }
     if (tamper) TAMPERS[tamper].apply(dir);
   } catch (err) {
     remove();

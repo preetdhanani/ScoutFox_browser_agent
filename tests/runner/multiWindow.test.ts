@@ -58,7 +58,6 @@ test('multiWindow: openNewWindow creates a new window, groups its tab separately
   t.after(env.fc.kill);
 
   const runner = new AgentRunner(101, 1);
-  t.after(() => runner.dispose());
   await runner.restorePromise;
 
   // Establish initial group in window 1
@@ -91,7 +90,6 @@ test('multiWindow: tabs created later in the new window join that window group',
   t.after(env.fc.kill);
 
   const runner = new AgentRunner(101, 1);
-  t.after(() => runner.dispose());
   await runner.restorePromise;
 
   const origGroup = await runner.ensureScoutFoxGroup(101, 1);
@@ -113,7 +111,6 @@ test('multiWindow: all window group IDs are tracked in scoutFoxGroupIds', async 
   t.after(env.fc.kill);
 
   const runner = new AgentRunner(101, 1);
-  t.after(() => runner.dispose());
   await runner.restorePromise;
 
   await runner.ensureScoutFoxGroup(101, 1);
@@ -134,7 +131,6 @@ test('multiWindow: openNewWindow preserves existing session task prompt and stat
   t.after(env.fc.kill);
 
   const runner = new AgentRunner(101, 1);
-  t.after(() => runner.dispose());
   await runner.restorePromise;
 
   (runner as any).currentTask = 'Find best deals on laptops';
@@ -153,7 +149,6 @@ test('multiWindow: groupIdForWindow returns null for unassociated windowId', asy
   t.after(env.fc.kill);
 
   const runner = new AgentRunner(101, 1);
-  t.after(() => runner.dispose());
   await runner.restorePromise;
 
   await runner.ensureScoutFoxGroup(101, 1);
@@ -166,7 +161,6 @@ test('multiWindow: multiple windows each have distinct ScoutFox group ids', asyn
   t.after(env.fc.kill);
 
   const runner = new AgentRunner(101, 1);
-  t.after(() => runner.dispose());
   await runner.restorePromise;
 
   const group1 = await runner.ensureScoutFoxGroup(101, 1);
@@ -190,7 +184,6 @@ test('multiWindow: windows.create rejection returns failure result cleanly', asy
   t.after(env.fc.kill);
 
   const runner = new AgentRunner(101, 1);
-  t.after(() => runner.dispose());
   await runner.restorePromise;
 
   const origCreate = (globalThis as any).chrome.windows.create;

@@ -1,0 +1,26 @@
+<!doctype html>
+<!--
+  Test-only page. It is NOT in dist/ and NOT in the shipped zip: tests/e2e/lib/extensionCopy.mjs
+  copies it into the temporary extension copy next to driver.html.
+
+  Why it exists: Chrome only lets an extension open its side panel as a response to a real user
+  gesture (chrome.sidePanel.open()). CDP cannot click the toolbar icon, because browser UI is not
+  a DevTools target. A page of the extension can be clicked over CDP, and Chrome treats that click
+  as a genuine gesture, so this page turns the click into the panel opening. It is the only file
+  here that touches Chrome's UI; the run itself never goes through it.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ScoutFox panel trigger</title>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    /* The whole page is the button: the harness clicks a fixed point and must hit it. */
+    #openPanel { position: fixed; inset: 0; width: 100%; height: 100%; margin: 0; border: 0; background: #fff; color: transparent; font-size: 1px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <button id="openPanel" type="button">open-side-panel</button>
+  <script src="panel-trigger.js"></script>
+</body>
+</html>

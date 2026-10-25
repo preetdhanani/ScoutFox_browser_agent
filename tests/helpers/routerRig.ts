@@ -11,7 +11,7 @@
  *
  * Example:
  *   import { routerRig } from './helpers/routerRig.ts';
- *   import { act, shopPages, shopPlan } from './helpers/graphHarness.ts';
+ *   import { act, shopPages, shopPlan } from './helpers/shopPages.ts';
  *
  *   const rig = await routerRig({ tabs: [{ id: 100, url: 'https://shop.test/items' }], pages: shopPages(),
  *     llm: { plan: [shopPlan()], policy: [act.finish('done')] } });
@@ -32,10 +32,15 @@
  * pause timer of the runner) and puts runtimeRegistry back as it found it.
  *
  * The model. The router creates its AgentRunner itself, the first time a panel connects, the icon is
- * clicked or a message names a tab, so a test cannot hand it a port. The rig wraps runtimeRegistry.set
- * for the time of the test: every runtime a runner registers gets the rig's LlmPort as `llm` (the
- * port of rig.llm, or one given with useLlm(tabId, port) for one tab). The wrap and the runtime are
- * the same objects production uses, so nothing in src/ is touched.
+ * clicked or a message names a tab, so a test cannot hand it a port. The MCP client does not talk to
+ * a port at all: it calls the provider over HTTP (callProviderWithTools), so the rig answers THAT.
+ * The rig installs a fetch in place of the real one for the time of the test, and every request the
+ * client makes is answered with the next scripted tool call, as a provider answers a tool-calling
+ * round. The wire format is the provider's own (OpenAI-shaped tool_calls), so the test exercises the
+ * real request the extension would send.
+ *
+ * The rig's runtime.llm is still the port of rig.llm, injected through runtimeRegistry.set, because
+ * one part of the runner still uses it: the find_element tie-break. Everything else goes over HTTP.
  *
  * What the rig cannot see: the router keeps its sessions (and so the AgentRunner objects) in a module
  * variable. A test reads a run through the router like the panel does: panel.lastState() (the pushed
@@ -60,6 +65,100 @@ export const ROUTER_MODULE = 'src/background/background.ts';
 const ROUTER_URL = new URL(`../../${ROUTER_MODULE}`, import.meta.url);
 
 let loads = 0;
+
+/**
+ * One scripted reply as the provider answers a tool-calling round.
+ *
+ * The rig's script is written in the old graph vocabulary: a JSON object with an "action" field
+ * ("click", "finish", "scroll", ...). The MCP client speaks in TOOLS: "click" with an element_id,
+ * "finish" with an answer, "get_page_text" and so on. This maps one onto the other, so a test can
+ * keep writing the replies it always wrote.
+ *
+ * A reply that is not an action object at all (plain text) becomes the model's text, which the
+ * client takes as the final answer of the run.
+ */
+function toToolCallReply(text: string): Record<string, unknown> {
+  let parsed: any = null;
+  try { parsed = JSON.parse(text); } catch { parsed = null; }
+  if (!parsed || typeof parsed !== 'object') {
+    return { choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }] };
+  }
+
+  // A plan reply has no "action" field: it carries the sites of the plan. The tools name that
+  // update_plan, with a flat list of steps.
+  if (parsed.action === undefined && Array.isArray(parsed.sites)) {
+    const steps = parsed.sites.map((site: any) => String(site?.goal ?? site?.name ?? 'Do the task'));
+    return {
+      choices: [{
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'call_update_plan_1', type: 'function', function: { name: 'update_plan', arguments: JSON.stringify({ plan: steps }) } }],
+        },
+        finish_reason: 'tool_calls',
+      }],
+    };
+  }
+
+  const action = String(parsed.action ?? '');
+  const args: Record<string, unknown> = { ...parsed };
+  delete args.action;
+
+  // The old vocabulary and the tool vocabulary, name by name.
+  const NAME_OF: Record<string, string> = {
+    click: 'click',
+    type: 'type',
+    scroll: 'scroll',
+    navigate: 'navigate',
+    go_back: 'go_back',
+    goForward: 'go_forward',
+    wait: 'wait',
+    read_page_text: 'read_page_text',
+    finish: 'finish',
+    update_plan: 'update_plan',
+    get_page_text: 'get_page_text',
+    get_page_elements: 'get_page_elements',
+    find: 'find',
+    find_element: 'find',
+  };
+  const name = NAME_OF[action];
+  if (!name) {
+    // An action the tools do not have: the run ends with the text of the reply, so a test that
+    // scripts an unknown action sees it instead of a silent hang.
+    return { choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }] };
+  }
+
+  // The tools name their fields differently in a few places.
+  if (name === 'go_back' || name === 'go_forward') {
+    if (parsed.reason !== undefined) args.reason = parsed.reason;
+  }
+  if (name === 'find' && parsed.query === undefined) {
+    const query = parsed.text ?? parsed.reason;
+    if (query !== undefined) args.query = String(query);
+  }
+  if (name === 'update_plan' && parsed.plan === undefined) {
+    args.plan = parsed.steps ?? [];
+  }
+  if (name === 'finish' && parsed.answer === undefined) {
+    args.answer = parsed.summary ?? '';
+  }
+  if (name === 'wait' && parsed.amount === undefined) {
+    args.amount = 1;
+  }
+
+  return {
+    choices: [{
+      index: 0,
+      message: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: `call_${name}_1`, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+      },
+      finish_reason: 'tool_calls',
+    }],
+  };
+}
 
 export interface RouterRigOptions {
   /** The tabs that exist at the start. Default: one tab, id 100, https://example.com/a, window 1. */
@@ -138,7 +237,15 @@ export async function routerRig(options: RouterRigOptions = {}): Promise<RouterR
 
   const llm = options.llm && 'port' in options.llm ? options.llm : fakeLlm();
   const queues = options.llm && !('port' in options.llm) ? options.llm : {};
-  const defaultPort: LlmPort = llm.port({ queues });
+  // The MCP loop is ONE sequence of tool calls, so the queues of the old graph (plan, policy,
+  // reflect) are read as one script, in that order. A test that scripts a plan and a policy keeps
+  // writing both; the plan reply is translated into an update_plan tool call.
+  const flatScript: ReplyEntry[] = [
+    ...(queues.plan ?? []),
+    ...(queues.policy ?? []),
+    ...(queues.reflect ?? []),
+  ];
+  const defaultPort: LlmPort = llm.port({ queues: { mcp: flatScript } });
   const portByTab = new Map<number, LlmPort>();
 
   const initialTabs = options.tabs ?? [{ id: 100, url: 'https://example.com/a', windowId: 1, active: true }];
@@ -150,6 +257,7 @@ export async function routerRig(options: RouterRigOptions = {}): Promise<RouterR
     runtime: true,
     sidePanel: true,
     alarms: true,
+    scripting: { executeScript: [{ result: { width: 1280, height: 720, devicePixelRatio: 1, scrollX: 0, scrollY: 0, scale: 1 } }] },
     declarativeNetRequest: true,
     action: true,
     dom: true,
@@ -182,11 +290,47 @@ export async function routerRig(options: RouterRigOptions = {}): Promise<RouterR
     originalSet(rt);
   };
 
+  // The model over the wire. The MCP client calls the provider with fetch, so the rig puts a fetch
+  // in its place and answers every request with the next scripted reply, as a provider answers a
+  // tool-calling round. The replies come from the SAME fakeLlm the port uses, so the script is
+  // written once and rig.llm.assertDrained() still means "the model was asked exactly as often as
+  // the test expected". The reply of the rig is a JSON action string (the old graph vocabulary),
+  // so it is translated here into the MCP tool call the client expects.
+  const httpCalls: Array<{ url: string; body: any }> = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
+    const raw = typeof init?.body === 'string' ? init.body : '';
+    let body: any = null;
+    try { body = raw ? JSON.parse(raw) : null; } catch { body = raw; }
+    httpCalls.push({ url, body });
+
+    // The port answers with the next reply of the queue, and records the call. A scripted error is
+    // a failed request, the way a provider that answers with an error status does.
+    let text: string;
+    try {
+      const reply = await defaultPort.complete({
+        node: 'mcp',
+        role: 'policy',
+        system: '',
+        messages: [],
+        schema: null,
+        signal: new AbortController().signal,
+      });
+      text = reply.text;
+    } catch (error: any) {
+      const message = error?.message ? String(error.message) : 'the model failed';
+      return new Response(JSON.stringify({ error: { message } }), { status: 500, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify(toToolCallReply(text)), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+
   let restored = false;
   const restore = () => {
     if (restored) return;
     restored = true;
     runtimeRegistry.set = originalSet;
+    globalThis.fetch = realFetch;
     restoreChrome();
     if (hadSelf) globals['self'] = previousSelf;
     else delete globals['self'];

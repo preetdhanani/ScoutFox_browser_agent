@@ -28,6 +28,7 @@ import { isGeminiStreamCut } from './boot/rejections.ts';
 import { lastRuntimeError, isValidWebTab, isDisposableTab } from './browser/tabs.ts';
 import { AgentRunner } from './runner/AgentRunner.ts';
 import { callProvider, fetchAvailableModels, getFallbackModels } from './llm/index.ts';
+import { resolveEffortSupport } from './llm/effort.ts';
 import { BUILTIN_PROVIDER_IDS } from '../shared/storage.ts';
 import { Logger } from '../shared/logger.ts';
 import { BUILD_STAMP } from '../shared/build.ts';
@@ -48,6 +49,10 @@ self.addEventListener('unhandledrejection', (event: Event) => {
   }
   Logger.error('Background', '[UNHANDLED_REJECTION] Unhandled promise rejection in service worker', rejEvent.reason);
 });
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export interface BackgroundSession {
   engine: AgentRunner;
@@ -84,7 +89,7 @@ const sessions = new Map<number, BackgroundSession>();
 function adoptTabIntoSession(session: BackgroundSession, tabId?: number | null): void {
   if (!tabId || sessions.get(tabId) === session) return;
   sessions.set(tabId, session);
-  Logger.info('Background', `[SESSION_EXTENDED] Session from tab [${session.ownerTabId}] now also covers tab [${tabId}].`);
+  Logger.debug('Background', `[SESSION_EXTENDED] Session from tab [${session.ownerTabId}] now also covers tab [${tabId}].`);
 }
 
 /**
@@ -117,7 +122,7 @@ function getOrCreateSession(tabId: number, windowId?: number): BackgroundSession
     adoptTabIntoSession(session!, newTabId);
   });
 
-  Logger.info('Background', `[SESSION_CREATED] New session for tab [${tabId}].`);
+  Logger.debug('Background', `[SESSION_CREATED] New session for tab [${tabId}].`);
   return session;
 }
 
@@ -131,7 +136,11 @@ function getOrCreateSession(tabId: number, windowId?: number): BackgroundSession
  */
 function endSessionForClosedTab(tabId: number): void {
   const session = sessions.get(tabId);
-  if (!session) return;
+  // After a worker restart a tab may have a kept run in storage and no session in this worker.
+  if (!session) {
+    AgentRunner.dropStoredState(tabId);
+    return;
+  }
   sessions.delete(tabId);
 
   if (session.ownerTabId !== tabId) {
@@ -143,7 +152,7 @@ function endSessionForClosedTab(tabId: number): void {
     if (session.engine.activeTabId === tabId) {
       void returnRunToOwnerTab(session, tabId);
     }
-    Logger.info('Background', `[SESSION_TAB_CLOSED] Tab [${tabId}] closed, but its session lives on in its owner tab [${session.ownerTabId}].`);
+    Logger.debug('Background', `[SESSION_TAB_CLOSED] Tab [${tabId}] closed, but its session lives on in its owner tab [${session.ownerTabId}].`);
     return;
   }
 
@@ -157,8 +166,7 @@ function endSessionForClosedTab(tabId: number): void {
     session.engine.stop();
   }
   AgentRunner.forgetSession(session.engine.sessionId);
-  session.engine.dispose?.();
-  Logger.info('Background', `[SESSION_CLOSED] Tab [${tabId}] closed. Its session and persisted state are gone.`);
+  Logger.debug('Background', `[SESSION_CLOSED] Tab [${tabId}] closed. Its session and persisted state are gone.`);
   syncKeepaliveAlarm();
 }
 
@@ -217,7 +225,7 @@ if (typeof chrome !== 'undefined') {
       for (const session of new Set(sessions.values())) {
         for (const [windowId, groupId] of Array.from(session.engine.scoutFoxGroupIds.entries())) {
           if (groupId !== group.id) continue;
-          Logger.info('Background', `[TAB_SANDBOX] ScoutFox tab group [${group.id}] was closed by user (window [${windowId}]).`);
+          Logger.debug('Background', `[TAB_SANDBOX] ScoutFox tab group [${group.id}] was closed by user (window [${windowId}]).`);
           session.engine.scoutFoxGroupIds.delete(windowId);
           void session.engine.persistState();
         }
@@ -249,7 +257,7 @@ if (typeof chrome !== 'undefined' && chrome.declarativeNetRequest) {
         }
       ]
     });
-    Logger.info('Background', '[DNR] Active declarativeNetRequest rule set for AgentRouter (agentrouter.org)');
+    Logger.debug('Background', '[DNR] Active declarativeNetRequest rule set for AgentRouter (agentrouter.org)');
   } catch (err) {
     Logger.warn('Background', '[DNR_WARN] Could not initialize declarativeNetRequest rules', err);
   }
@@ -266,20 +274,19 @@ Logger.setBroadcastCallback((logEntry: unknown) => {
 /**
  * Scope the side panel to one tab at a time, not the whole browser.
  *
- * manifest.json declares side_panel.default_path, which registers the panel globally on
- * EVERY tab as Chrome's fallback. The per-tab enable/disable calls below (onConnect,
- * onCreated, onActivated) are not enough to override that on their own - this is a
- * documented Chrome limitation, not a logic bug: setOptions({tabId, enabled:false}) does not
- * reliably close a panel a global default_path is still offering everywhere else. The fix
- * Chrome's own team and extension samples describe is to explicitly disable the panel
- * EVERYWHERE at startup, so nothing is ever enabled except the specific tab(s) this code
- * turns on. https://github.com/GoogleChrome/chrome-extensions-samples/issues/987
+ * The panel's page is set per tab (see setPanelVisibility and the action.onClicked handler), and
+ * the manifest deliberately has NO side_panel.default_path. Declaring one registers the panel as
+ * Chrome's fallback on EVERY tab of the browser, which is the "ScoutFox shows up everywhere"
+ * symptom a user reported. The workaround that used to sit here disabled the panel globally at
+ * startup; it fixed that symptom but made the panel impossible to open programmatically: with a
+ * global setOptions({enabled:false}) on record, sidePanel.open() either rejects with "No active
+ * side panel for tabId" or resolves without Chrome ever creating the panel document (verified on
+ * Chromium 152, with and without a per-tab enable).
+ *
+ * Without a global default path there is nothing left to override, so no boot-time disable is
+ * needed and open() works. What keeps tabs independent is unchanged: onActivated shows the panel
+ * only on a tab that has a session and hides it everywhere else.
  */
-if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setOptions) {
-  chrome.sidePanel.setOptions({ enabled: false }, () => {
-    lastRuntimeError();
-  });
-}
 
 // openPanelOnActionClick:true and chrome.action.onClicked are mutually exclusive by Chrome's
 // own design - the former means the panel auto-opens globally on click and onClicked NEVER
@@ -303,11 +310,7 @@ if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
     // whether the panel UI can be shown at all. Gating this whole handler on it meant clicking
     // the icon while sitting on chrome://newtab - an entirely ordinary starting point for a
     // browser session - silently did nothing: setOptions and open() never even ran.
-    if (chrome.sidePanel && chrome.sidePanel.setOptions) {
-      chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-        lastRuntimeError();
-      });
-    }
+    setPanelVisibility(tab.id, true);
 
     // MUST be called synchronously in this same tick, with nothing awaited above it. Chrome
     // only honors sidePanel.open() as a genuine response to the click's user gesture for as
@@ -321,36 +324,11 @@ if (typeof chrome !== 'undefined' && chrome.action && chrome.action.onClicked) {
       });
     }
 
-    // Clicking the toolbar icon is a deliberate, explicit "open ScoutFox" gesture - unlike the
-    // internal port reconnects (service worker restarts, a second tab's own panel document
-    // connecting) that must NOT clear an in-progress or just-finished run, and still resume
-    // exactly as before. An idle/finished session, though, should never resurrect a stale
-    // conversation into the next task's LLM prompt (previousTurnsSummary() would recap it)
-    // just because the panel was reopened - so start fresh here instead. Waits for any
-    // in-flight restoreState() first (restorePromise resolves immediately if it already has),
-    // so a just-constructed runner's own restore cannot clobber this clear by loading the old
-    // history right back a moment later; the status re-check inside also protects against a
-    // task that starts between the click and this running.
-    //
-    // The dirty check stops this from eating a run the user is still reading. "Stale" means a
-    // conversation restored from storage that the user already moved on from - not one that
-    // finished thirty seconds ago - and both read as 'idle' on status alone.
-    //
-    // dirty separates them exactly: the constructor sets it false, restoreState never sets it,
-    // and every method that mutates this worker's own runner (startTask, clearHistory, pause,
-    // resume, stop, answerQuestion) sets it true. So !dirty means "everything on screen came
-    // out of storage and nothing has happened in this worker's lifetime" - genuinely stale -
-    // while dirty means a real run happened right here and its result is the user's to keep.
-    const session = getOrCreateSession(tab.id, tab.windowId);
-    session.engine.restorePromise.then(() => {
-      const runner = session.engine;
-      if (runner.status === 'running' || runner.status === 'paused') return;
-      if (runner.dirty) {
-        Logger.info('Background', `[SESSION_KEPT] Icon clicked on an idle session that ran in this worker - keeping its history so a finished run is not wiped by the click that reopens the panel (tab [${tab.id}]).`);
-        return;
-      }
-      runner.clearHistory();
-    });
+    // Clicking the toolbar icon opens the panel on the run the tab has, finished or not, also one
+    // a restarted worker put back from storage: a reopened panel never loses what it showed. Each
+    // task starts its own conversation with the model, so an old run is never fed to the next
+    // one; "New chat" is how the user clears it. The session is built here so its restore starts.
+    getOrCreateSession(tab.id, tab.windowId);
 
     // NO tab group is created here, deliberately.
     //
@@ -393,17 +371,17 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onConnect)
     const session = getOrCreateSession(tabId);
     session.ports.add(port);
     session.lastBroadcastHadNoListeners = false;
-    Logger.info('Background', `[PORT_CONNECT] Sidepanel UI connected to tab [${tabId}]. Active ports for this tab: ${session.ports.size}`);
+    Logger.debug('Background', `[PORT_CONNECT] Sidepanel UI connected to tab [${tabId}]. Active ports for this tab: ${session.ports.size}`);
 
     port.onDisconnect.addListener(() => {
       session.ports.delete(port);
-      Logger.info('Background', `[PORT_DISCONNECT] Sidepanel UI disconnected from tab [${tabId}]. Active ports for this tab: ${session.ports.size}`);
+      Logger.debug('Background', `[PORT_DISCONNECT] Sidepanel UI disconnected from tab [${tabId}]. Active ports for this tab: ${session.ports.size}`);
     });
 
     // Keep the runner's idea of which window it is in current. A session is identified by its
     // tab, but tab groups are per-window, so the runner still needs to know where its tab lives -
     // and a tab can be dragged to another window after the session was created.
-    if (typeof tabId === 'number' && chrome.tabs && chrome.tabs.get) {
+    if (chrome.tabs && chrome.tabs.get) {
       chrome.tabs.get(tabId, (t: chrome.tabs.Tab) => {
         lastRuntimeError();
         if (t && t.windowId !== undefined) session.engine.windowId = t.windowId;
@@ -425,34 +403,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onConnect)
       }
 
       try {
-        port.postMessage({
-          type: 'STATE_UPDATE',
-          payload: {
-            status: session.engine.status,
-            stepCount: session.engine.stepCount,
-            task: session.engine.currentTask,
-            history: session.engine.history,
-            planSteps: session.engine.planSteps,
-            currentPhase: session.engine.currentPhase,
-            graphLocation: session.engine.graphLocation,
-            pauseReason: session.engine.pauseReason,
-            budget: session.engine.budget,
-            // Without this a panel that reconnects while the agent is waiting on ask_user shows a
-            // paused run with no question and no answer box - a dead end the user cannot clear.
-            pendingQuestion: session.engine.pendingQuestion,
-            pendingApproval: session.engine.pendingApproval,
-            pendingConfirm: session.engine.pendingConfirm,
-            pendingChallengeHelp: session.engine.pendingChallengeHelp,
-            pendingContinueBudget: session.engine.pendingContinueBudget,
-            effort: session.engine.effort,
-            effortProfile: session.engine.effortProfile,
-            runStats: session.engine.runStats,
-            findings: session.engine.findings,
-            stateVersion: session.engine.stateVersion,
-            bootId: session.engine.bootId,
-            scoutFoxGroupId: session.engine.scoutFoxGroupId
-          }
-        });
+        port.postMessage({ type: 'STATE_UPDATE', payload: session.engine.getState() });
       } catch (err) {
         Logger.warn('Background', 'Failed sending initial state update on port connect', err);
       }
@@ -461,11 +412,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onConnect)
     // The panel must stay visible on its own tab for as long as the session exists - a panel that
     // connected is a panel the user is looking at. No grouping happens here: that belongs to
     // starting a task, not to opening the panel (see the icon-click handler above).
-    if (typeof tabId === 'number' && chrome.sidePanel && chrome.sidePanel.setOptions) {
-      chrome.sidePanel.setOptions({ tabId, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-        lastRuntimeError();
-      });
-    }
+    setPanelVisibility(tabId, true);
   });
 }
 
@@ -485,7 +432,7 @@ export function broadcastToSession(session: BackgroundSession, type: string, pay
   if (session.ports.size === 0) {
     if (!session.lastBroadcastHadNoListeners) {
       session.lastBroadcastHadNoListeners = true; // set BEFORE logging
-      Logger.warnSilent('Background', `[BROADCAST_DROPPED] No sidepanel connected for tab [${session.engine.sessionId}] - "${type}" updates are being generated but nothing can receive them until that tab's panel reconnects.`);
+      Logger.debugSilent('Background', `[BROADCAST_DROPPED] No sidepanel connected for tab [${session.engine.sessionId}] - "${type}" updates are being generated but nothing can receive them until that tab's panel reconnects.`);
     }
     return;
   }
@@ -495,8 +442,8 @@ export function broadcastToSession(session: BackgroundSession, type: string, pay
       port.postMessage({ type, payload });
     } catch (err) {
       session.ports.delete(port); // remove FIRST, then report
-      const errMsg = err instanceof Error ? err.message : String(err);
-      Logger.warnSilent('Background', `[BROADCAST_ERROR] Dropped a dead sidepanel port for tab [${session.engine.sessionId}] while sending "${type}": ${errMsg}. Active ports for this tab: ${session.ports.size}`);
+      const errMsg = errorText(err);
+      Logger.debugSilent('Background', `[BROADCAST_ERROR] Dropped a dead sidepanel port for tab [${session.engine.sessionId}] while sending "${type}": ${errMsg}. Active ports for this tab: ${session.ports.size}`);
     }
   }
 }
@@ -559,11 +506,11 @@ function syncKeepaliveAlarm(): void {
     if (typeof (keepaliveIntervalId as any)?.unref === 'function') {
       (keepaliveIntervalId as any).unref();
     }
-    Logger.info('Background', '[KEEPALIVE_ON] A task is active somewhere - holding the service worker awake.');
+    Logger.debug('Background', '[KEEPALIVE_ON] A task is active somewhere - holding the service worker awake.');
   } else if (!shouldRun && keepaliveIntervalId !== null) {
     clearInterval(keepaliveIntervalId);
     keepaliveIntervalId = null;
-    Logger.info('Background', '[KEEPALIVE_OFF] No task active in any window - releasing the service worker.');
+    Logger.debug('Background', '[KEEPALIVE_OFF] No task active in any window - releasing the service worker.');
   }
 
   if (typeof chrome === 'undefined' || !chrome.alarms) return;
@@ -584,13 +531,24 @@ function syncKeepaliveAlarm(): void {
   }
 }
 
+/**
+ * Every tab a session may hold the debugger on: owner and adopted tabs (the session map's keys)
+ * plus each runner's current working tab, which a run can reach before it is adopted. The
+ * keepalive's leak sweep must never detach a tab a live run is working in.
+ */
+function tabsInUse(): Set<number> {
+  const ids = new Set<number>(sessions.keys());
+  for (const session of sessions.values()) {
+    const active = session.engine.activeTabId;
+    if (typeof active === 'number') ids.add(active);
+  }
+  return ids;
+}
+
 if (typeof chrome !== 'undefined' && chrome.alarms) {
   chrome.alarms.onAlarm.addListener((alarm: chrome.alarms.Alarm) => {
     if (alarm.name === KEEPALIVE_ALARM_NAME) {
-      Logger.info('Background', `[KEEPALIVE] Heartbeat - ${sessions.size} session(s) tracked.`);
-      void cdp.reconcileLeakedTargets(new Set(Array.from(sessions.keys())));
-      // If the alarm fires while a task is supposedly running but the interval ping is gone,
-      // the worker was terminated and restarted. Re-arm so the task is not left unprotected.
+      void cdp.reconcileLeakedTargets(tabsInUse());
       if (anySessionActive() && keepaliveIntervalId === null) {
         syncKeepaliveAlarm();
       }
@@ -600,8 +558,8 @@ if (typeof chrome !== 'undefined' && chrome.alarms) {
 
 // Every service-worker boot is logged, so an unexplained mid-task restart is visible
 // in the log pane instead of appearing as the UI mysteriously going quiet.
-Logger.info('Background', `[WORKER_BOOT] Service worker started (build ${BUILD_STAMP}). MV3 restarts the worker frequently - this line marks a fresh incarnation.`);
-void cdp.reconcileLeakedTargets(new Set(Array.from(sessions.keys())));
+Logger.debug('Background', `[WORKER_BOOT] Service worker started (build ${BUILD_STAMP}). MV3 restarts the worker frequently - this line marks a fresh incarnation.`);
+void cdp.reconcileLeakedTargets(tabsInUse());
 
 /**
  * Take a tab the USER opened back out of the ScoutFox group, if Chrome put it there.
@@ -629,7 +587,7 @@ function releaseUserTabFromGroup(tab: chrome.tabs.Tab, groupIdForThisWindow?: nu
   if (tab.groupId !== groupIdForThisWindow) return;
   chrome.tabs.ungroup(tab.id, () => {
     lastRuntimeError();
-    Logger.info('Background', `[TAB_RELEASED] Chrome auto-added the user's new Tab ID [${tab.id}] to the 'ScoutFox' group [${groupIdForThisWindow}] because it was opened from a grouped tab. Removed it again - the group only ever holds tabs the agent itself opened (window [${tab.windowId}]).`);
+    Logger.debug('Background', `[TAB_RELEASED] Chrome auto-added the user's new Tab ID [${tab.id}] to the 'ScoutFox' group [${groupIdForThisWindow}] because it was opened from a grouped tab. Removed it again - the group only ever holds tabs the agent itself opened (window [${tab.windowId}]).`);
   });
 }
 
@@ -679,7 +637,7 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
         && session.engine.status === 'running';
       if (!openedByThisSession) {
         if (groupIdForThisWindow) {
-          Logger.info('Background', `[TAB_LEFT_ALONE] Tab [${tab.id}] was opened by the user, not by automation - keeping it outside the 'ScoutFox' group (window [${tab.windowId}]).`);
+          Logger.debug('Background', `[TAB_LEFT_ALONE] Tab [${tab.id}] was opened by the user, not by automation - keeping it outside the 'ScoutFox' group (window [${tab.windowId}]).`);
           releaseUserTabFromGroup(tab, groupIdForThisWindow);
         }
         return;
@@ -695,22 +653,20 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
       if (groupIdForThisWindow && typeof chrome.tabs.group === 'function' && typeof tab.id === 'number') {
         chrome.tabs.group({ tabIds: tab.id, groupId: groupIdForThisWindow }, () => {
           lastRuntimeError();
-          Logger.info('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'ScoutFox' tab group [${groupIdForThisWindow}] (window [${tab.windowId}])`);
+          Logger.debug('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'ScoutFox' tab group [${groupIdForThisWindow}] (window [${tab.windowId}])`);
         });
       }
 
-      if (typeof chrome.sidePanel !== 'undefined' && chrome.sidePanel.setOptions && typeof tab.id === 'number') {
-        chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel/sidepanel.html', enabled: true }, () => {
-          lastRuntimeError();
-        });
-      }
+      if (typeof tab.id === 'number') setPanelVisibility(tab.id, true);
 
       if (session.engine.status === 'running' && typeof tab.id === 'number') {
         const newlyCreatedTabId = tab.id;
         setTimeout(() => {
           chrome.tabs.get(newlyCreatedTabId, (createdTab: chrome.tabs.Tab) => {
+            // A tab that closed within the half second (a popup, a redirect helper) is just gone.
+            if (lastRuntimeError()) return;
             if (createdTab && isValidWebTab(createdTab) && typeof createdTab.id === 'number') {
-              Logger.info('Background', `[NEW_TAB_DETECTED] Automation switching to newly opened Tab ID [${createdTab.id}] (window [${tab.windowId}])`);
+              Logger.debug('Background', `[NEW_TAB_DETECTED] Automation switching to newly opened Tab ID [${createdTab.id}] (window [${tab.windowId}])`);
               session.engine.activeTabId = createdTab.id;
             }
           });
@@ -754,7 +710,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
     } catch (err) {
       Logger.error('Background', `[MESSAGE_ROUTER_ERROR] Uncaught exception handling action [${request?.action}]`, err);
       try {
-        const errMsg = err instanceof Error ? err.message : String(err);
+        const errMsg = errorText(err);
         sendResponse({ success: false, error: `Internal error: ${errMsg}` });
       } catch (_) {
         /* channel already closed */
@@ -777,16 +733,12 @@ function routeMessage(
     // belongs to - is unambiguous here, the way it cannot be for a side-panel-originated
     // message (a side-panel port reaches this worker with no sender.tab at all, which is why
     // the panel has to resolve and send its own tabId).
-    let session: BackgroundSession | null = null;
-    let tabId: number | null = sender.tab?.id !== undefined ? sender.tab.id : null;
-    if (sender.tab && typeof sender.tab.id === 'number') {
-      session = sessions.get(sender.tab.id) ?? null;
-    } else {
-      // Fall back to searching for whichever session currently has an active tab, for the
-      // rare case a sender lacks tab info entirely.
-      for (const s of sessions.values()) {
-        if (s.engine.activeTabId) { session = s; tabId = s.engine.activeTabId; break; }
-      }
+    let tabId = sender.tab?.id;
+    let session = tabId !== undefined ? sessions.get(tabId) : undefined;
+    if (tabId === undefined) {
+      // Fall back to whichever session has an active tab, for the rare sender with no tab info.
+      session = Array.from(sessions.values()).find((s) => s.engine.activeTabId);
+      tabId = session?.engine.activeTabId ?? undefined;
     }
     if (session && typeof tabId === 'number') session.engine.recordNetworkRequest(tabId, payload);
     sendResponse({ success: true });
@@ -817,11 +769,25 @@ function routeMessage(
         // another provider's curated list; the built-ins keep theirs. The HTTP status, when the
         // failure carries one, lets the panel tell "no model list" (404/405) from a real failure.
         const savedCustom = payload?.customProviders?.[payload?.provider]?.models;
-        const fallbacks = Array.isArray(savedCustom) && payload?.provider
-          ? savedCustom
-          : (getFallbackModels ? getFallbackModels(payload?.provider) : []);
-        sendResponse({ success: false, error: err instanceof Error ? err.message : String(err), status: (err as { status?: number })?.status, models: fallbacks });
+        const fallbacks = Array.isArray(savedCustom) ? savedCustom : getFallbackModels(providerId);
+        sendResponse({ success: false, error: errorText(err), status: (err as { status?: number })?.status, models: fallbacks });
       });
+    return true;
+  }
+
+  if (action === 'GET_BUILD') {
+    // The panel compares this with its own stamp. Chrome loads a new panel page from disk on every
+    // open, but keeps the old worker running until the extension is reloaded, so the two can differ.
+    sendResponse({ success: true, build: BUILD_STAMP });
+    return true;
+  }
+
+  if (action === 'GET_EFFORT_SUPPORT') {
+    // Which effort levels the composer offers for the provider and model in the payload (a
+    // settings snapshot, like FETCH_MODELS). For Ollama the first answer may ask /api/show.
+    resolveEffortSupport(payload || {})
+      .then((support) => sendResponse({ success: true, support }))
+      .catch((err) => sendResponse({ success: false, error: errorText(err) }));
     return true;
   }
 
@@ -839,7 +805,7 @@ function routeMessage(
       { signal: probeSignal }
     )
       .then((reply) => sendResponse({ success: true, reply: reply.slice(0, 200), latencyMs: Date.now() - startedAt }))
-      .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err), latencyMs: Date.now() - startedAt }));
+      .catch((err) => sendResponse({ success: false, error: errorText(err), latencyMs: Date.now() - startedAt }));
     return true;
   }
 
@@ -863,7 +829,8 @@ function routeMessage(
     'CONFIRM_ACTION',
     'RESOLVE_CHALLENGE',
     'CONTINUE_BUDGET',
-    'CLEAR_HISTORY'
+    'CLEAR_HISTORY',
+    'GET_SCREENSHOT'
   ]);
 
   if (TAB_ACTIONS.has(action)) {
@@ -882,31 +849,10 @@ function routeMessage(
       // immediately used to race it: a resync landing before the restore finished got back an
       // empty array, which the panel trusted and used to overwrite logs it had already shown.
       // Waiting here makes the answer always complete, so nothing downstream has to guess.
-      Logger.logsRestored().then(() => {
-        sendResponse({
-          status: runner.status,
-          stepCount: runner.stepCount,
-          task: runner.currentTask,
-          history: runner.history,
-          planSteps: runner.planSteps,
-          currentPhase: runner.currentPhase,
-          graphLocation: runner.graphLocation,
-          pauseReason: runner.pauseReason,
-          budget: runner.budget,
-          pendingQuestion: runner.pendingQuestion,
-          pendingApproval: runner.pendingApproval,
-          pendingConfirm: runner.pendingConfirm,
-          pendingChallengeHelp: runner.pendingChallengeHelp,
-          pendingContinueBudget: runner.pendingContinueBudget,
-          effort: runner.effort,
-          effortProfile: runner.effortProfile,
-          runStats: runner.runStats,
-          findings: runner.findings,
-          logs: Logger.getLogsHistory(),
-          stateVersion: runner.stateVersion,
-          bootId: runner.bootId,
-          scoutFoxGroupId: runner.scoutFoxGroupId
-        });
+      // The runner's own restore (the run kept across a worker restart) is waited for too: an
+      // answer before it would be the empty state, and the panel would show the start screen.
+      Promise.all([Logger.logsRestored(), runner.restorePromise.catch(() => {})]).then(() => {
+        sendResponse({ ...runner.getState(), logs: Logger.getLogsHistory() });
       });
       return true;
     }
@@ -937,7 +883,7 @@ function routeMessage(
         .catch((err) => {
           runner.releaseTaskClaim();
           Logger.error('Background', 'Failed to start task', err);
-          sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
+          sendResponse({ success: false, error: errorText(err) });
         });
       return true;
     }
@@ -964,39 +910,22 @@ function routeMessage(
       return true;
     }
 
-    if (action === 'APPROVE_PLAN') {
-      runner.approvePlan(payload).then(() => {
-        sendResponse({ success: true });
-      }).catch((err) => {
-        sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
-      });
+    const replyWhenDone = (work: Promise<unknown>): true => {
+      work.then(() => sendResponse({ success: true }), (err) => sendResponse({ success: false, error: errorText(err) }));
       return true;
-    }
+    };
 
-    if (action === 'CONFIRM_ACTION') {
-      runner.confirmAction(payload && payload.decision, payload && payload.remember).then(() => {
-        sendResponse({ success: true });
-      }).catch((err) => {
-        sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
-      });
-      return true;
-    }
+    if (action === 'APPROVE_PLAN') return replyWhenDone(runner.approvePlan(payload));
+    if (action === 'CONFIRM_ACTION') return replyWhenDone(runner.confirmAction(payload?.decision, payload?.remember));
+    if (action === 'RESOLVE_CHALLENGE') return replyWhenDone(runner.resolveChallenge(payload?.action));
+    if (action === 'CONTINUE_BUDGET') return replyWhenDone(runner.continueBudget(payload?.action, payload?.additionalSteps));
 
-    if (action === 'RESOLVE_CHALLENGE') {
-      runner.resolveChallenge(payload && payload.action).then(() => {
-        sendResponse({ success: true });
-      }).catch((err) => {
-        sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
-      });
-      return true;
-    }
-
-    if (action === 'CONTINUE_BUDGET') {
-      runner.continueBudget(payload && payload.action, payload && payload.additionalSteps).then(() => {
-        sendResponse({ success: true });
-      }).catch((err) => {
-        sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
-      });
+    if (action === 'GET_SCREENSHOT') {
+      // The picture's bytes stay in memory, in the session, and never in a history row. A
+      // picture the registry no longer holds answers success:false, and the panel says so.
+      runner.getScreenshot(String(payload?.imageId || '')).then((held) => {
+        sendResponse(held ? { success: true, data: held.data, mediaType: held.mediaType } : { success: false, error: 'That picture is no longer kept.' });
+      }, (err) => sendResponse({ success: false, error: errorText(err) }));
       return true;
     }
 
@@ -1058,12 +987,10 @@ async function getActiveTab(session: BackgroundSession, requestingTabId?: number
   // group map before it resolves answers null for a session that does in fact have a group,
   // which sends this function down the "nothing to automate" path and opens yet another tab -
   // repeating the whole sequence on every worker restart.
-  if (session.engine.restorePromise) {
-    try {
-      await session.engine.restorePromise;
-    } catch (err) {
-      Logger.warn('Background', '[TAB_PICK] Session restore failed; picking a tab from a clean state', err);
-    }
+  try {
+    await session.engine.restorePromise;
+  } catch (err) {
+    Logger.warn('Background', '[TAB_PICK] Session restore failed; picking a tab from a clean state', err);
   }
 
   // Among the tabs this session covers, prefer the one that is actually in front of the user.
@@ -1092,13 +1019,11 @@ async function getActiveTab(session: BackgroundSession, requestingTabId?: number
   // nothing for Chrome to close.
   if (focused && typeof focused.id === 'number' && isDisposableTab(focused) && typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.update) {
     const focusedTabId = focused.id;
-    Logger.info('Background', `[TAB_REUSED] The session's tab [${focusedTabId}] (${focused.url}) is an empty page, so this task runs in it rather than opening another tab beside it.`);
-    if (session.engine.ensureScoutFoxGroup) {
-      try {
-        await session.engine.ensureScoutFoxGroup(focusedTabId, focused.windowId);
-      } catch (err) {
-        Logger.warn('Background', '[TAB_SANDBOX_ERROR] Could not group the reused tab', err);
-      }
+    Logger.debug('Background', `[TAB_REUSED] The session's tab [${focusedTabId}] (${focused.url}) is an empty page, so this task runs in it rather than opening another tab beside it.`);
+    try {
+      await session.engine.ensureScoutFoxGroup(focusedTabId, focused.windowId);
+    } catch (err) {
+      Logger.warn('Background', '[TAB_SANDBOX_ERROR] Could not group the reused tab', err);
     }
     setPanelVisibility(focusedTabId, true);
     await new Promise<void>((resolve) => {
@@ -1107,9 +1032,7 @@ async function getActiveTab(session: BackgroundSession, requestingTabId?: number
         resolve();
       });
     });
-    if (session.engine.waitForTabComplete) {
-      await session.engine.waitForTabComplete(focusedTabId, 4000);
-    }
+    await session.engine.waitForTabComplete(focusedTabId, 4000);
     return { ...focused, url: START_URL };
   }
 
@@ -1153,14 +1076,12 @@ async function getActiveTab(session: BackgroundSession, requestingTabId?: number
   // the handoff's open() is rejected with "No active side panel for tabId", and onActivated
   // must find the tab already in this session or it disables the panel again on arrival.
   // ensureScoutFoxGroup is idempotent, so startTask calling it again right after is a no-op.
-  if (session.engine.ensureScoutFoxGroup && typeof newTab.id === 'number') {
+  if (typeof newTab.id === 'number') {
     try {
       await session.engine.ensureScoutFoxGroup(newTab.id, newTab.windowId);
     } catch (err) {
       Logger.warn('Background', '[TAB_SANDBOX_ERROR] Could not group the freshly opened tab', err);
     }
-  }
-  if (typeof newTab.id === 'number') {
     setPanelVisibility(newTab.id, true);
     // The run must be visible - driving a background tab is what made a finished run look like
     // nothing had happened - so the tab comes to the front even if the handoff below fails.
@@ -1171,7 +1092,7 @@ async function getActiveTab(session: BackgroundSession, requestingTabId?: number
   // about five seconds, and a slow page load alone can use most of that.
   broadcastToSession(session, 'PANEL_HANDOFF', { tabId: newTab.id, fromTabId: requestingTabId });
 
-  if (session.engine.waitForTabComplete && typeof newTab.id === 'number') {
+  if (typeof newTab.id === 'number') {
     await session.engine.waitForTabComplete(newTab.id, 4000);
   }
 

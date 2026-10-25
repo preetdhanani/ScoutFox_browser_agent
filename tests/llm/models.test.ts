@@ -130,10 +130,19 @@ test('gemini lists the models that can generateContent, without the models/ pref
   assert.deepEqual(await fetchAvailableModels({ provider: 'gemini', apiKey: 'bad' }, true), getFallbackModels('gemini'));
 });
 
-test('anthropic has no list endpoint here: its fallback list is the list', async (t) => {
-  const sent = spyFetch(t);
-  assert.deepEqual(await fetchAvailableModels({ provider: 'anthropic', apiKey: 'k' }, true), ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022']);
+test('anthropic: the list comes from /v1/models with the key header, and the curated ids stand in without a key or on a failure', async (t) => {
+  const sent = spyFetch(t, () => jsonResponse({ data: [{ id: 'claude-sonnet-5-5' }, { id: 'claude-haiku-5-5' }] }));
+  assert.deepEqual(await fetchAvailableModels({ provider: 'anthropic', apiKey: 'k' }, true), ['claude-haiku-5-5', 'claude-sonnet-5-5']);
+  assert.equal(sent[0].url, 'https://api.anthropic.com/v1/models?limit=100');
+  assert.equal(sent[0].headers['x-api-key'], 'k');
+  assert.equal(sent[0].headers['anthropic-version'], '2023-06-01');
+
+  sent.length = 0;
+  assert.deepEqual(await fetchAvailableModels({ provider: 'anthropic' }, true), getFallbackModels('anthropic'), 'no key: no request');
   assert.equal(sent.length, 0);
+
+  spyFetch(t, () => new Response('nope', { status: 401 }));
+  assert.deepEqual(await fetchAvailableModels({ provider: 'anthropic', apiKey: 'bad' }, true), getFallbackModels('anthropic'));
 });
 
 test('nvidia lists models with Bearer auth when key is set, and fetches public catalog without auth when key is missing', async (t) => {

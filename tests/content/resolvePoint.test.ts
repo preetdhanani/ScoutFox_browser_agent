@@ -208,3 +208,30 @@ test('Hit-testing acceptance logic correctly validates target points (live conte
   // 8. Element with pointer-events: none (transparent overlay)
   assert.equal(isAcceptedHit(targetBtn, transparentOverlay), true);
 });
+test('a target inside nested shadow roots is not "covered" by the outer host (web-component pages)', () => {
+  // bahn.de: document.elementFromPoint answers the outer host, and the target lives two shadow
+  // roots down. The old check looked only one root deep and refused every click on the page.
+  const target: any = { tagName: 'BUTTON', parentNode: null, contains: (n: any) => n === target, closest: () => null };
+  const innerRoot: any = { host: null };
+  const innerHost: any = { tagName: 'DB-BUTTON', parentNode: null, contains: (n: any) => n === innerHost, closest: () => null };
+  const outerRoot: any = { host: null };
+  const outerHost: any = { tagName: 'DIV', parentNode: null, contains: (n: any) => n === outerHost, closest: () => null, shadowRoot: outerRoot, style: {} };
+  innerRoot.host = innerHost;
+  outerRoot.host = outerHost;
+  target.parentNode = innerRoot;
+  target.getRootNode = () => innerRoot;
+  innerRoot.parentNode = null;
+  innerRoot.getRootNode = () => innerRoot;
+  innerHost.parentNode = outerRoot;
+  innerHost.getRootNode = () => outerRoot;
+  outerRoot.getRootNode = () => outerRoot;
+  outerRoot.contains = () => false;
+  outerHost.getRootNode = () => ({});
+  assert.equal(liveIsAcceptedHit(target, outerHost), true);
+});
+
+test('an unrelated overlay is still a cover', () => {
+  const target: any = { tagName: 'BUTTON', parentNode: null, getRootNode: () => ({}), contains: (n: any) => n === target, closest: () => null };
+  const overlay: any = { tagName: 'DIV', parentNode: null, getRootNode: () => ({}), contains: (n: any) => n === overlay, closest: () => null, style: {} };
+  assert.equal(liveIsAcceptedHit(target, overlay), false);
+});

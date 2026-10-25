@@ -6,6 +6,8 @@
 //
 // Erasable TypeScript only (no enums, no parameter properties).
 
+import type { EffortLevel } from './llm/effort.ts';
+
 // ---------- small unions ----------
 export type RunStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'error';
 export type ModelTier = 'small' | 'large';
@@ -60,9 +62,13 @@ export interface EffortProfile {
   replanMaxRounds?: number;
   screenshotMode?: string;
 }
+/**
+ * The effort of the running task: how hard the MODEL thinks (llm/effort.ts), never how many steps
+ * it takes. `level` is what the task runs with; `requested` is what the composer sent.
+ */
 export interface EffortChoice {
-  requested: 'auto' | Level;
-  level: Level;
+  requested: EffortLevel;
+  level: EffortLevel;
   suggestedBy: 'user' | 'heuristic' | 'default';
 }
 
@@ -194,6 +200,10 @@ export type HistoryEntry =
       rawResponse: string; mode?: PolicyMode }
   | { type: 'execution_result'; step: number; success: boolean; message?: string; error?: string;
       label?: string; submitted?: boolean; resultData?: unknown;
+      /** The id of the picture this step produced, when it took one. The bytes never go here. */
+      imageId?: string;
+      /** The measured size of that picture, so the panel can size its slot before the bytes arrive. */
+      imageWidth?: number; imageHeight?: number;
       via?: 'cdp' | 'synthetic' | 'background' | 'state'; effect?: Effect;
       verify?: 'ok' | 'no_effect' | 'failed' | 'stuck'; goal?: 'closer' | 'same' | 'away';
       finishRefused?: boolean }
@@ -210,7 +220,7 @@ export type HistoryEntry =
       findings: number; stepsUsed: number }
   | { type: 'finish'; answer: string; unconfirmed?: true; partial?: true; table?: any;
       runStats?: RunStats; offer?: any; stoppedEarly?: string; findings?: Finding[];
-      audit?: any }
+      audit?: any; evidence?: string }
   | { type: 'partial_result'; answer: string; table: any; reason: EndReason;
       runStats?: RunStats; offer?: any; findings?: Finding[];
       skippedSites?: Array<{ siteId: string; site: string; reason: string }> };
@@ -243,6 +253,8 @@ export type BatchStep = {
 
 export type PageAction =
   | { action: 'click'; element_id: number }
+  | { action: 'click_at'; x: number; y: number }
+  | { action: 'take_screenshot' }
   | { action: 'type'; element_id: number; text: string; submit: boolean }
   | { action: 'scroll'; direction: 'up' | 'down' }
   | { action: 'navigate'; url: string }

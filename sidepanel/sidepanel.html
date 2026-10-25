@@ -15,23 +15,35 @@
     <header class="app-header">
       <div class="brand">
         <div class="logo-icon" title="ScoutFox AI Agent">
-          🦊
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.2 3 8.6 8.4 5.6 11.2Q6.6 17 12 21.6Q17.4 17 18.4 11.2L15.4 8.4 20.8 3 15.2 6.2Q12 5.2 8.8 6.2Z"/><circle cx="9.5" cy="12.8" r="1" fill="currentColor" stroke="none"/><circle cx="14.5" cy="12.8" r="1" fill="currentColor" stroke="none"/></svg>
         </div>
         <div class="brand-text">
           <h1>ScoutFox</h1>
-          <span class="badge-tag" id="currentModelBadge">Gemini 1.5 Flash</span>
-          <span class="sandbox-badge hidden" id="sandboxBadge" title="This tab is inside the ScoutFox tab group. The agent is scoped to it.">Sandboxed</span>
+          <span class="brand-meta">
+            <span class="badge-tag" id="currentModelBadge">Gemini 1.5 Flash</span>
+          </span>
         </div>
       </div>
       <div class="header-actions">
-        <button class="btn-history-toggle" id="btnToggleHistory" title="Saved sessions" aria-expanded="false" aria-controls="historyDrawer">History (0)</button>
-        <button class="theme-toggle" id="btnThemeToggle" title="Theme: Auto"></button>
+        <button class="theme-toggle" id="btnThemeToggle" title="Theme: Auto" aria-label="Theme"></button>
         <div class="status-indicator" id="statusPill">
           <span class="status-dot"></span>
           <span class="status-text" id="statusText">Idle</span>
         </div>
+        <button class="icon-btn" id="btnToggleHistory" title="Recent tasks" aria-label="Recent tasks" aria-expanded="false" aria-controls="historyDrawer">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4"/><polyline points="3 3 3 8 8 8"/><polyline points="12 7 12 12 15.5 14"/></svg>
+        </button>
+        <button class="icon-btn" id="btnNewChat" title="New chat" aria-label="New chat">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H8l-5 3v-5.7A8.5 8.5 0 1 1 21 11.5z"/><line x1="12" y1="7.5" x2="12" y2="13.5"/><line x1="9" y1="10.5" x2="15" y2="10.5"/></svg>
+        </button>
       </div>
     </header>
+
+    <!-- Shown when the background worker is from an older build than this page (see checkWorkerBuild) -->
+    <div class="update-banner" id="updateBanner" role="status" hidden>
+      <span class="update-banner-text">ScoutFox was updated. Reload it to use the new version.</span>
+      <button class="update-banner-btn" id="btnReloadExtension" type="button" title="Reloads the extension. A running task stops.">Reload</button>
+    </div>
 
     <!-- Navigation Tabs -->
     <nav class="nav-tabs">
@@ -53,7 +65,9 @@
     <div class="history-drawer" id="historyDrawer" style="display: none;">
       <div class="history-drawer-header">
         <span>Saved sessions</span>
-        <button class="btn btn-secondary btn-xs" id="btnCloseHistory">Close</button>
+        <button class="icon-btn" id="btnCloseHistory" title="Close recent tasks" aria-label="Close recent tasks">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+        </button>
       </div>
       <div class="history-sessions-list" id="historySessionsList"></div>
     </div>
@@ -67,8 +81,8 @@
 
         <div class="timeline-container" id="timeline">
           <div class="empty-state" id="emptyState">
-            <div class="empty-icon-tile">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+            <div class="empty-glyph" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.2 3 8.6 8.4 5.6 11.2Q6.6 17 12 21.6Q17.4 17 18.4 11.2L15.4 8.4 20.8 3 15.2 6.2Q12 5.2 8.8 6.2Z"/><circle cx="9.5" cy="12.8" r="1" fill="currentColor" stroke="none"/><circle cx="14.5" cy="12.8" r="1" fill="currentColor" stroke="none"/></svg>
             </div>
             <h3>What would you like to automate?</h3>
             <p>Enter a task below. ScoutFox will read the page, index elements, and execute browser actions step-by-step.</p>
@@ -106,8 +120,6 @@
           </div>
         </div>
 
-        <!-- NESTED LIVE GRAPH VIEW CONTAINER -->
-        <div class="live-graph-container" id="liveGraphContainer" style="display: none;"></div>
 
         <div class="input-panel">
           <div class="control-bar" id="controlBar" style="display: none;">
@@ -121,23 +133,68 @@
             </button>
           </div>
 
-          <div class="effort-selector-bar" id="effortSelectorBar">
-            <span class="effort-label">Effort</span>
-            <div class="effort-segmented-control" role="radiogroup" aria-label="Task Effort Level">
-              <button type="button" class="effort-btn active" data-effort="auto" title="Automatic heuristic based on task">Auto</button>
-              <button type="button" class="effort-btn" data-effort="low" title="Fast single-pass lookup (1x budget, 0 retries)">Low</button>
-              <button type="button" class="effort-btn" data-effort="medium" title="Balanced multi-site depth (2x budget, 1 retry)">Medium</button>
-              <button type="button" class="effort-btn" data-effort="high" title="Thorough investigation (3x budget, 2 retries)">High</button>
-              <button type="button" class="effort-btn" data-effort="xhigh" title="Deep multi-source research (4x budget, cross-checking)">XHigh</button>
-              <button type="button" class="effort-btn" data-effort="max" title="Maximum effort (8x budget, human escalation)">Max</button>
-            </div>
-          </div>
+          <div class="composer" id="composer">
+            <textarea id="taskInput" class="composer-input" placeholder="Ask ScoutFox to do something..." rows="2"></textarea>
 
-          <div class="input-wrapper">
-            <textarea id="taskInput" placeholder="e.g. Find the price of product X and click Add to Cart..." rows="2"></textarea>
-            <button class="btn btn-primary" id="btnStartTask">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-            </button>
+            <div class="composer-bar">
+              <button type="button" class="composer-icon-btn" id="btnApprovalMode" aria-haspopup="menu" aria-expanded="false" title="Automatically approve" aria-label="Approval mode">
+                <span id="approvalModeIcon" class="composer-icon-slot"></span>
+              </button>
+
+              <div class="composer-meta">
+                <button type="button" class="composer-meta-btn" id="btnEffort" aria-haspopup="menu" aria-expanded="false" title="How hard the model thinks">Medium</button>
+                <span class="composer-sep">·</span>
+                <button type="button" class="composer-model" id="composerModel" aria-haspopup="menu" aria-expanded="false" title="Model">qwen3.8:27b-mlx</button>
+              </div>
+
+              <button class="composer-send" id="btnStartTask" title="Send" aria-label="Send">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+              </button>
+            </div>
+
+            <!-- Approval mode menu (same two choices as the reference) -->
+            <div class="menu" id="approvalMenu" role="menu" hidden>
+              <button type="button" class="menu-item" data-approval="manual" role="menuitemradio" aria-checked="false">
+                <span class="menu-icon">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a1.5 1.5 0 0 0-3 0v4"/><path d="M15 10V4.5a1.5 1.5 0 0 0-3 0V10"/><path d="M12 10V6a1.5 1.5 0 0 0-3 0v8"/><path d="M9 14l-1.6-2.7a1.5 1.5 0 0 0-2.6 1.5L7.7 18A6 6 0 0 0 13 21h1a6 6 0 0 0 6-6v-3a1.5 1.5 0 0 0-2 0"/></svg>
+                </span>
+                <span class="menu-label">Manually approve</span>
+                <span class="menu-check" aria-hidden="true"></span>
+              </button>
+              <button type="button" class="menu-item" data-approval="auto" role="menuitemradio" aria-checked="true">
+                <span class="menu-icon">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polygon points="4 4 12 12 4 20"/><polygon points="11 4 19 12 11 20"/></svg>
+                </span>
+                <span class="menu-label">Automatically approve</span>
+                <span class="menu-check" aria-hidden="true"></span>
+              </button>
+            </div>
+
+            <!-- Effort menu: how hard the model thinks before each step (never the number of steps).
+                 Only the levels the chosen model supports are shown; the note says why. -->
+            <div class="menu" id="effortMenu" role="menu" hidden>
+              <button type="button" class="menu-item" data-effort="auto" role="menuitemradio" aria-checked="false"><span class="menu-label">Auto</span><span class="menu-check" aria-hidden="true"></span></button>
+              <button type="button" class="menu-item" data-effort="off" role="menuitemradio" aria-checked="false"><span class="menu-label">Off</span><span class="menu-check" aria-hidden="true"></span></button>
+              <button type="button" class="menu-item" data-effort="low" role="menuitemradio" aria-checked="false"><span class="menu-label">Low</span><span class="menu-check" aria-hidden="true"></span></button>
+              <button type="button" class="menu-item" data-effort="medium" role="menuitemradio" aria-checked="false"><span class="menu-label">Medium</span><span class="menu-check" aria-hidden="true"></span></button>
+              <button type="button" class="menu-item" data-effort="high" role="menuitemradio" aria-checked="false"><span class="menu-label">High</span><span class="menu-check" aria-hidden="true"></span></button>
+              <button type="button" class="menu-item" data-effort="max" role="menuitemradio" aria-checked="false"><span class="menu-label">Max</span><span class="menu-check" aria-hidden="true"></span></button>
+              <div class="menu-note" id="effortMenuNote"></div>
+            </div>
+
+            <!-- Model menu: every model of the chosen provider, scrollable, plus a hand-typed id -->
+            <div class="menu menu-scroll" id="modelMenu" role="menu" hidden>
+              <div class="menu-search">
+                <input type="text" id="modelMenuSearch" class="menu-search-input" placeholder="Search models..." autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="menu-scroll-list" id="modelMenuList"></div>
+              <div class="menu-custom">
+                <input type="text" id="modelMenuCustom" class="menu-search-input" placeholder="Custom model id..." autocomplete="off" spellcheck="false" />
+                <button type="button" class="composer-icon-btn" id="modelMenuCustomApply" title="Use this model" aria-label="Use this model">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="4.5 12.5 9.5 17.5 19.5 7"/></svg>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -229,17 +286,7 @@
             </div>
           </div>
 
-          <!-- Model Overrides (Optional) -->
-          <div class="form-row">
-            <div class="form-group half">
-              <label class="form-label" for="plannerModelInput">Planner Model Override</label>
-              <input type="text" id="plannerModelInput" class="form-input" placeholder="Default: main model">
-            </div>
-            <div class="form-group half">
-              <label class="form-label" for="reflectModelInput">Reflect Model Override</label>
-              <input type="text" id="reflectModelInput" class="form-input" placeholder="Default: main model">
-            </div>
-          </div>
+          <!-- Model Overrides removed: the agent always plans and reflects with the same model it uses for everything else. -->
 
           <!-- Ollama-only: local models have no vendor-side output cap, so this is the only
                ceiling on a single generation. Always shown rather than hidden per-provider,
@@ -259,35 +306,30 @@
             <span class="subtext-hint">How long to wait for a single reply before retrying. Raise this if you see "did not respond within Ns" errors on a slow provider or local model.</span>
           </div>
 
-          <!-- Default Effort Level -->
+          <!-- Default Effort Level: the model's reasoning level, sent in each provider's own field. -->
           <div class="form-group" id="effortDefaultGroup">
-            <label class="form-label" for="effortDefaultSelect">Default Effort Level</label>
+            <label class="form-label" for="effortDefaultSelect">Default Effort</label>
             <select id="effortDefaultSelect" class="form-select">
-              <option value="medium">Medium (2x budget, 1 retry - Recommended)</option>
-              <option value="low">Low (1x budget, 0 retries - Fast)</option>
-              <option value="high">High (3x budget, 2 retries - Thorough)</option>
-              <option value="xhigh">XHigh (4x budget, cross-checking)</option>
-              <option value="max">Max (8x budget, human escalation)</option>
+              <option value="auto">Auto (the model's own default)</option>
+              <option value="off">Off (no thinking, where the model allows it)</option>
+              <option value="low">Low (thinks briefly)</option>
+              <option value="medium">Medium (Recommended)</option>
+              <option value="high">High (thinks longer)</option>
+              <option value="max">Max (the most the model allows)</option>
             </select>
-            <span class="subtext-hint">Default effort used when Auto mode resolves or when no level is explicitly chosen.</span>
+            <span class="subtext-hint">How hard the model thinks before each step. It is sent in the provider's own reasoning setting and never changes the step limit. Custom endpoints get no effort setting.</span>
           </div>
 
-          <!-- Feature Toggles -->
-          <div class="form-group toggle-group">
-            <label class="toggle-label" for="badgesToggle">
-              <span>Show Floating Element Badges `[1]`, `[2]` on Webpage</span>
-              <input type="checkbox" id="badgesToggle" checked>
-            </label>
+          <div class="form-group" id="effortAdaptiveGroup">
+            <label class="form-label" for="effortAdaptiveSelect">Thinking on Routine Steps</label>
+            <select id="effortAdaptiveSelect" class="form-select">
+              <option value="on">One level less (saves tokens - Recommended)</option>
+              <option value="off">Same as the chosen effort</option>
+            </select>
+            <span class="subtext-hint">The first step and the step after a failed action always get the chosen effort.</span>
           </div>
 
-          <!-- execute_js is opt-in: off, the model is not offered it and the engine refuses it. -->
-          <div class="form-group toggle-group" id="executeJsGroup">
-            <label class="toggle-label" for="executeJsToggle">
-              <span>Allow the agent to run JavaScript on pages</span>
-              <input type="checkbox" id="executeJsToggle">
-            </label>
-            <span class="subtext-hint">Off by default. A script runs with the page's rights, including your login cookies on that site. You still approve every script on a card that shows its code. Only large models get it. Turning it on applies from the next task; turning it off stops scripts at once.</span>
-          </div>
+          <!-- Element badges stay off: the agent navigates by reading page text and structure, not by visual markers. -->
 
           <button class="btn btn-primary btn-block" id="btnSaveSettings">Save Settings</button>
         </div>
@@ -297,7 +339,7 @@
       <section id="tab-logs" class="tab-panel">
         <div class="logs-container">
           <div class="logs-header">
-            <h3>Backend System Telemetry</h3>
+            <h3>Run log</h3>
             <div style="display: flex; gap: 4px;">
               <button class="btn btn-secondary btn-xs" id="btnCopyLogs">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="1.5"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
@@ -312,14 +354,13 @@
           </div>
 
           <div class="log-toolbar">
-            <span class="log-filter-chip active" data-filter="all">All</span>
-            <span class="log-filter-chip" data-filter="DOM">DOM</span>
-            <span class="log-filter-chip" data-filter="LLM">LLM</span>
-            <span class="log-filter-chip" data-filter="EXECUTION">Action</span>
-            <span class="log-filter-chip" data-filter="NETWORK">Network</span>
+            <span class="log-filter-chip active" data-filter="all" title="The run: task, steps, model calls, and any warning">All</span>
+            <span class="log-filter-chip" data-filter="agent" title="What the agent did, step by step">Agent steps</span>
+            <span class="log-filter-chip" data-filter="llm" title="Each call to the model: what was sent and what came back">Model calls</span>
+            <span class="log-filter-chip" data-filter="system" title="The extension's own machinery: ports, worker, tabs">System</span>
           </div>
 
-          <div class="log-output" id="logOutput">// Waiting for backend system logs...</div>
+          <div class="log-output" id="logOutput"><div class="subtext-hint log-empty">Nothing logged yet. Start a task and every model call and step appears here.</div></div>
         </div>
       </section>
 

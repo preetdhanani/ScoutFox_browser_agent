@@ -7,14 +7,18 @@
 // Must stay the first import: it sets zod's jitless flag before any module that bundles zod runs (see the file).
 import '../src/background/boot/zodJitless.ts';
 import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../src/shared/storage.ts';
+import { extractReadableAnswer } from '../src/shared/answerText.ts';
+import { BUILD_STAMP, IS_BUILD } from '../src/shared/build.ts';
 import {
   renderActionConfirmationCard,
   renderChallengeHelpCard,
   renderContinueBudgetCard,
-  renderReplanApprovalCard,
   renderProvenanceFindingsTable
 } from './cards.js';
-import { updateLiveGraphView } from './graphStrip.js';
+
+import { FOX_MARK } from './brand.js';
+import { logEntryHtml, logMatchesFilter, parseLogData, treeStateKey } from './logView.js';
+
 import {
   initCustomProviderDialog,
   providerMeta,
@@ -49,6 +53,9 @@ let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
 let apiKeyFetchDebounce = null;
 let allFetchedModels = [];
+// The provider id the list above was fetched for. The composer's model menu uses it to notice
+// that the provider changed since then and fetch the new provider's list before showing it.
+let allFetchedModelsProvider = null;
 
 // The authoritative selected model.
 //
@@ -58,19 +65,39 @@ let allFetchedModels = [];
 // default was not already in the list persisted model: '' and then fell back to whatever
 // happened to be first in the hardcoded list. Keep the truth here instead of in the DOM.
 let selectedModel = null;
+// The Settings picker's "Enter custom model name..." row. It is a UI choice (open the text field),
+// never a model id: it must not reach selectedModel, the screen or the storage.
+const CUSTOM_MODEL_OPTION = '__custom__';
+// True while that text field is open, so the row stays marked as the one chosen.
+let customModelFieldOpen = false;
 let currentEffort = 'auto';
+// The level the user picked. currentEffort is what this model can take of it (the nearest level it
+// supports), so switching to a model that supports more brings the pick back.
+let preferredEffort = 'auto';
+// The levels the chosen model supports (background/llm/effort.ts), and why. Until the background
+// answers, every level is offered.
+/** Whether the last rendered state was a running or paused run, to notice when one ends. */
+let effortRunWasActive = false;
+let effortSupport = { levels: ['auto', 'off', 'low', 'medium', 'high', 'max'], note: '' };
+// 'auto' runs the task straight through; 'manual' stops at the plan and waits for the
+// user's approval before the first action. Persisted as settings.autoApprove.
+let approvalMode = 'auto';
 // Guards the window between clicking send and the background confirming the task started.
 let isSubmittingTask = false;
 // Mirrors the engine status the panel last rendered, so the submit guard knows whether
 // renderState() has taken ownership of the send button.
 let isTaskActive = false;
+// The provider and model the live run started with, for the run's model chip. Taken when this
+// panel submits the task, or at the first live state a panel opened mid-run sees; cleared when
+// the run ends. A model changed in Settings during the run applies to the next run, not this one.
+let runModelSnapshot = null;
 let portReconnectAttempts = 0;
 let portReconnectTimer = null;
 // False only for this panel instance's very first connect. Distinguishes opening the panel
 // from reconnecting after Chrome reclaimed the service worker.
 let hasConnectedBefore = false;
 // Terminal state is broadcast more than once for the same run; this keeps the write to one
-// per (session, history length) rather than one per broadcast.
+// per (run, history length) rather than one per broadcast.
 const savedSessionIds = new Set();
 
 // Out-of-order render guard. The live port and the GET_AGENT_STATE resync are two independent
@@ -90,6 +117,19 @@ const expandedRows = new Set();       // "turn:index" of rows whose reasoning is
 // Same reason, for the answer audit <details> on a finish card: the key is the turn number as a
 // string. Without this a details block the user opened would snap shut on the next broadcast.
 const openAuditDetails = new Set();
+
+/**
+ * The pictures this panel has fetched, by id: the data URL, and the decoded <img> element itself.
+ *
+ * The timeline is rebuilt from scratch on every state broadcast, so an <img> inside the rebuilt
+ * subtree would decode again on every one of them and the eye would catch a blank frame. Moving
+ * an already-decoded element into the new subtree does not decode it again, so the element is
+ * kept here and re-attached after each render.
+ */
+const shotCache = new Map(); // imageId -> { dataUrl: string, img: HTMLImageElement }
+
+/** The ids whose bytes the background said it no longer has, so the panel stops asking. */
+const shotGone = new Set();
 // Turns whose notes the reader closed although they open by default (an unverified answer).
 const closedAuditDetails = new Set();
 
@@ -113,6 +153,7 @@ const ICONS = {
   globe: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.5 3.8 5.6 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.6-3.8-9s1.3-6.5 3.8-9z"/></svg>',
   eye: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></svg>',
   pointer: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M5 3l6.5 17 2.4-6.6 6.6-2.4z"/></svg>',
+  camera: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h1.8l1.2-1.8h5l1.2 1.8h1.8A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/><circle cx="12" cy="12.5" r="3.2"/></svg>',
   keyboard: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8" stroke-linecap="round"/></svg>',
   enter: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 5v6a3 3 0 0 1-3 3H5"/><polyline points="9 10 5 14 9 18"/></svg>',
   scrollIco: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 4 12 8 16 4"/><polyline points="8 20 12 16 16 20"/></svg>',
@@ -122,26 +163,19 @@ const ICONS = {
   layers: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><polygon points="12 3 21 8 12 13 3 8"/><polyline points="3 13 12 18 21 13"/></svg>',
   ask: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.2a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.9.7-.9 1.3v.4"/><circle cx="12" cy="16.6" r="0.6" fill="currentColor" stroke="none"/></svg>',
   chevron: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>',
+  chevronRight: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 5 11 12 5 19"/></svg>',
+  chevronDown: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="19 5 13 12 19 19"/></svg>',
   aim: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>',
   // A plan step the harness skipped because no page of its source was ever read. Same 12px box
   // as `check` so the two rows line up; a dash in a ring reads as "not done", never as "done".
   skip: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="8" y1="12" x2="16" y2="12"/></svg>'
 };
 
-/**
- * Log filter chips -> the tag prefixes the codebase actually emits.
- *
- * These used to be matched as a literal `[DOM]` / `[LLM]` / `[EXECUTION]` token, but nothing
- * anywhere logs those exact strings — the real tags are [DOM_SNAPSHOT_INPUT], [LLM_RAW_OUTPUT],
- * [ACTION_DISPATCH] and so on. Four of the five chips therefore matched nothing at all and
- * rendered a permanently empty pane. Match on real prefixes instead, case-insensitively.
- */
-const LOG_FILTER_KEYWORDS = {
-  DOM: ['[DOM', '[SNAPSHOT', '[PAGE', 'DOMCOMPRESSOR'],
-  LLM: ['[LLM', '[PLANNER', '[PARSE', '[UNIVERSAL_GUARDRAIL', 'APICLIENT'],
-  EXECUTION: ['[ACTION', '[EXEC', '[TASK', '[STEP', '[GUARDRAIL', '[STOPPED', '[PAUSED', '[RESUMED'],
-  NETWORK: ['[NET', '[DNR', '[FETCH', '[KEEPALIVE', '[PORT', '[BROADCAST', '[WORKER', '[RESYNC']
-};
+/** Entries the Logs tab keeps, the same bound as the worker's log store. */
+const MAX_PANEL_LOGS = 500;
+
+/** Which nodes of the log trees are open, by "<entry id>|<path>", so a re-render keeps them. */
+const logTreeState = new Map();
 
 const THEME_MODES = ['system', 'light', 'dark'];
 const THEME_ICON = {
@@ -150,6 +184,117 @@ const THEME_ICON = {
   dark: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>'
 };
 const THEME_LABEL = { system: 'Auto (matches system)', light: 'Light', dark: 'Dark' };
+
+function applyApprovalMode(mode) {
+  approvalMode = mode === 'manual' ? 'manual' : 'auto';
+  const btn = document.getElementById('btnApprovalMode');
+  const icon = document.getElementById('approvalModeIcon');
+  if (icon) icon.innerHTML = APPROVAL_ICON[approvalMode];
+  if (btn) {
+    btn.title = APPROVAL_TITLE[approvalMode];
+    btn.setAttribute('aria-label', APPROVAL_TITLE[approvalMode]);
+  }
+  document.querySelectorAll('#approvalMenu .menu-item').forEach((item) => {
+    const checked = item.getAttribute('data-approval') === approvalMode;
+    const check = item.querySelector('.menu-check');
+    if (check) check.innerHTML = checked ? MENU_CHECK : '';
+    item.setAttribute('aria-checked', String(checked));
+  });
+}
+
+const EFFORT_LABEL = { auto: 'Auto', off: 'Off', low: 'Low', medium: 'Medium', high: 'High', max: 'Max' };
+const EFFORT_ORDER = ['off', 'low', 'medium', 'high', 'max'];
+
+/** A stored or picked value as a level: the old 'xhigh' is 'max', anything unknown is 'auto'. */
+function normalizeEffort(effort) {
+  if (effort === 'xhigh') return 'max';
+  return EFFORT_LABEL[effort] ? effort : 'auto';
+}
+
+/** The supported level nearest to the pick: Off on a model that cannot stop thinking is Low, Max where High is the top is High. */
+function nearestSupportedEffort(effort, levels) {
+  if (levels.includes(effort)) return effort;
+  // A level that thinks never becomes Off: only Off itself, or a model with nothing else, may.
+  const thinking = levels.filter((level) => level !== 'auto' && (effort === 'off' || level !== 'off'));
+  if (effort === 'auto' || thinking.length === 0) return 'auto';
+  const want = EFFORT_ORDER.indexOf(effort);
+  return thinking.reduce((best, level) => (Math.abs(EFFORT_ORDER.indexOf(level) - want) < Math.abs(EFFORT_ORDER.indexOf(best) - want) ? level : best), thinking[0]);
+}
+
+function setEffort(effort) {
+  preferredEffort = normalizeEffort(effort);
+  renderEffort();
+}
+
+/** The composer's effort button and menu, for the pick and the model's support. */
+function renderEffort() {
+  const levels = effortSupport.levels && effortSupport.levels.length ? effortSupport.levels : ['auto'];
+  currentEffort = nearestSupportedEffort(preferredEffort, levels);
+  const onlyAuto = levels.length === 1;
+  const btn = document.getElementById('btnEffort');
+  if (btn) {
+    btn.textContent = EFFORT_LABEL[currentEffort];
+    btn.title = onlyAuto
+      ? `Effort: ${effortSupport.note || 'this model has no reasoning setting.'}`
+      : `Effort: how hard the model thinks before each step (${EFFORT_LABEL[currentEffort]})`;
+  }
+  document.querySelectorAll('#effortMenu .menu-item').forEach((item) => {
+    const level = item.getAttribute('data-effort');
+    item.hidden = !levels.includes(level);
+    const checked = level === currentEffort;
+    const check = item.querySelector('.menu-check');
+    if (check) check.innerHTML = checked ? MENU_CHECK : '';
+    item.setAttribute('aria-checked', String(checked));
+  });
+  const note = document.getElementById('effortMenuNote');
+  if (note) note.textContent = effortSupport.note || '';
+}
+
+/**
+ * Asks the background which effort levels the chosen provider and model take. Called whenever the
+ * model changes. A late answer for a model that is no longer chosen is dropped.
+ */
+let effortSupportAsk = 0;
+function refreshEffortSupport() {
+  const provider = document.getElementById('providerSelect')?.value || currentSettings.provider;
+  const model = selectedModel || currentSettings.providerConfigs?.[provider]?.model || currentSettings.model || '';
+  const ask = ++effortSupportAsk;
+  sendBgMessage({
+    action: 'GET_EFFORT_SUPPORT',
+    payload: {
+      provider,
+      model,
+      baseUrl: currentSettings.providerConfigs?.[provider]?.baseUrl || (provider === currentSettings.provider ? currentSettings.baseUrl : ''),
+      providerConfigs: currentSettings.providerConfigs,
+      customProviders: currentSettings.customProviders
+    }
+  }, (res) => {
+    if (ask !== effortSupportAsk || !res || !res.success || !res.support) return;
+    effortSupport = res.support;
+    renderEffort();
+  });
+}
+
+/** The model shown in the composer, in step with the badge in the header. Clicking it opens the
+    provider's model menu, so the tooltip says both. */
+function refreshComposerModel() {
+  const el = document.getElementById('composerModel');
+  if (!el) return;
+  const label = selectedModel || currentSettings.model || 'model';
+  el.textContent = label;
+  el.title = `Model: ${label}. The models of the chosen provider are one click away.`;
+}
+
+/** The approval icon in the composer, the same two glyphs as the menu items. */
+const APPROVAL_ICON = {
+  auto: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polygon points="4 4 12 12 4 20"/><polygon points="11 4 19 12 11 20"/></svg>',
+  manual: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a1.5 1.5 0 0 0-3 0v4"/><path d="M15 10V4.5a1.5 1.5 0 0 0-3 0V10"/><path d="M12 10V6a1.5 1.5 0 0 0-3 0v8"/><path d="M9 14l-1.6-2.7a1.5 1.5 0 0 0-2.6 1.5L7.7 18A6 6 0 0 0 13 21h1a6 6 0 0 0 6-6v-3a1.5 1.5 0 0 0-2 0"/></svg>'
+};
+const APPROVAL_TITLE = {
+  auto: 'Automatically approve - the agent runs without asking',
+  manual: 'Manually approve - the agent shows its plan first'
+};
+const MENU_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4.5 12.5 9.5 17.5 19.5 7"/></svg>';
 
 /**
  * Simple toast notification system
@@ -203,6 +348,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
   initTabs();
   initTimelineInteraction();
+  initLogInteractions();
   initPortConnection();
   initEventListeners();
   initCombobox();
@@ -245,6 +391,29 @@ if (document.readyState === 'complete' || document.readyState === 'interactive')
 }
 
 /**
+ * The timeout a provider holds for itself, or 0 when it has none. Mirrors the first two steps of
+ * timeoutMsOf (src/background/llm/settings.ts): providerConfigs[id].llmTimeoutMs, then a custom
+ * provider's descriptor. When this is set, the engine never reads the global llmTimeoutMs.
+ */
+function providerOwnTimeoutOf(settings, provider) {
+  const configMs = Number(settings?.providerConfigs?.[provider]?.llmTimeoutMs);
+  if (configMs > 0) return configMs;
+  const customMs = Number(settings?.customProviders?.[provider]?.llmTimeoutMs);
+  if (customMs > 0) return customMs;
+  return 0;
+}
+
+/** The value the LLM Timeout field shows for a provider: the one the engine will use. */
+function timeoutShownFor(settings, provider) {
+  const own = providerOwnTimeoutOf(settings, provider);
+  if (own > 0) return own;
+  // A custom provider has no curated default, so its fallback is the global one.
+  const isCustom = isCustomProviderId(provider, settings);
+  const defaultTimeout = isCustom ? DEFAULT_SETTINGS.llmTimeoutMs : (DEFAULT_PROVIDER_CONFIGS[provider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs);
+  return provider === 'nvidia' ? defaultTimeout : (settings.llmTimeoutMs || defaultTimeout);
+}
+
+/**
  * Load settings into form controls with per-provider memory restoration
  */
 async function loadSettings() {
@@ -268,24 +437,15 @@ async function loadSettings() {
   document.getElementById('maxStepsInput').value = currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
   document.getElementById('delayInput').value = currentSettings.actionDelayMs || DEFAULT_SETTINGS.actionDelayMs;
   document.getElementById('ollamaNumPredictInput').value = currentSettings.ollamaNumPredict || DEFAULT_SETTINGS.ollamaNumPredict;
-  // A custom provider has no curated default; its per-provider timeout (set in the dialog) is
-  // already in providerCfg, so the fallback here is the global one.
-  const defaultTimeout = activeIsCustom ? DEFAULT_SETTINGS.llmTimeoutMs : (DEFAULT_PROVIDER_CONFIGS[activeProvider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs);
-  document.getElementById('llmTimeoutInput').value = providerCfg.llmTimeoutMs || (activeProvider === 'nvidia' ? defaultTimeout : (currentSettings.llmTimeoutMs || defaultTimeout));
-  document.getElementById('badgesToggle').checked = currentSettings.showElementBadges !== false;
-  document.getElementById('executeJsToggle').checked = currentSettings.allowExecuteJs === true;
+  document.getElementById('llmTimeoutInput').value = timeoutShownFor(currentSettings, activeProvider);
   const effortSelect = document.getElementById('effortDefaultSelect');
   if (effortSelect) {
-    effortSelect.value = currentSettings.effortDefault || 'medium';
+    effortSelect.value = normalizeEffort(currentSettings.effortDefault || 'medium');
   }
-  const plannerInput = document.getElementById('plannerModelInput');
-  if (plannerInput) {
-    plannerInput.value = currentSettings.plannerModel || '';
-  }
-  const reflectInput = document.getElementById('reflectModelInput');
-  if (reflectInput) {
-    reflectInput.value = currentSettings.reflectModel || '';
-  }
+  const effortAdaptiveSelect = document.getElementById('effortAdaptiveSelect');
+  if (effortAdaptiveSelect) effortAdaptiveSelect.value = currentSettings.effortAdaptive === false ? 'off' : 'on';
+  setEffort(currentSettings.effortDefault || 'medium');
+  applyApprovalMode(currentSettings.autoApprove === false ? 'manual' : 'auto');
 
   // Visibility: Hide Ollama settings if not using Ollama
   const ollamaGroup = document.getElementById('ollamaNumPredictGroup');
@@ -304,12 +464,16 @@ function syncCustomProviderActions(providerId) {
 }
 
 /**
- * Update active model label and backing select element
+ * Update active model label and backing select element. Takes a real model id only; the custom
+ * row of the Settings picker goes through pickComboboxModel, which opens the text field instead.
  */
 function updateSelectedModel(modelName) {
+  if (modelName === CUSTOM_MODEL_OPTION) {
+    setCustomModelFieldOpen(true);
+    return;
+  }
   const labelEl = document.getElementById('modelSelectedLabel');
   const selectEl = document.getElementById('modelSelect');
-  const customInput = document.getElementById('modelCustomInput');
 
   selectedModel = modelName || null;
 
@@ -326,12 +490,45 @@ function updateSelectedModel(modelName) {
     selectEl.value = modelName || '';
   }
   updateModelBadge(modelName);
+  refreshComposerModel();
+}
 
-  if (modelName === '__custom__') {
-    if (customInput) customInput.style.display = 'block';
-  } else {
-    if (customInput) customInput.style.display = 'none';
+/** Shows or hides the Settings field for a model id typed by hand. */
+function setCustomModelFieldOpen(open) {
+  const wasOpen = customModelFieldOpen;
+  customModelFieldOpen = open;
+  const customInput = document.getElementById('modelCustomInput');
+  if (!customInput) return;
+  customInput.style.display = open ? 'block' : 'none';
+  if (open) {
+    // A fresh field each time it opens; picking the row again while typing keeps the text.
+    if (!wasOpen) customInput.value = '';
+    customInput.focus();
   }
+}
+
+/**
+ * A click on a row of the Settings model picker. The custom row only opens the text field: there
+ * is nothing to save until an id is typed there (see commitTypedModel). A listed model is put into
+ * effect and saved at once.
+ */
+async function pickComboboxModel(value) {
+  closeComboboxMenu();
+  if (value === CUSTOM_MODEL_OPTION) {
+    setCustomModelFieldOpen(true);
+    return;
+  }
+  setCustomModelFieldOpen(false);
+  updateSelectedModel(value);
+  await autoSaveCurrentForm();
+}
+
+/** Saves the id typed in the Settings custom field, once there is one. */
+async function commitTypedModel() {
+  const value = (document.getElementById('modelCustomInput')?.value || '').trim();
+  if (!value) return;
+  updateSelectedModel(value);
+  await autoSaveCurrentForm();
 }
 
 /**
@@ -347,8 +544,12 @@ function renderModelOptions(modelsList) {
   const currentSelected = (selectEl && selectEl.value) ? selectEl.value : savedModel;
 
   const combinedList = [...modelsList];
-  if (savedModel && savedModel !== '__custom__' && !combinedList.includes(savedModel)) {
+  if (savedModel && savedModel !== CUSTOM_MODEL_OPTION && !combinedList.includes(savedModel)) {
     combinedList.unshift(savedModel);
+  }
+  // An id typed by hand and not saved yet is still the selected one, so it stays in the list.
+  if (currentSelected && currentSelected !== CUSTOM_MODEL_OPTION && !combinedList.includes(currentSelected)) {
+    combinedList.unshift(currentSelected);
   }
 
   if (selectEl) {
@@ -360,12 +561,12 @@ function renderModelOptions(modelsList) {
       selectEl.appendChild(opt);
     });
     const customOpt = document.createElement('option');
-    customOpt.value = '__custom__';
+    customOpt.value = CUSTOM_MODEL_OPTION;
     customOpt.textContent = 'Custom model name…';
     selectEl.appendChild(customOpt);
   }
 
-  if (combinedList.length === 0 && savedModel !== '__custom__') {
+  if (combinedList.length === 0) {
     // A custom provider with an empty saved list is a real state, not a failed fetch: the picker
     // says so and keeps accepting ids typed by hand.
     const emptySource = Array.isArray(modelsList) && modelsList.length === 0 && providerMeta(activeProvider, currentSettings).isCustom;
@@ -380,17 +581,12 @@ function renderModelOptions(modelsList) {
     return `<div class="combobox-option-item ${isSelected ? 'selected' : ''}" data-value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</div>`;
   }).join('');
 
-  html += `<div class="combobox-option-item custom-option ${activeModel === '__custom__' ? 'selected' : ''}" data-value="__custom__">✏️ Enter custom model name...</div>`;
+  html += `<div class="combobox-option-item custom-option ${customModelFieldOpen ? 'selected' : ''}" data-value="${CUSTOM_MODEL_OPTION}">✏️ Enter custom model name...</div>`;
 
   optionsContainer.innerHTML = html;
 
   optionsContainer.querySelectorAll('.combobox-option-item').forEach(item => {
-    item.addEventListener('click', async () => {
-      const val = item.getAttribute('data-value');
-      updateSelectedModel(val);
-      closeComboboxMenu();
-      await autoSaveCurrentForm();
-    });
+    item.addEventListener('click', () => pickComboboxModel(item.getAttribute('data-value')));
   });
 
   updateSelectedModel(activeModel);
@@ -489,14 +685,19 @@ function closeComboboxMenu() {
  */
 async function autoSaveCurrentForm() {
   const provider = document.getElementById('providerSelect').value;
-  const customVal = document.getElementById('modelCustomInput').value.trim();
-  const finalModel = (selectedModel === '__custom__' && customVal) ? customVal : (selectedModel || '');
+  // selectedModel only ever holds a real id (the custom row is not one), checked once more here
+  // because this is the one place a model reaches the storage and, from there, the provider.
+  const finalModel = (selectedModel && selectedModel !== CUSTOM_MODEL_OPTION) ? selectedModel : '';
 
   const apiKey = document.getElementById('apiKeyInput').value.trim();
   const baseUrl = document.getElementById('baseUrlInput').value.trim();
 
   const previousModel = (currentSettings.providerConfigs && currentSettings.providerConfigs[provider]
     && currentSettings.providerConfigs[provider].model) || '';
+
+  // The input's min="5000" is not enforced on read, and the field is in ms - a user typing "1"
+  // or "1000" (thinking seconds) would otherwise make every LLM call abort almost immediately.
+  const llmTimeoutMs = Math.max(5000, parseInt(document.getElementById('llmTimeoutInput').value, 10) || (DEFAULT_PROVIDER_CONFIGS[provider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs));
 
   const newSettings = {
     provider,
@@ -508,20 +709,33 @@ async function autoSaveCurrentForm() {
     maxSteps: parseInt(document.getElementById('maxStepsInput').value, 10) || DEFAULT_SETTINGS.maxSteps,
     actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || DEFAULT_SETTINGS.actionDelayMs,
     ollamaNumPredict: parseInt(document.getElementById('ollamaNumPredictInput').value, 10) || DEFAULT_SETTINGS.ollamaNumPredict,
-    // The input's min="5000" is not enforced on read, and the field is in ms - a user typing "1"
-    // or "1000" (thinking seconds) would otherwise make every LLM call abort almost immediately.
-    llmTimeoutMs: Math.max(5000, parseInt(document.getElementById('llmTimeoutInput').value, 10) || (DEFAULT_PROVIDER_CONFIGS[provider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs)),
-    showElementBadges: document.getElementById('badgesToggle').checked,
-    allowExecuteJs: document.getElementById('executeJsToggle').checked === true,
+    llmTimeoutMs,
+    // JavaScript is always on; screenshots are always on too. Neither has a user toggle anymore.
+    allowExecuteJs: true,
+    screenshots: true,
     effortDefault: document.getElementById('effortDefaultSelect')?.value || currentSettings.effortDefault || 'medium',
-    plannerModel: (document.getElementById('plannerModelInput')?.value || '').trim(),
-    reflectModel: (document.getElementById('reflectModelInput')?.value || '').trim()
+    effortAdaptive: (document.getElementById('effortAdaptiveSelect')?.value || 'on') !== 'off'
   };
+
+  // A provider with a timeout of its own (a custom provider's, set in its dialog) is read before
+  // the global one, so the edit goes there; writing only the global value would change nothing
+  // and the field would snap back. NVIDIA's own timeout is written by Storage.saveSettings itself.
+  if (provider !== 'nvidia' && providerOwnTimeoutOf(currentSettings, provider) > 0) {
+    delete newSettings.llmTimeoutMs;
+    newSettings.providerConfigs = {
+      [provider]: { ...(currentSettings.providerConfigs?.[provider] || {}), llmTimeoutMs }
+    };
+    // The dialog shows the descriptor's value; keep it the same number.
+    const descriptor = currentSettings.customProviders?.[provider];
+    if (descriptor) {
+      newSettings.customProviders = { ...currentSettings.customProviders, [provider]: { ...descriptor, llmTimeoutMs } };
+    }
+  }
 
   currentSettings = await Storage.saveSettings(newSettings);
   // Show the value that was stored: one below the minimum was raised above, and the field must not
   // keep showing the raw number that was typed.
-  document.getElementById('llmTimeoutInput').value = (currentSettings.providerConfigs?.[provider]?.llmTimeoutMs) || currentSettings.llmTimeoutMs;
+  document.getElementById('llmTimeoutInput').value = timeoutShownFor(currentSettings, provider);
   updateModelBadge(newSettings.model);
 }
 
@@ -555,6 +769,7 @@ async function fetchDynamicModels(forceRefresh = false) {
 
       if (res && res.success && Array.isArray(res.models)) {
         allFetchedModels = res.models;
+        allFetchedModelsProvider = tempSettings.provider;
         renderModelOptions(allFetchedModels);
 
         if (statusEl) {
@@ -576,6 +791,7 @@ async function fetchDynamicModels(forceRefresh = false) {
           : (activeMeta.isCustom
             ? activeMeta.savedModels
             : (DEFAULT_PROVIDER_CONFIGS[tempSettings.provider]?.model ? [DEFAULT_PROVIDER_CONFIGS[tempSettings.provider].model] : []));
+        allFetchedModelsProvider = tempSettings.provider;
         renderModelOptions(allFetchedModels);
         resolve(allFetchedModels);
       }
@@ -584,6 +800,8 @@ async function fetchDynamicModels(forceRefresh = false) {
 }
 
 function updateModelBadge(modelName) {
+  // Every model change passes here, so the effort levels follow the model.
+  refreshEffortSupport();
   const badge = document.getElementById('currentModelBadge');
   if (badge) {
     badge.textContent = modelName || 'Model';
@@ -683,12 +901,9 @@ function connectPort() {
   backgroundPort.onMessage.addListener((msg) => {
     try {
       if (msg.type === 'STATE_UPDATE') {
-        renderState(msg.payload);
-        autoSaveActiveSession(msg.payload);
+        receiveState(msg.payload);
       } else if (msg.type === 'LOG_ENTRY') {
-        rawLogsCache.push(msg.payload);
-        if (rawLogsCache.length > 300) rawLogsCache.shift();
-        renderFilteredLogs();
+        addLogEntry(msg.payload);
       } else if (msg.type === 'PANEL_HANDOFF') {
         followRunToTab(msg.payload);
       }
@@ -771,9 +986,10 @@ function resyncAgentState() {
 
     portReconnectAttempts = 0;
     setConnectionBanner(false);
+    checkWorkerBuild();
 
     if (res) {
-      renderState(res);
+      receiveState(res);
       if (res.logs) {
         rawLogsCache = res.logs;
         renderFilteredLogs();
@@ -813,6 +1029,33 @@ function sendControlMessage(action, done) {
   });
 }
 
+/**
+ * Chrome loads this page fresh from disk every time the panel opens, but keeps the old background
+ * worker running until the extension is reloaded. After a rebuild the two are different builds,
+ * and the panel asks for things the old worker does not know (effort levels, for one). Compare the
+ * stamps after every resync and offer the reload. An older worker does not know GET_BUILD either.
+ */
+let staleWorkerLogged = false;
+function checkWorkerBuild() {
+  if (!IS_BUILD) return;
+  sendBgMessage({ action: 'GET_BUILD' }, (res) => {
+    if (chrome.runtime.lastError || !res) return;
+    const workerBuild = res.success ? res.build : null;
+    const stale = workerBuild !== BUILD_STAMP;
+    const bar = document.getElementById('updateBanner');
+    if (bar) {
+      bar.hidden = !stale;
+      bar.dataset.workerBuild = stale ? 'stale' : 'same'; // read by the e2e side panel gate
+    }
+    const reload = document.getElementById('btnReloadExtension');
+    if (reload) reload.onclick = () => chrome.runtime.reload();
+    if (stale && !staleWorkerLogged) {
+      staleWorkerLogged = true;
+      appendLocalLog('WARN', 'Sidepanel', `[STALE_WORKER] The panel is build ${BUILD_STAMP}, the background worker is ${workerBuild ? `build ${workerBuild}` : 'an older build'}. Reload ScoutFox to run the new version.`);
+    }
+  });
+}
+
 function setConnectionBanner(isDisconnected) {
   const pill = document.getElementById('statusPill');
   const textEl = document.getElementById('statusText');
@@ -827,15 +1070,17 @@ function setConnectionBanner(isDisconnected) {
  * this they would leave no trace anywhere — the "logs were empty too" symptom.
  */
 function appendLocalLog(level, module, message) {
-  rawLogsCache.push({
-    timestamp: new Date().toLocaleTimeString(),
-    level,
-    module,
-    message,
-    data: null
-  });
-  if (rawLogsCache.length > 300) rawLogsCache.shift();
-  try { renderFilteredLogs(); } catch (_) { /* log pane may not exist yet during boot */ }
+  try {
+    addLogEntry({
+      id: `panel-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toLocaleTimeString(),
+      level,
+      kind: 'system',
+      module,
+      message,
+      data: null
+    });
+  } catch (_) { /* log pane may not exist yet during boot */ }
   console.warn(`[${module}]`, message);
 }
 
@@ -920,26 +1165,205 @@ function initEventListeners() {
     });
   }
 
-  // Effort selector buttons
-  const effortBar = document.getElementById('effortSelectorBar');
-  if (effortBar) {
-    const buttons = effortBar.querySelectorAll('.effort-btn');
-    buttons.forEach((btn) => {
-      btn.addEventListener('click', () => {
-        buttons.forEach((b) => b.classList.remove('active'));
-        btn.classList.add('active');
-        currentEffort = btn.getAttribute('data-effort') || 'auto';
+  // Composer approval mode: one icon, two choices, like the reference's menu.
+  const approvalBtn = document.getElementById('btnApprovalMode');
+  const approvalMenu = document.getElementById('approvalMenu');
+  const effortBtn = document.getElementById('btnEffort');
+  const effortMenu = document.getElementById('effortMenu');
+  const modelBtn = document.getElementById('composerModel');
+  const modelMenu = document.getElementById('modelMenu');
+
+  const setMenuOpen = (menu, btn, open) => {
+    if (!menu || !btn) return;
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+  };
+  const closeComposerMenus = () => {
+    setMenuOpen(approvalMenu, approvalBtn, false);
+    setMenuOpen(effortMenu, effortBtn, false);
+    setMenuOpen(modelMenu, modelBtn, false);
+  };
+
+  if (approvalBtn && approvalMenu) {
+    approvalBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = approvalMenu.hidden;
+      closeComposerMenus();
+      setMenuOpen(approvalMenu, approvalBtn, willOpen);
+    });
+    approvalMenu.querySelectorAll('.menu-item').forEach((item) => {
+      item.addEventListener('click', async () => {
+        applyApprovalMode(item.getAttribute('data-approval') || 'auto');
+        closeComposerMenus();
+        await Storage.saveSettings({ autoApprove: approvalMode === 'auto' });
       });
     });
   }
 
+  if (effortBtn && effortMenu) {
+    effortBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = effortMenu.hidden;
+      closeComposerMenus();
+      setMenuOpen(effortMenu, effortBtn, willOpen);
+    });
+    effortMenu.querySelectorAll('.menu-item').forEach((item) => {
+      item.addEventListener('click', () => {
+        setEffort(item.getAttribute('data-effort') || 'auto');
+        closeComposerMenus();
+      });
+    });
+  }
+
+  // Model menu: the models of the chosen provider, scrollable, opened from the model name.
+  if (modelBtn && modelMenu) {
+    const modelSearch = document.getElementById('modelMenuSearch');
+    const modelCustom = document.getElementById('modelMenuCustom');
+    const listEl = document.getElementById('modelMenuList');
+
+    // The same list the Settings picker shows, with every id the provider serves. The saved id
+    // is kept at the top even when the endpoint itself no longer mentions it.
+    const modelsForMenu = () => {
+      const provider = document.getElementById('providerSelect')?.value || currentSettings.provider;
+      const list = allFetchedModels.slice();
+      const saved = currentSettings.providerConfigs?.[provider]?.model || currentSettings.model || '';
+      for (const id of [saved, selectedModel]) {
+        if (id && id !== CUSTOM_MODEL_OPTION && !list.includes(id)) list.unshift(id);
+      }
+      return list;
+    };
+
+    const renderComposerModels = (list) => {
+      if (!listEl) return;
+      const provider = document.getElementById('providerSelect')?.value || currentSettings.provider;
+      const active = selectedModel || currentSettings.providerConfigs?.[provider]?.model || currentSettings.model || '';
+      if (!list || list.length === 0) {
+        listEl.innerHTML = '<div class="menu-empty">No models found for this provider.</div>';
+        return;
+      }
+      listEl.innerHTML = list.map((name) => {
+        const checked = name === active;
+        return `<button type="button" class="menu-item" role="menuitemradio" aria-checked="${checked}" data-model="${escapeHtml(name)}"><span class="menu-label">${escapeHtml(name)}</span><span class="menu-check" aria-hidden="true">${checked ? MENU_CHECK : ''}</span></button>`;
+      }).join('');
+      listEl.querySelectorAll('.menu-item').forEach((item) => {
+        item.addEventListener('click', async () => {
+          updateSelectedModel(item.getAttribute('data-model'));
+          closeComposerMenus();
+          await autoSaveCurrentForm();
+        });
+      });
+    };
+
+    const applyCustomModel = async () => {
+      const value = (modelCustom?.value || '').trim();
+      if (!value) return;
+      setCustomModelFieldOpen(false);
+      updateSelectedModel(value);
+      closeComposerMenus();
+      if (modelCustom) modelCustom.value = '';
+      await autoSaveCurrentForm();
+    };
+
+    modelBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const willOpen = modelMenu.hidden;
+      closeComposerMenus();
+      if (!willOpen) return;
+      setMenuOpen(modelMenu, modelBtn, true);
+      if (modelSearch) modelSearch.value = '';
+      // The list belongs to one provider; a provider switch anywhere in the settings makes the
+      // cached list wrong, so it is fetched again for the provider that is active now.
+      if (allFetchedModelsProvider !== (document.getElementById('providerSelect')?.value || currentSettings.provider)) {
+        if (listEl) listEl.innerHTML = '<div class="menu-empty">Loading models...</div>';
+        await fetchDynamicModels(false);
+        if (!modelMenu.hidden) renderComposerModels(modelsForMenu());
+      } else {
+        renderComposerModels(modelsForMenu());
+      }
+    });
+
+    if (modelSearch) {
+      modelSearch.addEventListener('click', (e) => e.stopPropagation());
+      modelSearch.addEventListener('input', () => {
+        const query = modelSearch.value.toLowerCase().trim();
+        const source = modelsForMenu();
+        renderComposerModels(query ? source.filter((m) => m.toLowerCase().includes(query)) : source);
+      });
+    }
+
+    if (modelCustom) {
+      modelCustom.addEventListener('click', (e) => e.stopPropagation());
+      modelCustom.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.stopPropagation();
+          applyCustomModel();
+        }
+      });
+    }
+    document.getElementById('modelMenuCustomApply')?.addEventListener('click', applyCustomModel);
+  }
+
+  document.addEventListener('click', closeComposerMenus);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeComposerMenus();
+  });
+
+  // New chat: clears the run history of this tab, the same action the drawer's delete uses.
+  const newChatBtn = document.getElementById('btnNewChat');
+  if (newChatBtn) {
+    newChatBtn.addEventListener('click', () => {
+      sendBgMessage({ action: 'CLEAR_HISTORY' }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : res.error;
+          appendLocalLog('ERROR', 'Sidepanel', `[NEW_CHAT_FAILED] ${errMsg}`);
+          showTaskError(errMsg || 'Could not start a new chat.');
+          return;
+        }
+        currentSessionId = null;
+        // CLEAR_HISTORY resets the runner's version counter, so the next broadcast is lower
+        // than the watermark this panel holds. Drop the watermark or that state is ignored.
+        lastRenderedStateVersion = -1;
+        const input = document.getElementById('taskInput');
+        if (input) {
+          input.value = '';
+          input.focus();
+        }
+        const timeline = document.getElementById('timeline');
+        if (timeline) renderEmptyState(timeline);
+      });
+    });
+  }
+
+  // A model id typed in the Settings custom field: saved like the base URL (debounced while
+  // typing, at once on change or blur), and only once it is not empty.
+  const modelCustomInput = document.getElementById('modelCustomInput');
+  if (modelCustomInput) {
+    let modelCustomDebounce = null;
+    const commitNow = () => {
+      if (modelCustomDebounce) clearTimeout(modelCustomDebounce);
+      modelCustomDebounce = null;
+      return commitTypedModel();
+    };
+    modelCustomInput.addEventListener('input', () => {
+      if (modelCustomDebounce) clearTimeout(modelCustomDebounce);
+      modelCustomDebounce = setTimeout(commitNow, 400);
+    });
+    modelCustomInput.addEventListener('change', commitNow);
+    modelCustomInput.addEventListener('blur', commitNow);
+  }
+
   // Auto-save for all number inputs and toggles
-  ['maxStepsInput', 'delayInput', 'ollamaNumPredictInput', 'llmTimeoutInput', 'badgesToggle', 'effortDefaultSelect', 'plannerModelInput', 'reflectModelInput'].forEach(id => {
+  ['maxStepsInput', 'delayInput', 'ollamaNumPredictInput', 'llmTimeoutInput', 'effortDefaultSelect', 'effortAdaptiveSelect'].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener('change', autoSaveCurrentForm);
     }
   });
+  // The default effort is also the composer's effort from now on, as it is when the panel opens.
+  const effortDefaultSelect = document.getElementById('effortDefaultSelect');
+  if (effortDefaultSelect) {
+    effortDefaultSelect.addEventListener('change', () => setEffort(effortDefaultSelect.value || 'medium'));
+  }
 
   document.querySelectorAll('.log-filter-chip').forEach(chip => {
     chip.addEventListener('click', () => {
@@ -962,8 +1386,16 @@ function initEventListeners() {
   });
 
   document.getElementById('btnCopyLogs').addEventListener('click', () => {
-    const outputText = document.getElementById('logOutput').textContent;
-    navigator.clipboard.writeText(outputText).then(() => {
+    // Plain text, one line per entry, no leading/trailing air. Copy what the reader sees.
+    const entries = rawLogsCache.map(log => {
+      const time = log.timestamp || '';
+      const level = log.level || 'INFO';
+      const mod = log.module || 'System';
+      const msg = log.message || '';
+      const payload = log.data ? `\n  ${String(log.data)}` : '';
+      return `[${time}] [${level}] [${mod}] ${msg}${payload}`;
+    }).join('\n');
+    navigator.clipboard.writeText(entries).then(() => {
       const copyBtn = document.getElementById('btnCopyLogs');
       copyBtn.innerHTML = `${ICONS.check} Copied`;
       setTimeout(() => copyBtn.innerHTML = `${ICONS.copy} Copy`, 2000);
@@ -1040,8 +1472,6 @@ function initEventListeners() {
   document.getElementById('baseUrlInput').addEventListener('input', debouncedAutoSaveBaseUrl);
   document.getElementById('baseUrlInput').addEventListener('change', immediateAutoSaveBaseUrl);
   document.getElementById('baseUrlInput').addEventListener('blur', immediateAutoSaveBaseUrl);
-  document.getElementById('plannerModelInput')?.addEventListener('blur', autoSaveCurrentForm);
-  document.getElementById('reflectModelInput')?.addEventListener('blur', autoSaveCurrentForm);
   document.getElementById('llmTimeoutInput')?.addEventListener('change', autoSaveCurrentForm);
   document.getElementById('llmTimeoutInput')?.addEventListener('blur', autoSaveCurrentForm);
   document.getElementById('apiKeyInput').addEventListener('paste', () => {
@@ -1138,10 +1568,10 @@ async function applyProviderSelection(provider) {
   document.getElementById('apiKeyInput').value = savedCfg.apiKey || '';
 
   const modelToSet = savedCfg.model || (activeIsCustom ? '' : (DEFAULT_PROVIDER_CONFIGS[provider] ? DEFAULT_PROVIDER_CONFIGS[provider].model : currentSettings.model));
+  setCustomModelFieldOpen(false);
   updateSelectedModel(modelToSet);
 
-  const defaultTimeout = activeIsCustom ? DEFAULT_SETTINGS.llmTimeoutMs : (DEFAULT_PROVIDER_CONFIGS[provider]?.llmTimeoutMs || DEFAULT_SETTINGS.llmTimeoutMs);
-  const timeoutToSet = savedCfg.llmTimeoutMs || (provider === 'nvidia' ? defaultTimeout : (currentSettings.llmTimeoutMs || defaultTimeout));
+  const timeoutToSet = timeoutShownFor({ ...currentSettings, providerConfigs }, provider);
   document.getElementById('llmTimeoutInput').value = timeoutToSet;
 
   // Update settings object
@@ -1149,7 +1579,9 @@ async function applyProviderSelection(provider) {
   currentSettings.baseUrl = baseUrlToSet;
   currentSettings.apiKey = savedCfg.apiKey || '';
   currentSettings.model = modelToSet;
-  if (provider !== 'nvidia') {
+  // The global timeout follows the field only for a provider that reads it; a provider's own
+  // value must not leak into the global one the other providers use.
+  if (provider !== 'nvidia' && providerOwnTimeoutOf({ ...currentSettings, providerConfigs }, provider) === 0) {
     currentSettings.llmTimeoutMs = timeoutToSet;
   }
 
@@ -1191,15 +1623,25 @@ async function startTask() {
   }
 }
 
+/** The provider and model the settings hold now, as the run chip names them. */
+function currentRunModel() {
+  const provider = currentSettings.provider || 'openrouter';
+  return {
+    provider,
+    model: currentSettings.providerConfigs?.[provider]?.model || currentSettings.model || ''
+  };
+}
+
 async function startTaskInner(prompt) {
   // Auto-sync form state into Storage before launching task
   await autoSaveCurrentForm();
+  runModelSnapshot = currentRunModel();
 
   currentSessionId = `session_${Date.now()}`;
 
   appendLocalLog('INFO', 'Sidepanel', `[TASK_SUBMIT] Sending task to background worker: "${prompt}"`);
 
-  sendBgMessage({ action: 'START_TASK', payload: { prompt, effort: currentEffort } }, (res) => {
+  sendBgMessage({ action: 'START_TASK', payload: { prompt, effort: currentEffort, autoApprove: approvalMode !== 'manual' } }, (res) => {
     // Without this check a failed wake-up leaves res undefined and the whole submission
     // vanishes with no alert, no log and no UI change — the task simply never starts.
     if (chrome.runtime.lastError) {
@@ -1242,11 +1684,11 @@ function showTaskError(message) {
 async function loadSessionHistory() {
   const sessions = await Storage.getSessions();
   const historyBtn = document.getElementById('btnToggleHistory');
-  // The word is wrapped so it can be dropped at narrow panel widths, leaving the clock and
-  // the count. Without that the button pushes the status pill past the header edge at 320px.
+  // Icon only, like the rest of the header. The count stays in the tooltip: a number in the
+  // button overflowed the header at 320px.
   if (historyBtn) {
-    historyBtn.innerHTML = `${ICONS.clock}<span class="history-toggle-label">History</span> (${sessions.length})`;
-    historyBtn.title = `Saved sessions (${sessions.length})`;
+    historyBtn.title = `Recent tasks (${sessions.length})`;
+    historyBtn.setAttribute('aria-label', `Recent tasks (${sessions.length})`);
   }
 
   const listContainer = document.getElementById('historySessionsList');
@@ -1260,12 +1702,12 @@ async function loadSessionHistory() {
   listContainer.innerHTML = sessions.map(session => {
     const isSelected = session.id === currentSessionId;
     return `
-      <div class="history-session-item ${isSelected ? 'active' : ''}" data-id="${session.id}" tabindex="0" role="button">
+      <div class="history-session-item ${isSelected ? 'active' : ''}" data-id="${escapeHtml(session.id)}" tabindex="0" role="button">
         <div class="history-item-info">
           <span class="history-item-title">${escapeHtml(session.task || 'Untitled Session')}</span>
-          <span class="history-item-meta">${session.timestamp || ''} • ${session.model || ''}</span>
+          <span class="history-item-meta">${escapeHtml(session.timestamp || '')} • ${escapeHtml(session.model || '')}</span>
         </div>
-        <button class="btn-delete-session" data-delete-id="${session.id}">${ICONS.trash}</button>
+        <button class="btn-delete-session" data-delete-id="${escapeHtml(session.id)}">${ICONS.trash}</button>
       </div>
     `;
   }).join('');
@@ -1292,6 +1734,51 @@ async function loadSessionHistory() {
 }
 
 /**
+ * Every engine state this panel gets, from the port or from a resync, goes through here.
+ *
+ * A panel that did not submit the run itself (opened while it was going, or after it ended)
+ * has no session id for it, so it takes one here, before the first render: the id is part of
+ * the finish card's identity, and taking it later would make the card land a second time.
+ */
+function receiveState(state) {
+  if (!state) return;
+  if (!currentSessionId && state.task && Array.isArray(state.history) && state.history.length > 0) {
+    currentSessionId = `session_${Date.now()}`;
+  }
+  // Read before the render, which forgets the run's model once the run has ended.
+  const runModel = runModelSnapshot || currentRunModel();
+  renderState(state);
+  autoSaveActiveSession(state, runModel);
+}
+
+/**
+ * What tells one run apart from another in the same tab: its own goal row (the run number, the
+ * prompt and the time it was typed). Two panels that save the same run agree on it, which a
+ * per-panel session id cannot do.
+ */
+function runKeyOf(task, history) {
+  const list = Array.isArray(history) ? history : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    if (e && e.type === 'user_goal') return `${e.turn}|${e.prompt}|${e.timestamp || ''}`;
+  }
+  return `task|${task || ''}`;
+}
+
+/**
+ * The saved entry a run belongs to. The run's own entry if any panel saved it already (so a
+ * second panel updates it instead of adding a copy), else this panel's id, unless that id names
+ * a different run (a session the user opened from the list), which must not be overwritten.
+ */
+function sessionIdForRun(sessions, runKey) {
+  const same = sessions.find((s) => s && runKeyOf(s.task, s.history) === runKey);
+  if (same) return { id: same.id, saved: same };
+  const own = sessions.find((s) => s && s.id === currentSessionId);
+  if (currentSessionId && !own) return { id: currentSessionId, saved: null };
+  return { id: `session_${Date.now()}`, saved: null };
+}
+
+/**
  * Persist a run once it reaches a terminal state.
  *
  * Only terminal states are saved, so a run is written once rather than on every one of the
@@ -1299,25 +1786,29 @@ async function loadSessionHistory() {
  * history on a fresh connect); this is what makes that previous run recoverable afterwards
  * instead of simply lost.
  */
-async function autoSaveActiveSession(state) {
+async function autoSaveActiveSession(state, runModel = currentRunModel()) {
   if (!state) return;
 
   const TERMINAL = ['idle', 'stopped', 'complete', 'completed', 'error'];
   if (!TERMINAL.includes(state.status)) return;
   if (!state.task) return;
   if (!Array.isArray(state.history) || state.history.length === 0) return;
-  if (!currentSessionId) return;
-  if (savedSessionIds.has(currentSessionId + ':' + state.history.length)) return;
+  const runKey = runKeyOf(state.task, state.history);
+  const writeKey = runKey + ':' + state.history.length;
+  if (savedSessionIds.has(writeKey)) return;
 
-  savedSessionIds.add(currentSessionId + ':' + state.history.length);
+  savedSessionIds.add(writeKey);
 
   try {
+    const { id, saved } = sessionIdForRun(await Storage.getSessions(), runKey);
+    // Already saved in full (by another panel, or before this panel was reopened): nothing new.
+    if (saved && Array.isArray(saved.history) && saved.history.length === state.history.length) return;
     await Storage.saveSession({
-      id: currentSessionId,
+      id,
       task: state.task,
       timestamp: new Date().toLocaleString(),
-      model: currentSettings.model || '',
-      provider: currentSettings.provider || '',
+      model: runModel.model || '',
+      provider: runModel.provider || '',
       history: state.history,
       planSteps: state.planSteps || []
     });
@@ -1354,7 +1845,9 @@ function renderEmptyState() {
   if (timeline) {
     timeline.innerHTML = `
       <div class="empty-state" id="emptyState">
-        <div class="empty-icon-tile">${ICONS.aim}</div>
+        <div class="empty-glyph" aria-hidden="true">
+          ${FOX_MARK}
+        </div>
         <h3>What would you like to automate?</h3>
         <p>Enter a task below. ScoutFox will read the page, index elements, and execute browser actions step-by-step.</p>
         <div class="sample-prompts">
@@ -1412,35 +1905,45 @@ function renderState(state) {
       : status.charAt(0).toUpperCase() + status.slice(1);
   }
 
-  const sandboxBadge = document.getElementById('sandboxBadge');
-  if (sandboxBadge) {
-    if (state.scoutFoxGroupId) {
-      sandboxBadge.classList.remove('hidden');
-    } else {
-      sandboxBadge.classList.add('hidden');
-    }
-  }
-
   if (status === 'running' || status === 'paused') {
     if (processingBanner) {
       processingBanner.style.display = 'flex';
       processingBanner.classList.toggle('paused', status === 'paused');
     }
     // A pause with no card of its own says why (a Resume button with no reason looks like the agent stopped by itself).
-    if (processingPhaseText) processingPhaseText.textContent = pauseReasonText(state) || currentPhase || `Processing step ${stepCount}...`;
+    if (processingPhaseText) processingPhaseText.textContent = pendingApproval
+      ? 'Waiting for your approval'
+      : (pauseReasonText(state) || currentPhase || `Processing step ${stepCount}...`);
     
     const maxSteps = (state.budget && state.budget.hardCap) || currentSettings.maxSteps || DEFAULT_SETTINGS.maxSteps;
     const workingSteps = (state.budget && state.budget.workingTotal) || maxSteps;
     const currentSteps = (state.budget && state.budget.used) || stepCount || 1;
     const pct = Math.min(100, Math.round((currentSteps / Math.max(1, workingSteps)) * 100));
-    if (progressBarFill) progressBarFill.style.width = `${pct}%`;
+    if (progressBarFill) {
+      progressBarFill.style.width = `${pct}%`;
+      // A hold at the plan is not progress through the steps; the bar would claim 4% of a run
+      // that has not executed anything yet.
+      if (progressBarFill.parentElement) progressBarFill.parentElement.style.display = pendingApproval ? 'none' : '';
+    }
 
     isTaskActive = true;
-    if (controlBar) controlBar.style.display = 'flex';
+    // The plan card is the only decision while it is up: Cancel there ends the run, so the
+    // control bar would only repeat it.
+    if (controlBar) controlBar.style.display = pendingApproval ? 'none' : 'flex';
     if (taskInput) taskInput.disabled = true;
     if (btnStartTask) btnStartTask.disabled = true;
+    const approvalBtn = document.getElementById('btnApprovalMode');
+    const effortBtn = document.getElementById('btnEffort');
+    const modelBtn = document.getElementById('composerModel');
+    if (approvalBtn) approvalBtn.disabled = true;
+    if (effortBtn) effortBtn.disabled = true;
+    if (modelBtn) modelBtn.disabled = true;
+    if (!runModelSnapshot) runModelSnapshot = currentRunModel();
 
     if (btnPause) {
+      // The plan card owns the decision while it is up: Resume would only re-enter the loop
+      // without an approval, so it is replaced by Approve/Cancel on the card.
+      btnPause.style.display = pendingApproval ? 'none' : '';
       if (status === 'paused') {
         btnPause.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Resume`;
       } else {
@@ -1453,24 +1956,38 @@ function renderState(state) {
     if (controlBar) controlBar.style.display = 'none';
     if (taskInput) taskInput.disabled = false;
     if (btnStartTask) btnStartTask.disabled = false;
+    const approvalBtn = document.getElementById('btnApprovalMode');
+    const effortBtn = document.getElementById('btnEffort');
+    const modelBtn = document.getElementById('composerModel');
+    if (approvalBtn) approvalBtn.disabled = false;
+    if (effortBtn) effortBtn.disabled = false;
+    if (modelBtn) modelBtn.disabled = false;
+    runModelSnapshot = null;
   }
 
-  const liveGraphContainer = document.getElementById('liveGraphContainer');
-  if (liveGraphContainer) {
-    if (status === 'running' || status === 'paused') {
-      liveGraphContainer.style.display = 'block';
-      updateLiveGraphView(liveGraphContainer, state.graphLocation, state.runStats, state.effortProfile);
-    } else {
-      liveGraphContainer.style.display = 'none';
-    }
+  // New chat clears the run history, which would strand a plan hold that is still waiting for
+  // an answer. It is only available between runs.
+  const newChatBtn = document.getElementById('btnNewChat');
+  if (newChatBtn) {
+    newChatBtn.disabled = isTaskActive;
+    newChatBtn.title = isTaskActive ? 'Stop the task before starting a new chat' : 'New chat';
   }
 
+
+
+  // A run that ended may have learned that its model refuses the reasoning fields (or which values
+  // it accepts): ask again, so the composer offers what the next run will really send.
+  if (effortRunWasActive && status !== 'running' && status !== 'paused') refreshEffortSupport();
+  effortRunWasActive = status === 'running' || status === 'paused';
   const processingEffortBadge = document.getElementById('processingEffortBadge');
   if (processingEffortBadge) {
     if (status === 'running' || status === 'paused') {
-      const activeEffort = state.effort?.level || state.effortProfile?.level || (currentEffort !== 'auto' ? currentEffort : null);
-      if (activeEffort) {
-        processingEffortBadge.textContent = `${activeEffort}`;
+      // The chip names the model's reasoning level, and only when one is sent: not for Auto and
+      // not for a model that takes none.
+      const activeEffort = state.effort?.level || (currentEffort !== 'auto' ? currentEffort : null);
+      if (activeEffort && activeEffort !== 'auto' && effortSupport.levels.length > 1 && !pendingApproval) {
+        processingEffortBadge.textContent = `${EFFORT_LABEL[normalizeEffort(activeEffort)] || activeEffort}`;
+        processingEffortBadge.title = 'How hard the model thinks before each step';
         processingEffortBadge.style.display = 'inline-block';
       } else {
         processingEffortBadge.style.display = 'none';
@@ -1486,9 +2003,10 @@ function renderState(state) {
   const processingModelChip = document.getElementById('processingModelChip');
   if (processingModelChip) {
     if (status === 'running' || status === 'paused') {
-      const runProvider = providerMeta(currentSettings.provider || 'openrouter', currentSettings);
-      const runModel = currentSettings.providerConfigs?.[currentSettings.provider]?.model || currentSettings.model || '';
-      if (runProvider.exists && runModel) {
+      const run = runModelSnapshot || currentRunModel();
+      const runProvider = providerMeta(run.provider, currentSettings);
+      const runModel = run.model;
+      if (runProvider.exists && runModel && !pendingApproval) {
         processingModelChip.textContent = `${runProvider.displayName} · ${runModel}`;
         processingModelChip.style.display = 'inline-block';
       } else {
@@ -1510,9 +2028,91 @@ function renderState(state) {
     // expanding a row mid-run does not yank the view away from them.
     const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
     const finishArrived = noteFinishCard(status, history);
-    timeline.innerHTML = renderTurns(history, status, planSteps, currentPhase, pendingQuestion, pendingApproval, pendingConfirm, pendingChallengeHelp, pendingContinueBudget, findings, state.effortProfile);
+    timeline.innerHTML = renderTurns(history, status, currentPhase, pendingQuestion, pendingApproval, pendingConfirm, pendingChallengeHelp, pendingContinueBudget, findings, state.effortProfile, planSteps);
+    attachShotSlots();
     if (nearBottom) scrollTimelineToLatest(timeline, finishArrived);
   }
+}
+
+/**
+ * Puts the pictures into the slots the render just created.
+ *
+ * A picture that is cached is moved in from its element, which decodes nothing. A picture that is
+ * not cached yet is fetched once, decoded off-screen, and only then attached, so it never appears
+ * half-drawn. A picture the background no longer has (the registry keeps the last few, and a
+ * reloaded session has none) says so in a muted line, exactly like a session reloaded after the
+ * bytes were dropped: honest, and never a broken <img>.
+ */
+function attachShotSlots() {
+  const slots = document.querySelectorAll('#timeline .act-shot-slot');
+  for (const slot of slots) {
+    const imageId = slot.getAttribute('data-shot') || '';
+    if (!imageId) continue;
+    const cached = shotCache.get(imageId);
+    if (cached) {
+      attachShotPicture(slot, cached.img, cached.dataUrl);
+      continue;
+    }
+    if (shotGone.has(imageId)) {
+      slot.innerHTML = '<span class="act-shot-gone">picture no longer kept</span>';
+      continue;
+    }
+    void loadShotPicture(imageId, slot);
+  }
+}
+
+/** Puts one decoded picture (or its placeholder) into one slot. */
+function attachShotPicture(slot, img, dataUrl) {
+  const width = Number(slot.getAttribute('data-w')) || img.naturalWidth || 4;
+  const height = Number(slot.getAttribute('data-h')) || img.naturalHeight || 3;
+  // The box keeps the picture's shape from the stored size, so the layout does not jump when the
+  // bytes arrive. A ratio that would collapse is left to the image's own size.
+  if (width > 0 && height > 0) slot.style.aspectRatio = `${width} / ${height}`;
+  slot.innerHTML = '';
+  img.width = width;
+  img.height = height;
+  img.alt = 'The page as the agent saw it';
+  img.className = 'act-shot-img';
+  img.setAttribute('data-src', dataUrl);
+  slot.appendChild(img);
+}
+
+/** Fetches one picture by id, decodes it, and hands it to the slot. */
+async function loadShotPicture(imageId, slot) {
+  const dataUrlFor = (data, mediaType) => (String(data).startsWith('data:')
+    ? String(data)
+    : `data:${mediaType || 'image/jpeg'};base64,${data}`);
+  const answer = await new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => { if (!done) { done = true; resolve(value); } };
+    try {
+      sendBgMessage({ action: 'GET_SCREENSHOT', payload: { imageId } }, (resp) => finish(chrome.runtime.lastError ? null : resp));
+    } catch (_) {
+      finish(null);
+    }
+    setTimeout(() => finish(null), 3000);
+  });
+  if (!answer || !answer.success || !answer.data) {
+    shotGone.add(imageId);
+    if (slot.isConnected) slot.innerHTML = '<span class="act-shot-gone">picture no longer kept</span>';
+    return;
+  }
+  const dataUrl = dataUrlFor(answer.data, answer.mediaType);
+  const img = new Image();
+  img.src = dataUrl;
+  try {
+    await img.decode();
+  } catch (_) {
+    // The bytes came back but they are not a picture the browser can decode. That is not the
+    // same as "the session dropped it", and saying so would be a wrong explanation.
+    shotGone.add(imageId);
+    if (slot.isConnected) slot.innerHTML = '<span class="act-shot-gone">picture could not be shown</span>';
+    return;
+  }
+  shotCache.set(imageId, { dataUrl, img });
+  // The slot may be gone by now: the timeline re-rendered while the picture was loading. The
+  // cache keeps it, and the next render attaches it.
+  if (slot.isConnected) attachShotPicture(slot, img, dataUrl);
 }
 
 /**
@@ -1624,6 +2224,8 @@ function buildTurns(history) {
     } else if (item.type === 'finish') {
       cur.answer = item.answer;
       cur.answerUnconfirmed = !!item.unconfirmed;
+      // The supporting material of a structured answer, shown in its own section.
+      cur.evidence = item.evidence || '';
       // Written by the engine's answer audit (agent/answerAudit.ts). Absent on older runs and on
       // saved sessions from before the audit existed: those render exactly as they always did.
       cur.audit = item.audit || null;
@@ -1663,11 +2265,25 @@ function describeAction(action, outcome) {
   switch (action.action) {
     case 'navigate':      return { icon: ICONS.globe, text: `Opened ${quote(host(action.url || ''))}` };
     case 'read_page_text':return { icon: ICONS.eye, text: 'Read page text' };
-    case 'click':         return { icon: ICONS.pointer, text: label ? `Clicked ${quote(label)}` : `Clicked element ${escapeHtml(String(action.element_id))}` };
+    case 'click':         return {
+      icon: ICONS.pointer,
+      // A coordinate click has no element and no label, and "Clicked element undefined" is what
+      // the old wording would have said. The pixels are the picture's pixels, and the user is
+      // looking at that same picture in the thumbnail, so the wording says so.
+      text: label
+        ? `Clicked ${quote(label)}`
+        : (action.x !== undefined && action.x !== null
+          ? `Clicked at (${escapeHtml(String(action.x))}, ${escapeHtml(String(action.y))}) in the picture`
+          : `Clicked element ${escapeHtml(String(action.element_id))}`)
+    };
+    case 'take_screenshot': return { icon: ICONS.camera, text: 'Looked at the page' };
+    case 'render_table':    return { icon: ICONS.doc, text: `Built table: ${escapeHtml(String(action.columns?.length || 0))} columns × ${escapeHtml(String(action.rows?.length || 0))} rows` };
     case 'type':          return { icon: ICONS.keyboard, text: `Typed ${quote(action.text || '')}${label ? ` into ${quote(label)}` : ''}` };
     case 'scroll':        return { icon: ICONS.scrollIco, text: `Scrolled ${escapeHtml(action.direction || 'down')}` };
     case 'go_back':       return { icon: ICONS.back, text: 'Went back' };
     case 'go_forward':    return { icon: ICONS.back, text: 'Went forward' };
+    case 'get_page_elements': return { icon: ICONS.pointer, text: 'Listed the clickable elements' };
+    case 'find_elements': return { icon: ICONS.search, text: `Searched elements for ${quote(action.query || '')}` };
     case 'execute_js':    return { icon: ICONS.code, text: 'Ran JavaScript' };
     case 'read_network_requests': return { icon: ICONS.network, text: 'Checked network activity' };
     case 'browser_batch': return { icon: ICONS.layers, text: `Ran ${(action.steps || []).length} actions in one batch` };
@@ -1868,13 +2484,17 @@ function renderAuditDetails(audit, turnNo, mode) {
 
 /**
  * The finish card. Verdict decides the card:
- *   unverified -> danger card "Unverified answer"     partial -> warning card "Partial answer"
+ *   unverified -> danger card "Unconfirmed answer"     partial -> warning card "Partial answer"
  *   verified   -> today's green "Done" plus a quiet "Checked against N pages" line
  *   no audit   -> today's card, byte for byte ("Done", or "Unconfirmed answer" for a freeform reply)
  * The old `unconfirmed` flag (the model never called finish, ScoutFox inferred the end from a plain
  * reply) is a separate fact and stays visible next to a verdict: it turns a green or amber card
  * red, and it adds one line saying why. A verified-but-unconfirmed answer keeps the title
  * "Unconfirmed answer": its content was checked, but the model never said it was done.
+ *
+ * A step that failed is the third fact. A run whose click never reached the page and that said
+ * so in the answer still did not do the task: a green "Done" next to "the click failed" is the
+ * one thing a user must never be shown, because it is the green tick on a run that did nothing.
  */
 function renderFinishCard(turn, findings = null) {
   if (turn.partial) return renderPartialCard(turn, findings);
@@ -1882,17 +2502,38 @@ function renderFinishCard(turn, findings = null) {
   const unconfirmed = !!turn.answerUnconfirmed;
   // With an audit the card already says all of it (title, subtitle, the notes below): the stored answer keeps the
   // warning line and the notes section the engine wrote into it, for copying, but they are not shown a second time.
-  const shown = audit ? withoutEngineNotes(turn.answer) : turn.answer;
+  const raw = audit ? withoutEngineNotes(turn.answer) : turn.answer;
+  // The safety net for answers that are still a JSON object: the engine pulls the readable part
+  // out before it stores the answer, but a session saved by an older build still holds the raw
+  // JSON, and a wall of braces is not something to show a person. The engine's own answer is
+  // left exactly as it is.
+  const extracted = extractReadableAnswer(raw);
+  const shown = extracted.text;
+  // If the answer is a failure marker (MOCK-FAIL: ...), the task did not actually succeed even
+  // though the model called finish. Show it as a failed answer, not as green "Done".
+  const isFailedAnswer = /^MOCK-FAIL:/i.test(String(shown || ''));
+  // A step of this turn failed. The run reported it and ended, so the card is a red one: the
+  // user has to see that the task did not go through, not a green tick.
+  const hadFailedStep = !!turn.failed;
   const body = `<div class="finish-body">${formatMarkdownText(shown)}</div>`;
+  // The supporting material of a structured answer, in a section the reader opens. It is shown
+  // only when there is something to show, and never in place of the answer.
+  const evidenceText = extracted.evidence || turn.evidence || '';
+  const evidenceHtml = evidenceText
+    ? `<details class="audit verified answer-evidence"><summary class="audit-summary"><span class="audit-chev">${ICONS.chevron}</span><span>Evidence</span></summary><div class="audit-body"><div class="audit-plain">${escapeHtml(evidenceText)}</div></div></details>`
+    : '';
 
   const allFindings = (findings && findings.length > 0) ? findings : (turn.findings || (turn.table && turn.table.rows ? turn.table.rows : []));
   const hasEmbeddedTable = hasMarkdownBlocks(shown) && String(shown).includes('|');
   const findingsHtml = (allFindings && allFindings.length > 0 && !hasEmbeddedTable) ? renderProvenanceFindingsTable(allFindings) : '';
 
   if (!audit) {
+    if (isFailedAnswer || hadFailedStep) {
+      return `<div class="finish-card failed"><div class="finish-title">${ICONS.warning} Failed</div>${body}${evidenceHtml}${findingsHtml}</div>`;
+    }
     return unconfirmed
-      ? `<div class="finish-card unconfirmed"><div class="finish-title">${ICONS.warning} Unconfirmed answer</div>${body}${findingsHtml}</div>`
-      : `<div class="finish-card"><div class="finish-title">${ICONS.complete} Done</div>${body}${findingsHtml}</div>`;
+      ? `<div class="finish-card unconfirmed"><div class="finish-title">${ICONS.warning} Unconfirmed answer</div>${body}${evidenceHtml}${findingsHtml}</div>`
+      : `<div class="finish-card"><div class="finish-title">${ICONS.complete} Done</div>${body}${evidenceHtml}${findingsHtml}</div>`;
   }
 
   let title;
@@ -1907,6 +2548,11 @@ function renderFinishCard(turn, findings = null) {
     title = 'Partial answer'; icon = ICONS.warning;
     classes.push('partial');
     subs.push(partialSubtitle(audit.notOpened));
+  } else if (hadFailedStep) {
+    // A step failed, so the task did not go through. A verified answer is a claim about the
+    // answer, not about the run: the run still failed, and the card says so.
+    title = 'Failed'; icon = ICONS.warning;
+    classes.push('failed');
   } else if (unconfirmed) {
     title = 'Unconfirmed answer'; icon = ICONS.warning;
   } else {
@@ -1925,7 +2571,7 @@ function renderFinishCard(turn, findings = null) {
   const details = renderAuditDetails(audit, turn.turn, attention ? 'attention' : 'verified');
   // The caveat goes above a doubtful answer, so it is seen before the answer is read, and below a
   // checked one, where it is only a receipt.
-  return `<div class="${classes.join(' ')}"><div class="finish-title">${icon} ${title}</div>${subHtml}${attention ? details : ''}${body}${findingsHtml}${attention ? '' : details}</div>`;
+  return `<div class="${classes.join(' ')}"><div class="finish-title">${icon} ${title}</div>${subHtml}${attention ? details : ''}${body}${evidenceHtml}${findingsHtml}${attention ? '' : details}</div>`;
 }
 
 /**
@@ -2006,7 +2652,7 @@ function withoutEngineNotes(answer) {
  */
 function pauseReasonText(state) {
   if (!state || state.status !== 'paused') return '';
-  if (state.pendingQuestion || state.pendingConfirm || state.pendingChallengeHelp || state.pendingContinueBudget) return '';
+  if (state.pendingQuestion || state.pendingApproval || state.pendingConfirm || state.pendingChallengeHelp || state.pendingContinueBudget) return '';
   switch (state.pauseReason) {
     case 'user': return 'Paused by you. Press Resume to continue.';
     case 'llm_failure': return 'Paused: the model request failed (see the error above). Press Resume to try again.';
@@ -2040,12 +2686,58 @@ function renderPlanRows(planSteps) {
   }).join('')}</div>`;
 }
 
-function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, pendingApproval = null, pendingConfirm = null, pendingChallengeHelp = null, pendingContinueBudget = null, findings = null, effortProfile = null) {
+/**
+ * The manual-approve hold: the plan the model proposed, with the two decisions. Shown only
+ * while state.pendingApproval is set (manual mode); auto mode never renders it.
+ */
+function renderPlanApprovalCard(pendingApproval) {
+  const steps = Array.isArray(pendingApproval?.plan) ? pendingApproval.plan : [];
+  if (steps.length === 0) return '';
+  return `<div class="plan-approval-card">
+    <div class="plan-approval-head">
+      <span class="plan-approval-icon">${ICONS.layers}</span>
+      <div class="plan-approval-copy">
+        <div class="plan-approval-title">Here is my plan</div>
+        <div class="plan-approval-lead">Approve it and ScoutFox will start working.</div>
+      </div>
+    </div>
+    <ol class="plan-approval-steps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol>
+    <div class="plan-approval-actions">
+      <button type="button" class="btn btn-secondary btn-xs" data-plan-decision="reject">Cancel</button>
+      <button type="button" class="btn btn-primary btn-xs" data-plan-decision="approve">Approve plan</button>
+    </div>
+  </div>`;
+}
+
+function renderTurns(history, status, currentPhase, pendingQuestion, pendingApproval = null, pendingConfirm = null, pendingChallengeHelp = null, pendingContinueBudget = null, findings = null, effortProfile = null, planSteps = null) {
   const turns = buildTurns(history);
   const busy = status === 'running' || status === 'paused';
+  const isErrorEnded = status === 'error' || status === 'stopped';
+  // While the plan card is up it IS the plan: the checklist under it would list the same steps
+  // twice and count "step 1 of N" for a run that has not started.
+  const progressPlan = pendingApproval ? null : planSteps;
 
   if (turns.length === 0 && (pendingApproval || pendingConfirm || pendingChallengeHelp || pendingContinueBudget)) {
     turns.push({ turn: 1, goal: null, entries: [], answer: null, audit: null, failed: false, timestamp: null, isNewRun: false });
+  }
+
+  // If the run ended with an error/stopped but no finish card was produced, add a synthetic one
+  // to the last turn: "Failed" with the error when there is one, else the "Stopped by you" card.
+  if (isErrorEnded && turns.length > 0) {
+    const lastTurn = turns[turns.length - 1];
+    if (!lastTurn.answer && !lastTurn.partial) {
+      const fault = lastTurn.entries.filter((e) => e.kind === 'fault').pop();
+      if (status === 'stopped' && !fault) {
+        lastTurn.answer = PARTIAL_SUBTITLE.stopped;
+        lastTurn.partial = true;
+        lastTurn.partialReason = 'stopped';
+      } else {
+        lastTurn.answer = fault
+          ? `The run ended with an error: ${fault.content}.`
+          : 'The run ended with an error.';
+        lastTurn.failed = true;
+      }
+    }
   }
 
   return turns.map((turn, ti) => {
@@ -2056,11 +2748,11 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
     const incomplete = !isLive && !turn.answer && turn.entries.length > 0;
     const open = isTurnExpanded(turn, isLive, incomplete);
 
-    // Header doubles as the progress indicator, which is why the separate plan card is gone.
+    // Header doubles as the progress indicator.
     let headline;
     if (isLive) {
       // Only 'completed' is progress; a skipped step must never move the counter.
-      const { done, total } = planCounts(planSteps);
+      const { done, total } = planCounts(progressPlan);
       headline = total
         ? `Working · step ${Math.min(done + 1, total)} of ${total} · ${count} action${count === 1 ? '' : 's'}`
         : `Working · ${count} action${count === 1 ? '' : 's'}`;
@@ -2090,24 +2782,28 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
                   : pending ? '<span class="act-state live"></span>'
                   : '';
       const detail = d.detail ? `<span class="act-detail">${escapeHtml(d.detail)}</span>` : '';
+      // A step that took a picture gets a slot for it. The slot holds no <img> in the rendered
+      // HTML: after the innerHTML write, the already-decoded element is moved in (see
+      // attachShotSlots), so a re-render costs no decode and the picture does not flicker.
+      const shot = e.outcome && e.outcome.imageId
+        ? `<div class="act-shot-slot" data-shot="${escapeHtml(String(e.outcome.imageId))}" data-w="${escapeHtml(String(e.outcome.imageWidth || 0))}" data-h="${escapeHtml(String(e.outcome.imageHeight || 0))}"></div>`
+        : '';
       return `<div class="act-item">
           <div class="act-row${bad ? ' bad' : ''}${refused ? ' refused' : ''}${e.thought ? ' has-why' : ''}" data-row="${key}" ${e.thought ? 'role="button" tabindex="0"' : ''}>
             <span class="act-ico">${d.icon}</span>
             <span class="act-text">${d.text}${detail}</span>
             ${state}
-          </div>${why}
+          </div>${why}${shot}
         </div>`;
     }).join('');
 
     // The checklist is a live-progress view, so a finished turn hides it - except the last turn
-    // when the harness skipped a step. That is the one fact about a finished run the plan still
-    // has to say ("idealo.de - not checked"). It sits inside the action group, so a reader sees
-    // it only after opening the group: a finished turn's group is collapsed to "3 actions".
-    // The skipped sites are named where the reader does look, on the finish card: in the subtitle
-    // of a partial answer and in the "Not opened" list of its details.
-    const showPlan = planSteps && planSteps.length
-      && (isLive || (isLast && planCounts(planSteps).skipped > 0));
-    const planDetail = showPlan ? renderPlanRows(planSteps) : '';
+    // when a step was skipped. That is the one fact about a finished run the plan still has to
+    // say ("idealo.de - not checked"). The plan belongs to the current run only (the background
+    // replaces it per run), so no earlier turn ever shows it.
+    const showPlan = Array.isArray(progressPlan) && progressPlan.length > 0
+      && (isLive || (isLast && planCounts(progressPlan).skipped > 0));
+    const planDetail = showPlan ? renderPlanRows(progressPlan) : '';
 
     const phase = (isLive && currentPhase)
       ? `<div class="act-phase">${escapeHtml(currentPhase)}</div>`
@@ -2126,19 +2822,14 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
         </div>`
       : '';
 
-    // Plans are approved automatically by the runner (background.ts passes autoApprove:true),
-    // so a first-plan hold is never surfaced here. The old Plan Approval card - and its in-card
-    // effort picker - is gone from the product; effort is resolved by the engine's own heuristic.
-    // A plan REVISION that adds a domain is different: the runner never answers that hold itself,
-    // so the add-domain card is the one plan card the user still sees.
-    const replanPrompt = (isLive && status === 'paused' && pendingApproval
-      && (pendingApproval.planMeta?.version ?? 1) > 1
-      && (pendingApproval.addedDomains?.length ?? 0) > 0)
-      ? renderReplanApprovalCard(pendingApproval)
-      : '';
-
     const confirmPrompt = (isLive && status === 'paused' && pendingConfirm)
       ? renderActionConfirmationCard(pendingConfirm)
+      : '';
+
+    // Like the other holds, the plan card belongs to the live turn only: under every turn it
+    // would repeat its Approve/Cancel buttons for runs that are long over.
+    const planPrompt = (isLive && pendingApproval)
+      ? renderPlanApprovalCard(pendingApproval)
       : '';
 
     const challengePrompt = (isLive && status === 'paused' && pendingChallengeHelp)
@@ -2159,11 +2850,11 @@ function renderTurns(history, status, planSteps, currentPhase, pendingQuestion, 
     return `<div class="turn">
       ${sessionDivider}
       ${turn.goal ? `<div class="user-goal-card"><span class="goal-label">Goal</span>${escapeHtml(turn.goal)}</div>` : ''}
+      ${planPrompt}
       ${confirmPrompt ? confirmPrompt : ''}
-      ${replanPrompt ? replanPrompt : ''}
       ${challengePrompt ? challengePrompt : ''}
       ${budgetPrompt ? budgetPrompt : ''}
-      ${count || turn.entries.length ? `<div class="act-group${open ? ' open' : ''}">
+      ${count || turn.entries.length || planDetail ? `<div class="act-group${open ? ' open' : ''}">
         <button class="act-head" data-turn="${turn.turn}" aria-expanded="${open}">
           <span class="act-chev">${ICONS.chevron}</span>
           <span class="act-head-text">${headline}</span>
@@ -2233,36 +2924,23 @@ function initTimelineInteraction() {
     const sendBtn = e.target.closest('.ask-user-send');
     if (sendBtn) { sendAnswer(sendBtn.closest('.ask-user-prompt')); return; }
 
-    // The old Plan Approval card (with its effort chips) is still not rendered - first plans are
-    // approved automatically. Only the revision add-domain card above is rendered now.
+    // The manual-approve plan card: Approve releases the hold, Cancel ends the run.
+    const planBtn = e.target.closest('[data-plan-decision]');
+    if (planBtn) {
+      const decision = planBtn.getAttribute('data-plan-decision');
+      const card = planBtn.closest('.plan-approval-card');
+      if (card) card.querySelectorAll('[data-plan-decision]').forEach((b) => { b.disabled = true; });
+      sendBgMessage({ action: 'APPROVE_PLAN', payload: { decision } }, (res) => {
+        if (chrome.runtime.lastError || (res && res.success === false)) {
+          if (card) card.querySelectorAll('[data-plan-decision]').forEach((b) => { b.disabled = false; });
+          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
+          showTaskError(errMsg || 'Failed to send the plan decision.');
+        }
+      });
+      return;
+    }
 
     // The add-domain card of a plan revision: Allow runs the new site, Deny continues without it.
-    const allowReplanBtn = e.target.closest('.btn-approve-replan');
-    if (allowReplanBtn) {
-      allowReplanBtn.disabled = true;
-      sendBgMessage({ action: 'APPROVE_PLAN', payload: { decision: 'approve' } }, (res) => {
-        if (chrome.runtime.lastError || (res && res.success === false)) {
-          allowReplanBtn.disabled = false;
-          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
-          showTaskError(errMsg || 'Failed to approve the new domain.');
-        }
-      });
-      return;
-    }
-
-    const denyReplanBtn = e.target.closest('.btn-deny-replan');
-    if (denyReplanBtn) {
-      denyReplanBtn.disabled = true;
-      sendBgMessage({ action: 'APPROVE_PLAN', payload: { decision: 'deny' } }, (res) => {
-        if (chrome.runtime.lastError || (res && res.success === false)) {
-          denyReplanBtn.disabled = false;
-          const errMsg = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.error);
-          showTaskError(errMsg || 'Failed to deny the new domain.');
-        }
-      });
-      return;
-    }
-
     const allowBtn = e.target.closest('.btn-confirm-allow');
     if (allowBtn) {
       allowBtn.disabled = true;
@@ -2408,53 +3086,83 @@ function initTimelineInteraction() {
   });
 }
 
+/** Whether the log list is scrolled to (near) its end, so a new entry may keep it there. */
+function logsAtBottom(logOutput) {
+  return logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight < 40;
+}
+
+const LOGS_WAITING_HTML = '<div class="subtext-hint log-empty">Nothing logged yet. Start a task and every model call and step appears here.</div>';
+
+/** The whole Logs tab, for a filter change or a resync. Open trees stay open (logTreeState). */
 function renderFilteredLogs() {
   const logOutput = document.getElementById('logOutput');
   if (!logOutput) return;
-
-  if (!rawLogsCache || rawLogsCache.length === 0) {
-    logOutput.innerHTML = '<div class="subtext-hint" style="text-align: center; padding: 20px;">// Waiting for backend system logs...</div>';
-    return;
-  }
-
-  const filtered = rawLogsCache.filter(log => {
-    if (currentActiveLogFilter === 'all') return true;
-    const keywords = LOG_FILTER_KEYWORDS[currentActiveLogFilter];
-    if (!keywords) return true;
-    const haystack = `${log.message || ''} ${log.module || ''}`.toUpperCase();
-    return keywords.some(k => haystack.includes(k));
-  });
-
+  const stick = logsAtBottom(logOutput);
+  const filtered = (rawLogsCache || []).filter((log) => logMatchesFilter(log, currentActiveLogFilter));
   if (filtered.length === 0) {
-    logOutput.innerHTML = `<div class="subtext-hint" style="text-align: center; padding: 20px;">// No logs match category filter: [${currentActiveLogFilter}]</div>`;
+    logOutput.innerHTML = rawLogsCache && rawLogsCache.length
+      ? '<div class="subtext-hint log-empty">No entries for this filter yet.</div>'
+      : LOGS_WAITING_HTML;
     return;
   }
+  logOutput.innerHTML = filtered.map((log) => logEntryHtml(log, { state: logTreeState })).join('');
+  if (stick) logOutput.scrollTop = logOutput.scrollHeight;
+}
 
-  logOutput.innerHTML = filtered.map(log => {
-    const time = log.timestamp || '';
-    const level = log.level || 'INFO';
-    const mod = log.module || 'System';
-    const msg = log.message || '';
-    const payload = log.data ? `<div class="log-payload">${escapeHtml(JSON.stringify(log.data, null, 2))}</div>` : '';
+/**
+ * One live entry: kept, and appended to the view when the filter shows it. Appending (not a full
+ * re-render) keeps open trees open and does not move a reader who scrolled up.
+ */
+function addLogEntry(entry) {
+  if (!entry) return;
+  rawLogsCache.push(entry);
+  if (rawLogsCache.length > MAX_PANEL_LOGS) rawLogsCache.shift();
+  const logOutput = document.getElementById('logOutput');
+  if (!logOutput || !logMatchesFilter(entry, currentActiveLogFilter)) return;
+  const stick = logsAtBottom(logOutput);
+  if (!logOutput.querySelector('.log-entry')) logOutput.innerHTML = '';
+  logOutput.insertAdjacentHTML('beforeend', logEntryHtml(entry, { state: logTreeState }));
+  while (logOutput.children.length > MAX_PANEL_LOGS) logOutput.firstElementChild.remove();
+  if (stick) logOutput.scrollTop = logOutput.scrollHeight;
+}
 
-    if (msg.includes('[NEW_SESSION_RUN]')) {
-      return `<div class="log-entry" style="border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); padding: 10px 0; margin: 10px 0; font-weight: 600;">${escapeHtml(msg)}</div>`;
+/** The clicks of the Logs tab: open and close a tree node, show a long string, copy an entry. */
+function initLogInteractions() {
+  const logOutput = document.getElementById('logOutput');
+  if (!logOutput) return;
+  logOutput.addEventListener('click', (event) => {
+    const toggle = event.target.closest('.jt-toggle');
+    if (toggle) {
+      const open = toggle.getAttribute('aria-expanded') !== 'true';
+      toggle.setAttribute('aria-expanded', String(open));
+      const children = toggle.nextElementSibling;
+      if (children) children.hidden = !open;
+      const entryId = toggle.closest('.jt')?.getAttribute('data-entry') || '';
+      logTreeState.set(treeStateKey(entryId, toggle.getAttribute('data-path') || ''), open);
+      return;
     }
-
-    return `
-      <div class="log-entry">
-        <div class="log-meta">
-          <span class="log-time">${time}</span>
-          <span class="log-level-${level}">${level}</span>
-          <span>${mod}</span>
-        </div>
-        <div class="log-msg">${escapeHtml(msg)}</div>
-        ${payload}
-      </div>
-    `;
-  }).join('');
-
-  logOutput.scrollTop = logOutput.scrollHeight;
+    const more = event.target.closest('.jt-more');
+    if (more) {
+      const open = more.getAttribute('aria-expanded') !== 'true';
+      more.setAttribute('aria-expanded', String(open));
+      const full = more.previousElementSibling;
+      const shortText = full?.previousElementSibling;
+      if (full) full.hidden = !open;
+      if (shortText) shortText.hidden = open;
+      more.textContent = open ? 'show less' : (more.getAttribute('data-label') || 'show all');
+      return;
+    }
+    const copy = event.target.closest('.log-copy');
+    if (copy) {
+      const log = rawLogsCache.find((entry) => String(entry.id) === copy.getAttribute('data-id'));
+      const details = log ? parseLogData(log.data) : null;
+      if (details === null) return;
+      navigator.clipboard.writeText(typeof details === 'string' ? details : JSON.stringify(details, null, 2)).then(() => {
+        copy.textContent = 'Copied';
+        setTimeout(() => { copy.textContent = 'Copy JSON'; }, 1500);
+      }).catch(() => {});
+    }
+  });
 }
 
 /**
@@ -2811,8 +3519,9 @@ function escapeHtml(str) {
 export {
   buildTurns, renderTurns, renderFinishCard, renderAuditDetails, renderPlanRows, normalizeAudit,
   planCounts, pauseReasonText, escapeHtml, initTimelineInteraction, openAuditDetails, closedAuditDetails, describeAction, firstSentence, withoutEngineNotes,
-  partialSubtitle, renderState, finishLandingTop, finishCardKey, noteFinishCard, scrollTimelineToLatest,
+  partialSubtitle, renderState, receiveState, loadSelectedSession, finishLandingTop, finishCardKey, noteFinishCard, scrollTimelineToLatest,
   formatMarkdownText, hasMarkdownBlocks, legacyBullets, splitTableRow,
+  attachShotSlots, attachShotPicture, shotCache, shotGone,
   loadSettings, autoSaveCurrentForm, openComboboxMenu, closeComboboxMenu, updateSelectedModel,
-  initEventListeners
+  pickComboboxModel, initEventListeners
 };

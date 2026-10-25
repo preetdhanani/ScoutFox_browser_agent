@@ -109,11 +109,11 @@ export async function ensureScoutFoxGroup(
           recordedGroupId = null;
           ctx.groupIds.delete(windowId);
         } else {
-          Logger.info('Browser', `[TAB_SANDBOX] Tab [${tabId}] joined active 'ScoutFox' tab group (GroupID: ${recordedGroupId}, window [${windowId}])`);
+          Logger.debug('Browser', `[TAB_SANDBOX] Tab [${tabId}] joined active 'ScoutFox' tab group (GroupID: ${recordedGroupId}, window [${windowId}])`);
           return recordedGroupId;
         }
       } else {
-        Logger.info('Browser', `[TAB_SANDBOX] Tab [${tabId}] joined active 'ScoutFox' tab group (GroupID: ${recordedGroupId}, window [${windowId}])`);
+        Logger.debug('Browser', `[TAB_SANDBOX] Tab [${tabId}] joined active 'ScoutFox' tab group (GroupID: ${recordedGroupId}, window [${windowId}])`);
         return recordedGroupId;
       }
     }
@@ -154,7 +154,7 @@ export async function ensureScoutFoxGroup(
 
       ctx.groupIds.set(windowId, newGroupId);
       try { ctx.persist(); } catch (_) {}
-      Logger.info('Browser', `[TAB_SANDBOX] Created fresh 'ScoutFox' tab group (GroupID: ${newGroupId}) for tab [${tabId}] (window [${windowId}])`);
+      Logger.debug('Browser', `[TAB_SANDBOX] Created fresh 'ScoutFox' tab group (GroupID: ${newGroupId}) for tab [${tabId}] (window [${windowId}])`);
       return newGroupId;
     }
 

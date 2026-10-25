@@ -104,6 +104,7 @@
 
 // The cut, the note and the paging are the real content script's own pure functions, so the fake cannot drift from them.
 import { clipWithNote } from '../../src/shared/clip.ts';
+import { computeHrefPath } from '../../src/content/perception.ts';
 import { capPageText as realCapPageText, pageTextPart } from '../../src/content/pageText.ts';
 import {
   omittedElementsNote,
@@ -468,6 +469,11 @@ function summarize(el: ElementSpec, id: number, nth: number, scrollY: number, vi
     pageHost = new URL(pageUrl).hostname.toLowerCase();
   } catch (_) {}
   if (hrefDomain && pageHost && hrefDomain !== pageHost) extraAttrs += ` domain="${hrefDomain}"`;
+  else if (hrefDomain) {
+    // A link on this site says which page it opens (perception.ts, computeHrefPath).
+    const path = computeHrefPath(el.goes ?? '#', pageUrl);
+    if (path) extraAttrs += ` href="${path}"`;
+  }
   if (isPasswordLike) extraAttrs += ' (user only)';
 
   const labelText = text || ariaLabel || placeholder || 'element';

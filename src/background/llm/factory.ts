@@ -24,12 +24,12 @@ import type { BaseMessage } from '@langchain/core/messages';
 import type { Callbacks } from '@langchain/core/callbacks/manager';
 import { ChatAnthropic } from '@langchain/anthropic';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
-import { ChatOpenAICompletions } from '@langchain/openai';
+import { ChatOpenAI, ChatOpenAICompletions } from '@langchain/openai';
 import { GEMINI_EMPTY_TEXT, UnreadableReplyError, scrubKey, statusOf } from './errors.ts';
 import { Logger } from '../../shared/logger.ts';
 import { SDK_TIMEOUT_MS, baseUrlOf, endpointHostOf, endpointOriginOf, maxTokensOf, modelOf, normalizeCustomAnthropicBase, normalizeCustomOpenaiBase, normalizeNvidiaBaseUrl, withV1 } from './settings.ts';
 import type { CustomProvider } from '../../shared/storage.ts';
-import type { ChatProvider, ChatTurn, LlmSettings } from './types.ts';
+import type { ChatProvider, ChatTurn, CompletionOptions, LlmSettings } from './types.ts';
 
 const OPENAI_BASE_URL = 'https://api.openai.com';
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
@@ -367,11 +367,13 @@ function scrubError(error: unknown, apiKey: string): unknown {
   return error;
 }
 
-function geminiCall(settings: LlmSettings, apiKey: string): ProviderCall {
+function geminiCall(settings: LlmSettings, apiKey: string, thinkingConfig?: CompletionOptions['thinkingConfig']): ProviderCall {
   const modelName = modelOf(settings) || 'gemini-1.5-flash';
   const model = new ChatGoogleGenerativeAI({
     model: modelName,
     apiKey,
+    // How hard the model thinks (llm/effort.ts): a budget on Gemini 2.5, a level on Gemini 3.
+    ...(thinkingConfig ? { thinkingConfig } : {}),
     temperature: settings.temperature ?? 0.1,
     maxRetries: 0,
     // Not optional: in non-streaming mode the client drops the abort signal, so neither Pause nor the deadline
@@ -409,10 +411,10 @@ function geminiCall(settings: LlmSettings, apiKey: string): ProviderCall {
 }
 
 /** Builds the model for one call. `apiKey` is the trimmed key from getApiKey ('' for a keyless OpenAI-style server). */
-export function createProviderCall(provider: ChatProvider, settings: LlmSettings, apiKey: string): ProviderCall {
+export function createProviderCall(provider: ChatProvider, settings: LlmSettings, apiKey: string, thinkingConfig?: CompletionOptions['thinkingConfig']): ProviderCall {
   switch (provider) {
     case 'anthropic': return anthropicCall(settings, apiKey);
-    case 'gemini': return geminiCall(settings, apiKey);
+    case 'gemini': return geminiCall(settings, apiKey, thinkingConfig);
     default: return openaiFamilyCall(provider, settings, apiKey);
   }
 }
@@ -424,9 +426,38 @@ export function createProviderCall(provider: ChatProvider, settings: LlmSettings
 const CUSTOM_LOG_TAG = 'CustomClient';
 
 /** The one chat model of a user-added OpenAI-style endpoint, built for the call and dropped after it. */
-function customOpenaiCall(descriptor: CustomProvider, settings: LlmSettings, apiKey: string, origin: string, model: string): ProviderCall {
+function customOpenaiCall(descriptor: CustomProvider, settings: LlmSettings, apiKey: string, origin: string, model: string, strategy: 'chat/completions' | 'responses' = 'chat/completions'): ProviderCall {
   const baseURL = normalizeCustomOpenaiBase(descriptor.baseUrl);
   const watch = watchFetch({ apiKey, keepReply: true, refuseForeignRedirects: origin });
+
+  // When the endpoint auto-detected as needing /v1/responses, use ChatOpenAI (the Responses API
+  // client) instead of ChatOpenAICompletions (the chat completions client).
+  if (strategy === 'responses') {
+    const client = new ChatOpenAI({
+      model,
+      apiKey: apiKey || 'unused',
+      temperature: settings.temperature ?? 0.1,
+      maxRetries: 0,
+      timeout: SDK_TIMEOUT_MS,
+      configuration: { baseURL, fetch: watch.fetch }
+    });
+    return {
+      baseUrl: baseURL,
+      logTag: CUSTOM_LOG_TAG,
+      logTarget: `${baseURL}/responses`,
+      invoke: async (messages, options = {}) => {
+        try {
+          const reply = await client.invoke(messages, { ...options, options: { headers: openaiRequestHeaders(apiKey) } });
+          const text = reply.text ? String(reply.text) : textOfChoices(watch.body()) || '';
+          return new AIMessage(text || '');
+        } catch (error) {
+          throw watch.asAnswered(error, options.signal);
+        }
+      },
+      lastBody: watch.body
+    };
+  }
+
   const client = new ChatOpenAICompletions({
     model,
     apiKey: apiKey || 'unused',
@@ -446,8 +477,31 @@ function customOpenaiCall(descriptor: CustomProvider, settings: LlmSettings, api
         // A server that answers in the legacy completion shape (choices[0].text) leaves LangChain with an empty reply.
         const legacy = reply.text ? '' : textOfChoices(watch.body());
         return legacy ? new AIMessage(legacy) : reply;
-      } catch (error) {
-        throw watch.asAnswered(error, options.signal);
+      } catch (error: any) {
+        const answered = watch.asAnswered(error, options.signal);
+        const rawBody = watch.body() || '';
+        // If the endpoint says this model needs /v1/responses instead of /v1/chat/completions,
+        // remember that for this origin and retry the call on the responses path.
+        if (isResponsesApiError(String(error?.message || rawBody))) {
+          recordResponsesApiStrategy(origin);
+          // Retry once on the responses path.
+          try {
+            const responsesClient = new ChatOpenAI({
+              model,
+              apiKey: apiKey || 'unused',
+              temperature: settings.temperature ?? 0.1,
+              maxRetries: 0,
+              timeout: SDK_TIMEOUT_MS,
+              configuration: { baseURL, fetch: watch.fetch }
+            });
+            const reply = await responsesClient.invoke(messages, { ...options, options: { headers: openaiRequestHeaders(apiKey) } });
+            const text = reply.text ? String(reply.text) : textOfChoices(watch.body()) || '';
+            return new AIMessage(text || '');
+          } catch (retryError) {
+            throw watch.asAnswered(retryError, options.signal);
+          }
+        }
+        throw answered;
       }
     },
     lastBody: watch.body
@@ -503,11 +557,23 @@ function customAnthropicCall(descriptor: CustomProvider, settings: LlmSettings, 
  * life, not one per call (C3.2). Private hosts are exempt: there, http is the normal case. */
 const HTTP_NOTE_LOGGED = new Set<string>();
 
+/** Origins whose API calling strategy has been auto-detected. Keyed by origin, value is the
+ * resolved call path: 'chat/completions' or 'responses'. First request probes with chat/completions;
+ * if the endpoint errors saying to use /v1/responses instead, that is recorded and used from then on. */
+const ENDPOINT_STRATEGY_LOG = new Map<string, 'chat/completions' | 'responses'>();
+
 function isPrivateHost(host: string): boolean {
   return /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]|::1)/.test(host)
     || host === 'host.docker.internal'
     || host.endsWith('.local')
     || host.endsWith('.lan');
+}
+
+/** Whether an error message says the model/endpoint needs the OpenAI Responses API (/v1/responses)
+ * instead of Chat Completions (/v1/chat/completions). */
+function isResponsesApiError(message: string): boolean {
+  const m = message || '';
+  return /\/v1\/responses/i.test(m) && (/\/v1\/chat\/completions/i.test(m) || /not support.*chat\/completions/i.test(m));
 }
 
 export function createCustomProviderCall(descriptor: CustomProvider, settings: LlmSettings, apiKey: string): ProviderCall {
@@ -536,5 +602,18 @@ export function createCustomProviderCall(descriptor: CustomProvider, settings: L
   if (descriptor.protocol === 'anthropic') {
     return customAnthropicCall(descriptor, settings, apiKey, origin, model);
   }
-  return customOpenaiCall(descriptor, settings, apiKey, origin, model);
+
+  // Auto-detect the API calling strategy for this origin. On the first request we probe with
+  // chat/completions; if the endpoint says to use /v1/responses instead, we remember that and
+  // use responses for all later calls to this origin.
+  const resolvedStrategy = ENDPOINT_STRATEGY_LOG.get(origin) ?? 'chat/completions';
+  return customOpenaiCall(descriptor, settings, apiKey, origin, model, resolvedStrategy);
+}
+
+/** Records that an origin uses the OpenAI Responses API instead of Chat Completions, so later
+ * calls to the same endpoint use /v1/responses. Called from customOpenaiCall when a 400 error
+ * indicates the model does not support /v1/chat/completions. */
+export function recordResponsesApiStrategy(origin: string): void {
+  ENDPOINT_STRATEGY_LOG.set(origin, 'responses');
+  Logger.debug('CustomClient', `[ENDPOINT_DETECT] ${origin} uses OpenAI Responses API (/v1/responses) instead of /v1/chat/completions`);
 }

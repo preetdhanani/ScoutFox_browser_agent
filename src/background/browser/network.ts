@@ -1,6 +1,6 @@
 // src/background/browser/network.ts
 // Ring buffer and formatting for captured network requests per tab.
-import { redactSensitiveData } from './redact.ts';
+import { redactSensitiveData, redactUrl } from './redact.ts';
 
 export interface NetworkRequestEntry {
   method?: string;
@@ -34,7 +34,8 @@ function formatBody(body: unknown): string {
 }
 
 export function formatNetworkLine(req: NetworkRequestEntry, includeBody: boolean = true): string {
-  const url = req.url || '';
+  // The query can carry a credential (?access_token=...): redact before truncating.
+  const url = redactUrl(req.url || '');
   const relativeUrl = url.length > 80 ? url.slice(0, 80) + '...' : url;
   let line = `[${req.method || 'GET'}] ${relativeUrl} → ${req.status || 'ERR'} (${req.durationMs ?? 0}ms)`;
   if (req.error) {

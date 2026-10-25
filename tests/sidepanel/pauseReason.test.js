@@ -33,10 +33,8 @@ test('nothing for a run that is not paused', () => {
   assert.equal(pauseReasonText(null), '');
 });
 
-test('nothing for a pause that draws its own card (question, confirmation, challenge, budget)', () => {
-  for (const hold of ['pendingQuestion', 'pendingConfirm', 'pendingChallengeHelp', 'pendingContinueBudget']) {
+test('nothing for a pause that draws its own card (plan, question, confirmation, challenge, budget)', () => {
+  for (const hold of ['pendingApproval', 'pendingQuestion', 'pendingConfirm', 'pendingChallengeHelp', 'pendingContinueBudget']) {
     assert.equal(pauseReasonText({ status: 'paused', pauseReason: 'user', [hold]: { any: 'card' } }), '', hold);
   }
-  // A plan hold has no card in the product, so it does not count as one.
-  assert.match(pauseReasonText({ status: 'paused', pauseReason: 'worker_restart', pendingApproval: { kind: 'approve_plan' } }), /extension restarted/);
 });

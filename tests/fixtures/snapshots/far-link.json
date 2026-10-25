@@ -1,0 +1,35 @@
+{
+  "title": "Framework laptops - fixture",
+  "url": "http://127.0.0.1:8765/far-link.html",
+  "domain": "127.0.0.1",
+  "scrollState": {
+    "scrollY": 0,
+    "pageHeight": 3394,
+    "viewportHeight": 772
+  },
+  "elementCount": 2,
+  "omittedCount": 0,
+  "elementsText": "[1] a \"Configure now\" (href=\"/store.html?model=laptop13\") [off-screen]\n[2] a \"Configure now\" (href=\"/configurator.html?model=laptop16\") [off-screen]",
+  "refs": [
+    1,
+    2
+  ],
+  "shownRefs": [
+    1,
+    2
+  ],
+  "elementInfo": {
+    "1": {
+      "role": "link",
+      "label": "Configure now",
+      "hrefDomain": "127.0.0.1"
+    },
+    "2": {
+      "role": "link",
+      "label": "Configure now",
+      "hrefDomain": "127.0.0.1"
+    }
+  },
+  "focused": null,
+  "pageText": "Framework laptops\nPick a laptop below.\nFramework Laptop 13\nConfigure now\nFramework Laptop 16\nConfigure now"
+}

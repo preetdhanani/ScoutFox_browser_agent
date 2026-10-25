@@ -14,6 +14,8 @@ export interface ElementLocator {
     name: string;
     'data-testid': string;
   };
+  /** True for an element inside a shadow root: its id and name are local to that root, so they are never looked up in the document. */
+  inShadow?: boolean;
 }
 
 export interface FormattedElement {
@@ -270,6 +272,26 @@ export function computeHrefDomain(
   return undefined;
 }
 
+/** Longest link path shown in an element line; a longer one is cut, the start tells pages apart. */
+export const HREF_PATH_LIMIT = 80;
+
+/**
+ * The path and query of a link to another page of the same site, or undefined: a link to the page
+ * itself (an anchor) has nothing to tell.
+ */
+export function computeHrefPath(href: string, currentHref: string): string | undefined {
+  try {
+    if (!href) return undefined;
+    const url = new URL(href, currentHref);
+    const here = new URL(currentHref);
+    const path = url.pathname + url.search;
+    if (path === here.pathname + here.search) return undefined;
+    return path.slice(0, HREF_PATH_LIMIT);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Produce concise element string representation with stable locator descriptors.
  */
@@ -326,6 +348,10 @@ export function getElementSummary(
   const currentHost = (win && win.location && win.location.hostname) ? win.location.hostname.toLowerCase() : '';
   if (hrefDomain && currentHost && hrefDomain !== currentHost) {
     extraAttrs += ` domain="${hrefDomain}"`;
+  } else if (hrefDomain) {
+    // A link on this site says which page it opens: five "Configure now" links are only told apart by their path.
+    const path = computeHrefPath((el as HTMLAnchorElement).href || el.getAttribute('href') || '', win && win.location ? win.location.href : 'https://localhost');
+    if (path) extraAttrs += ` href="${path}"`;
   }
   if (isForbidden) {
     extraAttrs += ' (user only)';
@@ -333,7 +359,9 @@ export function getElementSummary(
 
   const labelText = text || ariaLabel || placeholder || 'element';
 
+  const rootNode = typeof (el as any).getRootNode === 'function' ? (el as any).getRootNode() : null;
   const locator: ElementLocator = {
+    ...(rootNode && rootNode.host ? { inShadow: true } : {}),
     index: id,
     tag: tagName,
     text: labelText,

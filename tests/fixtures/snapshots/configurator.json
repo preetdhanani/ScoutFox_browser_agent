@@ -1,0 +1,75 @@
+{
+  "title": "Configure Framework Laptop 16 (AMD Ryzen AI 300 Series) - Framework Store",
+  "url": "http://127.0.0.1:8765/configurator.html",
+  "domain": "127.0.0.1",
+  "scrollState": {
+    "scrollY": 0,
+    "pageHeight": 1354,
+    "viewportHeight": 772
+  },
+  "elementCount": 8,
+  "omittedCount": 0,
+  "elementsText": "[1] a \"Framework\" (href=\"/index.html\")\n[2] a \"Laptops\"\n[3] a \"Desktops\"\n[4] a \"Support\"\n[5] button[button] \"Cart (0)\"\n[6] button[button] \"Add to cart\" [off-screen]\n[7] a \"Shipping & returns\" [off-screen]\n[8] a \"Imprint\" [off-screen]",
+  "refs": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "shownRefs": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "elementInfo": {
+    "1": {
+      "role": "link",
+      "label": "Framework",
+      "hrefDomain": "127.0.0.1"
+    },
+    "2": {
+      "role": "link",
+      "label": "Laptops",
+      "hrefDomain": "127.0.0.1"
+    },
+    "3": {
+      "role": "link",
+      "label": "Desktops",
+      "hrefDomain": "127.0.0.1"
+    },
+    "4": {
+      "role": "link",
+      "label": "Support",
+      "hrefDomain": "127.0.0.1"
+    },
+    "5": {
+      "role": "button",
+      "label": "Cart (0)"
+    },
+    "6": {
+      "role": "button",
+      "label": "Add to cart"
+    },
+    "7": {
+      "role": "link",
+      "label": "Shipping & returns",
+      "hrefDomain": "127.0.0.1"
+    },
+    "8": {
+      "role": "link",
+      "label": "Imprint",
+      "hrefDomain": "127.0.0.1"
+    }
+  },
+  "focused": null,
+  "pageText": "Framework Laptop 16\nFor in-stock laptop and desktop configurations: You can add up to five per order.\nFor pre-order laptop and desktop configurations: We only allow one per pre-order, but there is no limit for the amount of pre-orders per account.\nConfiguration\nChoose an option\nSystem, Base Pre-order €2,069 AMD Ryzen AI 5 340 16GB (2x8GB) Memory 512GB Storage Windows 11 Pro\nBatch 1 Shipped Batch 2 Shipped Batch 3 Ships December - Sold Out ... Batch 9 Ships December - Sold Out (7 similar entries) Batch 10 Ships Q1 - Sold Out\nSystem, Performance Pro Pre-order €2,314 AMD Ryzen AI 7 350 32GB (2x16GB) Memory 1TB Storage Windows 11 Pro\nBatch 1 Shipped Batch 2 Shipped Batch 3 Ships December - Sold Out ... Batch 9 Ships December - Sold Out (7 similar entries) Batch 10 Ships Q1 - Sold Out\nSystem, Overkill Pre-order €3,554 AMD Ryzen AI 9 HX 370 64GB (2x32GB) Memory 2TB Storage Windows 11 Pro\nBatch 1 Shipped Batch 2 Shipped Batch 3 Ships December - Sold Out ... Batch 9 Ships December - Sold Out (7 similar entries) Batch 10 Ships Q1 - Sold Out\nExpansion Bay Module, Graphics Module (NVIDIA GeForce RTX 5070) - 8GB Pre-order +€109 Slide the Graphics Module in for a massive boost in graphics performance.\nBatch 1 Shipped Batch 2 Shipped Batch 3 Ships December - Sold Out ... Batch 9 Ships December - Sold Out (7 similar entries) Batch 10 Ships Q1 - Sold Out\nTouchpad, One Piece Haptic Touchpad Pre-order Haptic feedback, no moving parts.\nBatch 1 Shipped Batch 2 Shipped Batch 3 Ships December - Sold Out ... Batch 9 Ships December - Sold Out (7 similar entries) Batch 10 Ships Q1 - Sold Out\nYour order\nStarting at €2,069.00\nFree shipping on laptop and desktop orders\nShips within 5 business days - Deliveries to Europe are currently delayed by up to 7 days due to global freight disruptions.\nAdd to cart"
+}

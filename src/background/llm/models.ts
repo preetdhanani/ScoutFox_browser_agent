@@ -9,6 +9,7 @@ import { Storage } from '../../shared/storage.ts';
 import { Logger } from '../../shared/logger.ts';
 import { baseUrlOf, customModelsUrl, endpointOriginOf, getApiKey, normalizeNvidiaBaseUrl, providerOf, withV1 } from './settings.ts';
 import { scrubKey } from './errors.ts';
+import { rememberAnthropicList, rememberGeminiList, rememberOpenRouterList } from './effort.ts';
 import { watchFetch } from './factory.ts';
 import type { CustomProvider } from '../../shared/storage.ts';
 import type { LlmSettings } from './types.ts';
@@ -61,7 +62,7 @@ export function getFallbackModels(provider: string): string[] {
         'claude-3-haiku'
       ];
     case 'ollama':
-      return ['qwen2.5:14b', 'llama3.1:8b', 'gemma2:9b'];
+      return ['qwen3.8:27b-mlx', 'qwen2.5:14b', 'llama3.1:8b', 'gemma2:9b'];
     case 'gemini':
       return [
         'gemini-2.0-flash',
@@ -94,7 +95,9 @@ export function getFallbackModels(provider: string): string[] {
 
 /**
  * The model-list request and parse of one user-added endpoint, per its protocol. A failed response
- * carries its body with the key scrubbed out, and a keyless endpoint sends no credential header at all.
+ * carries its body with the key scrubbed out, and a redirect that leaves the endpoint's origin is
+ * refused exactly as the chat call refuses one (a relay must not be able to walk the model-list
+ * request elsewhere either).
  */
 /** The models one user-added endpoint lists, with the count of ids that were filtered out for not
  * being chat models (embedders, rerankers, guards) - the panel shows that count beside the list. */
@@ -152,7 +155,7 @@ async function fetchCustomProviderModels(custom: CustomProvider, apiKey: string,
   const kept = raw.filter(id => !NON_CHAT_MODEL_PATTERN.test(id));
   const filteredCount = raw.length - kept.length;
   const unique = [...new Set(kept)].sort();
-  Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${unique.length} model(s) from ${custom.displayName || providerId}${filteredCount > 0 ? ` (${filteredCount} non-chat id(s) hidden)` : ''}`);
+  Logger.debug('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${unique.length} model(s) from ${custom.displayName || providerId}${filteredCount > 0 ? ` (${filteredCount} non-chat id(s) hidden)` : ''}`);
   return { models: unique, filteredCount };
 }
 
@@ -173,12 +176,12 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
   if (!forceRefresh) {
     const cached = await Storage.getCachedModels(cacheKey);
     if (cached && cached.length > 0) {
-      Logger.info('ApiClients', `[MODEL_CACHE] Loaded ${cached.length} model(s) from local storage for provider [${provider}] (Instant load)`);
+      Logger.debug('ApiClients', `[MODEL_CACHE] Loaded ${cached.length} model(s) from local storage for provider [${provider}] (Instant load)`);
       return cached;
     }
   }
 
-  Logger.info('ApiClients', `[MODEL_FETCH] Fetching fresh models via network for [${provider}]...`);
+  Logger.debug('ApiClients', `[MODEL_FETCH] Fetching fresh models via network for [${provider}]...`);
   const startTime = Date.now();
 
   try {
@@ -193,7 +196,7 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
         // the user saved, which may itself be empty: the picker then shows the honest empty state.
         models = [...custom.models];
       }
-      Logger.info('ApiClients', `[MODEL_FETCH] ${models.length} model(s) available for [${custom.displayName || provider}]`);
+      Logger.debug('ApiClients', `[MODEL_FETCH] ${models.length} model(s) available for [${custom.displayName || provider}]`);
     } else if (provider === 'openrouter') {
       const url = 'https://openrouter.ai/api/v1/models';
       const headers: Record<string, string> = {};
@@ -205,10 +208,12 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
 
       const data: ModelListPayload = await res.json();
       models = (data.data || []).map(m => m.id).sort();
+      // The same list says which models can reason and with which efforts (llm/effort.ts).
+      rememberOpenRouterList(settings, data.data || []);
       if (models.length === 0) {
         models = getFallbackModels('openrouter');
       }
-      Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from OpenRouter`);
+      Logger.debug('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from OpenRouter`);
     } else if (provider === 'ollama') {
       const baseUrl = (settings.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
       const url = `${baseUrl}/api/tags`;
@@ -219,7 +224,7 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
       const data: { models?: Array<{ name: string }> } = await res.json();
       models = (data.models || []).map(m => m.name);
       if (models.length === 0) models = getFallbackModels('ollama');
-      Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from Ollama`);
+      Logger.debug('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from Ollama`);
     } else if (provider === 'agent_router') {
       const baseUrl = withV1(settings.baseUrl || 'https://agentrouter.org/v1');
       const url = `${baseUrl}/models`;
@@ -237,7 +242,7 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
       if (models.length === 0) {
         models = getFallbackModels('agent_router');
       }
-      Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from AgentRouter`);
+      Logger.debug('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from AgentRouter`);
     } else if (provider === 'openai' || provider === 'openai_compatible') {
       const url = `${withV1(settings.baseUrl || 'https://api.openai.com')}/models`;
       const headers: Record<string, string> = {};
@@ -250,7 +255,7 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
       const data: ModelListPayload = await res.json();
       models = (data.data || []).map(m => m.id).sort();
       if (models.length === 0) models = getFallbackModels(provider);
-      Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from OpenAI/Compatible endpoint`);
+      Logger.debug('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from OpenAI/Compatible endpoint`);
     } else if (provider === 'gemini') {
       if (apiKey) {
         // The key goes in the x-goog-api-key header, as for the chat calls, and not in the URL, which ends up in DevTools and in logs.
@@ -259,12 +264,14 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
         const elapsed = Date.now() - startTime;
         if (res.ok) {
           const data: ModelListPayload = await res.json();
+          // Each entry says whether the model thinks (`thinking`), for llm/effort.ts.
+          rememberGeminiList(settings, (data.models || []) as any[]);
           models = (data.models || [])
             .filter((m): m is { name: string; supportedGenerationMethods?: string[] } => typeof m !== 'string')
             .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
             .map(m => m.name.replace(/^models\//, ''))
             .sort();
-          Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} live model(s) from Google Gemini API`);
+          Logger.debug('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} live model(s) from Google Gemini API`);
         } else {
           Logger.warn('ApiClients', `[MODEL_FETCH_WARN] Google Gemini API returned HTTP ${res.status}. Falling back to default list.`);
         }
@@ -300,9 +307,24 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
         .filter(id => Boolean(id) && !NON_CHAT_MODEL_PATTERN.test(id))
         .sort();
       if (models.length === 0) models = getFallbackModels('nvidia');
-      Logger.info('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from NVIDIA NIM endpoint`);
+      Logger.debug('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from NVIDIA NIM endpoint`);
     } else if (provider === 'anthropic') {
-      models = getFallbackModels('anthropic');
+      // Anthropic's model list carries each model's capabilities (thinking types, effort values),
+      // which llm/effort.ts reads. Without a key, or when the list fails, the curated ids stand.
+      if (apiKey) {
+        const res = await fetch('https://api.anthropic.com/v1/models?limit=100', {
+          headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }
+        });
+        if (res.ok) {
+          const data: ModelListPayload = await res.json();
+          rememberAnthropicList(settings, data.data || []);
+          models = (data.data || []).map(m => m.id).filter(Boolean).sort();
+          Logger.debug('ApiClients', `[MODEL_FETCH] 200 OK (${Date.now() - startTime}ms) - Retrieved ${models.length} model(s) from Anthropic`);
+        } else {
+          Logger.warn('ApiClients', `[MODEL_FETCH_WARN] Anthropic /v1/models returned HTTP ${res.status}. Falling back to default list.`);
+        }
+      }
+      if (models.length === 0) models = getFallbackModels('anthropic');
     }
 
     if (models.length > 0) {
@@ -321,3 +343,93 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
     return custom ? [...custom.models] : getFallbackModels(provider);
   }
 }
+
+/**
+ * Fetch the context window (num_ctx) for a specific model from the provider endpoint.
+ * Currently supports Ollama via /api/show. Returns the context length in tokens,
+ * or null if the endpoint doesn't report it.
+ */
+export async function fetchModelContextWindow(settings: LlmSettings, model: string): Promise<number | null> {
+  const provider = providerOf(settings);
+  const baseUrl = baseUrlOf(settings) || '';
+  
+  try {
+    if (provider === 'ollama') {
+      const url = `${baseUrl.replace(/\/$/, '')}/api/show`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model })
+      });
+      
+      if (!res.ok) {
+        Logger.warn('ApiClients', `[MODEL_CTX] Ollama /api/show for ${model} returned HTTP ${res.status}`);
+        return null;
+      }
+      
+      const data = await res.json();
+      // Ollama's /api/show returns model info with model_info containing context_length
+      // e.g., { model_info: { "general.architecture": "qwen35", "general.context_length": 262144, ... } }
+      if (data.model_info && typeof data.model_info === 'object') {
+        // Try multiple possible keys for context length
+        const ctxKeys = [
+          'general.context_length',
+          'context_length',
+          'llama.context_length',
+          'general.context.window'
+        ];
+        
+        for (const key of ctxKeys) {
+          const val = data.model_info[key];
+          if (typeof val === 'number' && val > 0) {
+            Logger.debug('ApiClients', `[MODEL_CTX] Fetched context window for ${model}: ${val} tokens (key: ${key})`);
+            return val;
+          }
+        }
+      }
+    }
+    // TODO: Add support for other providers (OpenAI, Anthropic, etc.) when they expose context window via API
+    return null;
+  } catch (err) {
+    Logger.warn('ApiClients', `[MODEL_CTX] Failed to fetch context window for ${model}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+export async function getEffectiveContextWindow(settings: LlmSettings): Promise<number> {
+  const provider = providerOf(settings);
+  const model = settings.model || '';
+  const cacheKey = `${provider}|${model}`;
+  
+  // Check stored context window first
+  if (settings.contextWindow?.[cacheKey]) {
+    return settings.contextWindow[cacheKey];
+  }
+  
+  // Try to fetch from endpoint
+  const fetched = await fetchModelContextWindow(settings, model);
+  if (fetched && fetched > 0) {
+    return fetched;
+  }
+  
+  // Fallback: use stored ollamaNumCtx or default
+  const ollamaNumCtx = Number(settings.ollamaNumCtx) > 0 ? Number(settings.ollamaNumCtx) : DEFAULT_CONTEXT_WINDOW;
+  
+  // For Ollama, use the fetched value or a reasonable default based on model family
+  if (provider === 'ollama' && model) {
+    // Known model families and their typical context windows
+    if (model.includes('qwen3') || model.includes('qwen2.5')) return 262144;
+    if (model.includes('llama3.1') || model.includes('llama3.2')) return 131072;
+    if (model.includes('llama3')) return 8192;
+    if (model.includes('gemma2') || model.includes('gemma3')) return 8192;
+    if (model.includes('mistral') || model.includes('mixtral')) return 32768;
+    if (model.includes('phi3') || model.includes('phi4')) return 131072;
+    if (model.includes('deepseek')) return 131072;
+    if (model.includes('nemotron')) return 131072;
+  }
+  
+  return ollamaNumCtx;
+}
+
+/** Default context window (tokens) when the endpoint does not report one. */
+export const DEFAULT_CONTEXT_WINDOW = 262144; // 256k tokens - safe for most modern models

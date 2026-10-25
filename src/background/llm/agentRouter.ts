@@ -94,7 +94,7 @@ export async function callAgentRouter(settings: LlmSettings, messages: ChatTurn[
     const reply = await anthropic.invoke(turns, { signal, callbacks: options.callbacks });
     const text = reply.text;
     if (text) {
-      Logger.info('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output from AgentRouter (${model}), length: ${text.length} chars`);
+      Logger.debug('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output from AgentRouter (${model}), length: ${text.length} chars`);
       return text;
     }
     Logger.warn('ApiClients', `[PAYLOAD_WARN] Messages endpoint returned 200 OK but text content was empty. Payload: ${JSON.stringify(payloadOf(reply))}`);
@@ -106,7 +106,7 @@ export async function callAgentRouter(settings: LlmSettings, messages: ChatTurn[
     // A model that AgentRouter serves in the OpenAI format may answer this endpoint in that format too.
     const foreign = failure instanceof UnreadableReplyError ? textOfChoices(rawBody) : '';
     if (foreign) {
-      Logger.info('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output from AgentRouter (${model}), length: ${foreign.length} chars`);
+      Logger.debug('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output from AgentRouter (${model}), length: ${foreign.length} chars`);
       return foreign;
     }
     if (isAgentRouterAuthFailure(failure, rawBody)) return fail(agentRouterAuthText(failure, { rawBody, apiKey }), failure);
@@ -133,6 +133,6 @@ export async function callAgentRouter(settings: LlmSettings, messages: ChatTurn[
   const text = reply.text || textOfChoices(completionsCall.body());
   if (!text) return fail(agentRouterEmptyText(payloadOf(reply), apiKey));
 
-  Logger.info('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output via completions fallback, length: ${text.length} chars`);
+  Logger.debug('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output via completions fallback, length: ${text.length} chars`);
   return text;
 }

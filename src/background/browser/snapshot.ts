@@ -190,7 +190,8 @@ export async function takeSnapshot(
           action: 'GET_DOM_SNAPSHOT',
           payload: {
             maxElements: opts.maxElements ?? 120,
-            showBadges: opts.showBadges ?? true,
+            // Element badges are off: numbers are drawn on the page only when a caller asks for them.
+            showBadges: opts.showBadges === true,
           },
         },
         (resp) => {
@@ -224,7 +225,7 @@ export async function takeSnapshot(
       throw primaryErr;
     }
     // 7. Fallback injection attempt
-    Logger.info('Browser', `[INJECT] Content script not active on tab [${tabId}] (${tab.url}). Injecting script dependencies...`);
+    Logger.debug('Browser', `[INJECT] Content script not active on tab [${tabId}] (${tab.url}). Injecting script dependencies...`);
 
     try {
       if (typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {

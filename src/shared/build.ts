@@ -9,4 +9,6 @@
 
 declare const __SCOUTFOX_BUILD__: string | undefined;
 
-export const BUILD_STAMP: string = typeof __SCOUTFOX_BUILD__ !== 'undefined' ? __SCOUTFOX_BUILD__ : 'not a build (run from source)';
+export const IS_BUILD: boolean = typeof __SCOUTFOX_BUILD__ !== 'undefined';
+
+export const BUILD_STAMP: string = IS_BUILD ? (__SCOUTFOX_BUILD__ as string) : 'not a build (run from source)';
