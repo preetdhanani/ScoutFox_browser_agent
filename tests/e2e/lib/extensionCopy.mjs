@@ -114,6 +114,10 @@ export const TAMPERS = {
     does: 'drops the outcome the finish tool named from the finish row (the old card rule: Done unless a step failed): stuck-recovery\'s honest "it did not work" shows the green Done card again, so stuck-recovery must fail',
     apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'if (outcome) entry.outcome = outcome;', '')
   },
+  'finish-says-partial': {
+    does: 'stores every finish row with outcome "partial", whatever the model said: an open-web task whose answer passes its check must still fail on "expected done"',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'if (outcome) entry.outcome = outcome;', 'if (outcome) entry.outcome = "partial";')
+  },
   'broken-net-recorder': {
     does: 'makes content/net-recorder.js (the MAIN-world content script) throw when it loads (the fixture page checks must fail)',
     apply: (dir) => prepend(inside(dir, 'content/net-recorder.js'), 'throw new Error(\'recorder boom (tamper=broken-net-recorder)\');\n')

@@ -39,6 +39,8 @@
  *         node smoke.mjs --fixtures                the local fixture tasks on LISA
  *         node smoke.mjs --held-out                the held-out open-web tasks (never tuned against; run them
  *                                                  after every change, to show it helps in general)
+ *         node smoke.mjs --sealed                  the sealed open-web tasks: only verdicts and numbers, no trace
+ *         node smoke.mjs --repeat=3                every task 3 times, summarised as median and p90 per task
  *         node smoke.mjs --provider=nvidia         the open-web tasks on NVIDIA NIM
  *         node smoke.mjs --provider=ollama         all tasks with qwen3.8:27b-mlx on the real Ollama
  *         node smoke.mjs --task=store-price        one task (or a comma list)
@@ -86,6 +88,7 @@ import { missingManifestFiles, prepareExtensionCopy, TAMPERS } from './lib/exten
 import { MOCK_FAIL_PREFIX } from '../mcp/callRecord.mjs';
 import { runFacts, TASKS } from '../mcp/tasks.mjs';
 import { HOST_RULES, RESEARCH_HOST, SHOP_B } from './lib/twoSources.mjs';
+import { aggregate, aggregateLines, callsForReport, expectedFinishOutcome, runVerdict } from './lib/metrics.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -96,13 +99,21 @@ const SNAPSHOT_DIR = path.join(REPO, 'tests', 'fixtures', 'snapshots');
 // read, so these go into the e2e folder, where the mock's self-test reads them.
 const E2E_SNAPSHOT_DIR = path.join(HERE, 'lib', 'snapshots');
 
-const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'headless', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'mock', 'tamper', 'prompt', 'start-url', 'provider', 'fixtures', 'held-out', 'effort']);
+const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'headless', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'mock', 'tamper', 'prompt', 'start-url', 'provider', 'fixtures', 'held-out', 'sealed', 'repeat', 'effort']);
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)(?:=(.*))?$/);
   return m ? [m[1], m[2] === undefined ? true : m[2]] : [a, true];
 }));
 
 const MOCK = !!args.mock;
+/** How often each task runs (--repeat=k). A real model is not deterministic, so its numbers are read as median and p90. */
+const REPEAT = args.repeat === undefined ? 1 : Number(args.repeat);
+/**
+ * --sealed: the sealed open-web tasks (tasks.mjs). They exist to judge the finished work, so nothing may be
+ * tuned against them: their steps, answers and model calls are never printed or saved, only the verdict and
+ * the numbers. Someone who reads a sealed trace has unsealed the set, and it has to be replaced.
+ */
+const SEALED = !!args.sealed;
 // The repo's own .env (gitignored) may hold the model keys; a variable already set in the shell wins.
 if (fs.existsSync(path.join(REPO, '.env'))) {
   try { process.loadEnvFile(path.join(REPO, '.env')); } catch { /* an unreadable .env is the same as none */ }
@@ -2220,7 +2231,7 @@ function beforeTaskProblems(before, done) {
   return problems;
 }
 
-async function runTask(ctx, fixtures, llm, name) {
+async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   const task = TASKS[name];
   if (!task) throw new Error(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
   const model = modelOf(name);
@@ -2254,7 +2265,9 @@ async function runTask(ctx, fixtures, llm, name) {
   const shotName = `${name}-${model.replace(/[^a-z0-9.]+/gi, '_')}`;
   // Screenshots are part of every run, not an option: each test case gets its folder with the
   // side panel (steps and end result, light and dark) and the end state of the page.
-  const shotDir = args['panel-screenshots'] ? path.resolve(String(args['panel-screenshots'])) : path.join(SHOT_ROOT, name);
+  // A repeated task (--repeat) keeps each attempt's screenshots in a folder of its own.
+  const shotRoot = args['panel-screenshots'] ? path.resolve(String(args['panel-screenshots'])) : path.join(SHOT_ROOT, name);
+  const shotDir = REPEAT > 1 ? path.join(shotRoot, `run-${attempt}`) : shotRoot;
   const screenshots = [];
 
   // A task about pictures runs in a viewport wider than the 1568 pixel image budget, so the
@@ -2358,6 +2371,7 @@ async function runTask(ctx, fixtures, llm, name) {
     : [];
   return {
     task: name,
+    attempt,
     model,
     startUrl: url,
     prompt: task.prompt,
@@ -2370,6 +2384,8 @@ async function runTask(ctx, fixtures, llm, name) {
     loop: run.loop,
     outcome: facts.outcome,
     expectOutcome,
+    finishOutcome: facts.finishOutcome,
+    expectFinishOutcome: expectedFinishOutcome(task),
     unconfirmed: facts.unconfirmed,
     answer,
     answerCorrect: answer ? !!task.check(facts) : false,
@@ -2411,12 +2427,12 @@ const countsText = (counts) => Object.entries(counts || {}).map(([k, n]) => `${k
 
 function printReport(r) {
   const f = r.facts;
-  console.log(`\n=== ${r.task} (${r.model}) ===`);
+  console.log(`\n=== ${r.task}${REPEAT > 1 ? ` (run ${r.attempt} of ${REPEAT})` : ''} (${r.model}) ===`);
   console.log(`start page: ${r.startUrl}`);
   console.log(`prompt:     ${r.prompt}`);
   const how = r.stopped ? `; the harness stopped it (${r.stopped}${r.loop ? `: the same prompt ${r.loop.calls} times in a row, ${r.loop.node}:${r.loop.mode}, call ${r.loop.lastCall}` : ''})` : '';
   const outcome = r.outcome === 'finish' ? 'FINISH' : r.outcome === 'partial_result' ? 'PARTIAL RESULT' : `NO FINAL ENTRY (status ${r.status})`;
-  console.log(`outcome:    ${outcome}${r.unconfirmed ? ' (unconfirmed)' : ''}, status ${r.status}${how}; expected ${r.expectOutcome}; answer check: ${r.answerCorrect ? 'PASS' : 'FAIL'}`);
+  console.log(`outcome:    ${outcome}${r.unconfirmed ? ' (unconfirmed)' : ''}, status ${r.status}${how}; expected ${r.expectOutcome}; model's outcome: ${r.finishOutcome || 'none'}${r.expectFinishOutcome ? ` (expected ${r.expectFinishOutcome})` : ''}; answer check: ${r.answerCorrect ? 'PASS' : 'FAIL'}`);
   if (r.answer) console.log(`answer:     ${oneLine(r.answer, 400)}`);
   for (const p of r.expectProblems) console.log(`run check:  ${oneLine(p, 300)}`);
   if (r.mockFail) console.log(`mock fail:  ${r.mockFail}`);
@@ -2471,13 +2487,11 @@ function judge(ctx, reports, gate) {
     if (TASKS[r.task]?.restartWorkerAfterSteps && !r.workerRestarted) failures.push(`${r.task}: the run ended before the harness could stop the worker`);
     if (TASKS[r.task]?.clearAfterSteps && !r.cleared) failures.push(`${r.task}: the run ended before the harness could press New chat`);
     if (TASKS[r.task]?.stopAfterSteps && !r.userStopped) failures.push(`${r.task}: the run ended before the harness could click Stop`);
-    if (!r.outcome) {
-      if (!r.stopped && !r.userStopped && !r.cleared) failures.push(`${r.task}: the run ended with no final entry (status ${r.status})`);
-    } else if (r.outcome !== r.expectOutcome) {
-      failures.push(`${r.task}: the run ended with a ${r.outcome} entry, expected ${r.expectOutcome}`);
-    } else if (!r.answerCorrect) {
-      failures.push(`${r.task}: the answer is wrong`);
-    }
+    // Every run is judged by the success rule of lib/metrics.mjs (final entry, the model's own outcome, the answer).
+    const verdict = runVerdict(r);
+    const label = REPEAT > 1 ? `${r.task} (run ${r.attempt})` : r.task;
+    // A run the harness stopped is already reported above, with its reason.
+    if (verdict && !(!r.outcome && r.stopped)) failures.push(`${label}: ${verdict}`);
     for (const p of r.expectProblems) failures.push(`${r.task}: ${p}`);
     for (const p of r.holdProblems) failures.push(`${r.task}: ${p}`);
     for (const p of r.probes) {
@@ -2517,7 +2531,8 @@ function judge(ctx, reports, gate) {
 
 function printFailureDetails(ctx, reports) {
   for (const r of reports) {
-    if (!r.pageErrors.length) continue;
+    // A sealed task's page errors name the sites it visited, which is part of its trace.
+    if (!r.pageErrors.length || SEALED) continue;
     console.log(`\nfixture page errors of ${r.task} (${r.pageErrors.length}):`);
     for (const e of r.pageErrors.slice(0, 20)) console.log(`  ${oneLine(e, 300)}`);
   }
@@ -2540,6 +2555,12 @@ async function main() {
   for (const flag of Object.keys(args)) {
     if (!KNOWN_FLAGS.has(flag)) throw new UserError(`Unknown option "${flag}". Known: ${[...KNOWN_FLAGS].map((f) => `--${f}`).join(', ')}`);
   }
+  if (!Number.isInteger(REPEAT) || REPEAT < 1 || REPEAT > 20) throw new UserError(`--repeat must be a whole number from 1 to 20, got ${args.repeat}`);
+  if (SEALED && (MOCK || args['held-out'] || args.fixtures)) throw new UserError('--sealed runs the sealed open-web tasks on a real model; it cannot be combined with --mock, --held-out or --fixtures');
+  // Naming a sealed task without --sealed would print its trace and unseal it.
+  for (const n of args.task ? String(args.task).split(',') : []) {
+    if (TASKS[n]?.sealed && !SEALED) throw new UserError(`"${n}" is a sealed task: run it only with --sealed, which shows its verdict and numbers but not its trace`);
+  }
   if (!MOCK && !REAL && PROVIDER !== 'ollama') throw new UserError(`--provider must be one of ${[...REAL_PROVIDER_NAMES, 'ollama'].join(', ')}, got ${PROVIDER}`);
   if (args.tamper !== undefined && !TAMPERS[args.tamper]) {
     throw new UserError(`Unknown --tamper "${args.tamper}". Known: ${Object.entries(TAMPERS).map(([k, v]) => `${k} (${v.does})`).join('; ')}`);
@@ -2547,10 +2568,11 @@ async function main() {
   // A real model meets the same goal in a task and in its mock-only variant, so the variants only run with --mock.
   // An open-web task (web) only runs against a real model, and it is the default set of a real run: the model
   // picks every site itself. --fixtures runs the local fixture tasks on the real model instead. --held-out runs
-  // only the held-out open-web tasks (heldOut), which a plain real run leaves out. --mock never touches the open web.
+  // only the held-out open-web tasks (heldOut), which a plain real run leaves out. --sealed runs only the sealed
+  // tasks, and shows only their verdicts and numbers. --mock never touches the open web.
   const names = args.task
     ? String(args.task).split(',')
-    : Object.keys(TASKS).filter((n) => MOCK ? !TASKS[n].web : args.fixtures ? (!TASKS[n].mockOnly && !TASKS[n].web) : TASKS[n].web && !!TASKS[n].heldOut === !!args['held-out']);
+    : Object.keys(TASKS).filter((n) => MOCK ? !TASKS[n].web : args.fixtures ? (!TASKS[n].mockOnly && !TASKS[n].web) : TASKS[n].web && !!TASKS[n].heldOut === !!args['held-out'] && !!TASKS[n].sealed === SEALED);
   for (const name of names) {
     if (!TASKS[name]) throw new UserError(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
   }
@@ -2638,9 +2660,13 @@ async function main() {
 
     for (const { task, reason } of skipped) console.log(`\n=== ${task} === SKIPPED (${reason})`);
     for (const name of runNames) {
-      const report = await runTask(ctx, fixtures, llm, name);
-      reports.push(report);
-      printReport(report);
+      for (let attempt = 1; attempt <= REPEAT; attempt++) {
+        const report = await runTask(ctx, fixtures, llm, name, attempt);
+        reports.push(report);
+        // A sealed task is measured, not read: its steps and answer stay out of the console (see SEALED).
+        if (SEALED) console.log(`\n=== ${name} (run ${attempt} of ${REPEAT}) === ${runVerdict(report) ? 'FAILED' : 'ok'}`);
+        else printReport(report);
+      }
     }
     // A task can use another model name (the mock's persona) and its own settings (the screenshots
     // mode): the side panel gate reads the configured one, so the plain settings are written back.
@@ -2650,10 +2676,14 @@ async function main() {
   }
 
   console.log('\n=== summary ===');
-  for (const r of reports) {
-    console.log(`${r.task}: ${r.outcome || `no final entry (status ${r.status}${r.stopped ? `, stopped: ${r.stopped}` : ''})`}, answer ${r.answerCorrect ? 'right' : 'wrong'}, ${r.facts.steps.length} step(s), ${(r.wallMs / 1000).toFixed(1)} s, ${r.modelCalls} model call(s) (by node: ${countsText(r.facts.calls.byNode)}), ${fmtInt(r.promptTokens)} prompt + ${fmtInt(r.outputTokens)} output tokens`);
+  for (const r of SEALED ? [] : reports) {
+    console.log(`${r.task}${REPEAT > 1 ? ` (run ${r.attempt})` : ''}: ${r.outcome || `no final entry (status ${r.status}${r.stopped ? `, stopped: ${r.stopped}` : ''})`}, answer ${r.answerCorrect ? 'right' : 'wrong'}, ${r.facts.steps.length} step(s), ${(r.wallMs / 1000).toFixed(1)} s, ${r.modelCalls} model call(s) (by node: ${countsText(r.facts.calls.byNode)}), ${fmtInt(r.promptTokens)} prompt + ${fmtInt(r.outputTokens)} output tokens`);
   }
   if (!args['dump-snapshots']) for (const { task, reason } of skipped) console.log(`${task}: skipped (${reason})`);
+  if (reports.length) {
+    console.log(`\n=== per task (${REPEAT} run${REPEAT === 1 ? '' : 's'} each; median/p90) ===`);
+    for (const line of aggregateLines(aggregate(reports))) console.log(line);
+  }
   console.log(`service worker errors (console, exceptions, CSP violations): ${ctx.workerErrors.length}`);
   if (reports.length) {
     const probes = reports.flatMap((r) => r.probes);
@@ -2679,9 +2709,9 @@ async function main() {
   const failures = judge(ctx, reports, gate);
   if (args.out) {
     // A run that loops makes thousands of calls: the report keeps the first five and the last three of each task, and the count.
-    const trimmed = reports.map((r) => ({ ...r, callCount: r.calls.length, calls: r.calls.length <= 8 ? r.calls : [...r.calls.slice(0, 5), ...r.calls.slice(-3)], logLines: r.logLines.length <= 40 ? r.logLines : [...r.logLines.slice(0, 25), ...r.logLines.slice(-15)] }));
+    const trimmed = reports.map((r) => ({ ...r, callCount: r.calls.length, calls: callsForReport(r.calls), logLines: r.logLines.length <= 40 ? r.logLines : [...r.logLines.slice(0, 25), ...r.logLines.slice(-15)] }));
     fs.writeFileSync(path.resolve(String(args.out)), JSON.stringify({
-      env, mock: MOCK, tamper: args.tamper || null, model: MODEL, skipped, reports: trimmed, workerErrors: ctx.workerErrors, panel: { ...ctx.panel, gate }, brand: ctx.brand || null, providerSetup: ctx.providerSetup || null, failures
+      env, mock: MOCK, tamper: args.tamper || null, model: MODEL, repeat: REPEAT, sealed: SEALED, skipped, aggregate: aggregate(reports), reports: SEALED ? [] : trimmed, workerErrors: ctx.workerErrors, panel: { ...ctx.panel, gate }, brand: ctx.brand || null, providerSetup: ctx.providerSetup || null, failures
     }, null, 2));
     console.log(`report saved to ${args.out}`);
   }
@@ -2690,7 +2720,8 @@ async function main() {
     for (const f of failures) console.log(`  - ${f}`);
     process.exitCode = 1;
   } else {
-    console.log(`\nSMOKE PASSED${reports.length ? ` (${reports.length} task${reports.length === 1 ? '' : 's'}, side panel clean, worker clean, fixture pages clean)` : ''}`);
+    const taskCount = new Set(reports.map((r) => r.task)).size;
+    console.log(`\nSMOKE PASSED${reports.length ? ` (${taskCount} task${taskCount === 1 ? '' : 's'}${REPEAT > 1 ? `, ${reports.length} runs` : ''}, side panel clean, worker clean, fixture pages clean)` : ''}`);
   }
 }
 

@@ -47,6 +47,8 @@ The run prints every task with its steps, model calls and tokens, then a summary
 | `--task=a,b` | Runs only these tasks, for example `web-eiffel-tower,web-npm-react`, or `store-price` with `--mock`. |
 | `--provider=name` | The real model server: `lisa` (default), `nvidia` or `ollama`. The OpenAI-compatible profiles live in `lib/providers.mjs`. |
 | `--held-out` | Runs the held-out open-web tasks instead of the regular ones (see "The tasks"). |
+| `--sealed` | Runs the sealed open-web tasks and shows only their verdicts and numbers, never their steps, answers or model calls (see "The tasks"). |
+| `--repeat=k` | Runs each task k times (1 to 20). A real model is not deterministic, so the summary reports each task by its median and p90 of steps, model calls, prompt tokens and wall time, and how many runs succeeded. |
 | `--model=name` | The model name (default: `lisa-pro` on LISA, `nvidia/nemotron-3.5-super-vl-120b-a12b` on NVIDIA, `qwen3.8:27b-mlx` on Ollama, `mock-agent` with `--mock`). |
 | `--max-steps=n` | Saved into the settings (the MCP loop does not read a step cap yet). |
 | `--timeout=ms` | The time limit for one task (default 360000, or 60000 with `--mock`). |
@@ -136,6 +138,15 @@ The check reads only facts a right answer must contain.
 The held-out tasks (`held-*`, `--held-out`) are open-web tasks of other kinds that nothing is ever tuned against.
 They run after every change made for the tasks above, to show the change helps in general and is not fitted to those tasks.
 A held-out task that fails is a finding about the agent, never a reason to edit the task.
+Their traces have been read while plans were made, so they are no longer a clean test of generality: the sealed set is.
+
+The sealed tasks (`sealed-*`, `--sealed`) judge a finished series of changes.
+The harness shows only their verdicts and numbers and saves no trace, and it refuses to run one by name without `--sealed`.
+If a trace of a sealed task is ever read, the set is unsealed and must be replaced with new tasks.
+
+A run succeeds only when it ends with the expected final entry, its answer passes the check, and the model's own outcome is the expected one.
+An open-web task must end with outcome "done": an answer the model itself calls "partial" or "blocked" fails, however plausible it looks to the check (`lib/metrics.mjs`).
+The summary ends with a table per task (runs that succeeded, and the median and p90 of each number), and `--out` saves every model call of every run.
 
 | Task | The question |
 | --- | --- |
@@ -240,6 +251,7 @@ The self-test (`tests/mcp/mockOllama.selftest.mjs`) checks the protocol, the val
 | `no-content-script` | Deletes `content/content.js`, which the manifest lists. | Exit 1: Chromium refuses to load the extension, and the error names the missing file. |
 | `worker-error` | Adds a `console.error` at the top of `background/sw.js`. | Exit 1 on the worker error, although all tasks pass. |
 | `broken-panel` | Makes the side panel script throw when it loads. | Exit 1 on the side panel gate. |
+| `finish-says-partial` | Stores every finish row with outcome "partial", whatever the model said. | Exit 1 on an open-web task whose answer passes its check: "the model ended with outcome "partial", expected "done"". |
 | `custom-provider-unsaved` | Makes "Add provider" of the "Custom model API" dialog close it without saving. | Exit 1 on a custom-provider run (LISA): "provider setup: "Add provider" stored no custom provider "lisa"". |
 | `empty-page-text` | Makes the content script report no page text (the snapshot text and the full text `read_page` pages through). | Exit 1: the mock answers `MOCK-FAIL` (it cannot read a price from an empty page). |
 | `no-history-rows` | Makes the runner drop every history row (`recordEntry` pushes nothing). | Exit 1: the run is invisible (no timeline rows, no final entry). |
@@ -279,6 +291,7 @@ Branded Chrome ignores `--load-extension`. Use Chromium or Chrome for Testing, a
 - `lib/fixtureServer.mjs`: the static server for the fixture site.
 - `lib/ollamaProxy.mjs`: the Origin proxy for the real Ollama.
 - `lib/keyProxy.mjs`: the proxy in front of a real OpenAI-compatible server (LISA, NVIDIA) that adds the key, so the extension only holds a placeholder.
+- `lib/metrics.mjs`: the success rule of a run, and the median and p90 per task over repeated runs.
 - `lib/providers.mjs`: the real OpenAI-compatible servers `--provider` takes, with their URL, key variables and default model.
 - `lib/twoSources.mjs`: the Chromium host rules that map fake shop names onto the fixture server.
 - `screenshots/<run stamp>/`: the screenshots of the runs (gitignored).

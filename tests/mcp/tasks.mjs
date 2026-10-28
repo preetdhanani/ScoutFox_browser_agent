@@ -39,8 +39,13 @@
  *   web         true = a real-model task: an open-web task (a neutral start page and only a question), or
  *               a local fixture task that only a real model can do justice (web-notebook-fix). The default
  *               set of a real-model run (NVIDIA or Ollama); never run with --mock
+ *   heldOut     true = a held-out open-web task: run only with --held-out, never tuned against
+ *   sealed      true = a sealed open-web task: run only with --sealed, which shows its verdict and numbers
+ *               but never its trace (see the sealed tasks below)
  *   maxRounds   the most model rounds the mock's self-test walks for this task (default 12)
  *   expectOutcome  the final entry the run must end with (default 'finish')
+ *   expectFinishOutcome  the outcome the model must name in finish (default 'done' for a web task, none
+ *               otherwise; see lib/metrics.mjs). A right-looking answer the model calls "partial" fails
  *   expectMock  with --mock only: the engine's own facts about the run (the action sequence, the plan rows,
  *               whether a click really reached the page) as a list of problems. The mock is deterministic,
  *               so these are exact. `check` judges the ANSWER (what the user reads), `expectMock` judges
@@ -627,5 +632,59 @@ export const TASKS = {
     prompt: 'What is the latest version of the Python package "requests" on PyPI, and which minimum Python version does it require?',
     timeoutMs: 6 * 60 * 1000,
     check: (run) => /\b2\.\d{2}\.\d+\b/.test(run.answer || '') && /\b3\.\d{1,2}\b/.test(run.answer || '')
+  },
+
+  // Sealed open-web tasks (`--sealed`). They judge the finished work of a series of changes, so they are
+  // never looked at while the work is going on: the harness shows only their verdicts and numbers, never
+  // their steps, answers or model calls, and refuses to run one by name without --sealed. The held-out set
+  // above shaped decisions once its traces were read; this set has not. If a trace of one is ever read,
+  // the set is unsealed and must be replaced with new tasks.
+  'sealed-go-release': {
+    page: WEB_START,
+    web: true,
+    sealed: true,
+    prompt: 'What is the latest stable release of the Go programming language, and on which date was it released?',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b(go)?1\.\d{2}(\.\d+)?\b/i.test(run.answer || '') && /\b20\d\d\b/.test(run.answer || '')
+  },
+  'sealed-k2-height': {
+    page: WEB_START,
+    web: true,
+    sealed: true,
+    prompt: 'How high is the mountain K2 in metres, according to its English Wikipedia article?',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b8[,.]?6\d\d\b/.test(run.answer || '')
+  },
+  'sealed-python-batched': {
+    page: WEB_START,
+    web: true,
+    sealed: true,
+    prompt: 'According to the official Python documentation, what does itertools.batched() return, and in which Python version was it added?',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b3\.1[2-9]\b/.test(run.answer || '') && /tuple/i.test(run.answer || '')
+  },
+  'sealed-crates-serde': {
+    page: WEB_START,
+    web: true,
+    sealed: true,
+    prompt: 'What is the latest version of the Rust crate "serde" on crates.io, and when was it published?',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b1\.\d+\.\d{2,3}\b/.test(run.answer || '') && /\b20\d\d\b/.test(run.answer || '')
+  },
+  'sealed-vscode-license': {
+    page: WEB_START,
+    web: true,
+    sealed: true,
+    prompt: 'Which license does the microsoft/vscode repository on GitHub use, and about how many stars does it have?',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\bMIT\b/.test(run.answer || '') && /\d/.test(run.answer || '') && /star/i.test(run.answer || '')
+  },
+  'sealed-kernel-mainline': {
+    page: WEB_START,
+    web: true,
+    sealed: true,
+    prompt: 'Which Linux kernel version is listed as "mainline" on kernel.org right now?',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b[6-9]\.\d{1,2}(-rc\d+)?\b/.test(run.answer || '')
   }
 };
