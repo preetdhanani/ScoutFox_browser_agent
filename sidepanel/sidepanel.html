@@ -331,6 +331,33 @@
 
           <!-- Element badges stay off: the agent navigates by reading page text and structure, not by visual markers. -->
 
+          <!-- Research outside the tab: web_search and fetch_url run from the background and never touch the tab. -->
+          <div class="settings-section" id="researchSection">
+            <div class="settings-section-head">
+              <span class="settings-section-title">Research</span>
+              <span class="subtext-hint">Lets the agent search the web and read pages outside your tab, without your cookies, to check facts before it writes them.</span>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="researchEnabledSelect">Web search and page reading</label>
+              <select id="researchEnabledSelect" class="form-select">
+                <option value="on">On (Recommended)</option>
+                <option value="off">Off - the agent only uses the tab</option>
+              </select>
+            </div>
+            <div class="form-group" id="researchBackendGroup">
+              <label class="form-label" for="researchBackendSelect">Search backend</label>
+              <select id="researchBackendSelect" class="form-select">
+                <option value="duckduckgo">DuckDuckGo (no key needed)</option>
+                <option value="searxng">SearXNG (your own server)</option>
+              </select>
+            </div>
+            <div class="form-group" id="searxngUrlGroup">
+              <label class="form-label" for="searxngUrlInput">SearXNG URL</label>
+              <input type="text" id="searxngUrlInput" class="form-input" placeholder="https://searx.example.org" autocomplete="off" spellcheck="false">
+              <span class="subtext-hint" id="searxngUrlHint">The server must allow the JSON format (search: formats: [html, json]).</span>
+            </div>
+          </div>
+
           <button class="btn btn-primary btn-block" id="btnSaveSettings">Save Settings</button>
         </div>
       </section>

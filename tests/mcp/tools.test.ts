@@ -50,9 +50,9 @@ test('the tool names are unique, and the map holds exactly the list', () => {
 });
 
 test('the tools the model needs to finish a task are all there', () => {
-  // A run cannot end without finish, cannot read without get_page_text, and cannot act without
+  // A run cannot end without finish, cannot read without read_page, and cannot act without
   // an element list. Losing one of these is a run that hangs.
-  for (const name of ['finish', 'get_page_text', 'get_page_elements', 'click', 'type', 'scroll', 'navigate', 'update_plan']) {
+  for (const name of ['finish', 'read_page', 'get_page_elements', 'click', 'type', 'scroll', 'navigate', 'update_plan']) {
     assert.ok(TOOL_NAMES.includes(name), `the tool "${name}" must exist`);
   }
 });
@@ -108,9 +108,10 @@ test('the amount of a wait is between one and five seconds', () => {
   assert.equal(property.maximum, 5);
 });
 
-test('the answer of finish is required, because a run without an answer tells the user nothing', () => {
+test('the answer and the outcome of finish are required: a run without an answer tells the user nothing, and the card follows the outcome', () => {
   const tool = TOOL_MAP.get('finish')!;
-  assert.deepEqual(tool.inputSchema.required, ['answer']);
+  assert.deepEqual(tool.inputSchema.required, ['answer', 'outcome']);
+  assert.deepEqual(tool.inputSchema.properties.outcome.enum, ['done', 'partial', 'blocked']);
   assert.equal(tool.inputSchema.properties.answer.type, 'string');
 });
 
@@ -126,18 +127,8 @@ test('finish carries an optional table for quick comparison', () => {
   assert.ok(table, 'finish has a table property');
   assert.equal(table.type, 'object');
   assert.equal(table.description.length, table.description.trim().length, 'the table description is not padded');
-  // answer stays required, table does not.
-  assert.deepEqual(tool.inputSchema.required, ['answer']);
-});
-
-test('render_table needs columns and rows, each row matching the column count', () => {
-  const tool = TOOL_MAP.get('render_table')!;
-  assert.ok(tool, 'the render_table tool exists');
-  assert.match(tool.description, /comparison/i, 'the tool explains it builds a comparison table');
-  assert.deepEqual(tool.inputSchema.required, ['columns', 'rows']);
-  assert.equal(tool.inputSchema.properties.columns.type, 'array');
-  assert.equal(tool.inputSchema.properties.rows.type, 'array');
-  assert.equal(tool.inputSchema.additionalProperties, false);
+  // answer and outcome are required, table is not.
+  assert.deepEqual(tool.inputSchema.required, ['answer', 'outcome']);
 });
 
 test('every tool but the plan shows up in the timeline, so no step is invisible', () => {
@@ -150,12 +141,15 @@ test('every tool but the plan shows up in the timeline, so no step is invisible'
   }
 });
 
-test('render_table maps to a timeline row', () => {
-  const action = mapToolToAction('render_table', { columns: ['Shop', 'Price'], rows: [['A', '99']] });
-  assert.ok(action, 'render_table maps to an action');
-  assert.equal(action!.action, 'render_table');
-  assert.deepEqual(action!.columns, ['Shop', 'Price']);
-  assert.deepEqual(action!.rows, [['A', '99']]);
+test('the old read and table tools are gone: read_page reads, finish.table shows a table', () => {
+  for (const name of ['get_page_text', 'read_page_text', 'render_table']) assert.equal(TOOL_MAP.has(name), false, name);
+  const read = TOOL_MAP.get('read_page')!;
+  assert.equal(read.inputSchema.properties.part.type, 'integer');
+  assert.equal(read.inputSchema.properties.part.minimum, 1);
+  assert.equal(read.inputSchema.properties.element_id.type, 'number');
+  assert.deepEqual(read.inputSchema.required ?? [], [], 'both are optional');
+  const scroll = TOOL_MAP.get('scroll')!;
+  assert.deepEqual(Object.keys(scroll.inputSchema.properties).sort(), ['direction', 'element_id', 'reason', 'x', 'y']);
 });
 
 test('take_screenshot is a tool the model can call, with only an optional reason', () => {

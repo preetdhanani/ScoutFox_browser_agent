@@ -224,7 +224,7 @@ function checkExecuteScriptFuncs({ manifest }) {
       problems.push(`${file}:${lineOf(prop)}: executeScript func uses "${name}", which it does not declare. It runs in the page, where the bundle's names do not exist`);
     }
   }
-  if (checked === 0) problems.push(`${file}: no executeScript({ func }) found, so this check is blind. If execute_js is gone on purpose, remove the check`);
+  if (checked === 0) problems.push(`${file}: no executeScript({ func }) found, so this check is blind. If no worker code injects a function any more, remove the check`);
   return { detail: `${checked} func checked`, problems };
 }
 

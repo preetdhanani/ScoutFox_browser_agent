@@ -60,8 +60,4 @@ export const act = {
   pressKey: (key: string, reason = 'Press key'): string => JSON.stringify({ action: 'press_key', key, reason }),
   wait: (amount = 1, reason = 'Wait'): string => JSON.stringify({ action: 'wait', amount, reason }),
   readPageText: (reason = 'Read page text'): string => JSON.stringify({ action: 'read_page_text', reason }),
-  executeJs: (code: string, reason = 'Run code'): string => JSON.stringify({ action: 'execute_js', code, reason }),
-  openWindow: (url: string, reason = 'Open window'): string => JSON.stringify({ action: 'open_window', url, reason }),
-  readNetworkRequests: (filter: Record<string, any> = {}, reason = 'Read requests'): string => JSON.stringify({ action: 'read_network_requests', filter, reason }),
-  browserBatch: (steps: any[], reason = 'Run batch'): string => JSON.stringify({ action: 'browser_batch', steps, reason }),
 };

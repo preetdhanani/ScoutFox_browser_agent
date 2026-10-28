@@ -14,10 +14,9 @@ import { cdp } from '../browser/cdp.ts';
 import { lastRuntimeError } from '../browser/tabs.ts';
 import { NetworkBuffers } from '../browser/network.ts';
 import { ensureScoutFoxGroup, isTabInScope, groupIdForWindow } from '../browser/groups.ts';
-import { openNewWindow } from '../browser/windows.ts';
 import { takeSnapshot } from '../browser/snapshot.ts';
-import { executeAction } from '../browser/execute.ts';
 import { ScoutFoxMCPClient } from '../mcp/client.ts';
+import { STOPPED_TEXT, partialResultEntry } from '../mcp/historyEntries.ts';
 import { normalizeEffort } from '../llm/effort.ts';
 import type { RunStatus, HistoryEntry, Limits, EffortChoice, EffortProfile, RunStats } from '../types.ts';
 
@@ -54,12 +53,10 @@ export class AgentRunner {
   public autoApprovePlan = true;
 
   private taskClaimed = false;
-  private adoptedTabIds = new Set<number>();
   private stopDuringClaim = false;
   private pauseDuringClaim = false;
   private _activeTabId: number | null = null;
   private onStateChangeCb: ((state: Record<string, any>) => void) | null = null;
-  private onTabAdoptedCb: ((tabId: number, windowId: number) => void) | null = null;
 
   private journal: SessionActionJournal;
   private meta: SessionRunnerMeta;
@@ -183,9 +180,6 @@ export class AgentRunner {
           sleep: (ms) => this.runtime.clock.sleep(ms)
         });
       },
-      execute: async (tabId: number, action: any, opts: any) => {
-        return await this.executeActionOnTab(tabId, action, opts);
-      },
       navigate: async (tabId: number, url: string) => {
         if (typeof chrome === 'undefined' || !chrome.tabs?.update) return;
         await chrome.tabs.update(tabId, { url });
@@ -235,7 +229,6 @@ export class AgentRunner {
       },
       isTabInScope: async (tabId: number) => {
         if (tabId === this.ownerTabId && this.scoutFoxGroupIds.size === 0) return true;
-        if (this.adoptedTabIds.has(tabId)) return true;
         return await isTabInScope(
           { windowId: this.windowId, groupIds: this.scoutFoxGroupIds, persist: () => this.persistState() },
           tabId
@@ -421,7 +414,7 @@ export class AgentRunner {
    */
   private async detachIfDone(): Promise<void> {
     if (this.status === 'running' || this.status === 'paused') return;
-    const ids = new Set<number>([this.ownerTabId, ...this.adoptedTabIds]);
+    const ids = new Set<number>([this.ownerTabId]);
     if (typeof this._activeTabId === 'number') ids.add(this._activeTabId);
     // No isAttached filter: detach is idempotent and only ever touches this extension's own
     // session, and a tab whose attach is still settling must not be skipped.
@@ -461,7 +454,7 @@ export class AgentRunner {
   }
 
   stop(): { success: boolean; error?: string } {
-    if (this.status === 'idle' || this.status === 'stopped') {
+    if (!this.endRun('stopped', partialResultEntry(STOPPED_TEXT, 'stopped'))) {
       if (this.taskClaimed) {
         this.stopDuringClaim = true;
         this.notifyStateChange({ stopped: true });
@@ -469,14 +462,6 @@ export class AgentRunner {
       }
       return { success: false, error: 'No task is running or paused.' };
     }
-    this.dirty = true;
-    this.status = 'stopped';
-    this.pauseReason = null;
-    this.pendingApproval = null;
-    this.runtime.control.abortStep('user_stop');
-    this.mcpClient?.stop();
-    this.notifyStateChange({ stopped: true });
-    void this.detachIfDone();
 
     const targetTabId = this._activeTabId ?? this.ownerTabId;
     if (targetTabId) {
@@ -508,7 +493,71 @@ export class AgentRunner {
     // Not used in MCP loop
   }
 
+  /**
+   * The one way out of running or paused. Every ending goes through here: the user's Stop, the
+   * client's finish or failure, a closed tab, New chat. It halts the loop first, so nothing writes
+   * into the run after its end, then leaves a terminal status and the final row (none for New
+   * chat, whose history is cleared) in one state broadcast: a run never ends as an idle thread
+   * with no card. Returns false when no run is active; that later ending is dropped, since the
+   * run already has its own.
+   */
+  endRun(status: 'idle' | 'stopped' | 'error', row: HistoryEntry | null): boolean {
+    if (this.status !== 'running' && this.status !== 'paused') return false;
+    this.runtime.control.abortStep('user_stop');
+    this.mcpClient?.stop();
+    this.dirty = true;
+    if (row) this.history.push(row);
+    this.status = status;
+    this.pauseReason = null;
+    this.pendingApproval = null;
+    this.notifyStateChange(status === 'stopped' ? { stopped: true } : undefined);
+    void this.detachIfDone();
+    return true;
+  }
+
+  /**
+   * Chrome swapped this session's tab for another one (chrome.tabs.onReplaced: a prerendered or
+   * instant page took its place). The run follows the new id, and so do its storage keys: a
+   * restarted worker builds the runner of a tab from that tab's id, so a run kept under the old id
+   * would never be found again.
+   */
+  replaceTab(oldTabId: number, newTabId: number): void {
+    if (this.ownerTabId === oldTabId) {
+      this.ownerTabId = newTabId;
+      this.runtime.ownerTabId = newTabId;
+      this.runtime.tabs.ownerTabId = newTabId;
+      this.rekeyThread(newTabId);
+    }
+    if (this._activeTabId === oldTabId) this.activeTabId = newTabId;
+  }
+
+  /**
+   * Moves the thread to the owner tab's new id: the runtime registry entry, the run snapshot and
+   * the runner meta are written under the new key at once, and the old keys are dropped.
+   */
+  private rekeyThread(newTabId: number): void {
+    const previous = this.threadId;
+    const next = String(newTabId);
+    if (previous === next) return;
+    runtimeRegistry.delete(previous);
+    this.threadId = next;
+    this.sessionId = newTabId;
+    this.runtime.threadId = next;
+    runtimeRegistry.set(this.runtime);
+    // A debounced write of the old store must not land under the old key after it was dropped.
+    this.snapshots.discard();
+    this.journal = new SessionActionJournal(next, this.bootId);
+    this.meta = new SessionRunnerMeta(next);
+    this.snapshots = new RunSnapshotStore(next);
+    this.snapshots.save(this.runSnapshot(), true);
+    void this.persistState();
+    AgentRunner.dropStoredState(previous);
+  }
+
   clearHistory() {
+    // New chat ends a live run first: its loop must not go on into the cleared thread.
+    this.endRun('idle', null);
+    this.mcpClient = null;
     this.dirty = true;
     this.history = [];
     this.currentTask = '';
@@ -574,36 +623,6 @@ export class AgentRunner {
     );
   }
 
-  async openNewWindow(url?: string) {
-    return await openNewWindow(
-      {
-        adoptTab: (newTabId, winId) => {
-          this.adoptedTabIds.add(newTabId);
-          this.onTabAdoptedCb?.(newTabId, winId);
-        },
-        ensureGroup: async (newTabId, winId) => this.ensureScoutFoxGroup(newTabId, winId),
-        setActiveTab: (newTabId) => {
-          this.activeTabId = newTabId;
-          this.notifyStateChange();
-        }
-      },
-      url
-    );
-  }
-
-  async executeActionOnTab(tabId: number, action: any, opts: any = {}): Promise<any> {
-    const settings = await Storage.getSettings().catch(() => null);
-    return await executeAction(tabId, action, {
-      runRuntime: this.runtime,
-      openNewWindow: (url) => this.openNewWindow(url),
-      docId: opts?.docId,
-      signal: this.runtime.control.stepSignal(),
-      waitDomQuiet: (tId, qMs, mMs) => this.runtime.browser.waitDomQuiet(tId, qMs, mMs),
-      actionDelayMs: settings?.actionDelayMs,
-      allowExecuteJs: settings?.allowExecuteJs === true
-    });
-  }
-
   async waitForTabComplete(tabId: number, timeoutMs = 15000, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return;
     if (typeof chrome === 'undefined' || !chrome.tabs?.onUpdated) return;
@@ -624,6 +643,16 @@ export class AgentRunner {
           clearTimeout(timer);
           resolve();
         });
+        // A load that completed before the listener was added fires no event any more: the tab's
+        // own status says so, instead of a wait that can only time out.
+        chrome.tabs.get?.(tabId, (tab) => {
+          if (chrome.runtime?.lastError) return;
+          if (tab?.status === 'complete') {
+            chrome.tabs.onUpdated.removeListener(listener);
+            clearTimeout(timer);
+            resolve();
+          }
+        });
       });
     } catch {
       // Timeout or error - continue anyway
@@ -636,10 +665,6 @@ export class AgentRunner {
 
   setStateChangeCallback(cb: (state: Record<string, any>) => void) {
     this.onStateChangeCb = cb;
-  }
-
-  setTabAdoptedCallback(cb: (tabId: number, windowId: number) => void) {
-    this.onTabAdoptedCb = cb;
   }
 
   // Static: forget a session when its owner tab closes
@@ -668,7 +693,7 @@ export class AgentRunner {
 
   // recordNetworkRequest: record a network request for a tab
   recordNetworkRequest(tabId: number, payload: any): void {
-    // The content scripts' net recorder feeds this buffer; read_network_requests reads it back.
+    // The content scripts' net recorder feeds this buffer.
     this.networkBuffers.record(tabId, payload, this.runtime.net.marker());
   }
 
@@ -696,6 +721,18 @@ export class AgentRunner {
     };
   }
 
+  /**
+   * The tab group map is what lets a restarted worker keep grouping and adopting this session's
+   * tabs; persistState writes it, so it is read back here.
+   */
+  private restoreGroupMap(entries: Array<[number, number]>): void {
+    for (const [windowId, groupId] of entries) {
+      if (typeof windowId === 'number' && typeof groupId === 'number' && !this.scoutFoxGroupIds.has(windowId)) {
+        this.scoutFoxGroupIds.set(windowId, groupId);
+      }
+    }
+  }
+
   private async restoreState(): Promise<void> {
     // The run the panel showed before the worker restarted. Restored before restorePromise
     // resolves, which the port connect and GET_AGENT_STATE both wait for.
@@ -720,16 +757,9 @@ export class AgentRunner {
     }
     try {
       const saved = await this.meta.read();
-      if (saved) {
-        this.status = 'idle';
-        // The tab group map is what lets a restarted worker keep grouping and adopting this
-        // session's tabs; persistState writes it, so it is read back here.
-        for (const [windowId, groupId] of saved.scoutFoxGroupIds || []) {
-          if (typeof windowId === 'number' && typeof groupId === 'number' && !this.scoutFoxGroupIds.has(windowId)) {
-            this.scoutFoxGroupIds.set(windowId, groupId);
-          }
-        }
-      }
+      // Only the tab group map comes back from the meta. The status is the restored run's own
+      // (an interrupted run stays "stopped" with its final row), never reset here.
+      if (saved) this.restoreGroupMap(saved.scoutFoxGroupIds || []);
     } catch {
       // Ignore restore errors
     }

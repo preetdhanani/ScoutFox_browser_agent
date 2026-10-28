@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 /** The folders with code that Node or Vite loads. node_modules and the build output are skipped. */
-const FOLDERS = ['src', 'sidepanel', 'content', 'scripts', 'shared', 'tests'];
+const FOLDERS = ['src', 'sidepanel', 'content', 'scripts', 'tests'];
 
 // `import x from '...'`, `import {\n a,\n b\n} from '...'`, `import '...'`, `export * from '...'`,
 // `export { a } from '...'` (at the start of a line, so a comment or a string does not count) ...

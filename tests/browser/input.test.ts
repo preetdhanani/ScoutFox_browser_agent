@@ -449,7 +449,7 @@ test('InputDispatcher: an empty content-script reply is an error, not success', 
   assert.equal(res.via, 'synthetic');
 });
 
-test('InputDispatcher: safeProbeEnd returns unknown when probe message throws or fails', async () => {
+test('InputDispatcher: probeEnd returns unknown when probe message throws or fails', async () => {
   const fc = fakeChrome({
     tabs: { list: [{ id: 101, url: 'https://example.com' }] },
     scripting: { executeScript: () => [{ result: 0 }] },
@@ -467,8 +467,9 @@ test('InputDispatcher: safeProbeEnd returns unknown when probe message throws or
   const cdp = new CDPManager();
   const dispatcher = new InputDispatcher(cdp);
 
-  const res = await (dispatcher as any).safeProbeEnd(101);
-  assert.equal(res, 'unknown');
+  const res = await (dispatcher as any).probeEnd(101);
+  assert.equal(res.effect, 'unknown');
+  assert.equal(await dispatcher.readProbe(101), null, 'a page that does not answer has no facts');
 });
 
 test('InputDispatcher: click uses injected sleep for 300ms probe delay', async () => {

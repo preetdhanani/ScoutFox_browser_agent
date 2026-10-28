@@ -98,23 +98,6 @@ The tradeoff to know: a worker-side test that accidentally uses `document` or `w
 TypeScript files use erasable syntax only (no `enum`, `namespace` or constructor parameter properties) and explicit `.ts` extensions in imports, because Node runs them directly by stripping types.
 Nothing in `tsc` or Vite enforces the extensions (they accept `./name` and `./name.js` for `name.ts`, and Node does not), so `tests/importSpecifiers.test.ts` reads every relative import and fails when it names a file that is not there exactly as written.
 
-### Action Registry
-Every verb the agent can use is defined once in `shared/actions.json`: name, category, tiers, policy modes, prompt line, schema and aliases.
-`src/background/agent/actions.ts` reads it, and `src/background/agent/schemas.ts` builds the JSON schemas that go to Ollama in `format` and validates replies with `@cfworker/json-schema`, which never uses `eval`.
-The engine's `KNOWN_ACTIONS` and its alias table (`click_element` to `click`, `done` to `finish`) come from the same file.
-To add a verb, add its entry to the file and an example to `tests/shared/actions.test.ts`; `tests/shared/actionsRegistry.test.ts` checks the file itself.
-`shared/fixtures/action-schemas.json` holds the exact schema and prompt bytes that go to Ollama, and `tests/actionRegistrySnapshot.test.js` compares them.
-Change that fixture only when the model request is meant to change.
-
-### Reply Parser
-`src/background/agent/parse.ts` turns a model reply into an action, or into the parse error that the model sees on its next turn.
-`repairJson.ts` (the string-aware brace scanner and the repair ladder for cut-off JSON), `sanitize.ts` (aliases, the verb check, element ids) and `toolCalls.ts` (tool-call markup) are its parts, and the engine's `parseResponse` only calls it.
-Tool-call markup is detected first and never becomes an answer: it is converted into the action it asks for, or it is the tool-call parse error.
-That covers DeepSeek DSML, Anthropic `invoke`, Qwen and Granite `tool_call`, Llama `python_tag` and `<function=...>`, Mistral `[TOOL_CALLS]`, OpenAI `tool_calls` and `function_call`, and a bare `{"name", "arguments"}` object.
-Words of markup inside the strings of a complete action (an answer that explains tool calls) are the action's content and do not count.
-When a reply holds several JSON objects, the first one with an `action` key wins, and only when there is none the last alias shape (`{"click": 3}`) does, as in the old engine.
-`shared/fixtures/parse-cases.json` holds the reply cases as data (also meant for the Python runner), and `tests/parse.test.ts` runs them next to the rules that data cannot say.
-
 ### LLM Providers
 The engine still calls `ApiClients.generateCompletion` in `background/apiClients.js`, which is now a thin shim over `src/background/llm/`.
 Every provider runs on a LangChain chat model, and a model is built for every call with `maxRetries: 0`, so `callWithRetry` stays the only retry layer.
@@ -268,7 +251,6 @@ node --test tests/agentEngineEvidence.test.ts     # ledger, storage, clamps, log
 node --test tests/agent/evidence.test.ts tests/agent/answerAudit.test.ts tests/agent/planEvidence.test.ts
 npm test
 ```
-`shared/fixtures/answer-audit-cases.json` holds the cases of the audit as data.
 If an existing engine test finishes with a number or a link, the page it runs on must show it, or the gate correctly refuses the answer.
 
 ### Effort: the model's reasoning level
@@ -288,24 +270,6 @@ When `stop_early` is chosen, the run finishes immediately when all required find
 When `replan` is chosen, `planNode` creates revised plans with monotonic site IDs and archives the previous plan in `planPrev`.
 `allocNode` preserves budget accounting across replans by crediting unspent allocations from dropped sites, funding new candidate sites, and protecting the reserve pool.
 Comprehensive tests cover profiles and reflection in `tests/agent/profile.test.ts`, `tests/agent/reflectPrompt.test.ts`, `tests/graph/orchestratorEffort.test.ts`, and `tests/graph/orchestratorReflect.test.ts`.
-
-### Risk Gate Backend (Phase P5d)
-The risk gate evaluates proposed actions before execution using deterministic keyword heuristics from `shared/risk.json`.
-Heuristic evaluation avoids LLM latency and nondeterminism for safety-critical checks.
-`evaluateActionRisk` in `src/background/agent/risk.ts` assigns actions to one of three levels:
-- `forbidden`: passwords, payment card numbers, and one-time security codes are rejected immediately and routed to recovery without asking the user.
-- `risky`: purchase or checkout actions (clicks on purchase words or on checkout pages or forms, typing or submitting in checkout contexts), login form submissions, sensitive or personal field entry (emails, addresses, phone numbers), form submissions with destructive or submit words, and unapproved external navigations pause execution in `holdNode` for human confirmation (`confirm_action`).
-- `safe`: ordinary browsing and navigation on approved domains proceed directly to `executeNode`.
-
-The gate reads `gateLabel` (visible text plus accessible name: input value, `aria-labelledby`, image alt, title) when the content script sets one, so an input submit or icon-only button with a risky name is not hidden behind the model-facing label "element".
-A click on a form's submit control (`submitControl`), `type` with `submit`, and `press_key` Enter all count as submitting a generic form; an explicit `method="get"` form on the same site does not.
-`press_key` Enter is judged against the focused element the snapshot reports in `focused`; when the snapshot does not say what has focus, Enter is risky.
-The search exemption applies only to the site's own search: a form whose action goes to another site (`formActionHost`) is a generic form, and purchase words inside a search form still raise a purchase card.
-Account, booking, confirmation, application, donation and posting words in German and English (`accountWords`, `commitWords`, `exactLabelWords`) raise a submit card; words like "Book", "Confirm" and "Post" count only as the whole label, and a link label of nine or more words is treated as a title, not a control.
-
-DOM compression in `content/domCompressor.js` and `content/content.js` annotates element metadata (`fieldKind`, `formKind`, `elementInfo`) to detect sensitive inputs and forms.
-When an action is denied by the user or fails policy, `recoverNode` in `src/background/graph/worker.ts` records the failure in failure memory and permanently bans that action signature (`verb|target|value`) to prevent retry loops.
-Tests in `tests/agent/risk.test.ts` and `tests/graph/workerRisk.test.ts` cover risk classification, checkout forms, and banned action recovery.
 
 ### SidePanel UI Overhaul and LangGraph Cards (Phase P6)
 Phase P6 upgrades the side panel with specialized event-delegated cards and live execution visualization:

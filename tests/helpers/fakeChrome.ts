@@ -116,7 +116,7 @@ export type GroupInit = Partial<GroupState>;
 export interface Extras {
   /** Extra or replacement methods: { captureVisibleTab: 'data:image/png;base64,AAAA' } (a value, an Error, an array or a function). */
   methods?: Record<string, Scripted>;
-  /** Extra events, e.g. ['onReplaced']. Fire them with fc.fire('tabs.onReplaced', ...). */
+  /** Extra events, e.g. ['onMoved']. Fire them with fc.fire('tabs.onMoved', ...). */
   events?: string[];
 }
 export interface TabsOptions extends Extras {
@@ -653,6 +653,22 @@ class World {
     if (Object.keys(changed).length > 0) this.#fx.fire(how, 'tabs.onUpdated', tab.id, changed, snapshot(tab));
   }
 
+  /**
+   * Chrome swaps a tab for another one (a prerendered or instant page): the new tab takes the old
+   * one's place, window, index, group and active state, and only tabs.onReplaced fires (no
+   * onRemoved, no onCreated).
+   */
+  replaceTab(oldId: number, init: TabInit, how: How): Tab {
+    const old = this.mustTab(oldId);
+    const id = init.id ?? this.#nextTabId;
+    if (this.tab(id)) throw new Error(`fakeChrome: tab id ${id} already exists`);
+    this.#nextTabId = Math.max(this.#nextTabId, id + 1);
+    const tab: Tab = { ...old, ...init, id, windowId: old.windowId, index: old.index, groupId: old.groupId, active: old.active, highlighted: old.highlighted };
+    this.tabs.splice(this.tabs.indexOf(old), 1, tab);
+    this.#fx.fire(how, 'tabs.onReplaced', id, oldId);
+    return tab;
+  }
+
   removeTab(id: number, how: How, windowClosing = false): void {
     const tab = this.mustTab(id);
     this.tabs.splice(this.tabs.indexOf(tab), 1);
@@ -922,6 +938,7 @@ function buildTabs(ctx: Ctx, opts: TabsOptions): Built {
     onUpdated: ctx.event('tabs.onUpdated'),
     onRemoved: ctx.event('tabs.onRemoved'),
     onActivated: ctx.event('tabs.onActivated'),
+    onReplaced: ctx.event('tabs.onReplaced'),
     get: call('get', (tabId: unknown) => snapshot(world.mustTab(intArg('tabs.get', tabId)))),
     query: call('query', (q: unknown = {}) => {
       if (!isObject(q)) throw invalid('tabs.query');
@@ -985,6 +1002,8 @@ function buildTabs(ctx: Ctx, opts: TabsOptions): Built {
     add: (init: TabInit = {}) => snapshot(world.addTab(init, 'sync')),
     /** The user closes a tab: tabs.onRemoved fires, and a group or window that becomes empty goes too. */
     close: (id: number) => world.removeTab(id, 'sync'),
+    /** Chrome replaces a tab with a new one (prerender, instant pages): only tabs.onReplaced(newId, oldId) fires. */
+    replace: (oldId: number, init: TabInit = {}) => snapshot(world.replaceTab(oldId, init, 'sync')),
     /** The user navigates: the URL commits, tabs.onUpdated fires with loading and (unless navigation is manual) complete. */
     navigate: (id: number, url: string) => world.navigate(world.mustTab(id), url, 'sync'),
     /** Finish a load that navigation: 'manual' left loading. */
@@ -1523,6 +1542,7 @@ export interface TabsHandle {
   get(id: number): Tab | undefined;
   add(init?: TabInit): Tab;
   close(id: number): void;
+  replace(oldId: number, init?: TabInit): Tab;
   navigate(id: number, url: string): void;
   completeLoad(id: number, details?: { title?: string }): void;
   patch(id: number, changes: Record<string, unknown>): void;

@@ -103,7 +103,8 @@ function makeRecorder() {
     setRunStatus: (status, pauseReason) => { statuses.push({ status, pauseReason }); },
     setPlanSteps: (steps) => { planSteps.length = 0; planSteps.push(...steps); },
     setPendingApproval: () => {},
-    resolvePendingApproval: (status, pauseReason) => { statuses.push({ status, pauseReason }); }
+    resolvePendingApproval: (status, pauseReason) => { statuses.push({ status, pauseReason }); },
+    endRun: (status, row) => { if (row) history.push(row); statuses.push({ status }); return true; }
   };
   return { recorder, history, statuses };
 }
@@ -252,7 +253,7 @@ const messagesOf = (request: { body: any }): any[] => request.body?.messages ?? 
 
 test('the picture is in a user message after the tool block, never in the tool message', async (t) => {
   const { client, requests } = withClient(t, {
-    replies: [toolCall('take_screenshot'), toolCall('finish', { answer: 'It is there.' })]
+    replies: [toolCall('take_screenshot'), toolCall('finish', { outcome: 'done', answer: 'It is there.' })]
   });
   await client.startTask('Look at the page');
 
@@ -278,8 +279,8 @@ test('with two tool calls in one round the block stays contiguous: assistant, to
   // the tool messages match the assistant's tool_calls array as one block.
   const { client, requests } = withClient(t, {
     replies: [
-      twoToolCalls({ name: 'take_screenshot' }, { name: 'get_page_text' }),
-      toolCall('finish', { answer: 'done' })
+      twoToolCalls({ name: 'take_screenshot' }, { name: 'read_page' }),
+      toolCall('finish', { outcome: 'done', answer: 'done' })
     ]
   });
   await client.startTask('Look, then read');
@@ -295,7 +296,7 @@ test('two pictures in one round travel in one user message, each with its own la
   const { client, requests } = withClient(t, {
     replies: [
       twoToolCalls({ name: 'take_screenshot' }, { name: 'take_screenshot' }),
-      toolCall('finish', { answer: 'done' })
+      toolCall('finish', { outcome: 'done', answer: 'done' })
     ]
   });
   await client.startTask('Look twice');
@@ -311,7 +312,7 @@ test('two pictures in one round travel in one user message, each with its own la
 
 test('the picture reaches the provider as an OpenAI image_url data URL', async (t) => {
   const { client, requests } = withClient(t, {
-    replies: [toolCall('take_screenshot'), toolCall('finish', { answer: 'done' })]
+    replies: [toolCall('take_screenshot'), toolCall('finish', { outcome: 'done', answer: 'done' })]
   });
   await client.startTask('Look at the page');
 
@@ -322,7 +323,7 @@ test('the picture reaches the provider as an OpenAI image_url data URL', async (
 
 test('the history row carries the picture id and size, and never the bytes', async (t) => {
   const { client, rec } = withClient(t, {
-    replies: [toolCall('take_screenshot'), toolCall('finish', { answer: 'done' })]
+    replies: [toolCall('take_screenshot'), toolCall('finish', { outcome: 'done', answer: 'done' })]
   });
   await client.startTask('Look at the page');
 
@@ -336,7 +337,7 @@ test('the history row carries the picture id and size, and never the bytes', asy
 
 test('the panel row says the picture was taken, not the whole base64', async (t) => {
   const { client, rec } = withClient(t, {
-    replies: [toolCall('take_screenshot'), toolCall('finish', { answer: 'done' })]
+    replies: [toolCall('take_screenshot'), toolCall('finish', { outcome: 'done', answer: 'done' })]
   });
   await client.startTask('Look at the page');
   const row = rec.history.find((r) => (r as any).type === 'execution_result' && (r as any).imageId) as any;
@@ -448,7 +449,7 @@ test('a provider that refuses the picture does not end the run: the round is ret
       toolCall('take_screenshot'),
       // The provider rejects the request that carried the picture.
       { __httpError: true, status: 400, message: 'this model does not support image input' },
-      toolCall('finish', { answer: 'The page is fine.' })
+      toolCall('finish', { outcome: 'done', answer: 'The page is fine.' })
     ]
   });
   await client.startTask('Look at the page');
@@ -469,7 +470,7 @@ test('after a refusal the screenshot tool is no longer offered', async (t) => {
     replies: [
       toolCall('take_screenshot'),
       { __httpError: true, status: 400, message: 'this model does not support image input' },
-      toolCall('finish', { answer: 'done' })
+      toolCall('finish', { outcome: 'done', answer: 'done' })
     ]
   });
   await client.startTask('Look at the page');
@@ -484,7 +485,7 @@ test('a refused picture is answered honestly if the model asks again anyway', as
       toolCall('take_screenshot'),
       { __httpError: true, status: 400, message: 'this model does not support image input' },
       toolCall('take_screenshot'),
-      toolCall('finish', { answer: 'done' })
+      toolCall('finish', { outcome: 'done', answer: 'done' })
     ]
   });
   await client.startTask('Look at the page');
@@ -503,14 +504,14 @@ test('an Ollama model whose capabilities do not list vision is never sent a pict
   clearVisionCache();
   const { client, requests } = withClient(t, {
     provider: 'ollama',
-    replies: [toolCall('finish', { answer: 'done' })]
+    replies: [toolCall('finish', { outcome: 'done', answer: 'done' })]
   });
   await client.startTask('Summarize the page');
   const first = requests.find((r) => r.url.endsWith('/api/chat'));
   assert.ok(first, 'the model was called');
   const toolNames = (first!.body.tools || []).map((tool: any) => tool.function?.name ?? tool.name);
   assert.equal(toolNames.includes('take_screenshot'), false, 'take_screenshot is not offered to a blind model');
-  assert.equal(toolNames.includes('get_page_text'), true, 'and it keeps the tools it can use');
+  assert.equal(toolNames.includes('read_page'), true, 'and it keeps the tools it can use');
   assert.ok(!(first!.body.messages as any[]).some((m) => Array.isArray(m.images) && m.images.length > 0), 'and no picture was sent');
 });
 
@@ -520,7 +521,7 @@ test('the first request carries a picture of the page, right after the task', as
   const { client, requests } = withClient(t, {
     provider: 'ollama',
     capabilities: ['completion', 'tools', 'vision'],
-    replies: [toolCall('finish', { answer: 'done' })]
+    replies: [toolCall('finish', { outcome: 'done', answer: 'done' })]
   });
   await client.startTask('What is on the page?');
   const first = requests.find((r) => r.url.endsWith('/api/chat'));
@@ -545,20 +546,20 @@ test('off: the camera is still offered - screenshots are mandatory now', async (
     provider: 'ollama',
     capabilities: ['completion', 'tools', 'vision'],
     screenshots: 'off',
-    replies: [toolCall('finish', { answer: 'done' })]
+    replies: [toolCall('finish', { outcome: 'done', answer: 'done' })]
   });
   await client.startTask('Summarize the page');
   const first = requests.find((r) => r.url.endsWith('/api/chat'));
   assert.ok(first, 'the model was called');
   const toolNames = (first!.body.tools || []).map((tool: any) => tool.function?.name ?? tool.name);
   assert.equal(toolNames.includes('take_screenshot'), true, 'screenshots are always on even when a stored "off" lingered');
-  assert.equal(toolNames.includes('get_page_text'), true, 'the rest of the tools stay');
+  assert.equal(toolNames.includes('read_page'), true, 'the rest of the tools stay');
 });
 
 test('always: the prompt carries no "look first" rule because every page load already gets a picture', async (t) => {
   const { client, requests } = withClient(t, {
     screenshots: 'always',
-    replies: [toolCall('finish', { answer: 'done' })]
+    replies: [toolCall('finish', { outcome: 'done', answer: 'done' })]
   });
   await client.startTask('Click the green button');
   const prompt = systemPromptOf(requests[0]);
@@ -569,7 +570,7 @@ test('always: the prompt carries no "look first" rule because every page load al
 
 test('auto: the prompt carries no always rule, so a normal run is not forced to look', async (t) => {
   const { client, requests } = withClient(t, {
-    replies: [toolCall('finish', { answer: 'done' })]
+    replies: [toolCall('finish', { outcome: 'done', answer: 'done' })]
   });
   await client.startTask('Summarize the page');
   const prompt = systemPromptOf(requests[0]);

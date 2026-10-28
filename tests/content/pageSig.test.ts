@@ -4,7 +4,7 @@ import fs from 'node:fs';
 
 const CONTENT_SRC = fs.readFileSync(new URL('../../content/content.js', import.meta.url), 'utf8');
 
-function setupEnvironment() {
+function setupEnvironment({ status = 'Kernel idle - tick 1', statusBox = { left: 600, top: 10, width: 160, height: 20 } } = {}) {
   let messageListener: any = null;
 
   const chrome = {
@@ -38,7 +38,18 @@ function setupEnvironment() {
           offsetWidth: 50,
           offsetHeight: 20,
           getAttribute: (attr: string) => (attr === 'role' ? 'link' : null),
-          innerText: 'Specs'
+          innerText: 'Specs',
+          getBoundingClientRect: () => ({ left: 10, top: 40, width: 50, height: 20, right: 60, bottom: 60 })
+        },
+        {
+          // A live kernel status a person can click, whose text changes all the time.
+          tagName: 'BUTTON',
+          offsetParent: {},
+          offsetWidth: statusBox.width,
+          offsetHeight: statusBox.height,
+          getAttribute: (attr: string) => (attr === 'role' ? 'button' : null),
+          innerText: status,
+          getBoundingClientRect: () => ({ ...statusBox, right: statusBox.left + statusBox.width, bottom: statusBox.top + statusBox.height })
         }
       ];
     }
@@ -47,6 +58,8 @@ function setupEnvironment() {
   const window: any = {
     location: { href: 'https://example.com/product' },
     scrollY: 150,
+    innerWidth: 1280,
+    innerHeight: 800,
     addEventListener: () => {},
     removeEventListener: () => {},
     getComputedStyle: () => ({ pointerEvents: 'auto' }),
@@ -94,4 +107,16 @@ test('GET_PAGE_SIG: hashes stay stable across identical DOM content', async () =
 
   assert.equal(res1.data.interactiveHash, res2.data.interactiveHash);
   assert.equal(res1.data.textHash, res2.data.textHash);
+});
+
+test('GET_PAGE_SIG: the layout hash ignores text that changes in place, and sees a control that moved', async () => {
+  // A coordinate click relies on where the controls are, not on what they say: a ticking kernel
+  // status must not make a screenshot "out of date", a control that moved must.
+  const tick1 = (await setupEnvironment({ status: 'Kernel idle - tick 1' }).dispatchMessage('GET_PAGE_SIG')).data;
+  const tick2 = (await setupEnvironment({ status: 'Kernel busy - tick 2' }).dispatchMessage('GET_PAGE_SIG')).data;
+  assert.equal(typeof tick1.layoutHash, 'string');
+  assert.equal(tick1.layoutHash, tick2.layoutHash, 'only the text changed');
+  assert.notEqual(tick1.interactiveHash, tick2.interactiveHash, 'the label hash does see the text');
+  const moved = (await setupEnvironment({ statusBox: { left: 600, top: 200, width: 160, height: 20 } }).dispatchMessage('GET_PAGE_SIG')).data;
+  assert.notEqual(moved.layoutHash, tick1.layoutHash, 'a control that moved changes the layout');
 });

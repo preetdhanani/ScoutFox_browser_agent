@@ -39,8 +39,8 @@
  * round. The wire format is the provider's own (OpenAI-shaped tool_calls), so the test exercises the
  * real request the extension would send.
  *
- * The rig's runtime.llm is still the port of rig.llm, injected through runtimeRegistry.set, because
- * one part of the runner still uses it: the find_element tie-break. Everything else goes over HTTP.
+ * The rig's runtime.llm is still the port of rig.llm, injected through runtimeRegistry.set, so a
+ * model call that does not go over HTTP would show up there. Every model call goes over HTTP.
  *
  * What the rig cannot see: the router keeps its sessions (and so the AgentRunner objects) in a module
  * variable. A test reads a run through the router like the panel does: panel.lastState() (the pushed
@@ -71,7 +71,7 @@ let loads = 0;
  *
  * The rig's script is written in the old graph vocabulary: a JSON object with an "action" field
  * ("click", "finish", "scroll", ...). The MCP client speaks in TOOLS: "click" with an element_id,
- * "finish" with an answer, "get_page_text" and so on. This maps one onto the other, so a test can
+ * "finish" with an answer, "read_page" and so on. This maps one onto the other, so a test can
  * keep writing the replies it always wrote.
  *
  * A reply that is not an action object at all (plain text) becomes the model's text, which the
@@ -114,10 +114,10 @@ function toToolCallReply(text: string): Record<string, unknown> {
     go_back: 'go_back',
     goForward: 'go_forward',
     wait: 'wait',
-    read_page_text: 'read_page_text',
+    read_page_text: 'read_page',
     finish: 'finish',
     update_plan: 'update_plan',
-    get_page_text: 'get_page_text',
+    read_page: 'read_page',
     get_page_elements: 'get_page_elements',
     find: 'find',
     find_element: 'find',
@@ -142,6 +142,10 @@ function toToolCallReply(text: string): Record<string, unknown> {
   }
   if (name === 'finish' && parsed.answer === undefined) {
     args.answer = parsed.summary ?? '';
+  }
+  // The finish tool requires how the run went; the old action shape never said it.
+  if (name === 'finish' && parsed.outcome === undefined) {
+    args.outcome = 'done';
   }
   if (name === 'wait' && parsed.amount === undefined) {
     args.amount = 1;

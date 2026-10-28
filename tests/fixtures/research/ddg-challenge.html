@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>DuckDuckGo</title>
+  <link rel="stylesheet" href="//duckduckgo.com/dist/h.5e5d9e2fa30e47bd4d65.css" type="text/css">
+</head>
+<!-- A trimmed copy of the bot check DuckDuckGo's HTML endpoint answers (HTTP 202) to traffic it
+     does not trust: no results, only a challenge form. -->
+<body>
+  <div class="anomaly-modal__mask">
+    <div class="anomaly-modal__modal" data-testid="anomaly-modal">
+      <div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+      <div class="anomaly-modal__description">Please complete the following challenge to confirm this search was made by a human.</div>
+      <div class="anomaly-modal__instructions">Select all squares containing a duck:</div>
+      <form id="challenge-form" action="//duckduckgo.com/anomaly.js?sv=html&amp;cc=sre&amp;ti=1761562200&amp;gk=d4cd0dabcf4caa22ad92fab40844c786&amp;p=6cb9e0b8a7f04f1e9d5e7d40d3d1d26c" method="POST">
+        <div class="anomaly-modal__puzzle"></div>
+        <button type="submit" class="anomaly-modal__submit">Submit</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

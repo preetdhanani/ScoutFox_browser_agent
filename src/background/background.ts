@@ -27,6 +27,7 @@ import './boot/zodJitless.ts';
 import { isGeminiStreamCut } from './boot/rejections.ts';
 import { lastRuntimeError, isValidWebTab, isDisposableTab } from './browser/tabs.ts';
 import { AgentRunner } from './runner/AgentRunner.ts';
+import { partialResultEntry } from './mcp/historyEntries.ts';
 import { callProvider, fetchAvailableModels, getFallbackModels } from './llm/index.ts';
 import { resolveEffortSupport } from './llm/effort.ts';
 import { BUILTIN_PROVIDER_IDS } from '../shared/storage.ts';
@@ -115,13 +116,6 @@ function getOrCreateSession(tabId: number, windowId?: number): BackgroundSession
     syncKeepaliveAlarm();
   });
 
-  // When this runner takes on another tab - the one inside a window it opened via the
-  // "open_window" action - register that TAB against this SAME session object rather than
-  // letting a second, disconnected one spring up the moment a panel appears there.
-  engine.setTabAdoptedCallback((newTabId) => {
-    adoptTabIntoSession(session!, newTabId);
-  });
-
   Logger.debug('Background', `[SESSION_CREATED] New session for tab [${tabId}].`);
   return session;
 }
@@ -162,12 +156,29 @@ function endSessionForClosedTab(tabId: number): void {
     if (other === session) sessions.delete(otherTabId);
   }
 
-  if (session.engine.status === 'running' || session.engine.status === 'paused') {
-    session.engine.stop();
-  }
+  // A run still going ends here like any other: through endRun, with its final row.
+  session.engine.endRun('stopped', partialResultEntry(TAB_CLOSED_TEXT, 'stopped'));
   AgentRunner.forgetSession(session.engine.sessionId);
   Logger.debug('Background', `[SESSION_CLOSED] Tab [${tabId}] closed. Its session and persisted state are gone.`);
   syncKeepaliveAlarm();
+}
+
+/** The final row of a run whose owner tab was closed under it. */
+const TAB_CLOSED_TEXT = 'The tab of this run was closed, so the run stopped.';
+
+/**
+ * Chrome swapped a tab for another one (a prerendered or instant page took its place): the old id
+ * is gone without an onRemoved. The session, and the run in it, move to the new id, so the panel
+ * and the run keep working on the tab the user sees.
+ */
+function moveSessionToReplacedTab(addedTabId: number, removedTabId: number): void {
+  const session = sessions.get(removedTabId);
+  if (!session) return;
+  sessions.delete(removedTabId);
+  sessions.set(addedTabId, session);
+  if (session.ownerTabId === removedTabId) session.ownerTabId = addedTabId;
+  session.engine.replaceTab(removedTabId, addedTabId);
+  Logger.info('Background', `[TAB_REPLACED] Chrome replaced tab [${removedTabId}] with tab [${addedTabId}]; its session moved with it.`);
 }
 
 /** True when the tab still exists (chrome.tabs.get answers it), false when it is gone or unknowable. */
@@ -213,6 +224,13 @@ if (typeof chrome !== 'undefined') {
       // A closed tab takes its session with it (see endSessionForClosedTab). Chrome fires this
       // for every tab of a closing window too, so a closed window needs no handler of its own.
       endSessionForClosedTab(tabId);
+    });
+  }
+
+  if (chrome.tabs && chrome.tabs.onReplaced) {
+    chrome.tabs.onReplaced.addListener((addedTabId: number, removedTabId: number) => {
+      void cdp.detach(removedTabId);
+      moveSessionToReplacedTab(addedTabId, removedTabId);
     });
   }
 
@@ -602,8 +620,7 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
 
       // The tab must also live in the session's own window. The opener path exists for the
       // tabs a click in the working tab opens, and those land in the working tab's window; a
-      // tab in some OTHER window (no ScoutFox session there) is nobody's business. A deliberate
-      // second window comes through the open_window action, which adopts its tab itself.
+      // tab in some OTHER window (no ScoutFox session there) is nobody's business.
       if (session.engine.windowId !== 'default' && tab.windowId !== session.engine.windowId) return;
 
       // The group is keyed by WINDOW even though sessions are keyed by tab: grouping into a

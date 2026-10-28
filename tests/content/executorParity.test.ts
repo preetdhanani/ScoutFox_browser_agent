@@ -228,87 +228,57 @@ test('4. setFieldValue handles select, input/textarea via prototype setter, and 
   assert.match(spanRes.error!, /cannot be typed into/);
 });
 
-test('5. doBrowserBatch enforces step bounds, forbidden actions, and accurate error reporting', async () => {
-  const fakeWindow = {
-    location: { href: 'https://example.com/' }
-  };
-  const executor = new ActionExecutor(undefined, fakeWindow as any);
-
-  // Empty steps
-  const emptyRes = await executor.doBrowserBatch([]);
-  assert.equal(emptyRes.success, false);
-  assert.match(emptyRes.error, /non-empty "steps"/);
-
-  // Exceeds 8 steps
-  const tooMany = Array.from({ length: 9 }, () => ({ action: 'scroll' }));
-  const tooManyRes = await executor.doBrowserBatch(tooMany);
-  assert.equal(tooManyRes.success, false);
-  assert.match(tooManyRes.error, /maximum allowed 8 steps/);
-
-  // Forbidden action in batch
-  const forbiddenRes = await executor.doBrowserBatch([{ action: 'navigate', url: 'https://other.com' }]);
-  assert.equal(forbiddenRes.success, false);
-  assert.equal(forbiddenRes.results[0].ok, false);
-  assert.match(forbiddenRes.results[0].error, /is forbidden inside browser_batch/);
+test('5. the content executor has no synthetic press_key and no browser_batch: those verbs are unknown here', async () => {
+  const executor = new ActionExecutor(undefined, { location: { href: 'https://example.com/' } } as any);
+  for (const action of ['press_key', 'keypress', 'browser_batch']) {
+    await assert.rejects(executor.execute({ action, key: 'Enter', steps: [] }), new RegExp(`Unknown action: ${action}`));
+  }
 });
 
-test('6. read_page_text continues where the last read stopped instead of repeating the first chunk', async () => {
-  // The live failure: a model on an arXiv feed page called read_page_text five times and got the
-  // same first 1500 chars every time, because the prompt says "read more text of this page" while
-  // the tool always returned the head of the text. The run burned 23 steps and never answered.
+test('6. read_page is stateless: the part the request names, the same text for the same part, never a hidden cursor', async () => {
+  // The live failure: a model called the old read tool again and again and got the same first
+  // part every time (or, with a hidden cursor, a part it could not name). Now the part is in the
+  // request and the result says which part it is and how to get the next.
   const longText = Array.from({ length: 300 }, (_, i) => `Line ${i + 1} of the page text`).join('. ');
   const fakeWindow = {
     location: { href: 'https://export.arxiv.test/api/query?x=1' },
-    domCompressor: { extractPageText: () => longText },
+    domCompressor: { extractFullPageText: () => longText },
   };
   const executor = new ActionExecutor(undefined, fakeWindow as any);
 
-  // The parts are line-bounded (here: cut at a space, the text is one line) and numbered "part i of n"
-  // (silent-truncation-no-marker); the old reads were unnumbered 1500-character slices.
-  const first = await executor.execute({ action: 'read_page_text' });
+  const first = await executor.execute({ action: 'read_page' });
   assert.equal(first.success, true);
-  const firstPos = first.message.match(/^Extracted text snippet \(\d+ chars, part 1 of (\d+), chars 1-(\d+)\):/);
-  assert.ok(firstPos, `the first read says it is part 1 of n: ${first.message.slice(0, 80)}`);
-  const count = Number(firstPos[1]);
-  assert.equal(count, 3, 'an 8000-character text is read in three parts of at most 3000');
-  assert.ok(first.message.includes('Line 1 of the page text'));
+  const firstPos = first.message.match(/^Page text \(part 1 of (\d+), chars 1-(\d+) of (\d+), next: read_page with part 2\):/);
+  assert.ok(firstPos, `the first read says it is part 1 of n and how to go on: ${first.message.slice(0, 120)}`);
+  assert.equal(Number(firstPos[1]), 3, 'an 8000-character text is read in three parts of at most 3000');
   assert.equal(first.result.pageText, longText.slice(0, Number(firstPos[2])));
+  assert.deepEqual([first.result.part, first.result.parts], [1, 3]);
 
-  const second = await executor.execute({ action: 'read_page_text' });
-  const secondPos = second.message.match(/part 2 of 3, chars (\d+)-(\d+)\)/);
+  const again = await executor.execute({ action: 'read_page', part: 1 });
+  assert.equal(again.result.pageText, first.result.pageText, 'part 1 again is part 1: no hidden cursor');
+
+  const second = await executor.execute({ action: 'read_page', part: 2 });
+  const secondPos = second.message.match(/part 2 of 3, chars (\d+)-(\d+) of \d+, next: read_page with part 3/);
   assert.ok(secondPos, second.message.slice(0, 120));
-  assert.doesNotMatch(second.message, /end of the text/, 'part 2 is not the end');
   assert.equal(second.result.pageText, longText.slice(Number(secondPos[1]) - 1, Number(secondPos[2])));
-  assert.notEqual(second.result.pageText, first.result.pageText, 'the second read shows new text');
 
-  const third = await executor.execute({ action: 'read_page_text' });
-  assert.match(third.message, new RegExp(`part 3 of 3, chars \\d+-${longText.length}, end of the text`));
-  assert.ok(longText.endsWith(third.result.pageText));
+  const third = await executor.execute({ action: 'read_page', part: 3 });
+  assert.match(third.message, new RegExp(`part 3 of 3, chars \\d+-${longText.length} of ${longText.length}, end of the text`));
   assert.equal([first, second, third].map((r) => r.result.pageText).join(' '), longText, 'the parts are the whole text');
 
-  // After the end, the read starts over - and says so, or the model burns steps re-reading.
-  const fourth = await executor.execute({ action: 'read_page_text' });
-  assert.match(fourth.message, /whole text already shown/, 'a wrapped read says the text was already shown');
-  assert.doesNotMatch(fourth.message, /part \d/, 'a wrapped read is not numbered as a next part');
-  assert.equal(fourth.result.pageText, first.result.pageText);
-
-  // A different URL starts the read over.
-  const otherWindow = {
-    location: { href: 'https://other.test/page' },
-    domCompressor: { extractPageText: () => longText },
-  };
-  const otherExecutor = new ActionExecutor(undefined, otherWindow as any);
-  const other = await otherExecutor.execute({ action: 'read_page_text' });
-  assert.match(other.message, /part 1 of 3/);
-  assert.doesNotMatch(other.message, /whole text already shown/);
-  assert.equal(other.result.pageText, first.result.pageText);
+  const past = await executor.execute({ action: 'read_page', part: 4 });
+  assert.equal(past.success, false);
+  assert.match(past.error, /has only 3 parts, so there is no part 4/);
+  for (const bad of [0, -1, 1.5, 'two']) {
+    const res = await executor.execute({ action: 'read_page', part: bad });
+    assert.equal(res.success, false, String(bad));
+    assert.match(res.error, /part must be a whole number from 1 up/);
+  }
 });
 
-test('7. read_page_text with element_id returns only that element\'s text', async () => {
-  // The live failure: on a 25-result arXiv search page the full text is capped at 4500 chars, so
-  // the model could only ever see result 1. It HALLUCINATED an element_id parameter for
-  // read_page_text because it wanted exactly this tool. The element list is how it reads result
-  // 2, 3, ... without the cap.
+test('7. read_page with element_id returns only that element\'s text, paged the same way', async () => {
+  // On a 25-result search page the page text is long, so the model reads result 2, 3, ... by the
+  // element id of each result instead of paging through everything.
   const elements = new Map<number, any>();
   elements.set(7, {
     getBoundingClientRect: () => ({ top: 10, left: 20, width: 80, height: 30, right: 100, bottom: 40 }),
@@ -316,31 +286,30 @@ test('7. read_page_text with element_id returns only that element\'s text', asyn
   });
   const fakeWindow = {
     location: { href: 'https://arxiv.test/search' },
-    domCompressor: { getElement: (id: number) => elements.get(id) || null },
+    domCompressor: { getElement: (id: number) => elements.get(id) || null, extractFullPageText: () => 'The whole search page' },
   };
   const fakeDocument = { contains: () => true };
   const executor = new ActionExecutor(fakeDocument as any, fakeWindow as any);
 
-  const scoped = await executor.execute({ action: 'read_page_text', element_id: 7 });
+  const scoped = await executor.execute({ action: 'read_page', element_id: 7 });
   assert.equal(scoped.success, true);
-  assert.match(scoped.message, /^Text of element \[7\] \(\d+ chars\):/);
-  assert.ok(scoped.message.includes('Nested Principal-Agent Problem'));
+  assert.match(scoped.message, /^Text of element \[7\] \(part 1 of 1, chars 1-\d+ of \d+, end of the text\):/);
   assert.equal(scoped.result.pageText, elements.get(7).innerText);
 
   // An id that is not on the page is an error that names the way out, not a wrong read.
-  const missing = await executor.execute({ action: 'read_page_text', element_id: 99 });
+  const missing = await executor.execute({ action: 'read_page', element_id: 99 });
   assert.equal(missing.success, false);
   assert.match(missing.error, /not on this page's element list/);
 
-  // Without element_id the page-level chunked read is unchanged.
-  const pageRead = await executor.execute({ action: 'read_page_text' });
+  const pageRead = await executor.execute({ action: 'read_page' });
   assert.equal(pageRead.success, true);
-  assert.match(pageRead.message, /^Extracted text snippet/);
+  assert.match(pageRead.message, /^Page text \(part 1 of 1/);
+  assert.equal(pageRead.result.pageText, 'The whole search page');
 });
 
-// silent-truncation-no-marker: read_page_text paged the snapshot text, which the extractor had already cut at 4500
+// silent-truncation-no-marker: the read used to page the snapshot text, which the extractor had already cut at 4500
 // characters, so nothing past 4500 could ever be read, and the parts did not say how many there were.
-test('8. read_page_text pages the whole extracted text, past the snapshot cap, and every part states its position', async () => {
+test('8. read_page pages the whole extracted text, past the snapshot cap, and every part states its position', async () => {
   const full = Array.from({ length: 400 }, (_, i) => `Offer ${i + 1}: seller name, price and shipping line`).join('\n');
   assert.ok(full.length > 12000);
   const capped = `${full.slice(0, 4500)}\n[page text truncated at 4500 characters]`;
@@ -353,33 +322,59 @@ test('8. read_page_text pages the whole extracted text, past the snapshot cap, a
   const chunks: string[] = [];
   let total = 0;
   for (let i = 1; i <= 40; i++) {
-    const res = await executor.execute({ action: 'read_page_text' });
+    const res = await executor.execute({ action: 'read_page', part: i });
     assert.equal(res.success, true);
     const m = res.message.match(/part (\d+) of (\d+), chars (\d+)-(\d+)/);
     assert.ok(m, `part ${i} states its position: ${res.message.slice(0, 120)}`);
     assert.equal(Number(m[1]), i);
     total = Number(m[2]);
-    assert.equal(res.result.note, res.message.match(/^Extracted text snippet \((.*)\):\n/)?.[1], 'the note travels with the result');
+    assert.equal(res.result.note, res.message.match(/^Page text \((.*)\):\n/)?.[1], 'the note travels with the result');
     chunks.push(res.result.pageText);
     if (/end of the text/.test(res.message)) break;
   }
   assert.equal(chunks.length, total, 'the read stops at the last part');
   assert.equal(chunks.join('\n'), full, 'every character of the page is reachable');
   assert.ok(chunks.join('\n').includes('Offer 400:'), 'the end of the page is reachable');
-
-  const wrapped = await executor.execute({ action: 'read_page_text' });
-  assert.match(wrapped.message, /whole text already shown - do not read this page again/);
-  assert.match(wrapped.result.note, /whole text already shown/);
 });
 
-test('9. read_page_text with element_id marks a cut element text with its full size', async () => {
+test('9. read_page with element_id pages a long element text instead of cutting it', async () => {
   const long = Array.from({ length: 120 }, (_, i) => `Result ${i + 1} title and abstract words`).join('\n');
-  assert.ok(long.length > 2000);
+  assert.ok(long.length > 3000);
   const elements = new Map<number, any>([[3, { innerText: long }]]);
   const fakeWindow = { location: { href: 'https://arxiv.test/search' }, domCompressor: { getElement: (id: number) => elements.get(id) || null } };
   const executor = new ActionExecutor({ contains: () => true } as any, fakeWindow as any);
-  const scoped = await executor.execute({ action: 'read_page_text', element_id: 3 });
-  assert.equal(scoped.success, true);
-  assert.match(scoped.result.pageText, new RegExp(`\\n\\[element text truncated: showing \\d+ of ${long.length} characters - [^\\]]+\\]$`));
-  assert.ok(scoped.message.includes('[element text truncated: showing'));
+  const first = await executor.execute({ action: 'read_page', element_id: 3 });
+  assert.match(first.message, /part 1 of 2, .*next: read_page with part 2/);
+  const second = await executor.execute({ action: 'read_page', element_id: 3, part: 2 });
+  assert.match(second.message, /part 2 of 2, .*end of the text/);
+  assert.equal(`${first.result.pageText}\n${second.result.pageText}`, long, 'nothing of the element is lost');
+});
+
+test('10. read_page reads a CodeMirror editor from .cm-content, and says when it hides off-screen lines', async () => {
+  // A CodeMirror 6 editor draws only the lines near the view and stands a .cm-gap in for the rest.
+  const gap = { className: 'cm-gap' };
+  const content = {
+    innerText: 'import os\nprint(os.getcwd())',
+    querySelector: (sel: string) => (sel === '.cm-gap' ? gap : null),
+    closest: (sel: string) => (sel === '.cm-content' ? content : null),
+  };
+  const line = { innerText: 'print(os.getcwd())', closest: (sel: string) => (sel === '.cm-content' ? content : null) };
+  const elements = new Map<number, any>([[4, line]]);
+  const fakeDocument = { contains: () => true, querySelector: (sel: string) => (sel === '.cm-content .cm-gap' ? gap : null) };
+  const fakeWindow = { location: { href: 'https://lab.test/' }, domCompressor: { getElement: (id: number) => elements.get(id) || null, extractFullPageText: () => 'In [1]:\nimport os' } };
+  const executor = new ActionExecutor(fakeDocument as any, fakeWindow as any);
+
+  const cell = await executor.execute({ action: 'read_page', element_id: 4 });
+  assert.equal(cell.result.pageText, 'import os\nprint(os.getcwd())', 'a line of the editor reads the whole editor content');
+  assert.match(cell.message, /\(editor may hide off-screen lines\)/);
+  assert.equal(cell.result.hidesLines, true);
+
+  const page = await executor.execute({ action: 'read_page' });
+  assert.match(page.message, /^Page text \(part 1 of 1, [^)]*\):\nNote: a code editor here draws only the lines near the view \(editor may hide off-screen lines\)/);
+  assert.equal(page.result.hidesLines, true);
+  assert.doesNotMatch(page.result.note, /editor/, 'the part note stays the part note');
+
+  const plain = new ActionExecutor({ contains: () => true, querySelector: () => null } as any, fakeWindow as any);
+  const quiet = await plain.execute({ action: 'read_page' });
+  assert.doesNotMatch(quiet.message, /editor may hide/, 'a page whose editors draw every line says nothing');
 });

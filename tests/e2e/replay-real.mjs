@@ -149,27 +149,23 @@ async function snapshotOf(driver, tabId) {
 }
 
 /**
- * The whole page text, read the way the engine reads it: read_page_text parts through the real
- * action executor, until the part that says it is the end. This is the text the model can reach,
+ * The whole page text, read the way the engine reads it: read_page parts 1, 2, ... through the real
+ * action executor, until the part that says it is the last. This is the text the model can reach,
  * not the snapshot's capped head.
  */
 async function fullTextOf(driver, tabId) {
   const parts = [];
-  for (let i = 0; i < MAX_READ_PARTS; i++) {
-    const res = await withTimeout(driver.evaluate(async (id) => {
+  for (let part = 1; part <= MAX_READ_PARTS; part++) {
+    const res = await withTimeout(driver.evaluate(async (id, n) => {
       try {
-        return await chrome.tabs.sendMessage(id, { action: 'EXECUTE_ACTION', payload: { action: 'read_page_text' } });
+        return await chrome.tabs.sendMessage(id, { action: 'EXECUTE_ACTION', payload: { action: 'read_page', part: n } });
       } catch (err) {
         return { success: false, error: err.message };
       }
-    }, tabId), 15000, `read_page_text part on tab ${tabId}`);
+    }, tabId, part), 15000, `read_page part ${part} on tab ${tabId}`);
     if (!res || !res.success) return { text: parts.join('\n'), error: (res && res.error) || 'no answer' };
     parts.push(res.result && res.result.pageText || '');
-    const note = String(res.result && res.result.note || '');
-    // "end of the text" marks the last part of a multi-part read; a note without a part
-    // position ("N chars" alone, or the re-read hint) means the whole text fit one part,
-    // so reading on would only repeat it.
-    if (/end of the text/.test(note) || !/, part /.test(note)) break;
+    if (!(res.result && res.result.part < res.result.parts)) break;
   }
   return { text: parts.join('\n'), error: null };
 }
@@ -256,7 +252,7 @@ async function main() {
       if (full.text.length > view.pageText.length + 100 && !/truncated: showing/.test(view.pageText)) {
         problems.push(`the snapshot shows ${view.pageText.length} of ${full.text.length} characters with no truncation note`);
       }
-      if (full.error) problems.push(`read_page_text failed: ${oneLine(full.error)}`);
+      if (full.error) problems.push(`read_page failed: ${oneLine(full.error)}`);
     } catch (err) {
       problems.push(`replay failed: ${oneLine(String(err && err.message || err), 300)}`);
     }

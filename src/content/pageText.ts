@@ -3,119 +3,17 @@
  * Pure text processing functions and scroll-aware body text extraction.
  */
 
-import { clipWithNote, splitIntoParts, PAGE_TEXT_MORE_HINT } from '../shared/clip.ts';
+import { clipWithNote, PAGE_TEXT_MORE_HINT } from '../shared/clip.ts';
+import { collapseRepeatedRuns, normalizePageText } from '../shared/textPaging.ts';
+// The pure helpers live in shared/textPaging.ts (the service worker pages fetched text with them too).
+export { collapseRepeatedRuns, HAS_LETTER, PAGE_TEXT_PART, pageTextPart, partCount, normalizePageText, collapseRepeatedRunsOnce, REPEAT_MIN_RUN, REPEAT_MAX_UNIT_WORDS, REPEAT_MAX_PASSES, PRICE_LIKE, DELIVERY_LIKE } from '../shared/textPaging.ts';
+export type { PageTextPart } from '../shared/textPaging.ts';
 
 export const PAGE_TEXT_CAP = 4500;
 export const PAGE_TEXT_SCAN_LIMIT = 1000000;
-export const REPEAT_MIN_RUN = 4;
-export const REPEAT_MAX_UNIT_WORDS = 64;
-export const REPEAT_MAX_PASSES = 4;
-
-export const HAS_LETTER = /\p{L}/u;
-export const PRICE_LIKE = /[€$£¥₹]\s?\d|\d\s?(?:[€$£¥₹]|EUR\b|USD\b|GBP\b|CHF\b|CAD\b|AUD\b|Euro\b)/i;
-export const DELIVERY_LIKE = /\b(?:shipping|shipment\w*|deliver\w*|arriv\w*|versand\w*|liefer\w*|werktag\w*|business days?|working days?|porto)\b/i;
-
-/**
- * One pass: finds runs of REPEAT_MIN_RUN or more identical units and replaces them with
- * concise summaries or collapses.
- */
-export function collapseRepeatedRunsOnce(text: string): string {
-  const matchLead = text.match(/^\s*/);
-  const lead = matchLead ? matchLead[0] : '';
-  const words: string[] = [];
-  const gaps: string[] = [];
-  for (const [, word, gap] of text.matchAll(/(\S+)(\s*)/g)) {
-    words.push(word);
-    gaps.push(gap);
-  }
-  const n = words.length;
-  if (n < REPEAT_MIN_RUN) return text;
-  const shapes = words.map((word) => word.replace(/\d+/g, '#'));
-
-  const sameShape = (a: number, b: number, size: number) => {
-    for (let t = 0; t < size; t++) {
-      if (shapes[a + t] !== shapes[b + t]) return false;
-    }
-    return true;
-  };
-
-  const unitText = (start: number, size: number) => {
-    let out = '';
-    for (let t = 0; t < size; t++) {
-      out += words[start + t] + (t < size - 1 ? gaps[start + t] : '');
-    }
-    return out;
-  };
-
-  const runAt = (i: number) => {
-    let best = { size: 0, count: 0 };
-    let skip = 0;
-    const longest = Math.min(REPEAT_MAX_UNIT_WORDS, Math.floor((n - i) / REPEAT_MIN_RUN));
-    for (let size = 1; size <= longest; size++) {
-      let count = 1;
-      while (i + (count + 1) * size <= n && sameShape(i, i + count * size, size)) count++;
-      if (count < REPEAT_MIN_RUN) continue;
-      if (!HAS_LETTER.test(unitText(i, size))) {
-        skip = Math.max(skip, size * count);
-      } else if (size * count > best.size * best.count) {
-        best = { size, count };
-      }
-    }
-    return { ...best, skip };
-  };
-
-  const out = [lead];
-  let i = 0;
-  while (i < n) {
-    const { size, count, skip } = runAt(i);
-    if (size === 0) {
-      const stay = Math.max(1, skip);
-      for (let t = 0; t < stay; t++) out.push(words[i + t], gaps[i + t]);
-      i += stay;
-      continue;
-    }
-
-    const end = i + size * count;
-    const first = unitText(i, size);
-    let identical = true;
-    for (let u = 1; u < count && identical; u++) {
-      identical = unitText(i + u * size, size) === first;
-    }
-
-    let summary: string | null = null;
-    if (identical) {
-      summary = `${first} (repeated ${count} times)`;
-    } else if (!PRICE_LIKE.test(first) && !DELIVERY_LIKE.test(first)) {
-      summary = `${first} ... ${unitText(end - size, size)} (${count} similar entries)`;
-    }
-
-    let runLength = words[end - 1].length;
-    for (let t = i; t < end - 1; t++) runLength += words[t].length + gaps[t].length;
-    if (summary !== null && summary.length < runLength) {
-      out.push(summary, gaps[end - 1]);
-    } else {
-      for (let t = i; t < end; t++) out.push(words[t], gaps[t]);
-    }
-    i = end;
-  }
-  return out.join('');
-}
-
-/**
- * Runs of repeated units become summaries, collapsing cycles across multiple passes.
- */
-export function collapseRepeatedRuns(text: string): string {
-  let current = text;
-  for (let pass = 0; pass < REPEAT_MAX_PASSES; pass++) {
-    const next = collapseRepeatedRunsOnce(current);
-    if (next === current) break;
-    current = next;
-  }
-  return current;
-}
 
 /** How the model sees more of a page text that was narrowed to the blocks around the viewport. */
-const PAGE_TEXT_WINDOW_HINT = 'only the text around the scroll position; call read_page_text to read the whole page in parts';
+const PAGE_TEXT_WINDOW_HINT = 'only the text around the scroll position; call read_page to read the whole page in parts';
 
 /**
  * Cuts the text at the cap, at a line boundary. A text that is cut, or that is a part of a longer text of total
@@ -140,31 +38,6 @@ export function finishPageText(text: string, cap = PAGE_TEXT_CAP): string {
   return capPageText(collapsed.text, cap, collapsed.total);
 }
 
-/** The size of one part of a paged read_page_text: the whole page text is read in parts of at most this many characters. */
-export const PAGE_TEXT_PART = 3000;
-
-/** One part of a paged read: its text and the note that says where it is ("12000 chars, part 2 of 4, chars 3001-6000"). */
-export interface PageTextPart { text: string; note: string; last: boolean }
-
-/** Said when a read starts over after the last part, so the model stops reading a page it has whole. */
-export const PAGE_TEXT_REREAD_HINT = 'whole text already shown - do not read this page again, act on the ELEMENTS list or open a specific result';
-
-/**
- * Part index (0-based) of the text split into PAGE_TEXT_PART parts at line boundaries. The note always states the
- * size; with more than one part it states the position, and the last part says it is the end. A read that starts
- * over after the end (again) says the whole text was already shown instead of a position.
- */
-export function pageTextPart(text: string, index: number, again = false): PageTextPart & { count: number } {
-  const parts = splitIntoParts(text, PAGE_TEXT_PART);
-  const i = Math.min(Math.max(0, index), parts.length - 1);
-  const { start, end } = parts[i];
-  const last = i === parts.length - 1;
-  let position = '';
-  if (again && text.length > 0) position = `, ${PAGE_TEXT_REREAD_HINT}`;
-  else if (parts.length > 1) position = `, part ${i + 1} of ${parts.length}, chars ${start + 1}-${end}${last ? ', end of the text' : ''}`;
-  return { text: text.slice(start, end), note: `${text.length} chars${position}`, last, count: parts.length };
-}
-
 /** Shown instead of a page text under PAGE_TEXT_MIN_CHARS, so the model knows the page has no readable text. Kept short: the page verdict reads a text under 120 characters as a blank page. */
 export const PAGE_TEXT_EMPTY_MARKER = '[no readable text on this page]';
 export const PAGE_TEXT_MIN_CHARS = 10;
@@ -176,18 +49,6 @@ const WINDOW_ABOVE = 200;
 const WINDOW_BELOW = 1500;
 /** How deep the window opens blocks that straddle its edges. */
 const WINDOW_MAX_DEPTH = 12;
-
-/**
- * The visible text with its whitespace normalised: one space inside a line, no blank lines, nothing at the ends.
- * innerText separates table cells with a tab; they are kept apart as " | ", so a row still shows its columns.
- */
-export function normalizePageText(text: string): string {
-  return text
-    .split(/\r?\n|\r/)
-    .map((line) => line.split('\t').map((cell) => cell.replace(/[\s\u00a0]+/g, ' ').trim()).filter(Boolean).join(' | '))
-    .filter(Boolean)
-    .join('\n');
-}
 
 /** The visible text of an element. innerText leaves out hidden elements and reads text from any element type. */
 function visibleText(el: Element): string {
@@ -262,7 +123,7 @@ export function extractPageTextFromDocument(
 }
 
 /**
- * The whole page text that read_page_text pages through: the same content block, collapsed the same way, with no
+ * The whole page text that read_page pages through: the same content block, collapsed the same way, with no
  * cap and no window, so every part of the page can be read.
  */
 export function extractFullPageTextFromDocument(

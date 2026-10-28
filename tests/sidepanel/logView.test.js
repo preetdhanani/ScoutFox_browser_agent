@@ -87,3 +87,10 @@ test('describeStep says what the agent is doing, with the element and the reason
   assert.equal(describeStep('update_plan', { plan: ['a', 'b'] }), 'Planning the work in 2 steps');
   assert.equal(describeStep('something_new', {}), 'Calling something_new');
 });
+
+test('describeStep names a key press with its modifiers, and a type into the focused element', () => {
+  assert.equal(describeStep('press_key', { key: 'Enter', modifiers: ['shift'] }), 'Pressing Shift+Enter');
+  assert.equal(describeStep('press_key', { key: 'select_all', reason: 'select the code' }), 'Pressing select all - select the code');
+  assert.equal(describeStep('type', { text: 'echo hi' }), 'Typing "echo hi" into the focused element');
+  assert.equal(describeStep('type', { text: ' more', mode: 'append' }), 'Appending "more" to the focused element');
+});

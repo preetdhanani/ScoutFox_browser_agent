@@ -125,10 +125,9 @@ test('every allowlist entry is narrow: a file, a kind, a snippet and a count', (
   }
 });
 
-test('the only allowlist entry that is not a library is the in-page execute_js', () => {
+test('every allowlist entry is a library: no file of ours may call eval or the Function constructor', () => {
   const ours = ALLOWLIST.filter((entry) => !entry.file.startsWith('node_modules/'));
-  assert.deepEqual(ours.map((entry) => entry.file), ['src/background/browser/executeJs.ts']);
-  assert.match(ours[0].snippet, /async \(\) => \{ \$\{src\} \}/);
+  assert.deepEqual(ours.map((entry) => entry.file), []);
 });
 
 test('the known hits are allowed, each as often as its max says and no more', () => {

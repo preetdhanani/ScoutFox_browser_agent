@@ -1,97 +1,72 @@
 // src/background/browser/execute.ts
-// Unified action execution engine dispatching page actions, background APIs,
-// scripts, batches, and input dispatcher primitives.
+// Runs one page action of an MCP tool on a tab through the input dispatcher, then settles and
+// reports what the action changed.
 
 import { describeRestrictedUrl } from './tabs.ts';
-import { executeJs } from './executeJs.ts';
-import { openNewWindow } from './windows.ts';
-import { runBatch } from './batch.ts';
+import { checkWebUrl } from '../research/urlPolicy.ts';
 import { inputDispatcher } from './input.ts';
-import { ensureScoutFoxGroup } from './groups.ts';
 import type { ExecResult, RunRuntime } from '../runner/runtimeRegistry.ts';
-import type { OneShot } from '../types.ts';
-
-/**
- * The shape of one find_element match, as the content script's findElements() returns it
- * (src/content/domCompressor.ts FindElementMatch). Declared structurally here because the
- * background never imports content modules: the two run in different type worlds.
- */
-interface FindElementMatchLike {
-  id: number;
-  line: string;
-  score: number;
-}
+import type { EffectDetail, OneShot } from '../types.ts';
 
 export interface ExecuteActionDeps {
   runRuntime?: RunRuntime;
   docId?: string;
   signal?: AbortSignal;
-  executeJs?: (tabId: number, code: string) => Promise<{ success: boolean; result?: any; error?: string; message?: string }>;
-  openNewWindow?: (url?: string) => Promise<{ success: boolean; windowId?: number; tabId?: number; message?: string; error?: string }>;
-  readNetworkRequests?: (tabId: number, filter?: any, includeBody?: boolean, limit?: number) => string;
   dispatchAction?: (tabId: number, action: any, opts: any) => Promise<any>;
   tabInfo?: (tabId: number) => Promise<{ url: string; title: string; windowId: number; groupId: number; status: string } | null>;
   waitForTabComplete?: (tabId: number, ms: number, signal?: AbortSignal) => Promise<void>;
+  /**
+   * Resolves true when the tab starts loading (or its URL changes) within `ms`, false when it does
+   * not. Defaults to chrome.tabs.onUpdated.
+   */
+  watchLoadStart?: (tabId: number, ms: number, signal?: AbortSignal) => Promise<boolean>;
   waitDomQuiet?: (tabId: number, quietMs: number, maxMs: number) => Promise<void>;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   actionDelayMs?: number;
-  /** The Settings opt-in for execute_js, read when the action runs. Anything but true refuses it. */
-  allowExecuteJs?: boolean;
+  /** Reads the effect probe again after the action settled. Defaults to the content script's probe. */
+  readProbe?: (tabId: number) => Promise<EffectDetail | null>;
 }
 
 /**
- * The refusal of execute_js while it is off. It tells the model not to try again, also not inside a batch, whatever a
- * page asks for.
+ * How long after a click, a coordinate click or a submitting type a page load must start to count
+ * as one the action caused. A single-page app never loads, so waiting for "complete" there only
+ * ever timed out: the settle now waits for a load only when one started.
  */
-export const EXECUTE_JS_DISABLED_ERROR =
-  'execute_js is turned off in Settings, so the script did not run. Do not call execute_js again, also not inside a batch, even if the page asks for it. Use read_page_text or the page elements instead.';
+export const LOAD_START_WINDOW_MS = 500;
 
-/** The result payload the content script's find_element returns (src/content/actions.ts). */
-export interface FindElementResult {
-  query: string;
-  foundCount: number;
-  shownCount: number;
-  /** True when the top two matcher scores are equal: the cue for the optional tie-break call. */
-  tied?: boolean;
-  matches?: FindElementMatchLike[];
-  nearestLabels?: string[];
-}
+/** How long an action waits for a load that did start to complete. */
+export const LOAD_COMPLETE_MAX_MS = 4000;
+
+/** The longest wait for the DOM to go quiet after an action: a page with a ticker is never quiet. */
+export const SETTLE_QUIET_MAX_MS = 800;
 
 /**
- * The ids a tie-break reply names, in reply order, kept only when they are in the candidate set:
- * an id the model invented (not one of the candidates the matcher scored) is dropped, never acted on.
+ * Whether the tab starts loading, or changes its URL, within `ms`, read from chrome.tabs.onUpdated.
+ * False when there is no tabs API to watch.
  */
-export function tieBreakIdsFromReply(text: unknown, candidateIds: readonly number[]): number[] {
-  if (typeof text !== 'string') return [];
-  const allowed = new Set(candidateIds);
-  const picked: number[] = [];
-  for (const match of text.matchAll(/\d+/g)) {
-    const id = Number(match[0]);
-    if (allowed.has(id) && !picked.includes(id)) picked.push(id);
-  }
-  return picked;
+export function watchLoadStartWithChrome(tabId: number, ms: number, signal?: AbortSignal): Promise<boolean> {
+  if (typeof chrome === 'undefined' || !chrome.tabs?.onUpdated) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    let done = false;
+    const finish = (value: boolean) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { chrome.tabs.onUpdated.removeListener(listener); } catch (_) {}
+      resolve(value);
+    };
+    const listener = (updatedTabId: number, changeInfo: { status?: string; url?: string }) => {
+      if (updatedTabId !== tabId) return;
+      if (changeInfo.status === 'loading' || typeof changeInfo.url === 'string') finish(true);
+    };
+    const timer = setTimeout(() => finish(false), ms);
+    chrome.tabs.onUpdated.addListener(listener);
+    signal?.addEventListener('abort', () => finish(false), { once: true });
+  });
 }
 
-/**
- * The matches after a tie-break: the ids the model picked first, in its order, then the candidates
- * it did not pick in their deterministic order. An empty pick list changes nothing.
- */
-export function applyTieBreak(matches: FindElementMatchLike[], pickedIds: readonly number[]): FindElementMatchLike[] {
-  const picked = pickedIds
-    .map((id) => matches.find((m) => m.id === id))
-    .filter((m): m is FindElementMatchLike => m !== undefined);
-  const rest = matches.filter((m) => !pickedIds.includes(m.id));
-  return [...picked, ...rest];
-}
-
-const FIND_TIEBREAK_SYSTEM =
-  'You rank element matches for a browser agent. The user message has a query and candidate element lines, each with its id in square brackets. '
-  + 'Reply with the id numbers of the candidates that best match the query, best first, ids only, nothing else. '
-  + 'Never name an id that is not in the candidate lines.';
-
-function findTiebreakUserMessage(query: string, matches: FindElementMatchLike[]): string {
-  return `Query: "${query}"\nCandidates:\n${matches.map((m) => m.line).join('\n')}`;
-}
+/** The actions whose result carries an observation: the probe is read again after they settled. */
+const OBSERVED_VERBS = new Set(['click', 'click_at', 'type', 'press_key', 'scroll']);
 
 /**
  * Dispatches an action onto a tab with safety gates and proper execution routing.
@@ -114,8 +89,8 @@ export async function executeAction(
     };
   }
 
-  // 2. Restricted gates on proposed target URLs for navigate and open_window
-  if ((verb === 'navigate' || verb === 'open_window') && action?.url) {
+  // 2. Restricted gates on the navigate target URL
+  if (verb === 'navigate' && action?.url) {
     const restriction = describeRestrictedUrl(action.url);
     if (restriction) {
       return {
@@ -126,110 +101,19 @@ export async function executeAction(
       };
     }
 
-    if (verb === 'navigate' && !/^https?:\/\//i.test(action.url)) {
+    // The same URL rule as fetch_url (research/urlPolicy.ts): parsed, http(s) only, a host, no credentials.
+    const checked = checkWebUrl(action.url);
+    if (!checked.ok) {
       return {
         success: false,
-        error: `Navigate target must be http or https, got "${action.url}"`,
+        error: `Navigate target refused: ${checked.error}`,
         via: 'background',
         effect: 'none',
       };
     }
   }
 
-  // 3. execute_js in MAIN world, only when the user turned it on. The model is not offered it otherwise; this is the
-  // last gate, which also covers a setting turned off while a run was going.
-  if (verb === 'execute_js') {
-    if (deps.allowExecuteJs !== true) {
-      return { success: false, error: EXECUTE_JS_DISABLED_ERROR, via: 'background', effect: 'none' };
-    }
-    const res = deps.executeJs
-      ? await deps.executeJs(tabId, action.code)
-      : await executeJs(tabId, action.code);
-
-    const oneShot: OneShot | undefined = res.success
-      ? { label: 'JavaScript Result', text: String(res.result ?? ''), step: action.step ?? 0 }
-      : undefined;
-
-    return {
-      success: res.success,
-      message: res.message,
-      error: res.error,
-      result: res.result,
-      resultData: res.result,
-      via: 'background',
-      effect: 'none',
-      oneShot,
-    };
-  }
-
-  // 4. open_window
-  if (verb === 'open_window') {
-    const res = deps.openNewWindow
-      ? await deps.openNewWindow(action.url)
-      : await openNewWindow(
-          {
-            adoptTab: (newTabId, winId) => {
-              (deps.runRuntime as any)?.onTabAdopted?.(newTabId, winId);
-            },
-            ensureGroup: async (newTabId, winId) => {
-              if (deps.runRuntime) {
-                return await ensureScoutFoxGroup(
-                  {
-                    windowId: winId,
-                    groupIds: deps.runRuntime.scoutFoxGroupIds,
-                    persist: () => (deps.runRuntime as any)?.persistState?.(),
-                  },
-                  newTabId,
-                  winId
-                );
-              }
-              return null;
-            },
-            setActiveTab: (newTabId) => {
-              if (deps.runRuntime) deps.runRuntime.tabs.activeTabId = newTabId;
-            },
-          },
-          action.url
-        );
-
-    return {
-      success: res.success,
-      message: res.message,
-      error: res.error,
-      via: 'background',
-      effect: res.success ? 'url_changed' : 'none',
-      urlAfter: action.url,
-    };
-  }
-
-  // 5. read_network_requests
-  if (verb === 'read_network_requests') {
-    const filter = action.filter;
-    const includeBody = action.includeBody !== false;
-    const limit = action.limit || 10;
-    const text = deps.readNetworkRequests
-      ? deps.readNetworkRequests(tabId, filter, includeBody, limit)
-      : deps.runRuntime
-        ? deps.runRuntime.net.read(tabId, filter, includeBody, limit)
-        : '[]';
-
-    const oneShot: OneShot = {
-      label: 'Recent Network Activity',
-      text,
-      step: action.step ?? 0,
-    };
-
-    return {
-      success: true,
-      message: `Recent Network Activity:\n${text}`,
-      resultData: text,
-      via: 'background',
-      effect: 'none',
-      oneShot,
-    };
-  }
-
-  // 5.5 wait: clamped to 1..5 s and run in the background, where the step
+  // 3. wait: clamped to 1..5 s and run in the background, where the step
   // signal can interrupt it. The content-side wait took any amount unchecked
   // (a cloud reply of amount:600 parked the run for 10 minutes inside one
   // action) and had no abort wiring (BUG-36).
@@ -249,66 +133,6 @@ export async function executeAction(
       throw err;
     }
     return { success: true, message: `Waited ${waitSec}s`, via: 'background', effect: 'none' };
-  }
-
-  // 6. browser_batch
-  if (verb === 'browser_batch') {
-    const batchRes = await runBatch(tabId, action, {
-      dispatch: (tId, stepAction, dOpts) => {
-        return deps.dispatchAction
-          ? deps.dispatchAction(tId, stepAction, dOpts)
-          : inputDispatcher.dispatchAction(tId, stepAction, {
-              docId: dOpts.docId ?? deps.docId,
-              signal: dOpts.signal ?? signal,
-              sleep:
-                deps.sleep ??
-                ((ms, s) =>
-                  deps.runRuntime?.clock
-                    ? deps.runRuntime.clock.sleep(ms, s)
-                    : new Promise((r) => setTimeout(r, ms))),
-              control: deps.runRuntime
-                ? {
-                    stopRequested: deps.runRuntime.control.stopRequested,
-                    pauseRequested: deps.runRuntime.control.pauseRequested,
-                    signal,
-                  }
-                : undefined,
-            });
-      },
-      currentUrl: async (tId) => {
-        if (deps.tabInfo) {
-          const info = await deps.tabInfo(tId);
-          return info?.url ?? '';
-        }
-        if (deps.runRuntime) {
-          const info = await deps.runRuntime.browser.tabInfo(tId);
-          return info?.url ?? '';
-        }
-        return '';
-      },
-      waitDomQuiet: (tId, qMs, mMs) => {
-        if (deps.waitDomQuiet) return deps.waitDomQuiet(tId, qMs, mMs);
-        if (deps.runRuntime) return deps.runRuntime.browser.waitDomQuiet(tId, qMs, mMs);
-        return Promise.resolve();
-      },
-      control: deps.runRuntime
-        ? // The LIVE control object, not a per-batch snapshot: the batch reads
-          // the flags per step, so a mid-batch Stop/Pause still terminates it
-          // and terminatedBy reports 'stop'/'pause' (BUG-31).
-          deps.runRuntime.control
-        : undefined,
-      docId: deps.docId,
-      clock: deps.runRuntime?.clock,
-    });
-
-    return {
-      success: batchRes.success,
-      message: batchRes.message,
-      error: batchRes.error,
-      resultData: batchRes.results,
-      via: 'background',
-      effect: batchRes.success ? 'dom_changed' : 'none',
-    };
   }
 
   // Helper for reading tab URL before/after
@@ -340,6 +164,20 @@ export async function executeAction(
     }
   };
 
+  // A load the action started: the tab is loading or on another URL already, or it starts within
+  // LOAD_START_WINDOW_MS. Only then is a "complete" worth waiting for.
+  const loadStarted = async (tId: number, urlBefore: string): Promise<boolean> => {
+    const info = deps.tabInfo
+      ? await deps.tabInfo(tId).catch(() => null)
+      : deps.runRuntime
+        ? await deps.runRuntime.browser.tabInfo(tId).catch(() => null)
+        : null;
+    if (info?.status === 'loading') return true;
+    if (info?.url && urlBefore && info.url !== urlBefore) return info.status !== 'complete';
+    const watch = deps.watchLoadStart ?? watchLoadStartWithChrome;
+    return await watch(tId, LOAD_START_WINDOW_MS, signal).catch(() => false);
+  };
+
   const doSleep = async (ms: number): Promise<void> => {
     if (deps.sleep) {
       await deps.sleep(ms, signal).catch(() => {});
@@ -350,7 +188,7 @@ export async function executeAction(
     }
   };
 
-  // 7. Page actions dispatched via inputDispatcher / dispatchAction
+  // 4. Page actions dispatched via inputDispatcher / dispatchAction
   try {
     const urlBefore = await getTabUrl(tabId);
     const isNav = verb === 'navigate' || verb === 'go_back' || verb === 'go_forward';
@@ -383,14 +221,14 @@ export async function executeAction(
       (res.effect as ExecResult['effect']) ||
       (res.success && !viaSynthetic ? 'dom_changed' : 'none');
     // A lookup never changes the page, whatever the effect probe counted.
-    if (verb === 'find_element') effect = 'none';
+    if (verb === 'find_element' || verb === 'read_page') effect = 'none';
     const isClick = verb === 'click' || verb === 'click_at';
     const isTypeSubmit = verb === 'type' && (res.submitted || Boolean(action?.submit));
 
     let urlAfter = '';
     if (res.success && (isNav || isClick || isTypeSubmit)) {
-      if (!action?.expected_outcome) {
-        await waitComplete(tabId, 4000);
+      if (!action?.expected_outcome && await loadStarted(tabId, urlBefore)) {
+        await waitComplete(tabId, LOAD_COMPLETE_MAX_MS);
       }
       urlAfter = await getTabUrl(tabId);
       if (urlAfter && urlBefore !== urlAfter) {
@@ -402,7 +240,17 @@ export async function executeAction(
 
     // Full post-action settle
     if (res.success && (isNav || isClick || isTypeSubmit || verb === 'scroll' || verb === 'press_key')) {
-      await waitQuiet(tabId, 300, 1500);
+      await waitQuiet(tabId, 300, SETTLE_QUIET_MAX_MS);
+    }
+
+    // The facts of the action, read once more after the settle, so the observation describes the
+    // page the model will act on next. A page that does not answer keeps the reading taken right
+    // after the input; with an injected dispatcher (a test) only an injected reader is asked.
+    let effectDetail: EffectDetail | undefined = res.effectDetail;
+    if (res.success && OBSERVED_VERBS.has(verb)) {
+      const reader = deps.readProbe ?? (deps.dispatchAction ? null : (tId: number) => inputDispatcher.readProbe(tId));
+      const settled = reader ? await reader(tabId).catch(() => null) : null;
+      if (settled) effectDetail = settled;
     }
 
     // Action delay if configured
@@ -412,7 +260,7 @@ export async function executeAction(
     }
 
     let oneShot: OneShot | undefined = undefined;
-    if (verb === 'read_page_text' && res.success) {
+    if (verb === 'read_page' && res.success) {
       const pageText = res.result?.pageText ?? res.pageText ?? res.message ?? '';
       // The part note ("12000 chars, part 2 of 4, ...") and the stop hint go in the label the model
       // reads, not only in the raw message, or the model never learns which part it has.
@@ -420,36 +268,10 @@ export async function executeAction(
       oneShot = { label: note ? `Page Text (${note})` : 'Page Text', text: pageText, step: action.step ?? 0, ...(note ? { note } : {}) };
     }
 
-    // find_element: a lookup never changes the page, and when the matcher's top two scores tie, one
-    // optional model call over the candidate lines only reorders them. Ids the call names that are
-    // not in the candidate set are dropped (tieBreakIdsFromReply), so a hallucinated id can never
-    // reach the element list; a failing call keeps the deterministic order.
-    let findMessage = res.message;
+    // find_element: a lookup never changes the page. The matcher's order is the answer: no extra
+    // model call reorders it (that call went out without the run's effort and model settings).
+    const findMessage = res.message;
     if (verb === 'find_element' && res.success) {
-      const find = res.result as FindElementResult | undefined;
-      const matches = find && Array.isArray(find.matches) ? find.matches : [];
-      if (find?.tied === true && matches.length >= 2 && deps.runRuntime?.llm) {
-        try {
-          const reply = await deps.runRuntime.llm.complete({
-            node: 'policy',
-            mode: 'browse',
-            role: 'policy',
-            system: FIND_TIEBREAK_SYSTEM,
-            messages: [{ role: 'user', content: findTiebreakUserMessage(find.query, matches) }],
-            schema: null,
-            signal: signal ?? new AbortController().signal,
-          });
-          const picked = tieBreakIdsFromReply(reply?.text, matches.map((m) => m.id));
-          if (picked.length > 0) {
-            const reordered = applyTieBreak(matches, picked);
-            const header = String(res.message ?? '').split('\n')[0] ?? '';
-            findMessage = `${header}\n${reordered.map((m) => m.line).join('\n')}`;
-            res.result = { ...find, matches: reordered };
-          }
-        } catch (_) {
-          // The deterministic matcher order stands when the tie-break call fails.
-        }
-      }
       oneShot = { label: 'Element Matches', text: findMessage ?? '', step: action.step ?? 0 };
     }
 
@@ -466,6 +288,8 @@ export async function executeAction(
       urlAfter: urlAfter || res.urlAfter || undefined,
       syntheticReason: (res as any).syntheticReason,
       oneShot,
+      ...(effectDetail ? { effectDetail } : {}),
+      ...(res.fieldText !== undefined ? { fieldText: res.fieldText } : {}),
     };
   } catch (err: any) {
     return {

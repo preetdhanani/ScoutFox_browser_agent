@@ -64,7 +64,18 @@ test('an undeclared method throws on access (not only on the call) and names the
 
 test('an undeclared event throws with the events option as the hint', () => {
   const fc = fakeChrome({ tabs: true });
-  assert.throws(() => fc.chrome.tabs.onReplaced, /chrome\.tabs\.onReplaced was not declared for this test - add it to fakeChrome\(\{ tabs: \{ events: \['onReplaced'\] \} \}\)/);
+  assert.throws(() => fc.chrome.tabs.onMoved, /chrome\.tabs\.onMoved was not declared for this test - add it to fakeChrome\(\{ tabs: \{ events: \['onMoved'\] \} \}\)/);
+});
+
+test('a replaced tab takes the old one\'s place and only tabs.onReplaced fires', () => {
+  const fc = fakeChrome({ tabs: { list: [{ id: 1, url: 'https://a.test/', windowId: 1, active: true }] } });
+  const seen = [];
+  for (const name of ['onReplaced', 'onRemoved', 'onCreated']) fc.chrome.tabs[name].addListener((...args) => seen.push([name, ...args]));
+  const tab = fc.tabs.replace(1, { id: 2, url: 'https://a.test/next' });
+  assert.equal(tab.id, 2);
+  assert.equal(tab.active, true);
+  assert.equal(fc.tabs.get(1), undefined);
+  assert.deepEqual(seen, [['onReplaced', 2, 1]]);
 });
 
 test('a name fakeChrome does not know at all says so, instead of suggesting an option that would be rejected', () => {

@@ -433,14 +433,10 @@ function clickContext(built: Built): ActionExecutionContext {
     showClickEffect: () => {},
     animateCursor: () => {},
     waitForDomQuiet: async () => {},
-    execute: async () => ({ success: true }),
     describeElement: () => '',
     setFieldValue: () => ({ success: true }),
     doClick: () => ({ success: true }),
     doType: () => ({ success: true }),
-    doScroll: () => ({ success: true }),
-    doPressKey: () => ({ success: true }),
-    doBrowserBatch: async () => ({ success: true }),
   };
 }
 

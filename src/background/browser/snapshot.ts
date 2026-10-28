@@ -243,7 +243,7 @@ export async function takeSnapshot(
         } catch (netErr: any) {
           Logger.warn(
             'Browser',
-            `[INJECT_PARTIAL] Page scripts loaded, but the network recorder could not be injected into tab [${tabId}]. read_network_requests will be empty for this page.`,
+            `[INJECT_PARTIAL] Page scripts loaded, but the network recorder could not be injected into tab [${tabId}].`,
             netErr
           );
         }

@@ -49,6 +49,8 @@ export interface ViewportProbe {
 export interface PageSignature {
   interactiveHash: string;
   textHash: string;
+  /** Where the controls in the viewport are, without their text: what a coordinate click relies on. */
+  layoutHash?: string;
 }
 
 /** Everything the capture reads from the page, so a test can stand in for Chrome. */
@@ -198,7 +200,11 @@ export function chromePagePort(): ScreenshotPagePort {
       const resp = await askContentScript(tabId, { action: 'GET_PAGE_SIG' });
       const sig = resp?.success ? resp.data : null;
       if (!sig || typeof sig.interactiveHash !== 'string' || typeof sig.textHash !== 'string') return null;
-      return { interactiveHash: sig.interactiveHash, textHash: sig.textHash };
+      return {
+        interactiveHash: sig.interactiveHash,
+        textHash: sig.textHash,
+        ...(typeof sig.layoutHash === 'string' ? { layoutHash: sig.layoutHash } : {})
+      };
     },
 
     async hideUi(tabId: number): Promise<boolean> {

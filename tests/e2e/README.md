@@ -125,6 +125,9 @@ The check reads only facts a right answer must contain.
 | `web-train-hof-munich` | a train from Hof to München Hbf tomorrow around 08:00 (bahn.de has a cookie layer in a shadow root) |
 | `web-framework-price` | the official Framework Laptop 16 price compared with one other shop |
 | `web-cookie-accept` | open stackoverflow.com, accept its cookie banner, and name the top question |
+| `web-research-archive` | the exact file name of Ollama's latest Linux amd64 archive and whether it needs zstd, looked up with `web_search` or `fetch_url` (the run must use one) |
+
+A task may list the sites it needs (`reachable`): the harness asks each first, and a site that does not answer skips the task with the reason, never a failure.
 
 Two small tasks start on a page of the fixture site (`tests/fixtures/site/store.html`) and run only offline on the scripted mock (`npm run test:e2e:mock`, CI).
 They are not use cases: they check that the built extension loads, a run reaches the page and the panel shows the result.
@@ -186,9 +189,23 @@ It speaks the MCP tool-calling protocol: a request carries a `tools` array (the 
 The script is stateless: it reads only the conversation of the request, the way a real model would.
 
 - A bot check in the page content: finish at once with the honest answer, never click.
-- A planning goal: `update_plan` with two steps (two steps auto-approve), then `get_page_text`, then `finish` with the facts.
+- A planning goal: `update_plan` with two steps (two steps auto-approve), then `read_page`, then `finish` with the facts.
 - A click goal: `get_page_elements`, then `click` the element whose label matches the goal (an "add" label beats a generic cart label), then `finish`.
-- A facts or summarize goal: `get_page_text`, then `finish` with the lines copied from the page text.
+- A facts or summarize goal: `read_page`, then `finish` with the lines copied from the page text.
+- A notebook goal (`notebook-fix`): `scroll` the cells panel (the result must say it moved, and the observation must have measured it), `read_page` part 1, then part 2 (cell 14 and its permission error), `get_page_elements`, `click` into cell 14, `press_key` select_all, `type` the fix without an element id, `press_key` Shift+Enter, `read_page` part 2 for the output, `finish` with the version.
+- An order-list goal (`virtual-scroll`): `scroll` the windowed list and `read_page` what it draws, again, until the Zanzibar Spice Co. row is drawn, then `finish` with it.
+- A two-fact goal whose page has only one fact (`partial-answer`): `read_page`, then `finish` with the price as inline code, the missing battery life said plainly, and `outcome` "partial".
+  The card must be "Partly done" (class `partial`), and its body must show the price without the backticks.
+- A dead-button goal (`stuck-recovery`, and `stuck-recovery-manual` with manual plan approval): `get_page_elements`, then `click` the dead Download CSV button again and again, like a stubborn model.
+  It stops only when the loop says the click changed nothing: the repeat hint in a result first, then the reflection note as the user message right after the tool block.
+  Then it `finish`es honestly with `outcome` "blocked": the button did not work, and what the user can do next.
+  The panel card must then be "Could not finish" (class `blocked`), never the green "Done".
+  In manual mode it plans first, and the harness approves the plan card like a user.
+- A research goal (`research-then-answer`): `web_search`, then `fetch_url` on the result that is the install script, then `finish` with the archive name only that script names.
+  Both results must come in the untrusted envelope, and without the research tools on offer it answers `MOCK-FAIL`, never a guess.
+  Before the run the harness sets Settings > Research to SearXNG through the side panel's Settings tab, like a user, pointing at the fixture's search endpoint under `docs.lantern.test` (`RESEARCH_HOST` in `lib/twoSources.mjs`).
+  The fixture server serves `research/search` as `research/search.json`, with `__ORIGIN__` replaced by the origin asked.
+  The run also checks that the tab stayed on its page and that the panel rows read "Searched the web: ..." and "Read install.sh (docs.lantern.test)", and it shoots the Research section in light and dark.
 - Anything it cannot find: a finish whose answer starts with `MOCK-FAIL:` and says what is missing. The run then ends without the data, and no check accepts it.
 
 Every reply is validated before it is sent: the tool name must be one the request offered, and the arguments must fit the tool's parameters schema (`validateToolArgs`). A violation is an HTTP 500 - a mock bug, named, not papered over.
@@ -204,14 +221,24 @@ The self-test (`tests/mcp/mockOllama.selftest.mjs`) checks the protocol, the val
 | `no-content-script` | Deletes `content/content.js`, which the manifest lists. | Exit 1: Chromium refuses to load the extension, and the error names the missing file. |
 | `worker-error` | Adds a `console.error` at the top of `background/sw.js`. | Exit 1 on the worker error, although all tasks pass. |
 | `broken-panel` | Makes the side panel script throw when it loads. | Exit 1 on the side panel gate. |
-| `empty-page-text` | Makes the content script report no page text. | Exit 1: the mock answers `MOCK-FAIL` (it cannot read a price from an empty page). |
+| `empty-page-text` | Makes the content script report no page text (the snapshot text and the full text `read_page` pages through). | Exit 1: the mock answers `MOCK-FAIL` (it cannot read a price from an empty page). |
 | `no-history-rows` | Makes the runner drop every history row (`recordEntry` pushes nothing). | Exit 1: the run is invisible (no timeline rows, no final entry). |
 | `zod-not-jitless` | Removes the statement that switches zod code generation off from `background/sw.js`. | Exit 1 on two `service worker CSP violation` lines, although all tasks pass. |
 | `broken-net-recorder` | Makes `content/net-recorder.js` (the MAIN-world content script) throw when it loads. | Exit 1 on every fixture page: the recorder flag is not set, and the page reports a page error. |
-| `bad-tool-schema` | Sets `get_page_text` `inputSchema.required` to null in the copy. | Exit 1: the extension must reject the tool itself, with an error naming the tool, instead of sending a schema a provider answers with HTTP 400. |
+| `bad-tool-schema` | Sets `read_page` `inputSchema.required` to null in the copy. | Exit 1: the extension must reject the tool itself, with an error naming the tool, instead of sending a schema a provider answers with HTTP 400. |
 | `no-fox-mark` | Takes the fox mark out of the panel header in the copy. | Exit 1 on the mark check ("the header has no fox mark"), although every task passes. |
 | `no-effort` | Makes the tool loop drop the effort the run was started with. | Exit 1: every model call went out with no reasoning field ("model call 1 went out with think=undefined, expected true for effort medium"). |
 | `stale-worker` | Gives the worker a different build stamp than the side panel, like a worker Chrome kept running after a rebuild. | Exit 1: the side panel gate reports that the panel shows its reload bar. |
+| `idle-after-restore` | Makes a restarted worker reset the restored run to `idle` whenever the runner meta exists. | Exit 1 on `worker-restart-midrun`: "after a mid-run worker restart the status is "idle", expected "stopped"". |
+| `clear-keeps-loop` | Makes New chat clear the thread without ending the run. | Exit 1 on `clear-midrun`: the model gets more calls after New chat, and the rows come back into the cleared thread. |
+| `no-press-key` | Takes `press_key` out of the tool list the model is offered. | Exit 1 on `editor-replace`: the mock's `press_key` reply names a tool the request did not offer (HTTP 500), and the editor keeps its old code. |
+| `type-needs-id` | Makes `type` refuse without an `element_id` again. | Exit 1 on `editor-replace`: the type into the focused editor fails, the mock answers `MOCK-FAIL`, and the page check finds the old code. |
+| `no-observation` | Drops the `Observation:` line from every action result. | Exit 1 on `editor-replace`: the mock answers `MOCK-FAIL` (the click was not observed), and `expectMock` finds no observation in the tool results the model got. |
+| `scroll-lies` | Makes `scroll` report the full step as moved without turning the wheel (the old always-"Scrolled" path). | Exit 1 on `notebook-fix` and `virtual-scroll`: the scroll result claims a move, the observation measured none, and the mock answers `MOCK-FAIL`. |
+| `read-repeats` | Makes `read_page` ignore `part` and always read part 1. | Exit 1 on `notebook-fix`: the mock asks for part 2, gets part 1, and answers `MOCK-FAIL`. |
+| `no-repeat-guard` | Turns the repeat guard off: no repeat hint, no reflection note. | Exit 1 on `stuck-recovery`: the mock clicks the dead button until it gives up and answers `MOCK-FAIL`, and `expectMock` finds no hint and no reflection. |
+| `finish-ignores-outcome` | Drops the `outcome` the finish tool named from the finish row, so the panel falls back to the old rule (Done unless a step failed). | Exit 1 on `stuck-recovery` and `partial-answer`: the honest "it did not work" and "only part of it" answers get the green "Done" card instead of "Could not finish" and "Partly done", and `expectMock` finds no finish outcome. |
+| `no-research` | Stops offering `web_search` and `fetch_url`, as if Settings > Research were off. | Exit 1 on `research-then-answer`: the mock answers `MOCK-FAIL` (the research tools are not offered), no research row appears, and the card says Failed. |
 
 ## Real mode and the Origin note
 

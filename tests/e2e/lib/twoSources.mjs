@@ -24,7 +24,14 @@ export const SHOP_B = 'shop-b.test';
  * shop-b.test is told to fail to resolve, so a run that does try to open it gets a clean
  * "not found" page and never asks a real DNS server.
  */
-export const HOST_RULES = `MAP ${SHOP_A} 127.0.0.1, MAP ${SHOP_B} ~NOTFOUND`;
+/**
+ * The research fixture's host (tests/fixtures/site/research): the docs site and its SearXNG-format
+ * search endpoint, both served by the fixture server under this name, so web_search and fetch_url
+ * reach "another site" from the service worker and never the tab's own host.
+ */
+export const RESEARCH_HOST = 'docs.lantern.test';
+
+export const HOST_RULES = `MAP ${SHOP_A} 127.0.0.1, MAP ${RESEARCH_HOST} 127.0.0.1, MAP ${SHOP_B} ~NOTFOUND`;
 
 /**
  * What the mock writes for the shop it never opened. The price is NOT the price of shop A (the

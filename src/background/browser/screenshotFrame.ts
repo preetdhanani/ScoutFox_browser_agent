@@ -32,7 +32,7 @@ export interface LivePageState {
   scrollX: number;
   scrollY: number;
   /** The page signature (content/content.js getLightPageSignature), when the content script answered. */
-  sig?: Pick<PageSig, 'interactiveHash' | 'textHash'> | null;
+  sig?: (Pick<PageSig, 'interactiveHash' | 'textHash'> & { layoutHash?: string }) | null;
 }
 
 /** The picture a frame describes, and the page state it was taken in. */
@@ -47,6 +47,10 @@ export interface FrameCheck {
   /** The refusal, worded for the model, or undefined when the frame is good. */
   reason?: string;
 }
+
+/** The refusal of a coordinate click whose picture shows controls that have moved since. */
+export const FRAME_LAYOUT_CHANGED_MESSAGE =
+  'Error: the controls on the page have moved since that screenshot, so the picture no longer shows where things are. Take a new screenshot, or click by element_id.';
 
 /** The message a click gets when there is no picture to read a coordinate from. */
 export const NO_FRAME_MESSAGE =
@@ -118,13 +122,15 @@ export function checkFrame(frame: CoordinateFrame | null | undefined, live: Live
   if (dx > SCROLL_TOLERANCE_PX || dy > SCROLL_TOLERANCE_PX) {
     return { ok: false, reason: 'Error: the page has scrolled since that screenshot, so the same pixel now points at different content. Take a new screenshot.' };
   }
-  // Only compared when both sides have a signature: a content script that cannot answer is not
-  // evidence that the page changed, and refusing on a missing signature would make the check
-  // fail on a page that never had one.
-  if (frame.sig && live.sig) {
-    if (frame.sig.interactiveHash !== live.sig.interactiveHash || frame.sig.textHash !== live.sig.textHash) {
-      return { ok: false, reason: 'Error: the page has changed since that screenshot, so the picture no longer shows what is there now. Take a new screenshot.' };
-    }
+  // Only the layout is compared: where the controls in the viewport are, never what they say. A
+  // coordinate click hits a box, so text that changes in place (a kernel status, a clock, a
+  // ticker) does not make the picture wrong, and refusing on it sent the model into a screenshot
+  // loop on every live page. Compared only when both sides have it: a content script that cannot
+  // answer is not evidence that the page changed.
+  const frameLayout = frame.sig?.layoutHash;
+  const liveLayout = live.sig?.layoutHash;
+  if (frameLayout && liveLayout && frameLayout !== liveLayout) {
+    return { ok: false, reason: FRAME_LAYOUT_CHANGED_MESSAGE };
   }
   return { ok: true };
 }

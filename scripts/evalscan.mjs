@@ -63,7 +63,7 @@ const DIST = path.join(ROOT, 'dist');
  * snippet in another file, or another kind of hit on that line is a new hit and fails. Add an
  * entry only with a reason.
  *
- * Every entry but the first names a file under node_modules/. That is what keeps the list from
+ * Every entry names a file under node_modules/. That is what keeps the list from
  * hiding a hit in our own sources: a hit in src/ or content/ has a different file, so
  * no library entry can match it (tests/evalscan.test.js pins that). Never add an entry for our own
  * code, fix the code. A library entry says why the call cannot run or why it is harmless, and names
@@ -71,17 +71,6 @@ const DIST = path.join(ROOT, 'dist');
  * kind stops matching, and the hit fails) when an upgrade changes the line.
  */
 export const ALLOWLIST = [
-  {
-    file: 'src/background/browser/executeJs.ts',
-    kind: 'new Function(',
-    snippet: 'new Function(`return (async () => { ${src} })()`)',
-    max: 1,
-    // The execute_js action. This code is the `func` of chrome.scripting.executeScript({ world: 'MAIN' }):
-    // Chrome serializes it and runs it inside the web PAGE, under the page's own CSP. The
-    // worker and the extension pages never call it, and the action reports "EVAL_BLOCKED" when
-    // the page's CSP refuses it.
-    why: 'execute_js runs this in the page (MAIN world), not in the worker'
-  },
   {
     // zod 4.6.5. `allowsEval` returns false on its first line when globalThis.__zod_globalConfig.jitless is true,
     // before it gets to this call. src/background/boot/zodJitless.ts sets the flag as the first import of the

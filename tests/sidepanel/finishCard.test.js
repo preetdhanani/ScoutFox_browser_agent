@@ -47,7 +47,7 @@ const WARNING_TRIANGLE = 'M12 3L2 20h20L12 3z';
  * The rows of a run: a goal, the steps, and the answer.
  * @param {{steps: Array<{action: string, success: boolean, error?: string}>, answer: string, audit?: object|null}} spec
  */
-function historyOf({ steps, answer, audit = null }) {
+function historyOf({ steps, answer, audit = null, outcome = undefined }) {
   const rows = [{ type: 'user_goal', turn: 1, prompt: 'Click the button', isNewRun: true }];
   steps.forEach((step, i) => {
     rows.push({
@@ -63,7 +63,7 @@ function historyOf({ steps, answer, audit = null }) {
         : { type: 'execution_result', step: i + 1, success: false, error: step.error || 'Element [1] no longer resolvable in DOM.' }
     );
   });
-  rows.push(audit ? { type: 'finish', answer, audit } : { type: 'finish', answer });
+  rows.push({ type: 'finish', answer, ...(audit ? { audit } : {}), ...(outcome !== undefined ? { outcome } : {}) });
   return rows;
 }
 
@@ -271,4 +271,123 @@ test('a plain answer is shown exactly as it is', () => {
 
   assert.match(card, /The price is 1\.399,00 EUR\./);
   assert.doesNotMatch(card, /answer-evidence/, 'and there is no evidence section for it');
+});
+
+// ---------------------------------------------------------------------------------------------
+// The finish outcome decides the card (done, partial, blocked); a failed step is only a note
+// ---------------------------------------------------------------------------------------------
+
+test('outcome "done" with every step through is the green Done card, with no note', () => {
+  const card = cardOf({ steps: [{ action: 'read_page', success: true }], answer: 'The price is 1.399,00 EUR.', outcome: 'done' });
+  assert.match(card, /class="finish-card"/);
+  assert.match(card, /> Done</);
+  assert.ok(card.includes(GREEN_TICK));
+  assert.doesNotMatch(card, /finish-sub/, 'no note when nothing failed');
+});
+
+test('outcome "done" after a blocked search is still Done: the failed step is a quiet note, not the title', () => {
+  const card = cardOf({
+    steps: [{ action: 'web_search', success: false, error: 'Error: the search engine answered 429' }, { action: 'fetch_url', success: true }],
+    answer: 'The archive is lantern-linux-amd64-v3.8.1.tar.zst.',
+    outcome: 'done'
+  });
+  assert.match(card, /> Done</, 'the title follows the outcome');
+  assert.doesNotMatch(card, /> Failed</, 'one blocked search does not make a correct answer "Failed"');
+  assert.match(card, /class="finish-card has-sub"/);
+  assert.match(card, /<div class="finish-sub">1 step failed along the way\.<\/div>/, 'the failed step is said under the title');
+});
+
+test('outcome "partial" is the amber Partly done card', () => {
+  const card = cardOf({ steps: [{ action: 'read_page', success: true }, { action: 'click', success: false }, { action: 'click', success: false }], answer: 'I found the price but not the shipping cost.', outcome: 'partial' });
+  assert.match(card, /class="finish-card partial has-sub"/);
+  assert.match(card, /> Partly done</);
+  assert.ok(!card.includes(GREEN_TICK), 'no green tick');
+  assert.ok(card.includes(WARNING_TRIANGLE));
+  assert.match(card, /2 steps failed along the way\./);
+});
+
+test('outcome "blocked" is Could not finish, even when no step failed (the honest "it did not work")', () => {
+  const card = cardOf({
+    steps: [{ action: 'click', success: true }, { action: 'click', success: true }],
+    answer: 'The Download CSV button did not work: nothing on the page changed.',
+    outcome: 'blocked'
+  });
+  assert.match(card, /class="finish-card blocked"/);
+  assert.match(card, /> Could not finish</);
+  assert.doesNotMatch(card, /> Done</, 'an answer that says it did not work is never Done');
+  assert.ok(!card.includes(GREEN_TICK));
+  assert.ok(card.includes(WARNING_TRIANGLE));
+});
+
+test('a finish with no outcome, or one the panel does not know, keeps the older card (a failed step is Failed)', () => {
+  for (const outcome of [undefined, 'great', null]) {
+    const card = cardOf({ steps: [{ action: 'click', success: false }], answer: 'The click failed.', outcome });
+    assert.match(card, /> Failed</, String(outcome));
+  }
+});
+
+test('the mock failure marker wins over any outcome', () => {
+  const card = cardOf({ steps: [{ action: 'click', success: true }], answer: 'MOCK-FAIL: no script', outcome: 'done' });
+  assert.match(card, /> Failed</);
+});
+
+test('the blocked card has its own danger edge in the stylesheet', () => {
+  assert.match(CSS, /\.finish-card\.blocked \{ border-left-color: var\(--danger\); \}/);
+  assert.match(CSS, /\.finish-card\.blocked \.finish-title svg \{ color: var\(--danger\); \}/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Inline `code` in the answer is rendered, and stays escaped
+// ---------------------------------------------------------------------------------------------
+
+/** The body of a card: the answer as the reader sees it. */
+const bodyOf = (card) => card.slice(card.indexOf('<div class="finish-body">'));
+
+test('an answer with `backticks` shows a code span, not the backticks', () => {
+  const card = cardOf({ steps: [{ action: 'read_page', success: true }], answer: 'Run `ollama --version` in ~/.local/bin.', outcome: 'done' });
+  assert.match(bodyOf(card), /Run <code class="md-code">ollama --version<\/code> in ~\/\.local\/bin\./);
+  assert.doesNotMatch(bodyOf(card), /`/, 'no backtick is left in the text');
+});
+
+test('code spans work in headings, list items and table cells of a structured answer too', () => {
+  const card = cardOf({
+    steps: [{ action: 'read_page', success: true }],
+    answer: '## The `install` step\n\n- download `lantern.tar.zst`\n\n| file | needs |\n|---|---|\n| `x.tar.zst` | zstd |',
+    outcome: 'done'
+  });
+  const body = bodyOf(card);
+  assert.match(body, /The <code class="md-code">install<\/code> step/);
+  assert.match(body, /download <code class="md-code">lantern\.tar\.zst<\/code>/);
+  assert.match(body, /<td class="md-nw"><code class="md-code">x\.tar\.zst<\/code><\/td>/);
+});
+
+test('model text inside a code span is escaped: no tag, attribute or entity of the model gets through', () => {
+  const card = cardOf({
+    steps: [{ action: 'read_page', success: true }],
+    answer: 'Use `<img src=x onerror="alert(1)">` and `a & b` and `**not bold**` then **bold**.',
+    outcome: 'done'
+  });
+  const body = bodyOf(card);
+  assert.match(body, /<code class="md-code">&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;<\/code>/);
+  assert.match(body, /<code class="md-code">a &amp; b<\/code>/);
+  assert.match(body, /<code class="md-code">\*\*not bold\*\*<\/code>/, 'a code span is never bolded');
+  assert.match(body, /<strong>bold<\/strong>/, 'bold outside a code span still works');
+  assert.doesNotMatch(body, /<img/);
+});
+
+test('only a single-backtick span on one line is code: fences, a lone backtick and a span across lines stay text', () => {
+  for (const answer of ['a ```fence``` b', 'one ` backtick', 'start `across\nlines` end', 'empty `` pair']) {
+    const card = cardOf({ steps: [{ action: 'read_page', success: true }], answer, outcome: 'done' });
+    assert.doesNotMatch(card, /<code/, JSON.stringify(answer));
+  }
+});
+
+test('the code span has a stylesheet rule built from theme tokens, so it reads in light and dark', () => {
+  const at = CSS.indexOf('.md-code {');
+  assert.ok(at >= 0, 'a .md-code rule exists');
+  const body = CSS.slice(at, CSS.indexOf('}', at));
+  assert.match(body, /font-family: var\(--font-mono\)/);
+  assert.match(body, /background: var\(--surface\)/);
+  assert.match(body, /overflow-wrap: anywhere/, 'a long path wraps inside the card');
+  assert.doesNotMatch(body, /#[0-9a-f]{3,8}\b|rgb/i, 'no literal colours');
 });

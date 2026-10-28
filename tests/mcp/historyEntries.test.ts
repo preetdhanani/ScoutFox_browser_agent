@@ -14,6 +14,7 @@ import {
   errorEntry,
   executionResultEntry,
   finishEntry,
+  finishOutcomeOf,
   mapToolToAction,
   screenshotResultEntry,
   summarizeToolResult,
@@ -21,8 +22,10 @@ import {
 } from '../../src/background/mcp/historyEntries.ts';
 
 test('mapToolToAction: the reading tools become the actions the panel already knows', () => {
-  assert.deepEqual(mapToolToAction('get_page_text', {}), { action: 'read_page_text' });
-  assert.deepEqual(mapToolToAction('read_page_text', {}), { action: 'read_page_text' });
+  assert.deepEqual(mapToolToAction('read_page', {}), { action: 'read_page' });
+  assert.deepEqual(mapToolToAction('read_page', { part: 1 }), { action: 'read_page' }, 'part 1 is the plain read');
+  assert.deepEqual(mapToolToAction('read_page', { part: 3 }), { action: 'read_page', part: 3 });
+  assert.deepEqual(mapToolToAction('read_page', { element_id: 7 }), { action: 'read_page', element_id: 7 });
   assert.deepEqual(mapToolToAction('get_page_elements', {}), { action: 'get_page_elements' });
 });
 
@@ -30,6 +33,8 @@ test('mapToolToAction: the acting tools keep the arguments the panel shows', () 
   assert.deepEqual(mapToolToAction('click', { element_id: 7 }), { action: 'click', element_id: 7 });
   assert.deepEqual(mapToolToAction('type', { element_id: 3, text: 'hello' }), { action: 'type', element_id: 3, text: 'hello' });
   assert.deepEqual(mapToolToAction('scroll', { direction: 'down' }), { action: 'scroll', direction: 'down' });
+  assert.deepEqual(mapToolToAction('scroll', { direction: 'down', element_id: 4 }), { action: 'scroll', direction: 'down', element_id: 4 });
+  assert.deepEqual(mapToolToAction('scroll', { direction: 'up', x: 10, y: 20 }), { action: 'scroll', direction: 'up', x: 10, y: 20 });
   assert.deepEqual(mapToolToAction('navigate', { url: 'https://example.com' }), { action: 'navigate', url: 'https://example.com' });
   assert.deepEqual(mapToolToAction('wait', { amount: 3 }), { action: 'wait', amount: 3 });
   assert.deepEqual(mapToolToAction('go_back', {}), { action: 'go_back' });
@@ -57,7 +62,7 @@ test('mapToolToAction: a missing argument list does not throw', () => {
   // The arguments come from the model, so they can be absent, null or the wrong shape.
   assert.deepEqual(mapToolToAction('click', null), { action: 'click', element_id: undefined });
   assert.deepEqual(mapToolToAction('find', null), { action: 'find_elements', query: undefined });
-  assert.deepEqual(mapToolToAction('get_page_text', null), { action: 'read_page_text' });
+  assert.deepEqual(mapToolToAction('read_page', null), { action: 'read_page' });
 });
 
 test('summarizeToolResult: a short result is kept whole', () => {
@@ -113,6 +118,14 @@ test('the rows carry the fields the panel reads', () => {
   assert.equal(finish.answer, 'It costs 99 USD.');
 });
 
+test('finishEntry carries the outcome only when there is one, and finishOutcomeOf knows exactly three', () => {
+  assert.equal('outcome' in (finishEntry('x') as any), false, 'a plain-text reply has no outcome');
+  assert.equal((finishEntry('x', '', undefined, 'blocked') as any).outcome, 'blocked');
+  assert.equal((finishEntry('x', 'ev', { columns: ['a'], rows: [['1']] }, 'partial') as any).outcome, 'partial');
+  for (const ok of ['done', 'partial', 'blocked']) assert.equal(finishOutcomeOf(ok), ok);
+  for (const bad of [undefined, null, '', 'Done', 'failed', 1, {}]) assert.equal(finishOutcomeOf(bad), undefined, String(bad));
+});
+
 test('mapToolToAction: a coordinate click carries the coordinates and no element id', () => {
   // The panel reads these to say "Clicked at (812, 344) in the picture" instead of
   // "Clicked element undefined".
@@ -153,4 +166,15 @@ test('a screenshot row without a picture is the plain result row', () => {
   const row: any = screenshotResultEntry(2, false, 'Error: the page is zoomed.');
   const plain: any = executionResultEntry(2, false, 'Error: the page is zoomed.');
   assert.deepEqual(row, plain);
+});
+
+test('press_key and a type without an element id map to panel actions; a row label names the element', async () => {
+  const { mapToolToAction, elementRowLabel } = await import('../../src/background/mcp/historyEntries.ts');
+  assert.deepEqual(mapToolToAction('press_key', { key: 'Enter', modifiers: ['shift'] }), { action: 'press_key', key: 'Enter', modifiers: ['shift'] });
+  assert.deepEqual(mapToolToAction('press_key', { key: 'select_all' }), { action: 'press_key', key: 'select_all' });
+  assert.deepEqual(mapToolToAction('type', { text: 'x' }), { action: 'type', text: 'x' });
+  assert.deepEqual(mapToolToAction('type', { element_id: 2, text: 'x', mode: 'append' }), { action: 'type', element_id: 2, text: 'x', mode: 'append' });
+  assert.equal(elementRowLabel('[1] div "sudo apt install ollama" (label="Code cell editor")'), 'Code cell editor');
+  assert.equal(elementRowLabel('[3] button[button] "In den Warenkorb"'), 'In den Warenkorb');
+  assert.equal(elementRowLabel(''), '');
 });

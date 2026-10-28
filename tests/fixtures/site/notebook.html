@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>setup-ollama.ipynb - Notebook fixture</title>
+  <link rel="stylesheet" href="site.css">
+  <style>
+    /* Like JupyterLab: the page itself never scrolls. The cells live in one inner panel that does. */
+    html, body { height: 100%; overflow: hidden; }
+    .frame { display: flex; flex-direction: column; height: 100%; }
+    header.bar .file { color: var(--muted); font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
+    .toolbar button { font-size: 13px; padding: 3px 10px; }
+    .toolbar .kernel { margin-left: auto; color: var(--muted); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; min-width: 330px; text-align: right; }
+    main.cells { flex: 1; overflow-y: auto; padding: 16px 24px 48px; }
+    .cell { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 4px 10px; max-width: 920px; margin: 0 auto 14px; }
+    .cell .prompt { color: var(--muted); font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; padding-top: 6px; }
+    .cell .editor { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); min-width: 0; }
+    .cell .editor .cm-editor { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .cell .editor .cm-editor.cm-focused { outline: 2px solid rgba(11, 87, 208, 0.35); }
+    .cell .editor .cm-content { padding: 6px 0; }
+    .cell .output { grid-column: 2; margin: 0; padding: 4px 10px; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+    .cell .output:empty { display: none; }
+    .cell .output.error { background: #fdecea; color: #8c1d18; border-radius: 4px; }
+    .cell.markdown .editor { display: none; }
+    .cell.markdown .output { font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; white-space: normal; }
+  </style>
+</head>
+<body>
+  <!-- Fixture: a notebook like JupyterLab. The page never scrolls; the cells scroll inside
+       main.cells. Every code cell is a real CodeMirror 6 editor (vendor/codemirror6.js, built from
+       the npm packages), which only takes trusted input: a capture listener drops untrusted key
+       events, and CodeMirror draws only the lines near the view (a long cell gets a .cm-gap).
+       Shift+Enter runs the focused cell: code with sudo or apt gets the permission error cell 14
+       shows, code that downloads ollama-linux-amd64.tar.zst without sudo prints the version. The
+       kernel status in the toolbar changes four times a second, like a busy indicator or a clock. -->
+  <div class="frame">
+    <header class="bar">
+      <span class="logo">Notebook</span>
+      <span class="file">setup-ollama.ipynb</span>
+    </header>
+    <div class="toolbar">
+      <button type="button" id="save">Save</button>
+      <button type="button" id="run-all">Run all</button>
+      <button type="button" id="restart">Restart kernel</button>
+      <span class="kernel" id="kernel-status" role="status">Python 3 (ipykernel) | Idle</span>
+    </div>
+    <main class="cells" id="cells" aria-label="Notebook cells"></main>
+  </div>
+  <script src="vendor/codemirror6.js"></script>
+  <script>
+    (function () {
+      const PERMISSION_ERROR = [
+        'sudo: The "no new privileges" flag is set, which prevents sudo from running as root.',
+        'sudo: If sudo is running in a container, you may need to adjust the container configuration to disable the flag.',
+        'E: Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)',
+        'E: Unable to lock directory /var/lib/apt/lists/',
+        'E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)',
+        'E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are you root?'
+      ].join('\n');
+      const OLLAMA_VERSION = 'ollama version 0.40.11';
+      const NVIDIA_SMI = [
+        'Mon Oct 27 09:12:44 2026',
+        '+-----------------------------------------------------------------------------------------+',
+        '| NVIDIA-SMI 570.86.15              Driver Version: 570.86.15      CUDA Version: 12.8     |',
+        '|-----------------------------------------+------------------------+----------------------+',
+        '| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |',
+        '| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |',
+        '|=========================================+========================+======================|',
+        '|   0  NVIDIA L4                      Off |   00000000:00:03.0 Off |                    0 |',
+        '| N/A   41C    P8             12W /   72W |       0MiB /  23034MiB |      0%      Default |',
+        '+-----------------------------------------+------------------------+----------------------+',
+        '| Processes:                                                                              |',
+        '|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |',
+        '|  No running processes found                                                             |',
+        '+-----------------------------------------------------------------------------------------+'
+      ].join('\n');
+      const PIP_LIST = [
+        'httpx                     0.28.1',
+        'jupyter_client            8.6.3',
+        'jupyter_core              5.7.2',
+        'jupyter-server            2.15.0',
+        'jupyterhub                5.2.1',
+        'jupyterlab                4.4.9',
+        'numpy                     2.2.6',
+        'requests                  2.32.4',
+        'torch                     2.7.1+cu128'
+      ].join('\n');
+
+      // The notebook: [kind, code, output]. Markdown cells have no editor.
+      const CELLS = [
+        ['md', '', 'Set up Ollama on the shared JupyterHub server. The server runs every notebook in an unprivileged container: there is no root, and sudo is turned off.'],
+        ['code', 'import os, platform, shutil\nprint(platform.platform())\nprint("user:", os.environ.get("USER"))', 'Linux-6.8.0-1012-gcp-x86_64-with-glibc2.39\nuser: jovyan'],
+        ['code', '!uname -m && cat /etc/os-release | head -n 2', 'x86_64\nPRETTY_NAME="Ubuntu 24.04.2 LTS"\nNAME="Ubuntu"'],
+        ['code', '!df -h $HOME | tail -n 1', '/dev/sdb1        98G   41G   57G  42% /home/jovyan'],
+        ['code', '!nvidia-smi', NVIDIA_SMI],
+        ['md', '', 'Step 1: check which tools are on the PATH already. Only tools inside the home folder can be installed by this user. The image is rebuilt every week from the hub template, so anything installed outside the home folder is gone after the next rebuild, and the next person has to do it all again. Keep every install step in this notebook, so it can be run again from the top after a rebuild.'],
+        ['code', 'for tool in ["curl", "tar", "zstd", "ollama"]:\n    print(f"{tool:8s}", shutil.which(tool))', 'curl     /usr/bin/curl\ntar      /usr/bin/tar\nzstd     /usr/bin/zstd\nollama   None'],
+        ['code', '!echo $PATH', '/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'],
+        ['code', 'os.makedirs(os.path.expanduser("~/.local/bin"), exist_ok=True)\nos.environ["PATH"] = os.path.expanduser("~/.local/bin") + ":" + os.environ["PATH"]\nprint(os.environ["PATH"].split(":")[0])', '/home/jovyan/.local/bin'],
+        ['code', '!ls -la ~/.local', 'total 12\ndrwxr-xr-x 3 jovyan users 4096 Oct 27 09:12 .\ndrwxr-xr-x 9 jovyan users 4096 Oct 27 09:12 ..\ndrwxr-xr-x 2 jovyan users 4096 Oct 27 09:12 bin'],
+        ['md', '', 'Step 2: the Ollama release for Linux on x86_64 is one archive, ollama-linux-amd64.tar.zst. It unpacks into bin/ and lib/, so it can live under ~/.local without root. The install script from the website wants root: it writes to /usr/local, creates a system user and a systemd service, and none of that is possible in this container. The archive needs only curl and tar with zstd support, and both are already on the PATH (see the cell above).'],
+        ['code', '!curl -sI https://ollama.com/download/ollama-linux-amd64.tar.zst | head -n 1', 'HTTP/2 302'],
+        ['code', '!pip list 2>/dev/null | grep -i -E "requests|httpx|numpy|torch|jupyter"', PIP_LIST],
+        ['code', '!sudo apt-get update && sudo apt-get install -y zstd\n!curl -fsSL https://ollama.com/install.sh | sh', PERMISSION_ERROR],
+        ['md', '', 'Step 3: start the server in the background and pull a small model to check that it works.'],
+        ['code', 'import subprocess\nserver = subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)\nprint(server.pid)', ''],
+        ['code', '!ollama pull qwen3:0.6b', ''],
+        ['code', '!ollama list', ''],
+        ['code', 'import requests\nr = requests.post("http://127.0.0.1:11434/api/generate", json={"model": "qwen3:0.6b", "prompt": "Say hi", "stream": False})\nprint(r.json()["response"])', ''],
+        ['md', '', 'Step 4: keep the model directory on the persistent disk, so the next session does not pull it again.'],
+        ['code', 'os.environ["OLLAMA_MODELS"] = os.path.expanduser("~/ollama-models")\nprint(os.environ["OLLAMA_MODELS"])', ''],
+        ['code', '!du -sh ~/ollama-models', ''],
+        ['code', 'server.terminate()\nserver.wait(timeout=10)', ''],
+        ['md', '', 'Step 5: notes for the next person who sets this up.'],
+        ['code', 'notes = """\nThe hub image has no root and no sudo.\nInstall user tools under ~/.local and put ~/.local/bin first on PATH.\n"""\nprint(notes.strip())', 'The hub image has no root and no sudo.\nInstall user tools under ~/.local and put ~/.local/bin first on PATH.'],
+        ['code', LONG_CELL(), ''],
+        ['code', '!ls ~/.local/bin', ''],
+        ['code', '!cat ~/.bashrc | tail -n 3', 'export PATH="$HOME/.local/bin:$PATH"\nexport OLLAMA_MODELS="$HOME/ollama-models"\nalias ll="ls -la"'],
+        ['code', 'print("done")', 'done'],
+        ['code', '', '']
+      ];
+
+      /** A long cell, so CodeMirror draws only the lines near the view and leaves a .cm-gap for the rest. */
+      function LONG_CELL() {
+        const lines = ['%%writefile models.txt'];
+        for (let i = 1; i <= 260; i++) lines.push(`model-${String(i).padStart(3, '0')}  qwen3:0.6b  tag-${(i * 7919) % 1000}`);
+        return lines.join('\n');
+      }
+
+      const { EditorState, EditorView, keymap, drawSelection, defaultKeymap, history, historyKeymap } = window.CM6;
+      const panel = document.getElementById('cells');
+      const status = document.getElementById('kernel-status');
+      let executionCount = CELLS.length;
+
+      function runCode(code) {
+        if (/\bsudo\b|\bapt(-get)?\b/.test(code)) return { text: PERMISSION_ERROR, error: true };
+        if (/ollama-linux-amd64\.tar\.zst/.test(code)) return { text: OLLAMA_VERSION, error: false };
+        const echo = /^\s*!?echo\s+(.*)$/s.exec(code);
+        if (echo) return { text: echo[1].trim(), error: false };
+        return { text: '', error: false };
+      }
+
+      CELLS.forEach(([kind, code, output], i) => {
+        const n = i + 1;
+        const cell = document.createElement('div');
+        cell.className = `cell ${kind === 'md' ? 'markdown' : 'code'}`;
+        cell.dataset.cell = String(n);
+        const prompt = document.createElement('div');
+        prompt.className = 'prompt';
+        const editorBox = document.createElement('div');
+        editorBox.className = 'editor';
+        const out = document.createElement('pre');
+        out.className = `output${output === PERMISSION_ERROR ? ' error' : ''}`;
+        out.textContent = output;
+        out.id = `output-${n}`;
+        cell.append(prompt, editorBox, out);
+        panel.appendChild(cell);
+        if (kind === 'md') {
+          prompt.textContent = '';
+          return;
+        }
+        // The prompt names the cell by its place in the notebook, so "cell 14" and "In [14]" are the same cell.
+        prompt.textContent = `In [${n}]:`;
+        // Untrusted key events (a script, a synthetic fallback) never reach the editor.
+        editorBox.addEventListener('keydown', (event) => { if (!event.isTrusted) event.stopImmediatePropagation(); }, true);
+        const view = new EditorView({
+          parent: editorBox,
+          state: EditorState.create({
+            doc: code,
+            extensions: [
+              keymap.of([{
+                key: 'Shift-Enter',
+                run: (v) => {
+                  const result = runCode(v.state.doc.toString());
+                  executionCount += 1;
+                  prompt.textContent = `In [${executionCount}]:`;
+                  out.textContent = result.text;
+                  out.className = `output${result.error ? ' error' : ''}`;
+                  cell.dataset.runs = String(Number(cell.dataset.runs || 0) + 1);
+                  return true;
+                }
+              }]),
+              history(),
+              drawSelection(),
+              EditorView.lineWrapping,
+              keymap.of([...defaultKeymap, ...historyKeymap]),
+              EditorView.contentAttributes.of({ 'aria-label': `Cell ${n} code` }),
+              EditorView.updateListener.of((update) => {
+                if (update.docChanged) cell.dataset.code = update.state.doc.toString();
+              })
+            ]
+          })
+        });
+        cell.dataset.code = code;
+        cell.editorView = view;
+      });
+
+      // The kernel status changes all the time, like a busy indicator or a clock.
+      let tick = 0;
+      setInterval(() => {
+        tick += 1;
+        const ms = String(tick * 250 % 60000).padStart(5, '0');
+        status.textContent = `Python 3 (ipykernel) | ${tick % 8 < 2 ? 'Busy' : 'Idle'} | uptime ${Math.floor(tick / 4)}s ${ms}`;
+      }, 250);
+    })();
+  </script>
+</body>
+</html>

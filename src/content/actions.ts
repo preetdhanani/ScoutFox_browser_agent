@@ -1,11 +1,11 @@
 /**
  * ScoutFox Browser Actions Execution
- * Executes click, type, scroll, press_key, navigate, browser_batch primitives.
+ * Executes the content-side primitives of the page tools: click, type, scroll, navigate, read_page, find_element.
  */
 
-import { clipWithNote } from '../shared/clip.ts';
 import { formatFindMessage } from './domCompressor.ts';
-import { pageTextPart } from './pageText.ts';
+import { normalizePageText, pageTextPart } from './pageText.ts';
+import { pickScrollTarget, positionOf, scrollInstantly, settledPosition, stepOf, type ScrollBox, type ScrollPosition } from './scrollMeasure.ts';
 
 export interface ActionExecutionContext {
   doc?: Document;
@@ -15,14 +15,10 @@ export interface ActionExecutionContext {
   showClickEffect: (x: number, y: number) => void;
   animateCursor: (x: number, y: number) => void;
   waitForDomQuiet: (quietMs?: number, ceilingMs?: number) => Promise<void>;
-  execute: (payload: any) => Promise<any>;
   describeElement: (el: Element | null) => string;
   setFieldValue: (el: Element, text: unknown) => { success: boolean; error?: string };
   doClick: (elementId: number | string) => any;
   doType: (elementId: number | string, text: unknown, submit?: unknown) => any;
-  doScroll: (direction?: string, amount?: any) => any;
-  doPressKey: (key?: string) => any;
-  doBrowserBatch: (steps: any[], stopOnError?: boolean) => Promise<any>;
 }
 
 const SafeKeyboardEvent = typeof KeyboardEvent !== 'undefined' ? KeyboardEvent : (Event as any);
@@ -267,126 +263,41 @@ export function doType(
 }
 
 /**
- * Scroll webpage smoothly
- */
-export function doScroll(
-  direction: any = 'down',
-  amount: any = 500,
-  win: (Window & typeof globalThis) | undefined = typeof window !== 'undefined' ? window : undefined
-): { success: boolean; message: string } {
-  const distance = direction === 'up' ? -amount : amount;
-  if (win && typeof win.scrollBy === 'function') {
-    win.scrollBy({ top: distance, behavior: 'smooth' } as any);
-  }
-  return { success: true, message: `Scrolled ${direction} by ${amount}px` };
-}
-
-/**
- * Dispatch keypress event
- */
-export function doPressKey(
-  key = 'Enter',
-  doc: Document = typeof document !== 'undefined' ? document : (null as unknown as Document)
-): { success: boolean; message: string } {
-  const activeEl = (doc && (doc.activeElement || doc.body)) || null;
-  if (activeEl) {
-    const KeyboardEventCtor = (doc && (doc.defaultView as any)?.KeyboardEvent) || SafeKeyboardEvent;
-    activeEl.dispatchEvent(new KeyboardEventCtor('keydown', { key, bubbles: true } as any));
-    activeEl.dispatchEvent(new KeyboardEventCtor('keyup', { key, bubbles: true } as any));
-  }
-  return { success: true, message: `Pressed key [${key}]` };
-}
-
-/**
- * Execute deterministic sequence of primitives in one round trip with stable locator re-resolution
- */
-export async function doBrowserBatch(
-  steps: any[],
-  stopOnError: boolean = true,
-  context: ActionExecutionContext,
-  win: (Window & typeof globalThis) | undefined = context.win || (typeof window !== 'undefined' ? window : undefined)
-): Promise<any> {
-  if (!Array.isArray(steps) || steps.length === 0) {
-    return { success: false, error: 'browser_batch requires a non-empty "steps" array' };
-  }
-
-  if (steps.length > 8) {
-    return { success: false, error: 'browser_batch exceeds maximum allowed 8 steps limit' };
-  }
-
-  const forbidden = ['navigate', 'go_back', 'go_forward', 'ask_user', 'finish', 'browser_batch'];
-  const results: any[] = [];
-  let completed = 0;
-  let abortedAt: number | null = null;
-  let terminatedBy: string | null = null;
-
-  const initialUrl = win && win.location ? win.location.href : '';
-
-  for (let i = 0; i < steps.length; i++) {
-    const step = { ...steps[i] };
-
-    const actName = step.action || (step.click !== undefined ? 'click' : step.type !== undefined ? 'type' : '');
-    const targetId = step.element_id || step.index || step.elementId || step.element;
-
-    if (forbidden.includes(actName)) {
-      const err = `Action "${actName}" is forbidden inside browser_batch`;
-      results.push({ step: i, action: actName, ok: false, error: err });
-      abortedAt = i;
-      if (stopOnError) break;
-      continue;
-    }
-
-    try {
-      const stepPayload = { ...step, action: actName, element_id: targetId };
-      const stepRes = await context.execute(stepPayload);
-
-      if (stepRes.success !== false) {
-        results.push({ step: i, action: actName, ok: true, message: stepRes.message });
-        completed++;
-      } else {
-        results.push({ step: i, action: actName, ok: false, error: stepRes.error });
-        abortedAt = i;
-        if (stopOnError) break;
-      }
-    } catch (stepErr: any) {
-      results.push({ step: i, action: actName, ok: false, error: stepErr.message });
-      abortedAt = i;
-      if (stopOnError) break;
-    }
-
-    if (win && win.location && win.location.href !== initialUrl) {
-      terminatedBy = 'navigation';
-      break;
-    }
-
-    await context.waitForDomQuiet(300, 1500);
-  }
-
-  const ok = results.length > 0 && results.every((r) => r.ok);
-  const summary = `${completed}/${steps.length} step(s) completed${terminatedBy ? ` (stopped by ${terminatedBy})` : ''}`;
-  return {
-    success: ok,
-    completed,
-    total: steps.length,
-    results,
-    abortedAt,
-    terminatedBy,
-    message: ok ? summary : undefined,
-    error: ok ? undefined : `${summary}. First failure: ${(results.find((r) => !r.ok) || {}).error || 'unknown'}`
-  };
-}
-
-/**
  * Execute action requested by agent
  */
 
-// The read position of read_page_text on the current page, with the whole extracted text it pages
-// through. Module state on purpose: the action executor lives for the lifetime of the page, so a
-// navigation resets it with the page itself.
-interface PageReadState { url: string; text: string; next: number; exhausted: boolean }
-let pageReadState: PageReadState | null = null;
-/** An element text over this is cut, with a note naming its full size. */
-const ELEMENT_TEXT_CAP = 2000;
+/** The note a read gets when a code editor on the page draws only the lines near the view (CodeMirror 6). */
+export const EDITOR_HIDES_LINES_NOTE = '(editor may hide off-screen lines)';
+
+/** The line a read starts with when an editor in it hides lines: the note, and how to read the rest. */
+export const EDITOR_HIDES_LINES_NOTE_LINE = `Note: a code editor here draws only the lines near the view ${EDITOR_HIDES_LINES_NOTE}. Scroll it into view to read the rest.`;
+
+/**
+ * The text a person reads in an element. A CodeMirror editor is read from its .cm-content, one
+ * line per .cm-line, and `hidesLines` says whether it left lines out (CodeMirror 6 draws only the
+ * lines near the view and stands a .cm-gap in for the rest).
+ */
+export function readableText(el: Element): { text: string; hidesLines: boolean } {
+  const editors: Element[] = [];
+  const own = typeof el.closest === 'function' ? el.closest('.cm-content') : null;
+  if (own) editors.push(own);
+  else if (typeof el.querySelectorAll === 'function') editors.push(...Array.from(el.querySelectorAll('.cm-content')));
+  const hidesLines = editors.some((cm) => typeof cm.querySelector === 'function' && !!cm.querySelector('.cm-gap'));
+  const source = own || el;
+  const raw = (source as HTMLElement).innerText ?? source.textContent ?? '';
+  return { text: normalizePageText(String(raw)), hidesLines };
+}
+
+/** The box the last scroll_target picked, which scroll_measure and scroll_fallback read and move. */
+let scrollBox: ScrollBox = null;
+
+function liveScrollBox(doc: Document): ScrollBox {
+  return scrollBox && (scrollBox as Element).isConnected !== false && doc.contains(scrollBox) ? scrollBox : null;
+}
+
+function positionPayload(position: ScrollPosition) {
+  return { top: position.top, max: position.max, height: position.height, atTop: position.atTop, atBottom: position.atBottom };
+}
 
 export async function execute(
   actionPayload: any,
@@ -394,17 +305,59 @@ export async function execute(
   doc: Document = context.doc || (typeof document !== 'undefined' ? document : (null as unknown as Document)),
   win: (Window & typeof globalThis) | undefined = context.win || (typeof window !== 'undefined' ? window : undefined)
 ): Promise<any> {
-  const { action, element_id, text, submit, direction, amount, seconds, key, url, steps, stopOnError = true } = actionPayload;
+  const { action, element_id, text, submit, direction, amount, seconds, url } = actionPayload;
 
   switch (action) {
     case 'click':
       return context.doClick(element_id);
     case 'type':
       return context.doType(element_id, text, submit);
-    case 'scroll':
-      return context.doScroll(direction, amount);
-    case 'press_key':
-      return context.doPressKey(key);
+    case 'scroll': {
+      // Only reached when the background could not drive the trusted wheel (see InputDispatcher.handleScroll):
+      // the picked box is moved at once and measured, so the reply is what really happened.
+      if (!doc || !win) return { success: false, error: 'scroll needs a page.' };
+      const picked = pickScrollTarget(doc, win, {});
+      const before = positionOf(picked.box, doc, win);
+      const sign = direction === 'up' ? -1 : 1;
+      scrollInstantly(picked.box, win, sign * stepOf(before));
+      const after = positionOf(picked.box, doc, win);
+      return { success: true, result: { moved: after.top - before.top, label: picked.label, ...positionPayload(after) } };
+    }
+    case 'scroll_target': {
+      // The box a scroll moves and where the wheel goes: an element's box, the box under a point,
+      // or the largest visible scrolling box. It is kept for scroll_measure and scroll_fallback.
+      if (!doc || !win) return { success: false, error: 'scroll needs a page.' };
+      let element: Element | null = null;
+      if (element_id !== undefined && element_id !== null) {
+        element = context.resolveElement(element_id);
+        if (!element) return { success: false, error: `Element [${element_id}] is not on this page any more. Get the element list again, or scroll without element_id.` };
+      }
+      const hasPoint = Number.isFinite(Number(actionPayload.x)) && Number.isFinite(Number(actionPayload.y)) && actionPayload.x !== null && actionPayload.y !== null && actionPayload.x !== undefined && actionPayload.y !== undefined;
+      const point = hasPoint ? { x: Number(actionPayload.x), y: Number(actionPayload.y) } : null;
+      const hit = point && typeof doc.elementFromPoint === 'function' ? doc.elementFromPoint(point.x, point.y) : null;
+      const picked = pickScrollTarget(doc, win, { element, point, hit });
+      scrollBox = picked.box;
+      const before = positionOf(picked.box, doc, win);
+      return { success: true, result: { point: picked.point, label: picked.label, step: stepOf(before), ...positionPayload(before) } };
+    }
+    case 'scroll_measure': {
+      // The kept box's position once it stopped moving (a wheel scroll can animate).
+      if (!doc || !win) return { success: false, error: 'scroll needs a page.' };
+      const box = liveScrollBox(doc);
+      const settled = await settledPosition(() => positionOf(box, doc, win), {
+        quietMs: Number(actionPayload.quietMs) > 0 ? Number(actionPayload.quietMs) : undefined,
+        maxMs: Number(actionPayload.maxMs) > 0 ? Number(actionPayload.maxMs) : undefined
+      });
+      return { success: true, result: positionPayload(settled) };
+    }
+    case 'scroll_fallback': {
+      // The wheel did not move the kept box: move it at once by delta, and measure it.
+      if (!doc || !win) return { success: false, error: 'scroll needs a page.' };
+      const box = liveScrollBox(doc);
+      scrollInstantly(box, win, Number(actionPayload.delta) || 0);
+      const settled = await settledPosition(() => positionOf(box, doc, win), { quietMs: 80, maxMs: 600 });
+      return { success: true, result: positionPayload(settled) };
+    }
     case 'navigate':
       if (win && win.location) win.location.href = url;
       return { success: true, message: `Navigating to ${url}` };
@@ -414,54 +367,46 @@ export async function execute(
     case 'go_forward':
       if (win && win.history) win.history.forward();
       return { success: true, message: 'Going forward' };
-    case 'read_page_text':
-    case 'extract_page_text': {
-      const compressor = win && (win as any).domCompressor ? (win as any).domCompressor : null;
-      // Scoped read: with a valid element_id, return only that element's text. This is how the model
-      // reads result 2, 3, ... of a long search page, whose full text is capped far below the page.
+    case 'read_page': {
+      // Stateless: the part is named in the request (1 when it is left out), so the same request
+      // always gives the same text and a model can never fall into re-reading the first part.
+      const rawPart = actionPayload.part;
+      const partNumber = rawPart === undefined || rawPart === null || rawPart === '' ? 1 : Number(rawPart);
+      if (!Number.isInteger(partNumber) || partNumber < 1) {
+        return { success: false, error: `part must be a whole number from 1 up, got ${JSON.stringify(rawPart)}.` };
+      }
+      let source: { text: string; hidesLines: boolean };
+      let what: string;
       const requestedId = actionPayload.element_id;
       if (requestedId !== undefined && requestedId !== null && String(requestedId).trim() !== '') {
-        const el = context.resolveElement
-          ? context.resolveElement(requestedId as number | string)
-          : null;
+        const el = context.resolveElement ? context.resolveElement(requestedId as number | string) : null;
         if (!el) {
-          return { success: false, error: `Element [${String(requestedId)}] is not on this page's element list. Use an element_id from the last snapshot, or read_page_text without element_id for the next part of the page text.` };
+          return { success: false, error: `Element [${String(requestedId)}] is not on this page's element list. Use an element_id from the last get_page_elements or find, or read_page without element_id.` };
         }
-        const elText = ((el as HTMLElement).innerText || (el as Element).textContent || '').trim();
-        const shown = clipWithNote(elText, ELEMENT_TEXT_CAP, { what: 'element text', hint: 'read a smaller element inside it by its element_id' });
-        return {
-          success: true,
-          message: `Text of element [${String(requestedId)}] (${elText.length} chars):\n"""\n${shown}\n"""`,
-          result: { pageText: shown },
-        };
-      }
-      // The whole page text, not the snapshot's capped one, so paging reaches past the snapshot cap.
-      const pageText =
-        compressor && typeof compressor.extractFullPageText === 'function'
+        source = readableText(el);
+        what = `Text of element [${String(requestedId)}]`;
+      } else {
+        // The whole page text (inner scroll panels included, nothing windowed to the scroll
+        // position), not the snapshot's capped one, so paging reaches every part of the page.
+        const compressor = win && (win as any).domCompressor ? (win as any).domCompressor : null;
+        const text = compressor && typeof compressor.extractFullPageText === 'function'
           ? compressor.extractFullPageText()
-          : compressor && typeof compressor.extractPageText === 'function'
-            ? compressor.extractPageText()
-            : doc && doc.body
-              ? (doc.body as HTMLElement).innerText || doc.body.textContent || ''
-              : '';
-      const url = win && win.location ? win.location.href : '';
-      // The prompt promises "read more text of this page". A repeated read of the SAME text must
-      // move forward, or the model re-reads the same first part forever (it did exactly that on
-      // an arXiv feed page: five identical reads, no progress, run ended without the answer).
-      // A different URL, or a text that changed under the same URL, starts the read over.
-      if (!pageReadState || pageReadState.url !== url || pageReadState.text !== pageText) {
-        pageReadState = { url, text: pageText, next: 0, exhausted: false };
+          : doc && doc.body
+            ? normalizePageText((doc.body as HTMLElement).innerText || doc.body.textContent || '')
+            : '';
+        const hidesLines = !!(doc && typeof doc.querySelector === 'function' && doc.querySelector('.cm-content .cm-gap'));
+        source = { text: String(text), hidesLines };
+        what = 'Page text';
       }
-      // After the end, the read starts over - but the model must know it is re-reading, or it burns
-      // steps on text it already has (it did: a full wrap-around read after "end of the text").
-      const again = pageReadState.next === 0 && pageReadState.exhausted;
-      const part = pageTextPart(pageText, pageReadState.next, again);
-      pageReadState.next = part.last ? 0 : pageReadState.next + 1;
-      if (part.last) pageReadState.exhausted = true;
+      const part = pageTextPart(source.text, partNumber);
+      if (partNumber > part.count) {
+        return { success: false, error: `${what} has only ${part.count} part${part.count === 1 ? '' : 's'}, so there is no part ${partNumber}. Read part 1 to ${part.count}.` };
+      }
+      const editorNote = source.hidesLines ? `${EDITOR_HIDES_LINES_NOTE_LINE}\n` : '';
       return {
         success: true,
-        message: `Extracted text snippet (${part.note}):\n"""\n${part.text}\n"""`,
-        result: { pageText: part.text, note: part.note },
+        message: `${what} (${part.note}):\n${editorNote}"""\n${part.text}\n"""`,
+        result: { pageText: part.text, note: part.note, part: part.number, parts: part.count, hidesLines: source.hidesLines },
       };
     }
     case 'find_element': {
@@ -479,8 +424,6 @@ export async function execute(
       const found = compressor.findElements(query);
       return { success: true, message: formatFindMessage(found), result: found };
     }
-    case 'browser_batch':
-      return context.doBrowserBatch(steps, stopOnError);
     case 'wait': {
       // The background clamps model waits to 1..5 s (BUG-36); this content-side
       // fallback keeps the same band so nothing here can park a run either,

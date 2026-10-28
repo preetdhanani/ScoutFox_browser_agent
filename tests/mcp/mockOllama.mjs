@@ -22,13 +22,13 @@
  *
  * The script is stateless: it reads only the conversation of the request, the way a real model
  * would. It walks the fixture tasks like the MCP client drives them:
- *   - a bot check in the page text (the user message's preview, or a get_page_text result):
+ *   - a bot check in the page text (the user message's preview, or a read_page result):
  *     finish at once with the honest answer. It never clicks a bot check;
  *   - a planning goal: update_plan with two steps (two steps auto-approve, so the run goes on),
- *     then get_page_text, then finish with the facts;
+ *     then read_page, then finish with the facts;
  *   - a click goal: get_page_elements, then click the element whose label matches the goal
  *     ("In den Warenkorb" for a cart goal), then finish;
- *   - a facts goal (price, shipping, delivery) or a summarize goal: get_page_text, then finish
+ *   - a facts goal (price, shipping, delivery) or a summarize goal: read_page, then finish
  *     with the lines copied from the page text;
  *   - anything it cannot find in the conversation (an empty page, an unknown goal, a click
  *     target that is not on the page): a finish whose answer starts with "MOCK-FAIL:" and says
@@ -40,6 +40,8 @@
  */
 import http from 'node:http';
 import { buildCallRecord, MOCK_FAIL_PREFIX } from './callRecord.mjs';
+import { REFLECTION_TEXT, REPEAT_HINT_PREFIX } from '../../src/background/mcp/progress.ts';
+import { UNTRUSTED_PREFIX } from '../../src/background/mcp/untrusted.ts';
 
 export const MOCK_VERSION = '0.0.0-mock';
 export { MOCK_FAIL_PREFIX };
@@ -155,10 +157,17 @@ export function readConversation(messages, tools) {
       if (block && block.type === 'image_url') pictures.push(block.image_url?.url || '');
     }
   }
+  // The notes the loop itself adds as user text after a tool block (the reflection, the step
+  // limit): every plain user message after the first assistant turn that carries no picture.
+  const firstAssistant = (messages || []).findIndex((m) => m.role === 'assistant');
+  const notes = firstAssistant < 0 ? [] : (messages || []).slice(firstAssistant)
+    .filter((m) => m.role === 'user' && typeof m.content === 'string' && !Array.isArray(m.images))
+    .map((m) => m.content);
+  const system = (messages || []).find((m) => m.role === 'system');
   const lastResultOf = (name) => [...results].reverse().find((r) => r.name === name)?.content ?? null;
   const firstUser = (messages || []).find((m) => m.role === 'user');
   const task = parseTaskMessage(firstUser ? firstUser.content : '');
-  const pageText = lastResultOf('get_page_text') ?? lastResultOf('read_page_text');
+  const pageText = lastResultOf('read_page');
   const elementsText = lastResultOf('get_page_elements') ?? lastResultOf('find');
   return {
     task: task.task,
@@ -175,6 +184,11 @@ export function readConversation(messages, tools) {
     lastPicture: pictures[pictures.length - 1] || '',
     screenshotResult: lastResultOf('take_screenshot'),
     screenshotTaken: results.some((r) => r.name === 'take_screenshot' && !/^Error:/.test(r.content)),
+    notes,
+    // The last two messages of the request: where a note the loop added sits.
+    tail: (messages || []).slice(-2).map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '' })),
+    // The system prompt says so when the user approves every plan by hand.
+    manualApproval: /MANUAL APPROVAL IS ON/.test(String(system ? system.content : '')),
     planApproved: results.some((r) => r.content.startsWith('Plan approved')),
     planRejected: results.some((r) => r.content.startsWith('Plan rejected'))
   };
@@ -214,7 +228,8 @@ export function validateToolArgs(parameters, args) {
     if (schema.enum && !schema.enum.includes(value)) errors.push(`"${key}" must be one of ${JSON.stringify(schema.enum)}`);
     if (schema.type === 'string' && typeof value !== 'string') errors.push(`"${key}" must be a string`);
     if (schema.type === 'boolean' && typeof value !== 'boolean') errors.push(`"${key}" must be a boolean`);
-    if (schema.type === 'number') {
+    if (schema.type === 'integer' && !Number.isInteger(value)) errors.push(`"${key}" must be an integer`);
+    if (schema.type === 'number' || schema.type === 'integer') {
       if (typeof value !== 'number' || Number.isNaN(value)) errors.push(`"${key}" must be a number`);
       else {
         if (schema.minimum !== undefined && value < schema.minimum) errors.push(`"${key}" must be >= ${schema.minimum}`);
@@ -224,6 +239,7 @@ export function validateToolArgs(parameters, args) {
     if (schema.type === 'array') {
       if (!Array.isArray(value)) errors.push(`"${key}" must be an array`);
       else if (schema.items?.type === 'string' && value.some((v) => typeof v !== 'string')) errors.push(`"${key}" must be an array of strings`);
+      else if (Array.isArray(schema.items?.enum) && value.some((v) => !schema.items.enum.includes(v))) errors.push(`"${key}" items must be one of ${JSON.stringify(schema.items.enum)}`);
     }
   }
   for (const key of parameters.required || []) {
@@ -275,12 +291,26 @@ export function kindOfGoal(goal) {
   if (/\bopen the configure now link\b/i.test(String(goal || ''))) return 'open';
   // The same, on a page whose consent banner swallows clicks until it is answered (consent-link).
   if (/\bopen the configurator\b/i.test(String(goal || ''))) return 'consent';
+  // Replace the code of a notebook-like editor and run it (the editor-replace task).
+  if (/\bcode editor\b/i.test(String(goal || ''))) return 'editor';
+  // Fix cell 14 of a JupyterLab-like notebook whose cells scroll in a panel (notebook-fix).
+  if (/\bcell 14 of this notebook\b/i.test(String(goal || ''))) return 'notebook';
+  // Scroll a windowed list until a row far down is drawn (virtual-scroll).
+  if (/\bscroll the order list\b/i.test(String(goal || ''))) return 'orders';
+  // Press a button that is dead: the run must notice, reflect and end honestly (stuck-recovery).
+  if (/\bdownload csv button\b/i.test(String(goal || ''))) return 'stuck';
+  // Find a fact outside the tab: search the web, fetch a file, answer with it (research-then-answer).
+  if (/\blantern cli install script\b/i.test(String(goal || ''))) return 'research';
+  // Two facts, one of which the page does not have: answer what is there and finish "partial" (partial-answer).
+  if (/\bbattery last\b/i.test(String(goal || ''))) return 'partial';
   if (/\b(price|cost|shipping|delivery|preis|versand|lieferung)\b/i.test(String(goal || ''))) return 'facts';
   return 'unknown';
 }
 
-const failFinish = (why) => ({ name: 'finish', arguments: { answer: `${MOCK_FAIL_PREFIX} ${why}` } });
-const finish = (answer) => ({ name: 'finish', arguments: { answer } });
+// Every finish says how the run went (the finish tool's required outcome). A mock failure could not
+// do the task, so it is "blocked"; the panel shows the MOCK-FAIL marker as Failed whatever it says.
+const failFinish = (why) => ({ name: 'finish', arguments: { answer: `${MOCK_FAIL_PREFIX} ${why}`, outcome: 'blocked' } });
+const finish = (answer, outcome = 'done') => ({ name: 'finish', arguments: { answer, outcome } });
 
 /** The price, shipping and delivery lines of a shop page, as the page writes them. A missing line is null. */
 export function shopFacts(pageText) {
@@ -310,7 +340,7 @@ export function scriptFor(convo) {
       if (!id) return { fail: `find returned no element: ${convo.elementsText.slice(0, 120)}`, note: 'open: nothing found' };
       return { call: { name: 'click', arguments: { element_id: id, reason: 'Open the Laptop 16 configurator' } }, note: 'open: click the best match' };
     }
-    if (last === 'click') return { call: { name: 'get_page_text', arguments: {} }, note: 'open: read the page it opened' };
+    if (last === 'click') return { call: { name: 'read_page', arguments: {} }, note: 'open: read the page it opened' };
     return { call: finish(`The page the link opened says: ${convo.pageText.replace(/\s+/g, ' ').slice(0, 300)}`), note: 'open: finish with what the page says' };
   }
 
@@ -325,7 +355,7 @@ export function scriptFor(convo) {
       return { call: { name: 'click', arguments: { element_id: id } }, note: 'consent: click the best match' };
     }
     if (last === 'click') {
-      if (/NOW ON:/.test(result)) return { call: { name: 'get_page_text', arguments: {} }, note: 'consent: read the page it opened' };
+      if (/NOW ON:/.test(result)) return { call: { name: 'read_page', arguments: {} }, note: 'consent: read the page it opened' };
       if (clicks === 1) {
         // The banner swallowed the click. The engine must say so, or the run believes it arrived.
         if (!/did not open its page/.test(result)) return { fail: `the blocked click did not say that the link did not open: ${result.slice(0, 160)}`, note: 'consent: silent blocked click' };
@@ -337,22 +367,252 @@ export function scriptFor(convo) {
     return { call: finish(`The page the link opened says: ${convo.pageText.replace(/\s+/g, ' ').slice(0, 300)}`), note: 'consent: finish with what the page says' };
   }
 
+  if (kind === 'editor') return editorScript(convo);
+  if (kind === 'notebook') return notebookScript(convo);
+  if (kind === 'orders') return ordersScript(convo);
+  if (kind === 'stuck') return stuckScript(convo);
+  if (kind === 'research') return researchScript(convo);
+
   if (!convo.lastCall) {
     if (kind === 'unknown') return { fail: `I do not know this goal: "${convo.task.slice(0, 80)}".`, note: 'unknown goal' };
-    return { call: { name: 'get_page_text', arguments: {} }, note: `${kind}: read the page` };
+    return { call: { name: 'read_page', arguments: {} }, note: `${kind}: read the page` };
   }
 
-  if (convo.lastCall.name === 'get_page_text') {
+  if (convo.lastCall.name === 'read_page') {
     if (!convo.pageText.trim()) {
-      return { fail: 'the get_page_text result is empty. If the prompt layout changed, update parseTaskMessage() in tests/mcp/mockOllama.mjs.', note: 'no page text' };
+      return { fail: 'the read_page result is empty. If the prompt layout changed, update parseTaskMessage() in tests/mcp/mockOllama.mjs.', note: 'no page text' };
     }
     const facts = shopFacts(convo.pageText);
+    if (kind === 'partial') {
+      if (!facts.price) return { fail: 'the page text has no price line.', note: 'partial: no price' };
+      if (/\b(akku|battery)\b/i.test(convo.pageText)) return { fail: 'the page talks about the battery, so this is not a partial answer any more.', note: 'partial: battery on the page' };
+      return {
+        call: finish(`The price on the page is \`${facts.price}\`. The page does not say how long the battery lasts, so I could not answer that part.`, 'partial'),
+        note: 'partial: the price, and the battery is not on the page'
+      };
+    }
     const lines = [facts.price, facts.shipping, facts.delivery].filter(Boolean);
     if (!lines.length) return { fail: 'the page text has no price, shipping or delivery line.', note: 'facts: nothing on the page' };
     return { call: finish(`Here is what the page says:\n${lines.join('\n')}`), note: 'facts: finish with the page facts' };
   }
 
   return { fail: 'the conversation is in a state the mock has no script for.', note: 'unknown state' };
+}
+
+/**
+ * The research-then-answer walk: web_search, then fetch_url on the result that is the install
+ * script, then finish with the archive name only that script names. Both results must come in the
+ * untrusted envelope, and the walk needs the research tools to be offered at all: without them
+ * (the no-research tamper) it is a MOCK-FAIL, never a guess.
+ */
+function researchScript(convo) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const result = convo.results.length ? convo.results[convo.results.length - 1].content : '';
+  if (!convo.tools.includes('web_search') || !convo.tools.includes('fetch_url')) {
+    return { fail: `web_search and fetch_url are not offered, so the fact cannot be checked (tools: ${convo.tools.join(', ')})`, note: 'research: no research tools' };
+  }
+  if (!last) return { call: { name: 'web_search', arguments: { query: 'Lantern CLI install script linux', reason: 'Find the official install script' } }, note: 'research: search the web' };
+  if (/^Error:/.test(result)) return { fail: `the ${last} failed: ${result.slice(0, 200)}`, note: `research: ${last} failed` };
+  if (!result.includes(UNTRUSTED_PREFIX)) return { fail: `the ${last} result is not in the untrusted envelope: ${result.slice(0, 160)}`, note: `research: ${last} not wrapped` };
+  if (last === 'web_search') {
+    const url = (/^\s+(https?:\/\/\S+\/install\.sh)\s*$/m.exec(result) || [])[1];
+    if (!url) return { fail: `the search results list no install.sh: ${result.slice(0, 240)}`, note: 'research: no script in the results' };
+    return { call: { name: 'fetch_url', arguments: { url, reason: 'Read the install script itself' } }, note: 'research: fetch the script' };
+  }
+  if (last === 'fetch_url') {
+    const archive = /lantern-linux-amd64-v[\d.]+\.tar\.zst/.exec(result);
+    if (!archive || !/needs zstd/.test(result)) return { fail: `the fetched script does not name the archive and the zstd check: ${result.slice(0, 240)}`, note: 'research: no archive in the script' };
+    const url = convo.lastCall.args.url;
+    return {
+      call: finish(`The official install script (${url}) downloads ${archive[0]} on Linux amd64. Yes, extracting it needs zstd: the script stops with "This installer needs zstd" when zstd is missing.`),
+      note: 'research: finish with the archive name'
+    };
+  }
+  return { fail: `the research run is in a state the mock has no script for (last call ${last}).`, note: 'research: unknown state' };
+}
+
+/** The code the editor-replace task asks for. */
+export const EDITOR_CODE = 'echo scoutfox';
+
+/**
+ * The editor-replace walk: list the elements, click into the editor, select all with a real key,
+ * type without an element id (into the focused editor), run it with Shift+Enter, read the output
+ * line, finish with it. Each action's result must carry the engine's "Observation:" line and the
+ * type must read the field back: a result without them is a MOCK-FAIL, since a model that is not
+ * told what its action did is exactly what the observation is for.
+ */
+function editorScript(convo) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const result = convo.results.length ? convo.results[convo.results.length - 1].content : '';
+  const keys = convo.calls.filter((c) => c.name === 'press_key');
+  const observed = (what) => {
+    if (/^Error:/.test(result)) return { fail: `the ${what} failed: ${result.slice(0, 160)}`, note: `editor: ${what} failed` };
+    return /\nObservation: /.test(result) ? null : { fail: `the ${what} result has no "Observation:" line: ${result.slice(0, 160)}`, note: `editor: ${what} not observed` };
+  };
+  if (!last) return { call: { name: 'get_page_elements', arguments: {} }, note: 'editor: list the elements' };
+  if (last === 'get_page_elements') {
+    const id = Number((/^\[(\d+)\][^\n]*editor/im.exec(convo.elementsText) || [])[1]);
+    if (!id) return { fail: `the element list has no editor: ${convo.elementsText.slice(0, 160)}`, note: 'editor: no editor' };
+    return { call: { name: 'click', arguments: { element_id: id, reason: 'Put the caret into the code editor' } }, note: 'editor: click into the editor' };
+  }
+  if (last === 'click') {
+    return observed('click') || { call: { name: 'press_key', arguments: { key: 'select_all', reason: 'Select all the code' } }, note: 'editor: select all' };
+  }
+  if (last === 'press_key' && keys.length === 1) {
+    return observed('select_all') || { call: { name: 'type', arguments: { text: EDITOR_CODE, reason: 'Replace the code' } }, note: 'editor: type into the focused editor' };
+  }
+  if (last === 'type') {
+    const fail = observed('type');
+    if (fail) return fail;
+    if (!result.includes(`Field now starts with: "${EDITOR_CODE}"`)) return { fail: `the type result does not read back the new code: ${result.slice(0, 200)}`, note: 'editor: no read-back' };
+    return { call: { name: 'press_key', arguments: { key: 'Enter', modifiers: ['shift'], reason: 'Run the cell' } }, note: 'editor: run with Shift+Enter' };
+  }
+  if (last === 'press_key' && keys.length === 2) {
+    const fail = observed('Shift+Enter');
+    if (fail) return fail;
+    return { call: { name: 'read_page', arguments: {} }, note: 'editor: read the output line' };
+  }
+  if (last === 'read_page') {
+    const outs = [...String(convo.pageText).matchAll(/Out \[(\d+)\]: ([^\n]*)/g)];
+    const lastOut = outs[outs.length - 1];
+    if (!lastOut) return { fail: `the page text has no output line: ${convo.pageText.slice(0, 160)}`, note: 'editor: no output' };
+    return { call: finish(`The cell ran. Its output line is: ${lastOut[0].trim()}`), note: 'editor: finish with the output line' };
+  }
+  return { fail: `the editor run is in a state the mock has no script for (last call ${last}).`, note: 'editor: unknown state' };
+}
+
+/** The fix the notebook-fix walk types into cell 14: the archive, unpacked under ~/.local, no sudo. */
+export const NOTEBOOK_FIX = '!mkdir -p ~/.local && curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst | tar --zstd -x -C ~/.local && ~/.local/bin/ollama --version';
+
+/**
+ * A scroll result must be true: when it says it moved, the observation the effect probe measured
+ * on its own must have seen a scroll too. A scroll that claims a move nobody measured (the old
+ * window.scrollBy on a page that does not scroll) is a MOCK-FAIL.
+ */
+function scrollProblem(result, what) {
+  if (/^Error:/.test(result)) return { fail: `the ${what} failed: ${result.slice(0, 160)}`, note: `${what} failed` };
+  if (/^Did not move/.test(result)) return { fail: `the ${what} did not move anything: ${result.slice(0, 160)}`, note: `${what}: did not move` };
+  if (!/^Scrolled .+ (down|up) \d+px/.test(result)) return { fail: `the ${what} result does not say what moved and how far: ${result.slice(0, 160)}`, note: `${what}: no measurement` };
+  const observation = /\nObservation: [^\n]*/.exec(result)?.[0] || '';
+  if (!observation) return { fail: `the ${what} result has no "Observation:" line: ${result.slice(0, 160)}`, note: `${what}: not observed` };
+  if (!/scrolled (down|up) \d+px|page scrolled to/.test(observation)) {
+    return { fail: `the ${what} says it moved, but the observation measured no scroll: ${observation.slice(0, 200)}`, note: `${what}: claimed a move nobody measured` };
+  }
+  return null;
+}
+
+/**
+ * The notebook-fix walk: scroll the cells panel, read the page in parts (part 2 holds cell 14 and
+ * its permission error), list the elements, click into cell 14, select all with a real key, type
+ * the fix without an element id, run it with Shift+Enter, read part 2 again for the output line,
+ * finish with it. A part that is not the part asked for, a scroll nobody measured, or an action
+ * without its observation is a MOCK-FAIL.
+ */
+function notebookScript(convo) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const result = convo.results.length ? convo.results[convo.results.length - 1].content : '';
+  const reads = convo.calls.filter((c) => c.name === 'read_page').length;
+  const keys = convo.calls.filter((c) => c.name === 'press_key').length;
+  const observed = (what) => {
+    if (/^Error:/.test(result)) return { fail: `the ${what} failed: ${result.slice(0, 160)}`, note: `notebook: ${what} failed` };
+    return /\nObservation: /.test(result) ? null : { fail: `the ${what} result has no "Observation:" line: ${result.slice(0, 160)}`, note: `notebook: ${what} not observed` };
+  };
+  if (!last) return { call: { name: 'scroll', arguments: { direction: 'down', reason: 'Look further down the notebook' } }, note: 'notebook: scroll the cells panel' };
+  if (last === 'scroll') return scrollProblem(result, 'scroll of the notebook panel') || { call: { name: 'read_page', arguments: {} }, note: 'notebook: read part 1' };
+  if (last === 'read_page' && reads === 1) {
+    if (!/\(part 1 of [2-9]\d*,/.test(result)) return { fail: `the first read does not say it is part 1 of several: ${result.slice(0, 160)}`, note: 'notebook: no part 1' };
+    return { call: { name: 'read_page', arguments: { part: 2 } }, note: 'notebook: read part 2' };
+  }
+  if (last === 'read_page' && reads === 2) {
+    if (!/\(part 2 of \d+,/.test(result)) return { fail: `asked for part 2, got: ${result.slice(0, 160)}`, note: 'notebook: not part 2' };
+    if (!/Permission denied/.test(result) || !/sudo apt-get/.test(result)) return { fail: `part 2 has no cell 14 with its permission error: ${result.slice(0, 200)}`, note: 'notebook: no error in part 2' };
+    return { call: { name: 'get_page_elements', arguments: {} }, note: 'notebook: list the elements' };
+  }
+  if (last === 'get_page_elements') {
+    const id = Number((/^\[(\d+)\][^\n]*Cell 14 code/m.exec(convo.elementsText) || [])[1]);
+    if (!id) return { fail: `the element list has no cell 14 editor: ${convo.elementsText.slice(0, 200)}`, note: 'notebook: no cell 14' };
+    return { call: { name: 'click', arguments: { element_id: id, reason: 'Put the caret into cell 14' } }, note: 'notebook: click into cell 14' };
+  }
+  if (last === 'click') return observed('click') || { call: { name: 'press_key', arguments: { key: 'select_all', reason: 'Select the whole cell' } }, note: 'notebook: select all' };
+  if (last === 'press_key' && keys === 1) return observed('select_all') || { call: { name: 'type', arguments: { text: NOTEBOOK_FIX, reason: 'Replace the cell with the install that needs no sudo' } }, note: 'notebook: type the fix' };
+  if (last === 'type') {
+    const fail = observed('type');
+    if (fail) return fail;
+    if (!result.includes(`Field now starts with: "${NOTEBOOK_FIX.slice(0, 60)}`)) return { fail: `the type result does not read back the fix: ${result.slice(0, 200)}`, note: 'notebook: no read-back' };
+    return { call: { name: 'press_key', arguments: { key: 'Enter', modifiers: ['shift'], reason: 'Run the cell' } }, note: 'notebook: run with Shift+Enter' };
+  }
+  if (last === 'press_key' && keys === 2) return observed('Shift+Enter') || { call: { name: 'read_page', arguments: { part: 2 } }, note: 'notebook: read the output' };
+  if (last === 'read_page' && reads === 3) {
+    const version = /ollama version [\d.]+/.exec(result);
+    if (!version) return { fail: `the output of the fixed cell is not in part 2: ${result.slice(0, 200)}`, note: 'notebook: no output' };
+    return { call: finish(`Cell 14 now installs Ollama under ~/.local without sudo. It printed: ${version[0]}`), note: 'notebook: finish with the version' };
+  }
+  return { fail: `the notebook run is in a state the mock has no script for (last call ${last}).`, note: 'notebook: unknown state' };
+}
+
+/** The most dead clicks the stuck walk makes before it gives up on the harness noticing. */
+export const STUCK_MAX_CLICKS = 7;
+
+/**
+ * The stuck-recovery walk: a stubborn small model. It lists the elements, then clicks the dead
+ * Download CSV button again and again, the way a real model repeated click(700,420) six times.
+ * It only stops when the loop tells it to: the repeat hint first, then the reflection note. Then
+ * it finishes honestly (the button did nothing, and what the user can do next). With manual
+ * approval it plans first, as the system prompt asks. Without the guard it never hears it, gives
+ * up after STUCK_MAX_CLICKS clicks, and the answer is a MOCK-FAIL.
+ */
+function stuckScript(convo) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const result = convo.results.length ? convo.results[convo.results.length - 1].content : '';
+  const clicks = convo.calls.filter((c) => c.name === 'click');
+  if (convo.manualApproval && !convo.planApproved) {
+    if (convo.planRejected) return { fail: 'the plan was rejected', note: 'stuck: plan rejected' };
+    return { call: { name: 'update_plan', arguments: { plan: ['Click Download CSV', 'Check that the file came'] } }, note: 'stuck: plan first (manual approval)' };
+  }
+  if (!last || last === 'update_plan') return { call: { name: 'get_page_elements', arguments: {} }, note: 'stuck: list the elements' };
+  if (/^Error:/.test(result)) return { fail: `the ${last} failed: ${result.slice(0, 160)}`, note: `stuck: ${last} failed` };
+  const hinted = convo.results.some((r) => r.content.includes(REPEAT_HINT_PREFIX));
+  const reflected = convo.notes.includes(REFLECTION_TEXT);
+  if (reflected) {
+    if (!hinted) return { fail: 'the reflection came, but no repeat hint before it', note: 'stuck: reflection without a hint' };
+    // The note must sit after the whole tool block: the last message is the note, the one before it a tool result.
+    const [before, note] = convo.tail;
+    if (!note || note.role !== 'user' || note.content !== REFLECTION_TEXT || !before || before.role !== 'tool') {
+      return { fail: `the reflection is not the user message right after the tool block (the request ends ${convo.tail.map((m) => m.role).join(', ')})`, note: 'stuck: reflection misplaced' };
+    }
+    return {
+      call: finish(`The Download CSV button did not work: I clicked it ${clicks.length} times and nothing on the page changed (no download, no message). What failed: the button does not respond, so the export did not start. Next steps for you: reload the page and try Download CSV again; if it still does nothing, the export service may be down, so ask the site's support or copy the table from the page.`, 'blocked'),
+      note: 'stuck: reflect and finish honestly (blocked)'
+    };
+  }
+  if (clicks.length >= STUCK_MAX_CLICKS) {
+    return { fail: `clicked the dead button ${clicks.length} times and the loop never said it changed nothing (hint ${hinted ? 'seen' : 'missing'}, reflection missing)`, note: 'stuck: no guard' };
+  }
+  const id = Number((/^\[(\d+)\][^\n]*Download CSV/im.exec(convo.elementsText) || [])[1]);
+  if (!id) return { fail: `the element list has no Download CSV button: ${convo.elementsText.slice(0, 160)}`, note: 'stuck: no button' };
+  if (last === 'click' && !/\nObservation: /.test(result)) return { fail: `the click result has no "Observation:" line: ${result.slice(0, 160)}`, note: 'stuck: click not observed' };
+  return { call: { name: 'click', arguments: { element_id: id, reason: 'Download the report as CSV' } }, note: `stuck: click ${clicks.length + 1}${hinted ? ' (ignoring the hint)' : ''}` };
+}
+
+/**
+ * The virtual-scroll walk: scroll the list, read what it draws now, again, until the row of
+ * Zanzibar Spice Co. is drawn; then finish with that row. Every scroll must be one the probe
+ * measured too (scrollProblem), or the walk is a MOCK-FAIL.
+ */
+function ordersScript(convo) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const result = convo.results.length ? convo.results[convo.results.length - 1].content : '';
+  const scrolls = convo.calls.filter((c) => c.name === 'scroll').length;
+  const scroll = { call: { name: 'scroll', arguments: { direction: 'down', reason: 'Bring more orders into view' } }, note: 'orders: scroll the list' };
+  if (!last) return scroll;
+  if (last === 'scroll') return scrollProblem(result, `scroll ${scrolls} of the order list`) || { call: { name: 'read_page', arguments: {} }, note: 'orders: read the rows now drawn' };
+  if (last === 'read_page') {
+    const row = /Order \d+ - Zanzibar Spice Co\.[^\n]*/.exec(result);
+    if (row) return { call: finish(`Found it: ${row[0].trim()}`), note: 'orders: finish with the row' };
+    if (scrolls >= 12) return { fail: `the row is still not drawn after ${scrolls} scrolls: ${result.slice(0, 160)}`, note: 'orders: never found' };
+    return scroll;
+  }
+  return { fail: `the orders run is in a state the mock has no script for (last call ${last}).`, note: 'orders: unknown state' };
 }
 
 /**

@@ -69,7 +69,9 @@ test('routerRig: START_TASK runs a real task on the injected model, and the pane
   assert.ok((pushed?.['history'] as unknown[]).length > 0, 'the panel was pushed the history');
   // The MCP loop is one node: the plan reply, the scroll and the finish are three calls of it.
   assert.deepEqual(rig.llm.callsOf('mcp').map((c) => c.outcome), ['text', 'text', 'text']);
-  assert.deepEqual(rig.site?.actions.map((a) => a.payload['action']), ['scroll'], 'the action reached the page through the router');
+  // The measured scroll first asks the page which box to move; this short page is already at its
+  // bottom, so nothing is moved and nothing else is asked.
+  assert.deepEqual(rig.site?.actions.map((a) => a.payload['action']), ['scroll_target'], 'the action reached the page through the router');
   assert.notEqual(rig.fc.tabs.get(100)?.groupId, -1, 'a task puts its tab in the ScoutFox group');
   assert.equal(rig.runtime(100)?.llm !== undefined, true);
   rig.llm.assertDrained();

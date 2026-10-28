@@ -1,7 +1,7 @@
 /**
  * ScoutFox ActionExecutor Class
  * Handles element highlighting overlay, stable locator re-resolution,
- * and executes actions (click, type, scroll, keypress, read_page_text, browser_batch).
+ * and executes the content-side actions (click, type, scroll, read_page, find_element).
  * Preserves the instance method dispatch seam for all callers and tamper scripts.
  */
 
@@ -21,9 +21,6 @@ import {
   setFieldValue,
   doClick,
   doType,
-  doScroll,
-  doPressKey,
-  doBrowserBatch,
   execute,
   type ActionExecutionContext
 } from './actions.ts';
@@ -173,20 +170,8 @@ export class ActionExecutor implements ActionExecutionContext {
     return doType(elementId, text, submit, this);
   }
 
-  doScroll(direction: any = 'down', amount: any = 500): any {
-    return doScroll(direction, amount, this.getWin());
-  }
-
-  doPressKey(key = 'Enter'): any {
-    return doPressKey(key, this.getDoc());
-  }
-
   waitForDomQuiet(quietMs = 300, timeoutCeilingMs = 1500): Promise<void> {
     return waitForDomQuiet(quietMs, timeoutCeilingMs, this.getDoc());
-  }
-
-  doBrowserBatch(steps: any[], stopOnError = true): Promise<any> {
-    return doBrowserBatch(steps, stopOnError, this, this.getWin());
   }
 
   execute(actionPayload: any): Promise<any> {

@@ -40,7 +40,8 @@ test('a run the worker died under is stopped, keeps its steps, and says why', ()
   const run = restoredRun({ ...finished(), status: 'running' });
   assert.equal(run.status, 'stopped');
   assert.equal(run.history.length, 3);
-  assert.equal((run.history.at(-1) as any).content, INTERRUPTED_TEXT);
+  // A final row, so the panel draws its "Interrupted" card (an error row would read "Failed").
+  assert.deepEqual(run.history.at(-1), { type: 'partial_result', answer: INTERRUPTED_TEXT, table: null, reason: 'interrupted' });
   assert.equal(run.stateVersion, 8, 'a newer version, so the panel does not drop it');
 });
 
@@ -108,4 +109,28 @@ test('New chat clears the kept run too', async (t) => {
   const restarted = new AgentRunner(302, 'default');
   await restarted.restorePromise;
   assert.equal(restarted.history.length, 0);
+});
+
+test('a tab Chrome replaced keeps its run for a restarted worker: the run is stored under the new tab id', async (t) => {
+  const restore = fakeChrome({ storage: true }).install();
+  t.after(restore);
+  const first = new AgentRunner(303, 'default');
+  first.currentTask = 'What does it cost?';
+  first.recordEntry({ type: 'user_goal', content: 'What does it cost?', turn: 1 } as any);
+  first.recordEntry({ type: 'finish', answer: '1.399,00 EUR' } as any);
+  first.setRunStatus('idle');
+  // Chrome swaps the tab (a prerendered page took its place) before the debounced write went out.
+  first.replaceTab(303, 304);
+  assert.equal(first.threadId, '304');
+  await new Promise((r) => setTimeout(r, 300));
+
+  const stored = await chrome.storage.session.get([runSnapshotKey(303), runSnapshotKey(304)]);
+  assert.equal(stored[runSnapshotKey(303)], undefined, 'nothing is left under the old tab id');
+  assert.ok(stored[runSnapshotKey(304)], 'the run is kept under the new tab id');
+
+  // A restarted worker builds the runner from the tab id it sees now: the new one.
+  const restarted = new AgentRunner(304, 'default');
+  await restarted.restorePromise;
+  assert.equal(restarted.history.length, 2);
+  assert.equal((restarted.history[1] as any).answer, '1.399,00 EUR');
 });

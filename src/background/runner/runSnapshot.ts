@@ -32,7 +32,7 @@ export const RUN_SNAPSHOT_MAX_CHARS = 800_000;
 export const RUN_SNAPSHOT_DEBOUNCE_MS = 250;
 
 /** The row a run gets when the worker died under it. */
-export const INTERRUPTED_TEXT = 'The run was interrupted because Chrome restarted ScoutFox\'s background worker. The steps so far are kept; start the task again to continue.';
+export const INTERRUPTED_TEXT = 'Chrome restarted ScoutFox\'s background worker, so the run could not go on. The steps so far are kept; start the task again to continue.';
 
 /** The storage key of one thread's run. */
 export function runSnapshotKey(threadId: string | number): string {
@@ -72,16 +72,18 @@ export function fitSnapshot(snapshot: RunSnapshot, maxChars = RUN_SNAPSHOT_MAX_C
 
 /**
  * The run as a new worker should show it. A run that was running or paused cannot go on: the
- * model's conversation died with the old worker. It is stopped, with a row that says why, and
- * nothing waits on a prompt nobody can serve. A finished run comes back as it was.
+ * model's conversation died with the old worker. It is stopped, with a final row that says why
+ * (the panel's "Interrupted" card), and nothing waits on a prompt nobody can serve. A finished
+ * run comes back as it was.
  */
 export function restoredRun(snapshot: RunSnapshot): RunSnapshot {
   if (snapshot.status !== 'running' && snapshot.status !== 'paused') return snapshot;
+  const finalRow: HistoryEntry = { type: 'partial_result', answer: INTERRUPTED_TEXT, table: null, reason: 'interrupted' };
   return {
     ...snapshot,
     status: 'stopped',
     pauseReason: null,
-    history: [...snapshot.history, { type: 'error', content: INTERRUPTED_TEXT } as HistoryEntry],
+    history: [...snapshot.history, finalRow],
     // The added row is a new state: the panel's watermark must see a higher version.
     stateVersion: snapshot.stateVersion + 1
   };
@@ -112,6 +114,15 @@ export class RunSnapshotStore {
     }
     if (this.timer) return;
     this.timer = setTimeout(() => { void this.flush(); }, RUN_SNAPSHOT_DEBOUNCE_MS);
+  }
+
+  /** Drops a pending write without making it: the thread moved to another key. */
+  discard(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.pending = null;
   }
 
   /** Writes the latest pending state, if any. */

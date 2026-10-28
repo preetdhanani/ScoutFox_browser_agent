@@ -3,7 +3,7 @@
 // thread_id. Nothing with functions, keys or signals is ever placed in a checkpoint or trace.
 import type { Settings } from '../../shared/storage.ts';
 import type {
-  ControlSnapshot, Effect, HistoryEntry, NodeName, PolicyMode, TrailEntry,
+  ControlSnapshot, Effect, EffectDetail, HistoryEntry, NodeName, PolicyMode, TrailEntry,
   NetFilter, OneShot, PageAction, PageSig, GateContext, GateDecision,
 } from '../types.ts';
 
@@ -48,12 +48,15 @@ export interface ExecResult {
   urlAfter?: string;
   syntheticReason?: string;
   oneShot?: OneShot;
+  /** The facts the effect probe measured around the action (see EffectDetail). */
+  effectDetail?: EffectDetail;
+  /** The text of the field a type wrote into, read back right after typing; null when it could not be read. */
+  fieldText?: string | null;
 }
 
 export interface BrowserPort {
   tabInfo(tabId: number): Promise<{ url: string; title: string; windowId: number; groupId: number; status: string } | null>;
   snapshot(tabId: number, opts: { showBadges: boolean; maxElements: number }): Promise<unknown>;
-  execute(tabId: number, action: PageAction, opts: { docId: string; mode: 'cdp' | 'synthetic' }): Promise<ExecResult>;
   navigate(tabId: number, url: string): Promise<void>;
   reload(tabId: number): Promise<void>;
   goBack(tabId: number): Promise<void>;

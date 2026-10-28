@@ -114,10 +114,37 @@ const FIND_FIELD_WEIGHTS: Array<[keyof FindFields, number]> = [
   ['text', 3], ['ariaLabel', 3], ['placeholder', 2], ['name', 2], ['title', 2], ['alt', 2], ['hrefPath', 1], ['role', 1]
 ];
 
-/** The lowercase words of a query, deduped. A query of only punctuation has no tokens and matches nothing. */
+/**
+ * Words of a query that say nothing about the element: a model asks in words ("the Releases link",
+ * "downloads page link"), and "link" or "page" would match half the page.
+ */
+const FIND_FILLER = new Set(['a', 'an', 'the', 'or', 'and', 'of', 'to', 'for', 'on', 'in', 'link', 'button', 'element', 'page', 'field', 'input', 'box', 'tab', 'icon', 'menu', 'item']);
+
+/**
+ * The lowercase words of a query, deduped, without the filler words (unless the query is nothing
+ * but filler). A query of only punctuation has no tokens and matches nothing.
+ */
 export function findQueryTokens(query: string): string[] {
   const raw = String(query).toLowerCase().match(FIND_TOKEN_RE);
-  return raw ? [...new Set(raw)] : [];
+  if (!raw) return [];
+  const all = [...new Set(raw)];
+  const meaningful = all.filter((t) => !FIND_FILLER.has(t));
+  return meaningful.length ? meaningful : all;
+}
+
+/** The words of a field, with words glued to numbers in a path also split ("laptop16" is also "laptop" and "16"). */
+function fieldWords(value: string): string[] {
+  const raw = String(value ?? '').toLowerCase().match(FIND_TOKEN_RE) ?? [];
+  return [...raw, ...raw.flatMap((t) => t.split(/(?<=[a-zäöüß])(?=[0-9])|(?<=[0-9])(?=[a-zäöüß])/))];
+}
+
+/** A query word matches a field word when they are equal, or one starts the other and is 4 or more letters ("download" finds "Downloads"). */
+function wordMatches(token: string, words: Set<string>): boolean {
+  if (words.has(token)) return true;
+  for (const w of words) {
+    if ((token.length >= 4 && w.startsWith(token)) || (w.length >= 4 && token.startsWith(w))) return true;
+  }
+  return false;
 }
 
 function findNorm(text: string): string {
@@ -133,13 +160,12 @@ export function scoreFindCandidate(fields: FindFields, tokens: string[]): number
   if (tokens.length === 0) return 0;
   const fieldTokens = new Map<keyof FindFields, Set<string>>();
   for (const [field] of FIND_FIELD_WEIGHTS) {
-    const raw = String(fields[field] ?? '').toLowerCase().match(FIND_TOKEN_RE);
-    fieldTokens.set(field, new Set(raw ?? []));
+    fieldTokens.set(field, new Set(fieldWords(String(fields[field] ?? ''))));
   }
   let score = 0;
   for (const token of tokens) {
     for (const [field, weight] of FIND_FIELD_WEIGHTS) {
-      if (fieldTokens.get(field)!.has(token)) {
+      if (wordMatches(token, fieldTokens.get(field)!)) {
         score += weight;
         break;
       }
@@ -380,7 +406,7 @@ export class DOMCompressor {
     return extractPageTextFromDocument(doc, win);
   }
 
-  /** The whole page text, with no cap and no window: what read_page_text pages through. */
+  /** The whole page text, with no cap and no window: what read_page pages through. */
   extractFullPageText(): string {
     const doc = typeof document !== 'undefined' ? document : undefined;
     const win = typeof window !== 'undefined' ? window : undefined;
@@ -435,7 +461,8 @@ export class DOMCompressor {
       let hrefPath = '';
       if (rawHref) {
         try {
-          hrefPath = new URL(rawHref, win && win.location ? win.location.href : undefined).pathname;
+          const target = new URL(rawHref, win && win.location ? win.location.href : undefined);
+          hrefPath = `${target.pathname}${target.search}`;
         } catch {
           hrefPath = '';
         }

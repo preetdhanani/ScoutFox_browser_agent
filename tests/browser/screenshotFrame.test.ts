@@ -159,11 +159,19 @@ test('a small scroll is tolerated, because pages move on their own', () => {
   assert.equal(SCROLL_TOLERANCE_PX, 2, 'the tolerance is two CSS pixels');
 });
 
-test('a changed page signature refuses the frame: the picture no longer shows what is there', () => {
-  for (const sig of [{ interactiveHash: 'zzz', textHash: 'def456' }, { interactiveHash: 'abc123', textHash: 'zzz' }]) {
-    const result = checkFrame(retinaFrame(), live({ sig }));
-    assert.equal(result.ok, false);
-    assert.match(result.reason!, /page has changed/);
+test('controls that moved refuse the frame: the picture no longer shows where things are', () => {
+  const frame = retinaFrame({ sig: { interactiveHash: 'abc123', textHash: 'def456', layoutHash: 'grid-1' } });
+  const result = checkFrame(frame, live({ sig: { interactiveHash: 'abc123', textHash: 'def456', layoutHash: 'grid-2' } }));
+  assert.equal(result.ok, false);
+  assert.match(result.reason!, /controls on the page have moved/);
+});
+
+test('text that changes in place does not refuse the frame: a live ticker or a clock is not a moved control', () => {
+  // A JupyterLab kernel status, a clock and a stock ticker change their text all the time. The
+  // old check compared the text hash, so every coordinate click on such a page was refused.
+  const frame = retinaFrame({ sig: { interactiveHash: 'abc123', textHash: 'def456', layoutHash: 'grid-1' } });
+  for (const sig of [{ interactiveHash: 'zzz', textHash: 'def456', layoutHash: 'grid-1' }, { interactiveHash: 'abc123', textHash: 'zzz', layoutHash: 'grid-1' }]) {
+    assert.deepEqual(checkFrame(frame, live({ sig })), { ok: true }, JSON.stringify(sig));
   }
 });
 

@@ -70,19 +70,21 @@
  *                tick) and every textarea takes the text as its value, and an element with role="textbox"
  *                or `editable` takes it as its text. With submit an element with `goes` opens it. A missing
  *                text puts in '' and is quoted as "undefined", like the real reply
- *   scroll       moves scrollY, clamped to the page, so off-screen elements come into view. Only a missing
- *                direction or amount gets its default, and a value that is not a number ("300") is used as it is
+ *   scroll       moves scrollY by the real step (most of the viewport), clamped to the page, and answers what
+ *                moved like the real one. scroll_target, scroll_measure and scroll_fallback are the steps the
+ *                background's measured scroll takes: the page is the box (a fake page has no inner panel), a
+ *                wheel never moves it (the fake debugger does not scroll), so the fallback moves it
  *   navigate     opens that page (its URL must be declared)
  *   go_back, go_forward   walk the pages this fake opened on that tab
- *   read_page_text, extract_page_text   the whole text (no cap) in numbered parts, like the real one;
- *                with element_id that element's text, cut at 2000 characters with a note
+ *   read_page    the whole text (no cap), the part the request names, like the real one; with element_id
+ *                that element's text, paged the same way
  *   find_element the real compressor's matcher over the described elements: ids continue after the
  *                window's ids and survive the next snapshot, and a zero match answers the real
  *                no-match message with the nearest labels
- *   press_key, wait      answer the real message (a missing key is Enter, any other value is quoted as it is).
- *                wait does not really wait
- *   Anything else with a real content-script meaning (browser_batch, or typing into a <select>) is a
- *   test mistake here. An unknown verb gets the real "Unknown action" reply.
+ *   wait         answers the real message, and does not really wait
+ *   Anything else with a real content-script meaning (typing into a <select>) is a test mistake
+ *   here. An unknown verb (press_key is CDP only, so the content script does not know it either)
+ *   gets the real "Unknown action" reply.
  *   A page opens a moment after the reply (navigationDelayMs, default 0 = the next timer tick), by
  *   fc.tabs.navigate(), so tabs.onUpdated fires after the engine has started waiting for it. The
  *   page a message sees is the one for the tab's CURRENT URL. State (typed text, checked, scroll)
@@ -103,9 +105,9 @@
  */
 
 // The cut, the note and the paging are the real content script's own pure functions, so the fake cannot drift from them.
-import { clipWithNote } from '../../src/shared/clip.ts';
 import { computeHrefPath } from '../../src/content/perception.ts';
 import { capPageText as realCapPageText, pageTextPart } from '../../src/content/pageText.ts';
+import { stepOf, type ScrollPosition } from '../../src/content/scrollMeasure.ts';
 import {
   omittedElementsNote,
   rankFindCandidates,
@@ -284,9 +286,6 @@ const MAX_ELEMENTS = 120;
 const PAGE_TEXT_EMPTY_MARKER = '[no readable text on this page]';
 const PAGE_TEXT_MIN_CHARS = 10;
 const ELEMENT_TEXT_LIMIT = 60;
-const ELEMENT_READ_LIMIT = 2000;
-/** Read position of read_page_text per fake document, mirroring the real content script's module state. */
-const readStateByDoc = new Map<any, { text: string; next: number; exhausted: boolean }>();
 const LABEL_LIMIT = 48;
 const ELEMENT_KEYS = ['tag', 'text', 'type', 'role', 'placeholder', 'label', 'id', 'name', 'testId', 'value', 'disabled', 'checked', 'expanded', 'editable', 'form', 'y', 'goes', 'cssPath'];
 const PAGE_KEYS = ['url', 'title', 'text', 'elements', 'viewportHeight', 'pageHeight', 'scrollY'];
@@ -779,20 +778,35 @@ export function fakeDom(options: FakeDomOptions): FakeDom {
         const label = describe(el);
         return { success: true, label, submitted: submit, message: `Typed "${String(payload.text)}" into element [${String(id)}]${label ? ` ("${label}")` : ''}` };
       }
-      case 'scroll': {
-        // doScroll(direction = 'down', amount = 500): only a missing value gets the default, whatever else the
-        // model sent is used and quoted as it is ("300" from a model that writes numbers as strings scrolls 300).
-        const direction: unknown = payload.direction === undefined ? 'down' : payload.direction;
-        const amount: unknown = payload.amount === undefined ? 500 : payload.amount;
-        const distance = Number(amount) * (direction === 'up' ? -1 : 1);
+      case 'scroll':
+      case 'scroll_target':
+      case 'scroll_measure':
+      case 'scroll_fallback': {
+        // The real content script's scroll verbs (src/content/actions.ts) on a page that is its own
+        // scroll box: the position is scrollY, its end is pageHeight - viewportHeight.
         const viewportHeight = doc.page.viewportHeight ?? DEFAULT_VIEWPORT_HEIGHT;
-        const furthest = Math.max(0, pageHeightOf(doc.page, viewportHeight) - viewportHeight);
-        doc.scrollY = Math.min(furthest, Math.max(0, doc.scrollY + (Number.isFinite(distance) ? distance : 0)));
-        return { success: true, message: `Scrolled ${String(direction)} by ${String(amount)}px` };
+        const furthest = Math.max(0, Math.round(pageHeightOf(doc.page, viewportHeight) - viewportHeight));
+        const position = (): ScrollPosition => {
+          const top = Math.round(doc.scrollY);
+          return { top, max: furthest, height: viewportHeight, atTop: top <= 1, atBottom: top >= furthest - 1 };
+        };
+        const moveBy = (delta: number) => { doc.scrollY = Math.min(furthest, Math.max(0, doc.scrollY + (Number.isFinite(delta) ? delta : 0))); };
+        if (action === 'scroll_target') {
+          if (payload.element_id !== undefined && payload.element_id !== null && !element(doc, payload.element_id)) {
+            return { success: false, error: `Element [${String(payload.element_id)}] is not on this page any more. Get the element list again, or scroll without element_id.` };
+          }
+          return { success: true, result: { point: { x: 640, y: Math.round(viewportHeight / 2) }, label: 'the page', step: stepOf(position()), ...position() } };
+        }
+        if (action === 'scroll_measure') return { success: true, result: { ...position() } };
+        if (action === 'scroll_fallback') {
+          moveBy(Number(payload.delta) || 0);
+          return { success: true, result: { ...position() } };
+        }
+        const before = position();
+        moveBy((payload.direction === 'up' ? -1 : 1) * stepOf(before));
+        const after = position();
+        return { success: true, result: { moved: after.top - before.top, label: 'the page', ...after } };
       }
-      case 'press_key':
-        // doPressKey(key = 'Enter'): only a missing key becomes Enter.
-        return { success: true, message: `Pressed key [${String(payload.key === undefined ? 'Enter' : payload.key)}]` };
       case 'wait':
         return { success: true, message: `Waited ${String(payload.amount || 1)}s` };
       case 'navigate': {
@@ -812,37 +826,36 @@ export function fakeDom(options: FakeDomOptions): FakeDom {
         }
         return { success: true, message: action === 'go_back' ? 'Going back' : 'Going forward' };
       }
-      case 'read_page_text':
-      case 'extract_page_text': {
-        // Scoped read, mirroring the real content script: with element_id, only that element's text.
+      case 'read_page': {
+        // Mirrors the real content script (src/content/actions.ts): stateless, the part the request
+        // names (1 by default) of the whole text, or of one element's text with element_id.
+        const rawPart = payload.part;
+        const partNumber = rawPart === undefined || rawPart === null || rawPart === '' ? 1 : Number(rawPart);
+        if (!Number.isInteger(partNumber) || partNumber < 1) {
+          return { success: false, error: `part must be a whole number from 1 up, got ${JSON.stringify(rawPart)}.` };
+        }
         const requestedId = payload.element_id;
+        let text: string;
+        let what: string;
         if (requestedId !== undefined && requestedId !== null && String(requestedId).trim() !== '') {
           const el = element(doc, requestedId);
-          if (!el) return gone(requestedId);
-          const elText = String(el.text ?? '');
-          const shown = clipWithNote(elText, ELEMENT_READ_LIMIT, { what: 'element text', hint: 'read a smaller element inside it by its element_id' });
-          return {
-            success: true,
-            message: `Text of element [${String(requestedId)}] (${elText.length} chars):\n"""\n${shown}\n"""`,
-            result: { pageText: shown },
-          };
+          if (!el) {
+            return { success: false, error: `Element [${String(requestedId)}] is not on this page's element list. Use an element_id from the last get_page_elements or find, or read_page without element_id.` };
+          }
+          text = String(el.text ?? '');
+          what = `Text of element [${String(requestedId)}]`;
+        } else {
+          text = markIfEmpty(fullPageText(doc.page.text));
+          what = 'Page text';
         }
-        // Mirrors the real content script (src/content/actions.ts): the whole text, not the capped
-        // snapshot, in numbered parts; a repeated read of the same text returns the NEXT part, and a
-        // read after the end says the whole text was shown.
-        const text = markIfEmpty(fullPageText(doc.page.text));
-        const cached = readStateByDoc.get(doc);
-        if (!cached || cached.text !== text) {
-          readStateByDoc.set(doc, { text, next: 0, exhausted: false });
+        const part = pageTextPart(text, partNumber);
+        if (partNumber > part.count) {
+          return { success: false, error: `${what} has only ${part.count} part${part.count === 1 ? '' : 's'}, so there is no part ${partNumber}. Read part 1 to ${part.count}.` };
         }
-        const state = readStateByDoc.get(doc)!;
-        const part = pageTextPart(text, state.next, state.next === 0 && state.exhausted);
-        state.next = part.last ? 0 : state.next + 1;
-        if (part.last) state.exhausted = true;
         return {
           success: true,
-          message: `Extracted text snippet (${part.note}):\n"""\n${part.text}\n"""`,
-          result: { pageText: part.text, note: part.note },
+          message: `${what} (${part.note}):\n"""\n${part.text}\n"""`,
+          result: { pageText: part.text, note: part.note, part: part.number, parts: part.count, hidesLines: false },
         };
       }
       case 'find_element': {
@@ -881,8 +894,6 @@ export function fakeDom(options: FakeDomOptions): FakeDom {
         if (foundCount === 0) result.nearestLabels = nearestFindLabels(records, query);
         return { success: true, message: formatFindMessage(result as never), result };
       }
-      case 'browser_batch':
-        throw violation('fakeDom: browser_batch is not simulated - script the EXECUTE_ACTION answer with fc.dom.on(tabId, \'EXECUTE_ACTION\', ...) for this test');
       default:
         return { success: false, error: `Unknown action: ${String(action)}` };
     }

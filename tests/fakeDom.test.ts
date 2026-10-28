@@ -283,7 +283,7 @@ test('a page whose text is one string is trimmed like the real extractor trims i
   assert.deepStrictEqual(paddedFake, realSnapshot(padded));
   // Cut at a word boundary, with the note naming the shown and the full size (silent-truncation-no-marker).
   const cut = words.lastIndexOf(' ', 4500);
-  assert.equal(paddedFake.pageText, `${words.slice(0, cut)}\n[page text truncated: showing ${cut} of ${words.length} characters - call read_page_text to read the whole page in parts]`);
+  assert.equal(paddedFake.pageText, `${words.slice(0, cut)}\n[page text truncated: showing ${cut} of ${words.length} characters - call read_page to read the whole page in parts]`);
 });
 
 test('a page text that is a list is read whole, one line per piece, short pieces and headings included, like the real extractor', () => {
@@ -400,7 +400,7 @@ test('defaults: no title is "Untitled Page", the page is as tall as its lowest e
 
 test('a page text is cut at 4500 characters, in either form, and a cut text ends with the marker line', () => {
   // The cut is at a line or word boundary and the note names the shown and the full size (silent-truncation-no-marker).
-  const marker = (shown: number, total: number) => `\n[page text truncated: showing ${shown} of ${total} characters - call read_page_text to read the whole page in parts]`;
+  const marker = (shown: number, total: number) => `\n[page text truncated: showing ${shown} of ${total} characters - call read_page to read the whole page in parts]`;
   const long = Array.from({ length: 2000 }, (_, i) => `w${letters(i)}`).join(' ');
   const cut = long.lastIndexOf(' ', 4500);
   assert.equal(pageSnapshot({ url: 'https://a.test/', text: long }).pageText, `${long.slice(0, cut)}${marker(cut, long.length)}`);
@@ -750,30 +750,41 @@ test('the label a reply quotes is the first of aria-label, placeholder, text, na
   assert.match((await r.send(snapshotMessage)).data.elementsText, /\[6\] input\[radio\] "Yes" \(label="Yes" checked value="on"\)/, 'a radio stays selected when clicked again');
 });
 
-test('scroll moves the page, clamped to its ends, and brings off-screen elements into view', async () => {
+test('scroll moves the page by the real step, clamped to its ends, says how far, and brings off-screen elements into view', async () => {
   const r = rig();
   const before = (await r.send(snapshotMessage)).data;
   assert.match(before.elementsText, /\[5\] a "Impressum" \[off-screen\]/);
 
-  assert.deepEqual(await r.send(act({ action: 'scroll', direction: 'down', amount: 1000 })), { success: true, message: 'Scrolled down by 1000px' });
-  const middle = (await r.send(snapshotMessage)).data;
-  assert.equal(middle.scrollState.scrollY, 1000);
-  assert.match(middle.elementsText, /^\[1\] a "Impressum"$/m, 'in view now, and listed first');
-  assert.match(middle.elementsText, /\[2\] a "Laptops" \(href="\/laptops"\) \[off-screen\]/, 'the top scrolled away');
-
-  await r.send(act({ action: 'scroll' }));
-  await r.send(act({ action: 'scroll', amount: 5000 }));
-  assert.equal((await r.send(snapshotMessage)).data.scrollState.scrollY, 1200, 'the bottom is pageHeight - viewportHeight');
-  await r.send(act({ action: 'scroll', direction: 'up', amount: 99999 }));
+  assert.deepEqual(await r.send(act({ action: 'scroll', direction: 'down' })), {
+    success: true,
+    result: { moved: 640, label: 'the page', top: 640, max: 1200, height: 800, atTop: false, atBottom: false }
+  });
+  assert.equal((await r.send(act({ action: 'scroll' }))).result.moved, 560, 'the second step stops at the end');
+  const bottom = (await r.send(snapshotMessage)).data;
+  assert.equal(bottom.scrollState.scrollY, 1200, 'the bottom is pageHeight - viewportHeight');
+  assert.match(bottom.elementsText, /^\[1\] a "Impressum"$/m, 'in view now, and listed first');
+  const stuck = await r.send(act({ action: 'scroll' }));
+  assert.equal(stuck.result.moved, 0, 'at the bottom nothing moves, and the reply says so');
+  assert.equal(stuck.result.atBottom, true);
+  await r.send(act({ action: 'scroll', direction: 'up' }));
+  await r.send(act({ action: 'scroll', direction: 'up' }));
   assert.equal((await r.send(snapshotMessage)).data.scrollState.scrollY, 0);
 });
 
-/** The real ActionExecutor on a stub window, for the actions that need no element: scrollBy is recorded. */
-function realExecutor(): { run: (payload: Record<string, unknown>) => Promise<any>; scrolled: unknown[] } {
-  const scrolled: unknown[] = [];
+/**
+ * The real ActionExecutor on a stub window whose page scrolls (no inner panel), for the actions
+ * that need no element: scrollBy moves scrollY like a browser, clamped to the page.
+ */
+function realExecutor({ pageHeight = 5000, innerHeight = 800, scrollY = 0 } = {}): { run: (payload: Record<string, unknown>) => Promise<any>; win: Record<string, any> } {
+  const root = { scrollHeight: pageHeight, clientHeight: innerHeight, getBoundingClientRect: () => ({ left: 0, top: 0, right: 1280, bottom: pageHeight }) };
   const fakeWindow: Record<string, any> = {
     domCompressor: { getElement: () => null, elements: [] },
-    scrollBy: (options: { top: unknown }) => scrolled.push(options.top),
+    innerWidth: 1280,
+    innerHeight,
+    scrollX: 0,
+    scrollY,
+    scrollBy(options: { top: number }) { this.scrollY = Math.min(pageHeight - innerHeight, Math.max(0, this.scrollY + Number(options.top))); },
+    getComputedStyle: () => ({ overflowY: 'visible' }),
     HTMLInputElement: HTMLInputElementStub,
     HTMLTextAreaElement: HTMLTextAreaElementStub,
     InputEvent: InputEventStub,
@@ -781,38 +792,35 @@ function realExecutor(): { run: (payload: Record<string, unknown>) => Promise<an
     MouseEvent: Event,
     CSS: { escape: (s: string) => s }
   };
-  const fakeDocument = { contains: () => true, activeElement: { dispatchEvent: () => true }, body: { dispatchEvent: () => true } };
+  const fakeDocument = {
+    contains: () => true,
+    activeElement: { dispatchEvent: () => true },
+    body: { dispatchEvent: () => true },
+    documentElement: root,
+    scrollingElement: root,
+    querySelectorAll: () => []
+  };
   const executor = new ActionExecutor(fakeDocument as any, fakeWindow as any);
   // The message crosses the wire as JSON, so a missing value is a missing key.
-  return { run: (payload) => executor.execute(JSON.parse(JSON.stringify(payload))), scrolled };
+  return { run: (payload) => executor.execute(JSON.parse(JSON.stringify(payload))), win: fakeWindow };
 }
 
-test('scroll: only a missing direction or amount gets its default, and any other value is used and quoted as it is, like the real doScroll', async () => {
-  const payloads: Array<Record<string, unknown>> = [
-    {}, { direction: 'down' }, { direction: 'up' }, { amount: 200 }, { direction: 'up', amount: 300 },
-    { direction: 'down', amount: '300' }, { direction: 'up', amount: '300' }, { amount: null }, { direction: null }, { direction: 'UP', amount: 100 },
-    { amount: 'abc' }, { direction: 5, amount: 40 }, { direction: 'up', amount: -70 }, { amount: 0 }
-  ];
-  for (const payload of payloads) {
-    const real = realExecutor();
-    const reply = await real.run({ action: 'scroll', ...payload });
-    const r = rig('https://long.test/', [{ url: 'https://long.test/', title: 'Long', pageHeight: 5000, scrollY: 1000, elements: [] }]);
+test('scroll answers like the real content script: the same step, the same edges, the same reply', async () => {
+  for (const [scrollY, direction] of [[1000, 'down'], [1000, 'up'], [0, 'up'], [4100, 'down'], [4200, 'down'], [300, 'up']] as const) {
+    const real = realExecutor({ pageHeight: 5000, innerHeight: 800, scrollY });
+    const reply = await real.run({ action: 'scroll', direction });
+    const r = rig('https://long.test/', [{ url: 'https://long.test/', title: 'Long', pageHeight: 5000, scrollY, elements: [] }]);
     await r.send(snapshotMessage);
-    assert.deepEqual(await r.send(act({ action: 'scroll', ...payload })), reply, JSON.stringify(payload));
-    // scrollBy({ top }) turns its value into a number, and a value that is not one scrolls 0.
-    const top = Number(real.scrolled[0]);
-    const expected = Math.min(4200, Math.max(0, 1000 + (Number.isFinite(top) ? top : 0)));
-    assert.equal((await r.send(snapshotMessage)).data.scrollState.scrollY, expected, JSON.stringify(payload));
+    assert.deepEqual(await r.send(act({ action: 'scroll', direction })), reply, `${direction} from ${scrollY}`);
+    assert.equal((await r.send(snapshotMessage)).data.scrollState.scrollY, real.win.scrollY, `${direction} from ${scrollY}`);
   }
 });
 
-test('press_key: only a missing key is Enter, any other value is quoted as it is, like the real doPressKey', async () => {
+test('press_key is not a content-script verb (it is CDP only), here as in the real executor', async () => {
   const r = rig();
   await r.send(snapshotMessage);
-  for (const payload of [{}, { key: 'Escape' }, { key: 5 }, { key: null }, { key: true }, { key: '' }, { key: 'Control+a' }]) {
-    const reply = await realExecutor().run({ action: 'press_key', ...payload });
-    assert.deepEqual(await r.send(act({ action: 'press_key', ...payload })), reply, JSON.stringify(payload));
-  }
+  await assert.rejects(realExecutor().run({ action: 'press_key', key: 'Enter' }), /Unknown action: press_key/);
+  assert.deepEqual(await r.send(act({ action: 'press_key', key: 'Enter' })), { success: false, error: 'Unknown action: press_key' });
 });
 
 test('navigate opens a declared page, and go_back and go_forward walk the pages this fake opened', async () => {
@@ -840,18 +848,16 @@ test('navigate opens a declared page, and go_back and go_forward walk the pages 
   assert.equal(r.fc.tabs.get(101)?.url, LAPTOPS);
 });
 
-test('read_page_text, press_key and wait answer like the real ones, and wait does not really wait', async () => {
+test('read_page and wait answer like the real ones, and wait does not really wait', async () => {
   const r = rig(PRODUCT);
   await r.send(snapshotMessage);
-  assert.deepEqual(await r.send(act({ action: 'read_page_text' })), {
+  assert.deepEqual(await r.send(act({ action: 'read_page' })), {
     success: true,
-    message: 'Extracted text snippet (37 chars):\n"""\nFramework Laptop 16 - ab 1.399,00 EUR\n"""',
+    message: 'Page text (part 1 of 1, chars 1-37 of 37, end of the text):\n"""\nFramework Laptop 16 - ab 1.399,00 EUR\n"""',
     // The note travels with the result, so the model-facing one-shot and step record carry it (silent-truncation-no-marker).
-    result: { pageText: 'Framework Laptop 16 - ab 1.399,00 EUR', note: '37 chars' },
+    result: { pageText: 'Framework Laptop 16 - ab 1.399,00 EUR', note: 'part 1 of 1, chars 1-37 of 37, end of the text', part: 1, parts: 1, hidesLines: false },
   });
-  assert.equal((await r.send(act({ action: 'extract_page_text' }))).success, true);
-  assert.deepEqual(await r.send(act({ action: 'press_key', key: 'Escape' })), { success: true, message: 'Pressed key [Escape]' });
-  assert.deepEqual(await r.send(act({ action: 'press_key' })), { success: true, message: 'Pressed key [Enter]' });
+  assert.match((await r.send(act({ action: 'read_page', part: 2 }))).error, /only 1 part, so there is no part 2/);
   const started = Date.now();
   assert.deepEqual(await r.send(act({ action: 'wait', amount: 30 })), { success: true, message: 'Waited 30s' });
   assert.deepEqual(await r.send(act({ action: 'wait' })), { success: true, message: 'Waited 1s' });
@@ -910,21 +916,20 @@ test('a link to a page that was not declared throws when it is clicked, and so d
   assert.equal(r.fc.tabs.get(101)?.url, SHOP);
 });
 
-test('browser_batch and typing into a <select> are not simulated, and say how to script them', async () => {
+test('typing into a <select> is not simulated, and says how to script it', async () => {
   const pages: PageSpec[] = [{ url: SHOP, elements: [{ tag: 'select', label: 'Country' }] }];
   const r = rig(SHOP, pages);
   await r.send(snapshotMessage);
 
-  assert.throws(() => r.send(act({ action: 'browser_batch', steps: [] })), /browser_batch is not simulated - script the EXECUTE_ACTION answer with fc\.dom\.on\(tabId, 'EXECUTE_ACTION', \.\.\.\)/);
   assert.throws(() => r.send(act({ action: 'type', element_id: 1, text: 'DE' })), /a <select>, is not simulated/);
-  assert.equal(r.site.violations.length, 2);
+  assert.equal(r.site.violations.length, 1);
 });
 
 test('the fake content script can be replaced for one message with fc.dom.on, which is how a test scripts what is not simulated', async () => {
   const r = rig();
   await r.send(snapshotMessage);
-  r.fc.dom.on(101, 'EXECUTE_ACTION', { success: true, message: 'batch done' });
-  assert.deepEqual(await r.send(act({ action: 'browser_batch', steps: [] })), { success: true, message: 'batch done' });
+  r.fc.dom.on(101, 'EXECUTE_ACTION', { success: true, message: 'scripted' });
+  assert.deepEqual(await r.send(act({ action: 'select', element_id: 1 })), { success: true, message: 'scripted' });
   r.site.assertClean();
 });
 

@@ -13,7 +13,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ScoutFoxMCPClient } from '../../src/background/mcp/client.ts';
+import { PLAN_FIRST_TEXT, ScoutFoxMCPClient } from '../../src/background/mcp/client.ts';
+import { REFLECTION_TEXT, REPEAT_HINT_PREFIX } from '../../src/background/mcp/progress.ts';
 import type { RunRecorder } from '../../src/background/mcp/client.ts';
 import { cdp } from '../../src/background/browser/cdp.ts';
 import { fakeChrome } from '../helpers/fakeChrome.ts';
@@ -61,7 +62,8 @@ function makeRecorder(options: { autoApprovePlan?: boolean } = {}) {
     setRunStatus: (status, pauseReason) => { statuses.push({ status, pauseReason }); },
     setPlanSteps: (steps) => { planSteps.length = 0; planSteps.push(...steps); },
     setPendingApproval: (value) => { pending = value; approvals.push(value); },
-    resolvePendingApproval: (status, pauseReason) => { statuses.push({ status, pauseReason }); pending = null; }
+    resolvePendingApproval: (status, pauseReason) => { statuses.push({ status, pauseReason }); pending = null; },
+    endRun: (status, row) => { if (row) history.push(row); statuses.push({ status }); pending = null; return true; }
   };
   return { recorder, history, planSteps, statuses, approvals, pending: () => pending };
 }
@@ -175,7 +177,7 @@ test('a run ends with the answer of the finish tool, and the panel shows it', as
   const { client, rec } = withClient(t, {
     replies: [
       toolCall('get_page_elements', {}),
-      toolCall('finish', { answer: 'It costs 99 USD.' })
+      toolCall('finish', { outcome: 'done', answer: 'It costs 99 USD.' })
     ]
   });
   await client.startTask('What does item 42 cost?');
@@ -188,8 +190,8 @@ test('a run ends with the answer of the finish tool, and the panel shows it', as
 test('the tool results are fed back to the model, so the model can act on them', async (t) => {
   const { client, requests } = withClient(t, {
     replies: [
-      toolCall('get_page_text', {}),
-      toolCall('finish', { answer: 'done' })
+      toolCall('read_page', {}),
+      toolCall('finish', { outcome: 'done', answer: 'done' })
     ]
   });
   await client.startTask('What does item 42 cost?');
@@ -207,7 +209,7 @@ test('a failed tool comes back to the model as an error, and the step is shown a
   const { client, rec } = withClient(t, {
     replies: [
       toolCall('click', { element_id: 99 }),
-      toolCall('finish', { answer: 'done' })
+      toolCall('finish', { outcome: 'done', answer: 'done' })
     ]
   });
   await client.startTask('Open the details');
@@ -220,10 +222,10 @@ test('a failed tool comes back to the model as an error, and the step is shown a
 test('the effort is the model\'s reasoning level: full on the first round and after a failed tool, one less on routine rounds', async (t) => {
   clearEffortCache();
   const script = () => [
-    toolCall('get_page_text', {}),
+    toolCall('read_page', {}),
     toolCall('click', { element_id: 99 }),
-    toolCall('get_page_text', {}),
-    toolCall('finish', { answer: 'done' })
+    toolCall('read_page', {}),
+    toolCall('finish', { outcome: 'done', answer: 'done' })
   ];
   const { client, requests } = withClient(t, { replies: script() });
   await client.startTask('Open the details', { effort: 'high' });
@@ -235,19 +237,19 @@ test('the effort is the model\'s reasoning level: full on the first round and af
 test('with "same as the chosen effort" every round gets the chosen level, and Auto sends nothing', async (t) => {
   clearEffortCache();
   const { client, requests } = withClient(t, {
-    replies: [toolCall('get_page_text', {}), toolCall('finish', { answer: 'done' })],
+    replies: [toolCall('read_page', {}), toolCall('finish', { outcome: 'done', answer: 'done' })],
     settings: { effortAdaptive: false }
   });
   await client.startTask('Read it', { effort: 'low' });
   assert.deepEqual(requests.map((request) => request.body?.reasoning?.effort), ['low', 'low']);
 
-  const auto = withClient(t, { replies: [toolCall('finish', { answer: 'done' })] });
+  const auto = withClient(t, { replies: [toolCall('finish', { outcome: 'done', answer: 'done' })] });
   await auto.client.startTask('Read it');
   assert.equal('reasoning' in auto.requests[0].body, false, 'no effort chosen: no reasoning field');
 });
 
 test('the model is asked for the tools, so it can call them', async (t) => {
-  const { client, requests } = withClient(t, { replies: [toolCall('finish', { answer: 'done' })] });
+  const { client, requests } = withClient(t, { replies: [toolCall('finish', { outcome: 'done', answer: 'done' })] });
   await client.startTask('Say something');
   const body = requests[0].body;
   const names = (body.tools as any[]).map((tool) => tool.function.name);
@@ -307,8 +309,8 @@ test('the plan becomes the checklist of the panel, and the steps are ticked off 
     replies: [
       toolCall('update_plan', { plan: ['Open the details', 'Read the price'] }),
       toolCall('get_page_elements', {}),
-      toolCall('get_page_text', {}),
-      toolCall('finish', { answer: 'done' })
+      toolCall('read_page', {}),
+      toolCall('finish', { outcome: 'done', answer: 'done' })
     ]
   });
   await client.startTask('Find the price of item 42');
@@ -322,7 +324,7 @@ test('a plan needs the user to approve it, and the run waits for the decision', 
     autoApprovePlan: false,
     replies: [
       toolCall('update_plan', { plan: ['Open the details'] }),
-      toolCall('finish', { answer: 'done' })
+      toolCall('finish', { outcome: 'done', answer: 'done' })
     ]
   });
   const running = client.startTask('Find the price of item 42');
@@ -384,20 +386,20 @@ test('two tool calls in one round are both executed, in order', async (t) => {
             content: '',
             tool_calls: [
               { id: 'c1', type: 'function', function: { name: 'get_page_elements', arguments: '{}' } },
-              { id: 'c2', type: 'function', function: { name: 'get_page_text', arguments: '{}' } }
+              { id: 'c2', type: 'function', function: { name: 'read_page', arguments: '{}' } }
             ]
           },
           finish_reason: 'tool_calls'
         }]
       },
-      toolCall('finish', { answer: 'done' })
+      toolCall('finish', { outcome: 'done', answer: 'done' })
     ]
   });
   await client.startTask('Look at the page');
   const actions = rowsOfType(rec.history, 'agent_response').map((row) => row.action.action);
   // Both calls of the round ran, in the order the model asked for them. The finish of the next
   // round is after them, so it is not part of this pair.
-  assert.deepEqual(actions.slice(0, 2), ['get_page_elements', 'read_page_text'], 'both calls of the round ran');
+  assert.deepEqual(actions.slice(0, 2), ['get_page_elements', 'read_page'], 'both calls of the round ran');
 });
 
 test('a tool call with broken arguments does not stop the run', async (t) => {
@@ -416,7 +418,7 @@ test('a tool call with broken arguments does not stop the run', async (t) => {
           finish_reason: 'tool_calls'
         }]
       },
-      toolCall('finish', { answer: 'done' })
+      toolCall('finish', { outcome: 'done', answer: 'done' })
     ]
   });
   await client.startTask('Click something');
@@ -425,7 +427,7 @@ test('a tool call with broken arguments does not stop the run', async (t) => {
 
 test('the first call to the model carries the page it starts on', async (t) => {
   // The model has to know where it is, or its first tool call is a guess.
-  const { client, requests } = withClient(t, { replies: [toolCall('finish', { answer: 'done' })] });
+  const { client, requests } = withClient(t, { replies: [toolCall('finish', { outcome: 'done', answer: 'done' })] });
   await client.startTask('What does item 42 cost?');
   const user = (requests[0].body.messages as any[]).find((m) => m.role === 'user');
   assert.match(String(user?.content), /TASK: What does item 42 cost\?/);
@@ -454,7 +456,7 @@ test('Pause then Resume while the model is answering leaves exactly one loop run
     if (n === 1) {
       return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true }));
     }
-    const reply = n === 2 ? toolCall('get_page_text', {}) : toolCall('finish', { answer: 'once' });
+    const reply = n === 2 ? toolCall('read_page', {}) : toolCall('finish', { outcome: 'done', answer: 'once' });
     return new Response(JSON.stringify(reply), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
   t.after(() => { globalThis.fetch = realFetch; });
@@ -481,14 +483,14 @@ test('a Pause between two tool calls still answers both, so Resume sends a valid
             role: 'assistant',
             content: '',
             tool_calls: [
-              { id: 'c1', type: 'function', function: { name: 'get_page_text', arguments: '{}' } },
+              { id: 'c1', type: 'function', function: { name: 'read_page', arguments: '{}' } },
               { id: 'c2', type: 'function', function: { name: 'get_page_elements', arguments: '{}' } }
             ]
           },
           finish_reason: 'tool_calls'
         }]
       },
-      toolCall('finish', { answer: 'resumed fine' })
+      toolCall('finish', { outcome: 'done', answer: 'resumed fine' })
     ]
   });
   // Pause as soon as the first tool's result row is recorded.
@@ -511,7 +513,7 @@ test('a Pause between two tool calls still answers both, so Resume sends a valid
 });
 
 test('the user\'s system instructions from Settings reach the model', async (t) => {
-  const { client, requests } = withClient(t, { replies: [toolCall('finish', { answer: 'done' })] });
+  const { client, requests } = withClient(t, { replies: [toolCall('finish', { outcome: 'done', answer: 'done' })] });
   await (globalThis as any).chrome.storage.local.set({ agent_settings: { provider: 'openrouter', model: 'test-model', maxSteps: 20, actionDelayMs: 1, systemInstructions: 'Always answer in German.' } });
   await client.startTask('What is here?');
   const system = (requests[0].body.messages as any[]).find((m) => m.role === 'system');
@@ -521,13 +523,13 @@ test('the user\'s system instructions from Settings reach the model', async (t) 
 test('manual approval: a model that skips the plan is held until it asks for approval', async (t) => {
   const { client, rec, requests } = withClient(t, {
     autoApprovePlan: false,
-    replies: [toolCall('get_page_text', {}), toolCall('update_plan', { plan: ['Read the page'] }), toolCall('finish', { answer: 'done' })]
+    replies: [toolCall('read_page', {}), toolCall('update_plan', { plan: ['Read the page'] }), toolCall('finish', { outcome: 'done', answer: 'done' })]
   });
   const running = client.startTask('What is here?');
   for (let i = 0; i < 400 && rec.approvals.filter(Boolean).length === 0; i++) await new Promise((r) => setTimeout(r, 2));
   const firstResult = (requests[1].body.messages as any[]).find((m) => m.role === 'tool');
   assert.match(String(firstResult.content), /manual approval is on/i, 'the read before the plan was refused');
-  assert.equal(rowsOfType(rec.history, 'agent_response').filter((r) => r.action.action === 'read_page_text').length, 1);
+  assert.equal(rowsOfType(rec.history, 'agent_response').filter((r) => r.action.action === 'read_page').length, 1);
   assert.ok(rec.pending(), 'the plan card is up');
   client.handleApprovePlan(true);
   await running;
@@ -536,7 +538,7 @@ test('manual approval: a model that skips the plan is held until it asks for app
 
 test('at the step limit the model gets one round with only finish, and the run ends', async (t) => {
   const { client, rec, requests } = withClient(t, {
-    replies: [toolCall('get_page_text', {}), toolCall('get_page_text', {}), toolCall('finish', { answer: 'what I found' })]
+    replies: [toolCall('read_page', {}), toolCall('read_page', {}), toolCall('finish', { outcome: 'done', answer: 'what I found' })]
   });
   await (globalThis as any).chrome.storage.local.set({ agent_settings: { provider: 'openrouter', model: 'test-model', maxSteps: 2, actionDelayMs: 1 } });
   await client.startTask('Read forever');
@@ -556,7 +558,7 @@ test('a passing provider error (a 500) is retried, and the run goes on', async (
     requests.push({ url: String(input), body: JSON.parse(String(init?.body || 'null')) });
     n += 1;
     if (n === 1) return new Response('{"message":"Failed to generate completions"}', { status: 500 });
-    return new Response(JSON.stringify(toolCall('finish', { answer: 'after a retry' })), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(toolCall('finish', { outcome: 'done', answer: 'after a retry' })), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
   t.after(() => { globalThis.fetch = realFetch; });
   await client.startTask('Anything');
@@ -575,7 +577,7 @@ test('a burst of 500s and then a 429 is waited out with longer pauses, and the r
     requests.push({ url: String(input), body: JSON.parse(String(init?.body || 'null')) });
     const status = failures.shift();
     if (status) return new Response('{"title":"Too Many Requests"}', { status });
-    return new Response(JSON.stringify(toolCall('finish', { answer: 'after the rate limit' })), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(toolCall('finish', { outcome: 'done', answer: 'after the rate limit' })), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
   t.after(() => { globalThis.fetch = realFetch; });
   await client.startTask('Anything');
@@ -606,7 +608,7 @@ test('a model call that times out is tried once more, and a second timeout ends 
     requests.push({ url: String(input), body: null });
     n += 1;
     if (n === 1) return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true }));
-    return new Response(JSON.stringify(toolCall('finish', { answer: 'second try' })), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(toolCall('finish', { outcome: 'done', answer: 'second try' })), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
   t.after(() => { globalThis.fetch = realFetch; });
   await client.startTask('Anything');
@@ -618,15 +620,19 @@ test('a run logs each model call and each step, with a sentence and the details 
   const { Logger } = await import('../../src/shared/logger.ts');
   Logger.clearLogs();
   const { client } = withClient(t, {
-    replies: [toolCall('get_page_elements', { reason: 'to see the buttons' }), toolCall('finish', { answer: 'It costs 99 USD.' })]
+    replies: [toolCall('get_page_elements', { reason: 'to see the buttons' }), toolCall('finish', { outcome: 'done', answer: 'It costs 99 USD.' })]
   });
   await client.startTask('What does item 42 cost?');
   const logs = Logger.getLogsHistory();
   const llm = logs.filter((l) => l.kind === 'llm');
   const steps = logs.filter((l) => l.kind === 'tool');
-  assert.equal(llm.length, 2, 'one entry per model call');
-  assert.match(llm[0].message, /^Model call 1 \(test-model\): chose get_page_elements$/);
-  const call = JSON.parse(llm[0].data!);
+  assert.equal(llm.length, 4, 'two entries per model call: when it starts and what came back');
+  // The start line comes before the request, so a call that never comes back is still in the log.
+  assert.match(llm[0].message, /^Model call 1 started \(test-model\)$/);
+  assert.equal(JSON.parse(llm[0].data!).round, 1);
+  assert.match(llm[1].message, /^Model call 1 \(test-model\): chose get_page_elements$/);
+  assert.match(llm[2].message, /^Model call 2 started \(test-model\)$/);
+  const call = JSON.parse(llm[1].data!);
   assert.equal(call.response.tool_calls[0].name, 'get_page_elements');
   assert.ok(call.request.messages.length >= 2, 'what was sent is in the details');
   assert.match(steps[0].message, /^Listing the elements on the page it can act on - to see the buttons$/);
@@ -644,7 +650,7 @@ test('a failed model attempt that is retried is a warning in the log, not an err
     requests.push({ url: String(input), body: null });
     n += 1;
     if (n === 1) return new Response('{"message":"Failed to generate completions"}', { status: 500 });
-    return new Response(JSON.stringify(toolCall('finish', { answer: 'ok' })), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(toolCall('finish', { outcome: 'done', answer: 'ok' })), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
   t.after(() => { globalThis.fetch = realFetch; });
   await client.startTask('Anything');
@@ -652,4 +658,121 @@ test('a failed model attempt that is retried is a warning in the log, not an err
   assert.equal(failed.length, 1);
   assert.equal(failed[0].level, 'WARN');
   assert.ok(!Logger.getLogsHistory().some((l) => l.level === 'ERROR'), 'the run did not fail, so nothing is an error');
+});
+
+// ---- the repeat guard (progress.ts) in the live loop ----------------------------------------------
+
+/** The messages of one request, and where the reflection notes sit in it. */
+function reflectionsOf(request: { body: any }): number[] {
+  return (request.body.messages as any[]).flatMap((m, i) => (m.role === 'user' && m.content === REFLECTION_TEXT ? [i] : []));
+}
+
+test('repeat guard: a repeated read gets the hint in its result, and stuck steps add one reflection after the tool block', async (t) => {
+  const { Logger } = await import('../../src/shared/logger.ts');
+  Logger.clearLogs();
+  const { client, requests, rec } = withClient(t, {
+    replies: [...Array.from({ length: 5 }, (_, i) => toolCall('read_page', { reason: `look ${i}` }, `call_${i}`)), toolCall('finish', { outcome: 'done', answer: 'The page did not change.' })]
+  });
+  await client.startTask('Watch this page');
+  assert.equal(requests.length, 6);
+  const lastTool = (i: number) => String([...(requests[i].body.messages as any[])].reverse().find((m) => m.role === 'tool').content);
+  assert.doesNotMatch(lastTool(1), new RegExp(REPEAT_HINT_PREFIX.replace(/[()]/g, '\\$&')), 'the first read is not a repeat');
+  assert.match(lastTool(2), /Same text as your last read/);
+  assert.ok(lastTool(2).includes(REPEAT_HINT_PREFIX), 'the second identical read carries the hint');
+  assert.match(lastTool(2), /read_page \{part\}/);
+  // Reads 2-5 changed nothing: 4 of the last 6 steps, so the 6th request carries the reflection.
+  for (let i = 0; i < 5; i++) assert.deepEqual(reflectionsOf(requests[i]), [], `request ${i + 1} has no reflection`);
+  const messages = requests[5].body.messages as any[];
+  const at = reflectionsOf(requests[5]);
+  assert.equal(at.length, 1, 'one reflection');
+  assert.equal(at[0], messages.length - 1, 'it is the last message');
+  assert.equal(messages[at[0] - 1].role, 'tool', 'right after the tool block');
+  assert.equal(messages[at[0] - 2].role, 'assistant', 'and the tool block answers the assistant call before it');
+  assert.equal(messages[at[0] - 2].tool_calls[0].id, messages[at[0] - 1].tool_call_id);
+  assert.equal(rowsOfType(rec.history, 'finish')[0].answer, 'The page did not change.');
+  const logs = Logger.getLogsHistory().filter((l) => l.kind === 'agent');
+  assert.ok(logs.some((l) => /^Repeat hint after /.test(l.message)), 'the hint is in the log');
+  assert.equal(logs.filter((l) => /^Asked the model to reflect/.test(l.message)).length, 1, 'the reflection is in the log once');
+});
+
+test('repeat guard: still stuck, the reflection comes at most once per 6 steps', async (t) => {
+  const { client, requests } = withClient(t, {
+    replies: [...Array.from({ length: 10 }, (_, i) => toolCall('read_page', {}, `call_${i}`)), toolCall('finish', { outcome: 'done', answer: 'done' })]
+  });
+  await client.startTask('Watch this page');
+  assert.equal(requests.length, 11);
+  assert.equal(reflectionsOf(requests[10]).length, 1, 'ten stuck steps, one reflection (the next is due at step 11)');
+});
+
+test('repeat guard: PLAN_FIRST refusals never count, and the approval card is never skipped', async (t) => {
+  const { client, rec, requests } = withClient(t, {
+    autoApprovePlan: false,
+    replies: [
+      ...Array.from({ length: 6 }, (_, i) => toolCall('read_page', {}, `call_${i}`)),
+      toolCall('update_plan', { plan: ['Read the page'] }, 'call_plan'),
+      toolCall('finish', { outcome: 'done', answer: 'done' })
+    ]
+  });
+  const running = client.startTask('What is here?');
+  for (let i = 0; i < 400 && rec.approvals.filter(Boolean).length === 0; i++) await new Promise((r) => setTimeout(r, 2));
+  assert.ok(rec.pending(), 'the plan card is up: six refusals did not get past it');
+  client.handleApprovePlan(true);
+  await running;
+  for (const request of requests) assert.deepEqual(reflectionsOf(request), [], 'no reflection from refused calls');
+  const toolTexts = (requests.at(-1)!.body.messages as any[]).filter((m) => m.role === 'tool').map((m) => String(m.content));
+  assert.equal(toolTexts.filter((c) => c === PLAN_FIRST_TEXT).length, 6, 'every refusal is the plain refusal, with no hint');
+});
+
+test('the finish outcome is stored on the finish row, so the panel card can follow it', async (t) => {
+  for (const outcome of ['done', 'partial', 'blocked']) {
+    const { client, rec } = withClient(t, { replies: [toolCall('finish', { outcome, answer: `it went ${outcome}` })] });
+    await client.startTask('Anything');
+    const finish = rowsOfType(rec.history, 'finish')[0];
+    assert.equal(finish.outcome, outcome);
+    assert.equal(finish.answer, `it went ${outcome}`);
+  }
+});
+
+test('the finish tool requires an outcome of done, partial or blocked', async () => {
+  const { TOOL_MAP } = await import('../../src/background/mcp/tools.ts');
+  const schema = TOOL_MAP.get('finish')!.inputSchema as any;
+  assert.deepEqual(schema.required, ['answer', 'outcome']);
+  assert.deepEqual(schema.properties.outcome.enum, ['done', 'partial', 'blocked']);
+  assert.match(schema.properties.outcome.description, /"blocked": you could not do it/);
+});
+
+test('a finish without a valid outcome is refused once, without a step, and the next finish ends the run', async (t) => {
+  const { FINISH_OUTCOME_TEXT } = await import('../../src/background/mcp/client.ts');
+  const { client, rec, requests } = withClient(t, {
+    replies: [toolCall('finish', { answer: 'all good' }), toolCall('finish', { answer: 'all good', outcome: 'maybe' }), toolCall('finish', { answer: 'all good', outcome: 'done' })]
+  });
+  await client.startTask('Anything');
+  assert.equal(requests.length, 3, 'the model was asked again twice');
+  const toolReplies = (requests[1].body.messages as any[]).filter((m) => m.role === 'tool');
+  assert.equal(toolReplies.at(-1).content, FINISH_OUTCOME_TEXT, 'the model is told what outcome means');
+  const finishes = rowsOfType(rec.history, 'finish');
+  assert.equal(finishes.length, 1, 'only the valid finish ended the run');
+  assert.equal(finishes[0].outcome, 'done');
+  assert.equal(rowsOfType(rec.history, 'execution_result').length, 1, 'the refused finishes left no failed step rows');
+  assert.equal(rowsOfType(rec.history, 'agent_response').length, 1, 'and no action rows');
+});
+
+test('at the step limit a finish without an outcome still ends the run, as partial', async (t) => {
+  const { client, rec } = withClient(t, {
+    replies: [toolCall('read_page', {}), toolCall('read_page', {}), toolCall('finish', { answer: 'what I found' })],
+    settings: { maxSteps: 2 }
+  });
+  await client.startTask('Read forever');
+  const finish = rowsOfType(rec.history, 'finish')[0];
+  assert.equal(finish.answer, 'what I found');
+  assert.equal(finish.outcome, 'partial');
+});
+
+test('a plain-text answer at the step limit ends the run as partial; a plain-text reply otherwise has no outcome', async (t) => {
+  const limited = withClient(t, { replies: [toolCall('read_page', {}), textReply('I ran out of steps.')], settings: { maxSteps: 1 } });
+  await limited.client.startTask('Read forever');
+  assert.equal(rowsOfType(limited.rec.history, 'finish')[0].outcome, 'partial');
+  const plain = withClient(t, { replies: [textReply('It costs 99 USD.')] });
+  await plain.client.startTask('What does it cost?');
+  assert.equal(rowsOfType(plain.rec.history, 'finish')[0].outcome, undefined);
 });

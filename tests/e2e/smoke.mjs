@@ -54,7 +54,7 @@
  *   --tamper=<name>   makes one deliberate break in the temp COPY (never in dist/) to prove that
  *             this run can fail: no-content-script, worker-error, broken-panel, empty-page-text,
  *             zod-not-jitless, no-history-rows, broken-net-recorder, bad-tool-schema, no-fox-mark,
- *             no-effort, stale-worker.
+ *             no-effort, stale-worker, scroll-lies, read-repeats (and the ones in lib/extensionCopy.mjs).
  *   --effort=<level>  the effort every task starts with (auto, off, low, medium, high, max;
  *             default medium): the model's reasoning level, checked on the wire for every call.
  *
@@ -77,7 +77,7 @@ import { NVIDIA_DEFAULT_MODEL, NVIDIA_PLACEHOLDER_KEY, startNvidiaProxy } from '
 import { missingManifestFiles, prepareExtensionCopy, TAMPERS } from './lib/extensionCopy.mjs';
 import { MOCK_FAIL_PREFIX } from '../mcp/callRecord.mjs';
 import { runFacts, TASKS } from '../mcp/tasks.mjs';
-import { HOST_RULES, SHOP_B } from './lib/twoSources.mjs';
+import { HOST_RULES, RESEARCH_HOST, SHOP_B } from './lib/twoSources.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -117,6 +117,8 @@ const SHOT_VIEWPORT = { width: 2000, height: 1100 };
 const SHOT_DPR = 2;
 const OLLAMA = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
 const MODEL = args.model || (MOCK ? 'mock-agent' : PROVIDER === 'nvidia' ? NVIDIA_DEFAULT_MODEL : 'qwen3.8:27b-mlx');
+/** The card title the panel draws for each finish outcome (OUTCOME_CARD in sidepanel/sidepanel.js). */
+const OUTCOME_TITLE = { done: 'Done', partial: 'Partly done', blocked: 'Could not finish' };
 const FIXTURE_PORT = Number(process.env.FIXTURE_PORT || 8765);
 const PROXY_PORT = Number(process.env.PROXY_PORT || 11435);
 // A mock task takes a few seconds, so a run that hangs should fail early.
@@ -139,7 +141,7 @@ const LOOP_LIMIT = 15;
 // How long a run may stand paused with no hold the harness can answer, before it is stopped.
 const PAUSE_GRACE_MS = 3000;
 
-const SNAPSHOT_PAGES = ['store', 'store-spans', 'error', 'far-link', 'configurator', 'consent-link'];
+const SNAPSHOT_PAGES = ['store', 'store-spans', 'error', 'far-link', 'configurator', 'consent-link', 'editor', 'notebook', 'virtual-list', 'dead-button'];
 // Every run saves its screenshots here (one folder per task): the side panel with the steps and
 // the end result, and the end state of the page. Gitignored; --panel-screenshots overrides the root.
 const RUN_STAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -602,6 +604,24 @@ async function probePage(ctx, page, tabId) {
   return probe;
 }
 
+/** Every part of read_page on a tab, joined: the page's whole text as the model can read it. */
+async function fullPageTextOf(driver, tabId) {
+  const parts = [];
+  for (let part = 1; part <= 50; part++) {
+    const res = await driver.evaluate(async (id, n) => {
+      try {
+        return await chrome.tabs.sendMessage(id, { action: 'EXECUTE_ACTION', payload: { action: 'read_page', part: n } });
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    }, tabId, part);
+    if (!res || !res.success) throw new Error(`read_page part ${part} failed on tab ${tabId}: ${res && res.error}`);
+    parts.push(res.result.pageText);
+    if (res.result.part >= res.result.parts) break;
+  }
+  return parts.join('\n');
+}
+
 async function dumpSnapshots(ctx, fixtures, only) {
   const pages = [
     ...SNAPSHOT_PAGES.map((name) => ({ name, origin: fixtures.origin, dir: SNAPSHOT_DIR })),
@@ -620,6 +640,9 @@ async function dumpSnapshots(ctx, fixtures, only) {
     // `elements` holds the per-element locators for the executor. The model never sees them,
     // so they are left out to keep the files small and readable.
     const { elements, ...forModel } = snap;
+    // The whole page text, the way read_page reads it (every part through the real content
+    // script, joined back at the line breaks they were cut at), so the self-test pages it exactly.
+    forModel.fullPageText = await fullPageTextOf(ctx.driver, tabId);
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `${name}.json`);
     fs.writeFileSync(file, `${JSON.stringify(forModel, null, 2)}\n`);
@@ -1476,7 +1499,6 @@ async function checkLogsTab(ctx, tabId, shotName, shotDir, screenshots) {
  * the next message wakes a new one, and the real side panel must still show the finished run.
  */
 async function restartWorkerAndReadCard(ctx, tabId, expect) {
-  const startsBefore = ctx.workerStarts.count;
   // A panel that stays open through the restart, like the user's: it must never fall back to the
   // start screen, not even for a moment, so every mutation is watched, not only the end state.
   const openPanel = await openPanelAsPage(ctx, tabId);
@@ -1486,6 +1508,30 @@ async function restartWorkerAndReadCard(ctx, tabId, expect) {
     new MutationObserver(() => { if (document.getElementById('emptyState')) window.__sawStartScreen = true; })
       .observe(document.body, { childList: true, subtree: true });
   });
+  const restartProblems = await stopAndWakeWorker(ctx, tabId);
+  if (restartProblems.length) {
+    await openPanel.close();
+    return restartProblems;
+  }
+  // The open panel reconnects its port and resyncs; give it the time a user would.
+  await sleep(2000);
+  const sawStartScreen = await openPanel.evaluate(() => window.__sawStartScreen === true).catch(() => null);
+  const stillShown = await openPanel.evaluate(() => document.querySelectorAll('.finish-card').length).catch(() => 0);
+  await openPanel.close();
+  const problems = [];
+  if (sawStartScreen) problems.push('after a worker restart: the open side panel fell back to the start screen');
+  if (!stillShown) problems.push('after a worker restart: the open side panel lost the finished run');
+  problems.push(...(await readPanelCard(ctx, tabId, expect)).map((p) => `after a worker restart: ${p}`));
+  return problems;
+}
+
+/**
+ * Stops every service worker of the extension over CDP and wakes a new one with a message, the
+ * way Chrome stops an idle worker and the panel wakes it again. Returns problems (empty when a
+ * new worker really started), so a restart check can never pass on a worker that kept running.
+ */
+async function stopAndWakeWorker(ctx, tabId) {
+  const startsBefore = ctx.workerStarts.count;
   // A worker with a DevTools session attached is kept alive, so the harness's own watcher lets go
   // first; the new worker is watched again when its target appears.
   await ctx.worker.session?.detach().catch(() => {});
@@ -1513,19 +1559,77 @@ async function restartWorkerAndReadCard(ctx, tabId, expect) {
   ]).catch(() => {});
   const deadline = Date.now() + 10000;
   while (ctx.workerStarts.count <= startsBefore && Date.now() < deadline) await sleep(100);
-  if (ctx.workerStarts.count <= startsBefore) {
-    await openPanel.close();
-    return ['the service worker did not restart, so the restart check proved nothing'];
-  }
-  // The open panel reconnects its port and resyncs; give it the time a user would.
-  await sleep(2000);
-  const sawStartScreen = await openPanel.evaluate(() => window.__sawStartScreen === true).catch(() => null);
-  const stillShown = await openPanel.evaluate(() => document.querySelectorAll('.finish-card').length).catch(() => 0);
-  await openPanel.close();
+  if (ctx.workerStarts.count <= startsBefore) return ['the service worker did not restart, so the restart check proved nothing'];
+  return [];
+}
+
+/**
+ * The panel after New chat: the start screen, no card and no step rows. A run that kept going
+ * after the clear would write its rows back into the cleared thread.
+ */
+async function readPanelCleared(ctx, tabId) {
+  const panel = await panelSurface(ctx, tabId);
   const problems = [];
-  if (sawStartScreen) problems.push('after a worker restart: the open side panel fell back to the start screen');
-  if (!stillShown) problems.push('after a worker restart: the open side panel lost the finished run');
-  problems.push(...(await readPanelCard(ctx, tabId, expect)).map((p) => `after a worker restart: ${p}`));
+  try {
+    await sleep(500);
+    const seen = await panel.evaluate(() => {
+      const empty = document.getElementById('emptyState');
+      return {
+        startScreen: !!empty && getComputedStyle(empty).display !== 'none',
+        cards: document.querySelectorAll('.finish-card').length,
+        rows: document.querySelectorAll('.act-row').length
+      };
+    });
+    problems.push(...panel.errors().map((e) => `the side panel page threw: ${e}`));
+    if (!seen.startScreen) problems.push('after New chat the side panel does not show the start screen');
+    if (seen.cards) problems.push(`after New chat the side panel still shows ${seen.cards} final card(s)`);
+    if (seen.rows) problems.push(`after New chat the side panel still shows ${seen.rows} step row(s)`);
+  } finally {
+    ctx.panel.pageErrors.push(...panel.errors());
+    await panel.close();
+  }
+  return problems;
+}
+
+/**
+ * The final card in light and dark, as a tall panel and as a close-up of the card itself, for a
+ * task whose ending is the thing it checks (cardShots). Problems when there is no card to show.
+ */
+async function cardScreenshots(ctx, tabId, name, dir, screenshots) {
+  const problems = [];
+  for (const scheme of ['light', 'dark']) {
+    const panel = await openPanelAsPage(ctx, tabId, scheme);
+    try {
+      const card = await panel.waitForSelector('.finish-card', { timeout: 8000 }).catch(() => null);
+      if (!card) {
+        problems.push(`the ${scheme} panel shows no final card to take a picture of`);
+        continue;
+      }
+      await sleep(400); // the theme transition, so the shot shows the settled colours
+      const tall = path.join(dir, `${name}-card-${scheme}.png`);
+      const close = path.join(dir, `${name}-card-${scheme}-closeup.png`);
+      fs.mkdirSync(dir, { recursive: true });
+      await panel.screenshot({ path: tall });
+      await card.screenshot({ path: close });
+      screenshots.push(tall, close);
+      // The steps that led to the card, with the action group open (AGENTS.md asks for that shot).
+      const opened = await panel.evaluate(() => {
+        const head = document.querySelector('.act-head');
+        if (!head) return null;
+        if (head.getAttribute('aria-expanded') !== 'true') head.click();
+        return head.getAttribute('aria-expanded') === 'true';
+      });
+      if (opened === false) problems.push(`the ${scheme} panel's action group could not be opened`);
+      if (opened) {
+        await sleep(400);
+        const group = path.join(dir, `${name}-group-open-${scheme}.png`);
+        await panel.screenshot({ path: group });
+        screenshots.push(group);
+      }
+    } finally {
+      await panel.close();
+    }
+  }
   return problems;
 }
 
@@ -1618,6 +1722,98 @@ async function saveSettings(ctx, llm, model) {
     providerConfigs: { [connection.provider]: { baseUrl: connection.baseUrl, apiKey: connection.apiKey, model, ...(PROVIDER === 'nvidia' ? { llmTimeoutMs: 120000 } : {}) } }
   });
   ctx.model = model;
+  // The plain settings: a task that changed more (Settings > Research) set its own key.
+  ctx.settingsKey = '{}';
+}
+
+/**
+ * The real-model tasks whose sites do not answer (task.reachable), each with the reason. One GET
+ * per address with a 10 s timeout; any HTTP answer counts as reachable (a 403 to a bare fetch is
+ * still a site that is up), only a network error or the timeout does not.
+ */
+async function unreachableTasks(names) {
+  const out = [];
+  for (const name of names) {
+    for (const url of TASKS[name].reachable || []) {
+      const why = await fetch(url, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(10000) })
+        .then(() => null, (err) => String((err && err.cause && err.cause.code) || (err && err.message) || err));
+      if (why) {
+        out.push({ task: name, reason: `unreachable: ${url} did not answer (${why})` });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Settings > Research, set the way a user sets it: the side panel's Settings tab, the backend
+ * select, the SearXNG URL field. The stored settings must then hold what was chosen, and the
+ * section is shot in light and dark (the second opening also proves the panel loads it back).
+ */
+async function configureResearch(ctx, fixtures, tabId, research, shotName, shotDir, screenshots) {
+  const problems = [];
+  const want = { enabled: true, backend: research.backend, searxngUrl: research.backend === 'searxng' ? `${originFor(fixtures, RESEARCH_HOST)}${research.path || ''}` : '' };
+  for (const scheme of ['light', 'dark']) {
+    const panel = await openPanelAsPage(ctx, tabId, scheme);
+    try {
+      await panel.click('.nav-btn[data-tab="settings"]');
+      await panel.waitForSelector('#researchSection', { visible: true, timeout: 8000 });
+      if (scheme === 'light') {
+        await panel.select('#researchEnabledSelect', want.enabled ? 'on' : 'off');
+        await panel.select('#researchBackendSelect', want.backend);
+        if (want.backend === 'searxng') {
+          await panel.waitForSelector('#searxngUrlInput', { visible: true, timeout: 3000 });
+          await panel.click('#searxngUrlInput', { clickCount: 3 });
+          await panel.type('#searxngUrlInput', want.searxngUrl);
+          // A user leaves the field (Tab): that is the change that saves it.
+          await panel.keyboard.press('Tab');
+        }
+        await panel.waitForFunction((w) => chrome.storage.local.get('agent_settings').then(({ agent_settings: s }) => {
+          const r = (s && s.research) || {};
+          return r.enabled === w.enabled && r.backend === w.backend && r.searxngUrl === w.searxngUrl;
+        }), { timeout: 5000 }, want).catch(() => {});
+        const stored = await panel.evaluate(() => chrome.storage.local.get('agent_settings').then(({ agent_settings: s }) => (s && s.research) || null));
+        const same = !!stored && stored.enabled === want.enabled && stored.backend === want.backend && stored.searxngUrl === want.searxngUrl;
+        if (!same) problems.push(`Settings > Research stored ${JSON.stringify(stored)}, expected ${JSON.stringify(want)}`);
+      } else {
+        const shown = await panel.evaluate(() => ({
+          enabled: document.getElementById('researchEnabledSelect').value,
+          backend: document.getElementById('researchBackendSelect').value,
+          url: document.getElementById('searxngUrlInput').value
+        }));
+        if (shown.backend !== want.backend || shown.url !== want.searxngUrl) problems.push(`the reopened Settings tab shows ${JSON.stringify(shown)}, not the stored research settings`);
+      }
+      await panel.evaluate(() => document.getElementById('researchSection').scrollIntoView({ block: 'center' }));
+      await sleep(400); // the theme transition, so the shot shows the settled colours
+      const section = await panel.$('#researchSection');
+      const file = path.join(shotDir, `${shotName}-settings-research-${scheme}.png`);
+      fs.mkdirSync(shotDir, { recursive: true });
+      await section.screenshot({ path: file });
+      screenshots.push(file);
+    } finally {
+      await panel.close();
+    }
+  }
+  ctx.settingsKey = JSON.stringify({ research: want });
+  return problems;
+}
+
+/** The timeline rows of the panel must show one row per pattern (task.expectPanelRows). */
+async function readPanelRows(ctx, tabId, patterns) {
+  const panel = await panelSurface(ctx, tabId);
+  const problems = [];
+  try {
+    await panel.waitForText('.act-row .act-text', 8000);
+    const rows = await panel.evaluate(() => [...document.querySelectorAll('.act-row .act-text')].map((el) => el.textContent.replace(/\s+/g, ' ').trim()));
+    for (const pattern of patterns) {
+      if (!rows.some((row) => pattern.test(row))) problems.push(`no timeline row of the side panel matches ${pattern}: the rows are ${JSON.stringify(rows)}`);
+    }
+  } finally {
+    ctx.panel.pageErrors.push(...panel.errors());
+    await panel.close();
+  }
+  return problems;
 }
 
 /** The model a task runs with: the mock's behaviour can depend on the model name (see mockOllama.mjs), a real run never does. */
@@ -1811,6 +2007,21 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot) {
         run.userStop = true;
         await stop();
       }
+      // Chrome stops the worker in the middle of the run. The next poll wakes a new one, which
+      // must end the run it could not go on with, with a card that says why.
+      if (task.restartWorkerAfterSteps && !run.workerRestarted && (state.stepCount || 0) >= task.restartWorkerAfterSteps) {
+        run.workerRestarted = true;
+        run.problems.push(...(await stopAndWakeWorker(ctx, tabId)).map((p) => `mid-run worker restart: ${p}`));
+      }
+      // The user presses New chat while the run is going: the run must stop with it.
+      if (task.clearAfterSteps && !run.cleared && (state.stepCount || 0) >= task.clearAfterSteps) {
+        run.cleared = true;
+        const cleared = await ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'CLEAR_HISTORY', tabId: id }), tabId);
+        if (!cleared || cleared.success === false) run.problems.push(`CLEAR_HISTORY was rejected: ${JSON.stringify(cleared)}`);
+        // A request the loop had already sent before the clear may still be arriving at the model.
+        await sleep(300);
+        run.callsAtClear = llm.calls.length;
+      }
     } else if (begun && state.status !== 'paused') {
       break;
     }
@@ -1857,6 +2068,21 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot) {
   if (run.stopped || run.userStop) {
     await sleep(500);
     state = await getState();
+  }
+  // The new worker cannot go on with the run it found: it must end it as stopped (with its
+  // "Interrupted" row), never leave it idle as if nothing had been running.
+  if (run.workerRestarted && state.status !== 'stopped') {
+    run.problems.push(`after a mid-run worker restart the status is "${state.status}", expected "stopped"`);
+  }
+  // After New chat: a loop that kept going would ask the model again within about a second (the
+  // mock's wait step), so a few seconds of silence is the evidence that it stopped.
+  if (run.cleared) {
+    await sleep(3000);
+    state = await getState();
+    const more = llm.calls.length - run.callsAtClear;
+    if (more > 0) run.problems.push(`after New chat the run went on: the model got ${more} more call(s)`);
+    if (state.status !== 'idle') run.problems.push(`after New chat the status is "${state.status}", expected "idle"`);
+    if ((state.history || []).length) run.problems.push(`after New chat the history has ${(state.history || []).length} row(s) again`);
   }
   const wallMs = Date.now() - startedAt;
   const logs = logsOfRun(state.logs, await ctx.driver.evaluate(() => window.__logs), tabId);
@@ -1955,6 +2181,8 @@ async function runTask(ctx, fixtures, llm, name) {
     await page.setViewport({ width: SHOT_VIEWPORT.width, height: SHOT_VIEWPORT.height, deviceScaleFactor: SHOT_DPR });
   }
 
+  const researchProblems = task.research ? await configureResearch(ctx, fixtures, tabId, task.research, shotName, shotDir, screenshots) : [];
+
   const { state, run, timedOut, wallMs, logs, replies, states, stateStatuses, calls, facts } =
     await driveTask(ctx, llm, task, tabId, hosts, { name: shotName, dir: shotDir, list: screenshots });
   const answer = facts.answer;
@@ -1981,14 +2209,20 @@ async function runTask(ctx, fixtures, llm, name) {
   // what the card says (expectCard.body, expectCard.noBody) and may override the title.
   const expectCard = {
     // A run the harness stopped (a timeout, the loop guard) without a final entry ends like a user's Stop.
-    title: run.stopped && !facts.outcome && !facts.failed
+    title: run.stopped && (!facts.outcome || facts.outcome === 'partial_result') && !facts.failed
       ? 'Stopped by you'
       : task.expectOutcome && task.expectOutcome !== 'finish'
       ? 'Failed'
+      // A finish that said how the run went: the card follows the outcome, a failed step is only a note.
+      : facts.outcome === 'finish' && OUTCOME_TITLE[facts.finishOutcome] && !/^MOCK-FAIL:/i.test(String(facts.answer || '').trim())
+      ? OUTCOME_TITLE[facts.finishOutcome]
       : (facts.failed ? 'Failed' : (facts.unconfirmed ? 'Unconfirmed answer' : 'Done')),
     ...(task.expectCard || {})
   };
-  const cardProblems = await readPanelCard(ctx, tabId, expectCard);
+  // After New chat there is no run left to end: the panel must be the clean start screen.
+  const cardProblems = run.cleared ? await readPanelCleared(ctx, tabId) : await readPanelCard(ctx, tabId, expectCard);
+  if (task.cardShots) cardProblems.push(...await cardScreenshots(ctx, tabId, shotName, shotDir, screenshots));
+  const rowProblems = task.expectPanelRows ? await readPanelRows(ctx, tabId, task.expectPanelRows) : [];
   // Element badges are off: whatever the run did, the page must not end with numbers drawn on it.
   const badgeCount = await Promise.race([
     page.evaluate(() => document.querySelectorAll('.scoutfox-badge').length),
@@ -2048,13 +2282,15 @@ async function runTask(ctx, fixtures, llm, name) {
     timedOut,
     stopped: run.stopped,
     userStopped: !!run.userStop,
+    cleared: !!run.cleared,
+    workerRestarted: !!run.workerRestarted,
     loop: run.loop,
     outcome: facts.outcome,
     expectOutcome,
     unconfirmed: facts.unconfirmed,
     answer,
     answerCorrect: answer ? !!task.check(facts) : false,
-    expectProblems: [...beforeProblems, ...(MOCK && task.expectMock ? task.expectMock(facts) : []), ...cardProblems, ...badgeProblems, ...restartProblems, ...logProblems, ...shotProblems, ...approvalProblems, ...modelPickProblems, ...effortProblems, ...pageProblems],
+    expectProblems: [...beforeProblems, ...(MOCK && task.expectMock ? task.expectMock(facts) : []), ...cardProblems, ...badgeProblems, ...restartProblems, ...logProblems, ...shotProblems, ...approvalProblems, ...modelPickProblems, ...effortProblems, ...pageProblems, ...researchProblems, ...rowProblems],
     holdProblems: run.problems,
     stateUpdates: { count: states.length, byStatus: stateStatuses },
     mockFail: MOCK ? findMockFail(facts, calls) : null,
@@ -2149,9 +2385,11 @@ function judge(ctx, reports, gate) {
   for (const problem of ctx.pageShotProblems || []) failures.push(problem);
   for (const r of reports) {
     if (r.stopped) failures.push(`${r.task}: the harness stopped the run (${r.stopped})${r.loop ? `: the model got the same prompt ${r.loop.calls} times in a row` : ''}`);
+    if (TASKS[r.task]?.restartWorkerAfterSteps && !r.workerRestarted) failures.push(`${r.task}: the run ended before the harness could stop the worker`);
+    if (TASKS[r.task]?.clearAfterSteps && !r.cleared) failures.push(`${r.task}: the run ended before the harness could press New chat`);
     if (TASKS[r.task]?.stopAfterSteps && !r.userStopped) failures.push(`${r.task}: the run ended before the harness could click Stop`);
     if (!r.outcome) {
-      if (!r.stopped && !r.userStopped) failures.push(`${r.task}: the run ended with no final entry (status ${r.status})`);
+      if (!r.stopped && !r.userStopped && !r.cleared) failures.push(`${r.task}: the run ended with no final entry (status ${r.status})`);
     } else if (r.outcome !== r.expectOutcome) {
       failures.push(`${r.task}: the run ended with a ${r.outcome} entry, expected ${r.expectOutcome}`);
     } else if (!r.answerCorrect) {
@@ -2231,8 +2469,12 @@ async function main() {
     if (!TASKS[name]) throw new UserError(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
   }
   // A pending task is skipped with its reason and is never a failure: the engine cannot do what it checks yet.
-  const skipped = names.filter((n) => TASKS[n].pending).map((n) => ({ task: n, reason: TASKS[n].pending }));
-  const runNames = names.filter((n) => !TASKS[n].pending);
+  const skipped = names.filter((n) => TASKS[n].pending).map((n) => ({ task: n, reason: `pending: ${TASKS[n].pending}` }));
+  // A real-model task that names the sites it needs (reachable) is skipped when one does not answer:
+  // an offline machine or a site outage is not an agent failure. The mock never touches the web.
+  const unreachable = MOCK ? [] : await unreachableTasks(names.filter((n) => !TASKS[n].pending));
+  skipped.push(...unreachable);
+  const runNames = names.filter((n) => !TASKS[n].pending && !unreachable.some((u) => u.task === n));
 
   const puppeteer = await loadPuppeteer();
   checkChromium();
@@ -2303,7 +2545,7 @@ async function main() {
   } else {
     await saveSettings(ctx, llm, MODEL);
 
-    for (const { task, reason } of skipped) console.log(`\n=== ${task} === SKIPPED (pending): ${reason}`);
+    for (const { task, reason } of skipped) console.log(`\n=== ${task} === SKIPPED (${reason})`);
     for (const name of runNames) {
       const report = await runTask(ctx, fixtures, llm, name);
       reports.push(report);
@@ -2320,7 +2562,7 @@ async function main() {
   for (const r of reports) {
     console.log(`${r.task}: ${r.outcome || `no final entry (status ${r.status}${r.stopped ? `, stopped: ${r.stopped}` : ''})`}, answer ${r.answerCorrect ? 'right' : 'wrong'}, ${r.facts.steps.length} step(s), ${(r.wallMs / 1000).toFixed(1)} s, ${r.modelCalls} model call(s) (by node: ${countsText(r.facts.calls.byNode)}), ${fmtInt(r.promptTokens)} prompt + ${fmtInt(r.outputTokens)} output tokens`);
   }
-  if (!args['dump-snapshots']) for (const { task, reason } of skipped) console.log(`${task}: skipped (pending: ${reason})`);
+  if (!args['dump-snapshots']) for (const { task, reason } of skipped) console.log(`${task}: skipped (${reason})`);
   console.log(`service worker errors (console, exceptions, CSP violations): ${ctx.workerErrors.length}`);
   if (reports.length) {
     const probes = reports.flatMap((r) => r.probes);

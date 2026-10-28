@@ -33,11 +33,10 @@ test('Storage - DEFAULT_SETTINGS sanity check', () => {
   assert.equal(DEFAULT_PROVIDER_CONFIGS.ollama.model, 'qwen3.8:27b-mlx');
 });
 
-test('Storage - execute_js is always on', async () => {
-  // JavaScript execution is mandatory: no toggle, the model can always run it.
-  assert.equal(DEFAULT_SETTINGS.allowExecuteJs, true);
-  mockStorageData['agent_settings'] = { provider: 'openrouter', maxSteps: 250 };
-  assert.equal((await Storage.getSettings()).allowExecuteJs, true);
+test('Storage - an old stored execute_js opt-in is dropped (there is no execute_js tool)', async () => {
+  assert.equal('allowExecuteJs' in DEFAULT_SETTINGS, false);
+  mockStorageData['agent_settings'] = { provider: 'openrouter', maxSteps: 250, allowExecuteJs: true };
+  assert.equal('allowExecuteJs' in (await Storage.getSettings()), false);
   delete mockStorageData['agent_settings'];
 });
 

@@ -704,6 +704,11 @@ a:hover { color: var(--text-main); }
 .finish-card.failed { border-left-color: var(--danger); }
 .finish-card.failed .finish-title svg { color: var(--danger); }
 
+/* The model said it could not do the task (finish outcome "blocked"): the same danger edge, so it
+   never reads as a success, with the model's own reason in the answer below. */
+.finish-card.blocked { border-left-color: var(--danger); }
+.finish-card.blocked .finish-title svg { color: var(--danger); }
+
 /* One-line explanation under the title of an audited card. */
 .finish-card.has-sub .finish-title { margin-bottom: 3px; }
 .finish-subs { margin-bottom: 8px; }
@@ -823,6 +828,20 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
 .md-table .md-nw { white-space: nowrap; }
 .md-table .md-al-c { text-align: center; }
 .md-table .md-al-r { text-align: right; }
+
+/* An inline `code` span of an answer: a command, a file name, a version. Tokens only, so it reads
+   in light and dark; it may wrap, so a long path never pushes the card wider than the panel. */
+.md-code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
 
 /* Input Panel */
 .input-panel {
@@ -1260,7 +1279,35 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
   font-style: italic;
 }
 
+/* A titled group of settings (Research), set off from the fields above by a rule. */
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-section-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.subtext-hint.is-error {
+  color: var(--danger);
+  font-style: normal;
+}
+
 .form-input, .form-select {
+  /* A URL or a model id is read character by character: JetBrains Mono's ligatures drew "://" as ": /". */
+  font-variant-ligatures: none;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 8px;

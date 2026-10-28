@@ -52,7 +52,9 @@ export const TAMPERS = {
       const file = inside(dir, 'content/domCompressor.js');
       // appendFileSync would create a missing file, and then this control would silently do nothing.
       if (!fs.existsSync(file)) throw new Error('tamper=empty-page-text: content/domCompressor.js is not in the copy (was it moved?)');
-      fs.appendFileSync(file, '\n;(function () { if (window.domCompressor) window.domCompressor.extractPageText = function () { return \'\'; }; })();\n');
+      // Both readers: the snapshot's capped text and the full text read_page pages through. With only the
+      // first blanked, read_page still found the price and this control passed (it went blind).
+      fs.appendFileSync(file, '\n;(function () { if (window.domCompressor) { window.domCompressor.extractPageText = function () { return \'\'; }; window.domCompressor.extractFullPageText = function () { return \'\'; }; } })();\n');
     }
   },
   'zod-not-jitless': {
@@ -63,17 +65,73 @@ export const TAMPERS = {
     does: 'makes the runner drop every history row (recordEntry pushes nothing), so the side panel timeline stays empty and the run is invisible (the harness must fail: the run never starts visibly)',
     apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'this.history.push(entry)', ';')
   },
+  'idle-after-restore': {
+    does: 'makes a restarted worker reset the restored run to "idle" whenever the runner meta exists (the old bug): an interrupted run must end "stopped", so worker-restart-midrun must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'),
+      'if (saved) this.restoreGroupMap(saved.scoutFoxGroupIds || []);',
+      'if (saved) { this.restoreGroupMap(saved.scoutFoxGroupIds || []); this.status = "idle"; }')
+  },
+  'clear-keeps-loop': {
+    does: 'makes New chat clear the thread without ending the run (the old bug): the loop goes on into the cleared thread, so clear-midrun must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'this.endRun("idle", null);', ';')
+  },
+  'no-press-key': {
+    does: 'takes press_key out of the tool list the model is offered (the old tool set): editor-replace cannot select all or press Shift+Enter, so it must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'),
+      'TOOL_NAMES = SCOUTFOX_TOOLS.map((t) => t.name);',
+      '(() => { const i = SCOUTFOX_TOOLS.findIndex((t) => t.name === "press_key"); if (i < 0) throw new Error("tamper=no-press-key: press_key is not in the tool list"); SCOUTFOX_TOOLS.splice(i, 1); })();\n\tTOOL_NAMES = SCOUTFOX_TOOLS.map((t) => t.name);')
+  },
+  'type-needs-id': {
+    does: 'makes type refuse without an element_id again (the old rule): typing into the focused editor fails, so editor-replace must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'),
+      'const hasTarget = targetId !== void 0 && targetId !== null;',
+      'if (targetId === void 0 || targetId === null) return { success: false, error: "Type action requires an element_id.", via: "synthetic" };\n\t\tconst hasTarget = true;')
+  },
+  'no-observation': {
+    does: 'drops the observation line from every action result (the old one-line results): the model is not told what its actions did, so editor-replace must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'observationLine(exec?.effectDetail, urlAfter)', '""')
+  },
+  'no-repeat-guard': {
+    does: 'turns the repeat guard off (no repeat hint, no reflection note, the old loop): the dead click of stuck-recovery is repeated until the model gives up, so stuck-recovery must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'),
+      'const guard = this.progress.record(name, args, resultText);',
+      'const guard = { hint: null, reflect: false, noProgressInWindow: 0, repeats: 0 };')
+  },
+  'no-research': {
+    does: 'stops offering web_search and fetch_url to the model, as if Settings > Research were off: research-then-answer cannot find the fact outside the tab, so it must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'research: this.researchEnabled,', 'research: false,')
+  },
+  'finish-ignores-outcome': {
+    does: 'drops the outcome the finish tool named from the finish row (the old card rule: Done unless a step failed): stuck-recovery\'s honest "it did not work" shows the green Done card again, so stuck-recovery must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'if (outcome) entry.outcome = outcome;', '')
+  },
   'broken-net-recorder': {
     does: 'makes content/net-recorder.js (the MAIN-world content script) throw when it loads (the fixture page checks must fail)',
     apply: (dir) => prepend(inside(dir, 'content/net-recorder.js'), 'throw new Error(\'recorder boom (tamper=broken-net-recorder)\');\n')
   },
   'bad-tool-schema': {
-    does: 'sets get_page_text inputSchema.required to null in the copy - a provider answers HTTP 400 "null is not of type array" and kills the run; the extension must fail locally instead, with an error naming the tool',
+    does: 'sets the read_page inputSchema.required to null in the copy - a provider answers HTTP 400 "null is not of type array" and kills the run; the extension must fail locally instead, with an error naming the tool',
     apply: (dir) => {
       const file = inside(dir, 'background/sw.js');
-      const from = '\t\t\tname: "get_page_text",\n\t\t\tdescription: "Read ALL visible text content from the current page. Use FIRST to understand page content.",\n\t\t\tinputSchema: {\n\t\t\t\ttype: "object",\n\t\t\t\tproperties: {},';
-      replaceOnce(file, from, from + ',\n\t\t\t\t\trequired: null');
+      const from = '\t\t\tname: "read_page",';
+      const code = fs.readFileSync(file, 'utf8');
+      const at = code.indexOf(from);
+      if (at < 0 || code.indexOf(from, at + 1) >= 0) throw new Error('tamper=bad-tool-schema: expected exactly one read_page tool definition in background/sw.js');
+      const schema = code.indexOf('inputSchema: {\n\t\t\t\ttype: "object",', at);
+      if (schema < 0) throw new Error('tamper=bad-tool-schema: the read_page tool has no inputSchema');
+      const insertAt = schema + 'inputSchema: {\n\t\t\t\ttype: "object",'.length;
+      fs.writeFileSync(file, `${code.slice(0, insertAt)}\n\t\t\t\trequired: null,${code.slice(insertAt)}`);
     }
+  },
+  'scroll-lies': {
+    does: 'makes scroll report the full step as moved without turning the wheel (the old always-"Scrolled" path): nothing moves, the observation measures no scroll, so notebook-fix and virtual-scroll must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'),
+      'await this.wheelAndMeasure(tabId, point, delta, before, control, ask)',
+      '({ after: { ...before, top: before.top + delta, atTop: false, atBottom: false } })')
+  },
+  'read-repeats': {
+    does: 'makes read_page ignore the part it is asked for and always read part 1 (the old re-read of the same first text): notebook-fix asks for part 2 and must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'const part = readPagePart(args?.part);', 'const part = 1;')
   },
   'no-fox-mark': {
     does: 'takes the fox mark out of the panel header in the copy (the mark check must fail: the panel shows no fox next to the name)',

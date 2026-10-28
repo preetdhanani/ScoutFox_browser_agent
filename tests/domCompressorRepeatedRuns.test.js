@@ -3,7 +3,7 @@
  * content script sends to the model (DOMCompressor.extractPageText, cut at 4500 characters) was
  * filled with "Batch 1 Shipped Batch 2 Shipped Batch 3 Ships December - Sold Out ..." again and
  * again until the cap. The price, the shipping and the delivery text never reached the small local
- * model, which then made up a shipping answer. read_page_text returns the same text, so the model
+ * model, which then made up a shipping answer. read_page returns the same text, so the model
  * had no way to get past the noise.
  *
  * What the live page does (read with the real extractor in a real browser): every option of the
@@ -36,7 +36,7 @@ const FIXTURE = fs.readFileSync(new URL('./fixtures/site/configurator.html', imp
 const CAP = 4500;
 // The note a cut page text ends with names the shown and the full size and how to read the rest
 // (src/shared/clip.ts; silent-truncation-no-marker). It used to be "[page text truncated at 4500 characters]".
-const NOTE = /\n\[page text truncated: showing (\d+) of (\d+) characters - call read_page_text to read the whole page in parts\]$/;
+const NOTE = /\n\[page text truncated: showing (\d+) of (\d+) characters - call read_page to read the whole page in parts\]$/;
 
 // ---------------------------------------------------------------------------------------------
 // The real compressor against a fake DOM
@@ -257,7 +257,7 @@ test('a text that is cut at the cap ends with a marker that says so', () => {
 test('a text that fits the cap has no marker, also exactly at the cap', () => {
   assert.equal(pageTextOf('a'.repeat(CAP)), 'a'.repeat(CAP));
   assert.equal(pageTextOf('A short page text that is long enough to count.'), 'A short page text that is long enough to count.');
-  assert.equal(pageTextOf('a'.repeat(CAP + 1)), `${'a'.repeat(CAP)}\n[page text truncated: showing ${CAP} of ${CAP + 1} characters - call read_page_text to read the whole page in parts]`);
+  assert.equal(pageTextOf('a'.repeat(CAP + 1)), `${'a'.repeat(CAP)}\n[page text truncated: showing ${CAP} of ${CAP + 1} characters - call read_page to read the whole page in parts]`);
 });
 
 test('collapsing first means the cap is spent on real content', () => {

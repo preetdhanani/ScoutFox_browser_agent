@@ -232,13 +232,14 @@ export class CDPManager {
     }
   }
 
-  /** Rejects with the named error (a CdpTimeoutError) when the promise does not settle within the timer. */
+  /**
+   * Rejects with the named error (a CdpTimeoutError) when the promise does not settle within the timer.
+   * The timer is not unref'd: it is always cleared on settle, and it must keep the event loop alive
+   * until it fires, or a hanging command never rejects (Node 22 exits the loop on an unref'd timer).
+   */
   private withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => reject(new CdpTimeoutError(message)), timeoutMs);
-      if (typeof (timer as any)?.unref === 'function') {
-        (timer as any).unref();
-      }
       promise.then(
         (value) => {
           clearTimeout(timer);

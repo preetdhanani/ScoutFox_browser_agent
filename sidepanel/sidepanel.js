@@ -158,8 +158,6 @@ const ICONS = {
   enter: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 5v6a3 3 0 0 1-3 3H5"/><polyline points="9 10 5 14 9 18"/></svg>',
   scrollIco: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 4 12 8 16 4"/><polyline points="8 20 12 16 16 20"/></svg>',
   back: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="10 5 4 11 10 17"/><path d="M4 11h10a6 6 0 0 1 6 6v2"/></svg>',
-  code: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 7 4 12 9 17"/><polyline points="15 7 20 12 15 17"/></svg>',
-  network: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10l-3-3M14 8l-3 3"/><path d="M20 16H10l3-3M10 16l3 3"/></svg>',
   layers: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><polygon points="12 3 21 8 12 13 3 8"/><polyline points="3 13 12 18 21 13"/></svg>',
   ask: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.2a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.9.7-.9 1.3v.4"/><circle cx="12" cy="16.6" r="0.6" fill="currentColor" stroke="none"/></svg>',
   chevron: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>',
@@ -453,8 +451,49 @@ async function loadSettings() {
     ollamaGroup.style.display = activeProvider === 'ollama' ? 'flex' : 'none';
   }
 
+  loadResearchSettings(currentSettings.research);
+
   syncCustomProviderActions(activeProvider);
   updateSelectedModel(providerCfg.model || currentSettings.model);
+}
+
+/** The Research section from the stored settings (getSettings already filled the defaults). */
+function loadResearchSettings(research) {
+  const r = research || DEFAULT_SETTINGS.research;
+  const enabled = document.getElementById('researchEnabledSelect');
+  if (!enabled) return;
+  enabled.value = r.enabled === false ? 'off' : 'on';
+  document.getElementById('researchBackendSelect').value = r.backend === 'searxng' ? 'searxng' : 'duckduckgo';
+  document.getElementById('searxngUrlInput').value = r.searxngUrl || '';
+  syncResearchFields();
+}
+
+/** The research fields the current choice uses: no backend when research is off, no URL unless SearXNG. */
+function syncResearchFields() {
+  const on = document.getElementById('researchEnabledSelect')?.value !== 'off';
+  const searxng = document.getElementById('researchBackendSelect')?.value === 'searxng';
+  const backend = document.getElementById('researchBackendGroup');
+  const urlGroup = document.getElementById('searxngUrlGroup');
+  if (backend) backend.style.display = on ? 'flex' : 'none';
+  if (urlGroup) urlGroup.style.display = on && searxng ? 'flex' : 'none';
+  const hint = document.getElementById('searxngUrlHint');
+  const url = (document.getElementById('searxngUrlInput')?.value || '').trim();
+  const bad = on && searxng && !/^https?:\/\/[^\s/]+/i.test(url);
+  if (hint) {
+    hint.classList.toggle('is-error', bad);
+    hint.textContent = bad
+      ? (url ? 'Enter a full address that starts with https:// or http://.' : 'Enter the address of your SearXNG server. Until then web search has no results.')
+      : 'The server must allow the JSON format (search: formats: [html, json]).';
+  }
+}
+
+/** The Research section as the settings object stores it. */
+function researchFromForm() {
+  return {
+    enabled: document.getElementById('researchEnabledSelect')?.value !== 'off',
+    backend: document.getElementById('researchBackendSelect')?.value === 'searxng' ? 'searxng' : 'duckduckgo',
+    searxngUrl: (document.getElementById('searxngUrlInput')?.value || '').trim()
+  };
 }
 
 /** Edit and Delete apply to a user-added provider only; the row stays hidden for the built-ins. */
@@ -710,11 +749,11 @@ async function autoSaveCurrentForm() {
     actionDelayMs: parseInt(document.getElementById('delayInput').value, 10) || DEFAULT_SETTINGS.actionDelayMs,
     ollamaNumPredict: parseInt(document.getElementById('ollamaNumPredictInput').value, 10) || DEFAULT_SETTINGS.ollamaNumPredict,
     llmTimeoutMs,
-    // JavaScript is always on; screenshots are always on too. Neither has a user toggle anymore.
-    allowExecuteJs: true,
+    // Screenshots are always on: there is no user toggle for them.
     screenshots: true,
     effortDefault: document.getElementById('effortDefaultSelect')?.value || currentSettings.effortDefault || 'medium',
-    effortAdaptive: (document.getElementById('effortAdaptiveSelect')?.value || 'on') !== 'off'
+    effortAdaptive: (document.getElementById('effortAdaptiveSelect')?.value || 'on') !== 'off',
+    research: researchFromForm()
   };
 
   // A provider with a timeout of its own (a custom provider's, set in its dialog) is read before
@@ -1358,6 +1397,13 @@ function initEventListeners() {
     if (el) {
       el.addEventListener('change', autoSaveCurrentForm);
     }
+  });
+  // The Research section saves on change like the fields above, and shows only the fields it uses.
+  ['researchEnabledSelect', 'researchBackendSelect', 'searxngUrlInput'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => { syncResearchFields(); autoSaveCurrentForm(); });
+    if (id === 'searxngUrlInput') el.addEventListener('input', syncResearchFields);
   });
   // The default effort is also the composer's effort from now on, as it is when the panel opens.
   const effortDefaultSelect = document.getElementById('effortDefaultSelect');
@@ -2215,7 +2261,10 @@ function buildTurns(history) {
           break;
         }
       }
-      if (item.success === false) cur.failed = true;
+      if (item.success === false) {
+        cur.failed = true;
+        cur.failedSteps = (cur.failedSteps || 0) + 1;
+      }
     } else if (item.type === 'error') {
       cur.entries.push({ kind: 'fault', idx, content: item.content });
       cur.failed = true;
@@ -2224,6 +2273,9 @@ function buildTurns(history) {
     } else if (item.type === 'finish') {
       cur.answer = item.answer;
       cur.answerUnconfirmed = !!item.unconfirmed;
+      // How the run went, as the model said it with finish. Absent on a plain-text reply and on
+      // runs saved before finish had it: those keep the older card (failed step -> Failed).
+      cur.outcome = Object.prototype.hasOwnProperty.call(OUTCOME_CARD, item.outcome) ? item.outcome : null;
       // The supporting material of a structured answer, shown in its own section.
       cur.evidence = item.evidence || '';
       // Written by the engine's answer audit (agent/answerAudit.ts). Absent on older runs and on
@@ -2264,6 +2316,11 @@ function describeAction(action, outcome) {
 
   switch (action.action) {
     case 'navigate':      return { icon: ICONS.globe, text: `Opened ${quote(host(action.url || ''))}` };
+    case 'read_page': {
+      const part = Number.isInteger(action.part) && action.part > 1 ? ` (part ${escapeHtml(String(action.part))})` : '';
+      return { icon: ICONS.eye, text: action.element_id !== undefined && action.element_id !== null ? `Read the text of ${label ? quote(label) : `element ${escapeHtml(String(action.element_id))}`}${part}` : `Read page text${part}` };
+    }
+    // A row of a session saved before read_page replaced it.
     case 'read_page_text':return { icon: ICONS.eye, text: 'Read page text' };
     case 'click':         return {
       icon: ICONS.pointer,
@@ -2277,19 +2334,31 @@ function describeAction(action, outcome) {
           : `Clicked element ${escapeHtml(String(action.element_id))}`)
     };
     case 'take_screenshot': return { icon: ICONS.camera, text: 'Looked at the page' };
-    case 'render_table':    return { icon: ICONS.doc, text: `Built table: ${escapeHtml(String(action.columns?.length || 0))} columns × ${escapeHtml(String(action.rows?.length || 0))} rows` };
-    case 'type':          return { icon: ICONS.keyboard, text: `Typed ${quote(action.text || '')}${label ? ` into ${quote(label)}` : ''}` };
-    case 'scroll':        return { icon: ICONS.scrollIco, text: `Scrolled ${escapeHtml(action.direction || 'down')}` };
+    case 'type':          return { icon: ICONS.keyboard, text: `${action.mode === 'append' ? 'Appended' : 'Typed'} ${quote(action.text || '')}${label ? ` into ${quote(label)}` : ''}` };
+    case 'scroll': {
+      // The engine measures a scroll: the row says what really moved, or that nothing did.
+      const measured = /^(Scrolled .+? (?:down|up) \d+px|Did not move: [^.]*)/.exec(String((outcome && outcome.message) || ''));
+      return { icon: ICONS.scrollIco, text: measured ? escapeHtml(measured[1]) : `Scrolled ${escapeHtml(action.direction || 'down')}` };
+    }
     case 'go_back':       return { icon: ICONS.back, text: 'Went back' };
     case 'go_forward':    return { icon: ICONS.back, text: 'Went forward' };
     case 'get_page_elements': return { icon: ICONS.pointer, text: 'Listed the clickable elements' };
     case 'find_elements': return { icon: ICONS.search, text: `Searched elements for ${quote(action.query || '')}` };
-    case 'execute_js':    return { icon: ICONS.code, text: 'Ran JavaScript' };
-    case 'read_network_requests': return { icon: ICONS.network, text: 'Checked network activity' };
-    case 'browser_batch': return { icon: ICONS.layers, text: `Ran ${(action.steps || []).length} actions in one batch` };
-    case 'open_window':   return { icon: ICONS.globe, text: `Opened a new window at ${quote(host(action.url || ''))}` };
+    // Research outside the tab: the row says what was searched, and what was read from where.
+    case 'web_search':    return { icon: ICONS.search, text: `Searched the web: ${quote(action.query || '')}` };
+    case 'fetch_url': {
+      const file = (() => { try { return decodeURIComponent(new URL(action.url).pathname.split('/').filter(Boolean).pop() || ''); } catch (_) { return ''; } })();
+      const name = label || file || host(action.url || '');
+      const part = Number.isInteger(action.part) && action.part > 1 ? ` (part ${escapeHtml(String(action.part))})` : '';
+      return { icon: ICONS.doc, text: `Read ${quote(name)} (${escapeHtml(host(action.url || ''))})${part}` };
+    }
     case 'ask_user':      return { icon: ICONS.ask, text: `Asked ${quote(action.question || 'a question')}` };
-    case 'press_key':     return { icon: ICONS.keyboard, text: `Pressed ${quote(action.key || 'a key')}` };
+    case 'press_key': {
+      const names = { ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift', meta: 'Meta' };
+      const mods = Array.isArray(action.modifiers) ? action.modifiers.map((m) => names[m] || String(m)) : [];
+      const key = action.key === 'select_all' ? 'Select all' : String(action.key || 'a key');
+      return { icon: ICONS.keyboard, text: `Pressed ${quote([...mods, key].join('+'))}` };
+    }
     case 'wait':          return { icon: ICONS.clock, text: `Waited ${escapeHtml(String(action.amount || 1))}s` };
     case 'finish':
       // A finish the engine's answer audit sent back is not a finish: the run went on. Say so, and why.
@@ -2483,6 +2552,23 @@ function renderAuditDetails(audit, turnNo, mode) {
 }
 
 /**
+ * The card of a finish that says how the run went (the finish tool's `outcome`). The title follows
+ * the outcome, never whether a step failed on the way: a run can fail a step and still answer
+ * (a blocked search, then the answer from another source), and a run can fail nothing and still
+ * not do the task (a button that does nothing). A failed step is a quiet note under the title.
+ */
+const OUTCOME_CARD = {
+  done: { title: 'Done', cls: '', icon: 'complete' },
+  partial: { title: 'Partly done', cls: 'partial', icon: 'warning' },
+  blocked: { title: 'Could not finish', cls: 'blocked', icon: 'warning' }
+};
+
+function failedStepsNote(count) {
+  const n = Number(count) || 0;
+  return n > 0 ? `${n} step${n === 1 ? '' : 's'} failed along the way.` : '';
+}
+
+/**
  * The finish card. Verdict decides the card:
  *   unverified -> danger card "Unconfirmed answer"     partial -> warning card "Partial answer"
  *   verified   -> today's green "Done" plus a quiet "Checked against N pages" line
@@ -2526,6 +2612,14 @@ function renderFinishCard(turn, findings = null) {
   const allFindings = (findings && findings.length > 0) ? findings : (turn.findings || (turn.table && turn.table.rows ? turn.table.rows : []));
   const hasEmbeddedTable = hasMarkdownBlocks(shown) && String(shown).includes('|');
   const findingsHtml = (allFindings && allFindings.length > 0 && !hasEmbeddedTable) ? renderProvenanceFindingsTable(allFindings) : '';
+
+  if (!audit && turn.outcome && !isFailedAnswer) {
+    const card = OUTCOME_CARD[turn.outcome];
+    const note = failedStepsNote(turn.failedSteps);
+    const classes = ['finish-card', card.cls, note ? 'has-sub' : ''].filter(Boolean).join(' ');
+    const subHtml = note ? `<div class="finish-subs"><div class="finish-sub">${escapeHtml(note)}</div></div>` : '';
+    return `<div class="${classes}"><div class="finish-title">${ICONS[card.icon]} ${card.title}</div>${subHtml}${body}${evidenceHtml}${findingsHtml}</div>`;
+  }
 
   if (!audit) {
     if (isFailedAnswer || hadFailedStep) {
@@ -2584,14 +2678,16 @@ function renderFinishCard(turn, findings = null) {
  */
 const PARTIAL_TITLE = {
   stopped: 'Stopped by you',
-  max_steps: 'Stopped at the step limit'
+  max_steps: 'Stopped at the step limit',
+  interrupted: 'Interrupted'
 };
 const PARTIAL_SUBTITLE = {
   stopped: 'The run was stopped before it finished.',
   max_steps: 'The run used all its steps before it finished.',
   partial: 'A site could not be read, so not every source was checked.',
   stopped_early: 'The run stopped before every planned site was checked.',
-  model_unusable: 'The model replies could not be used, so the run stopped early.'
+  model_unusable: 'The model replies could not be used, so the run stopped early.',
+  interrupted: 'Chrome restarted the background worker, so the run could not go on.'
 };
 const PARTIAL_SUBTITLE_FALLBACK = 'The run ended before it finished.';
 // A first paragraph longer than this, or with a line break, is an answer, not a reason line.
@@ -3201,9 +3297,29 @@ function hasMarkdownBlocks(text) {
 
 // ---- legacy renderer -------------------------------------------------------------------------
 
-/** Escape first, then **bold**. Both renderers build their inline text with this. */
+/**
+ * An inline code span: one backtick, text on one line, one backtick. A double or triple backtick
+ * (a fence) is not one, so ```x``` stays as it was written. It runs on ESCAPED text, so the span's
+ * content is already safe, and it is never bolded: `**x**` shows the stars.
+ */
+const INLINE_CODE = /(?<!`)`([^`\n]+)`(?!`)/g;
+
+const markdownBold = (escaped) => escaped.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+/** Escaped text with its `code` spans rendered, and `rest` applied to the text between them. */
+function withCodeSpans(escaped, rest) {
+  let out = '';
+  let at = 0;
+  for (const match of escaped.matchAll(INLINE_CODE)) {
+    out += rest(escaped.slice(at, match.index)) + `<code class="md-code">${match[1]}</code>`;
+    at = match.index + match[0].length;
+  }
+  return out + rest(escaped.slice(at));
+}
+
+/** Escape first, then `code` spans and **bold** around them. Both renderers build their inline text with this. */
 function markdownInline(text) {
-  return escapeHtml(text).replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  return withCodeSpans(escapeHtml(text), markdownBold);
 }
 
 function legacyMarkdown(text) {
@@ -3465,9 +3581,9 @@ function parseMarkdownBlocks(source) {
 }
 
 function markdownTableInline(text) {
-  let escaped = escapeHtml(text);
-  escaped = escaped.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="site-link">$1</a>');
-  return escaped.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  return withCodeSpans(escapeHtml(text), (part) => markdownBold(
+    part.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="site-link">$1</a>')
+  ));
 }
 
 function renderMarkdownTable(table) {

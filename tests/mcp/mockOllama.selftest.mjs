@@ -32,18 +32,28 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SCOUTFOX_TOOLS } from '../../src/background/mcp/tools.ts';
-import { linkNotOpenedNote, rankElementLines } from '../../src/background/mcp/server.ts';
+import { RESEARCH_TOOL_NAMES, SCOUTFOX_TOOLS } from '../../src/background/mcp/tools.ts';
+import { sourceOf, wrapUntrusted } from '../../src/background/mcp/untrusted.ts';
+import { webSearch } from '../../src/background/research/search.ts';
+import { fetchUrl } from '../../src/background/research/fetchText.ts';
+import { RESEARCH_HOST } from '../e2e/lib/twoSources.mjs';
+import vm from 'node:vm';
+import { fieldReadBack, linkNotOpenedNote, observationLine, scrollResultText, SAME_TEXT_NOTE } from '../../src/background/mcp/server.ts';
+import { formatFindMessage, rankFindCandidates } from '../../src/content/domCompressor.ts';
+import { pageTextPart } from '../../src/content/pageText.ts';
+import { resolveKey } from '../../src/background/browser/input.ts';
 import {
   agentResponseEntry,
   executionResultEntry,
   finishEntry,
+  finishOutcomeOf,
   mapToolToAction,
   screenshotResultEntry,
   userGoalEntry
 } from '../../src/background/mcp/historyEntries.ts';
 import { extractReadableAnswer } from '../../src/shared/answerText.ts';
-import { runFacts, TASKS } from './tasks.mjs';
+import { ProgressTracker, REFLECTION_TEXT } from '../../src/background/mcp/progress.ts';
+import { runFacts, TASKS, endedByHarness, onlyWaits } from './tasks.mjs';
 import { MOCK_THINKING_TEXT,
   MOCK_FAIL_PREFIX,
   MOCK_PARAMETER_SIZE,
@@ -68,6 +78,26 @@ const ollamaTools = SCOUTFOX_TOOLS.map((t) => ({
   type: 'function',
   function: { name: t.name, description: t.description, parameters: t.inputSchema }
 }));
+
+// The research fixture as the service worker reaches it in a browser run: the fixture server's
+// files under RESEARCH_HOST (tests/e2e/lib/fixtureServer.mjs serves them the same way: a path
+// without a file is its .json, and __ORIGIN__ in a .json is the origin asked). web_search and
+// fetch_url below are the extension's own functions, handed this stand-in for fetch.
+const SITE_DIR = path.resolve(HERE, '..', 'fixtures', 'site');
+const RESEARCH_ORIGIN = `http://${RESEARCH_HOST}:8765`;
+const RESEARCH_TYPES = { '.json': 'application/json; charset=utf-8', '.html': 'text/html; charset=utf-8', '.sh': 'text/x-sh; charset=utf-8' };
+async function fixtureFetch(input) {
+  const url = new URL(String(input));
+  let file = path.join(SITE_DIR, decodeURIComponent(url.pathname).replace(/^\/+/, ''));
+  if (!path.extname(file) && fs.existsSync(`${file}.json`)) file = `${file}.json`;
+  const found = url.origin === RESEARCH_ORIGIN && file.startsWith(SITE_DIR + path.sep) && fs.existsSync(file);
+  let body = found ? fs.readFileSync(file, 'utf8') : 'not found';
+  if (found && path.extname(file) === '.json') body = body.replaceAll('__ORIGIN__', url.origin);
+  const res = new Response(body, { status: found ? 200 : 404, headers: { 'content-type': found ? RESEARCH_TYPES[path.extname(file)] || 'application/octet-stream' : 'text/plain' } });
+  Object.defineProperty(res, 'url', { value: url.href });
+  return res;
+}
+const RESEARCH_SETTINGS = { enabled: true, backend: 'searxng', searxngUrl: `${RESEARCH_ORIGIN}/research` };
 
 // The snapshot files are named after the page without its .html ending (store.html -> store.json).
 const snapshotOf = (name) => JSON.parse(fs.readFileSync(path.join(SNAPSHOT_DIR, `${String(name).replace(/\.html$/, '')}.json`), 'utf8'));
@@ -108,27 +138,175 @@ function ollamaPictureMessage() {
  * that is what the server does now (a failed action is an error, not a success), and the walk
  * has to see the same thing the extension would.
  */
-function serverResult(name, args, snapshot, strip, state = {}) {
-  const { frame = null, shuffled = false, pageSignature = null, onPageClick = () => {}, onShuffle = () => {}, onOpen = () => {}, blocked = false, onAccept = () => {} } = state;
+/**
+ * The facts the effect probe would measure for an action of the walk, as the server formats them
+ * (observationLine). `focus` is the focused element's label; `added`/`removed` the visible lines
+ * that changed. strip.observation is the honesty case: the line never reaches the model.
+ */
+function observed(strip, { focus = null, focusChanged = false, added = '', removed = '', container = null } = {}) {
+  if (strip.observation) return '';
+  const changed = Boolean(added || removed);
+  return `\n${observationLine({
+    base: true,
+    url: 'http://127.0.0.1:8765/page.html',
+    urlChanged: false,
+    focus: focus ? { label: focus, editable: true, caretLine: null, text: null } : null,
+    focusChanged,
+    scroll: { x: 0, y: 0 },
+    scrollChanged: false,
+    container,
+    textHash: changed ? 'h2' : 'h1',
+    textChanged: changed,
+    added,
+    removed,
+    changedChars: added.length + removed.length
+  })}`;
+}
+
+/** The editor of editor.html as the walk plays it: its text, and the output line under it. */
+const EDITOR_LABEL = 'textbox "Code cell editor"';
+
+// The rows of virtual-list.html, from the same file the page loads, so the walk and the page agree on every row.
+const ORDERS = (() => {
+  const sandbox = {};
+  vm.runInNewContext(fs.readFileSync(path.resolve(HERE, '..', 'fixtures', 'site', 'virtual-list-data.js'), 'utf8'), { globalThis: sandbox, window: sandbox });
+  return sandbox.VIRTUAL_ORDERS;
+})();
+/** The list of virtual-list.html as the walk plays it: rows of 36 px, a view about 18 rows tall, 3 rows drawn beyond it. */
+const ORDER_ROW_PX = 36;
+const ORDER_VIEW_PX = 650;
+const ORDER_STEP_PX = Math.round(ORDER_VIEW_PX * 0.8);
+function drawnOrders(top) {
+  const first = Math.max(0, Math.floor(top / ORDER_ROW_PX) - 3);
+  const last = Math.min(ORDERS.rows.length, Math.ceil((top + ORDER_VIEW_PX) / ORDER_ROW_PX) + 3);
+  return ORDERS.rows.slice(first, last).map(ORDERS.rowText);
+}
+
+/** The notebook of notebook.html as the walk plays it: cell 14's code and output, and the cells panel. */
+const NOTEBOOK_CELL14 = '!sudo apt-get update && sudo apt-get install -y zstd\n!curl -fsSL https://ollama.com/install.sh | sh';
+const NOTEBOOK_PANEL = 'the "Notebook cells" panel';
+const NOTEBOOK_PANEL_MAX = 6200;
+
+/** The page text of a snapshot as the walk shows it now: the edits and runs of the walk applied. */
+function liveText(snapshot, editor, orders) {
+  if (orders) return ['All orders', '500 orders, newest last. Scroll the list to see more.', ...drawnOrders(orders.top)].join('\n');
+  let text = snapshot.fullPageText || snapshot.pageText || '';
+  if (editor && editor.kind === 'notebook') {
+    const lines = editor.original.split('\n').join('\n');
+    text = text.replace(lines, editor.text).replace(editor.originalOutput, editor.output);
+  } else if (editor) {
+    text = text.replace(/Out \[\d+\]: [^\n]*/, editor.output).replace(/sudo apt install ollama/, editor.text);
+  }
+  return text;
+}
+
+/** The find result the content script gives, from the element lines of a snapshot: the real matcher and the real message. */
+function findResult(elementsText, query) {
+  const lines = String(elementsText || '').split('\n').filter((line) => /^\[\d+\]/.test(line));
+  const records = lines.map((line) => ({
+    item: line,
+    fields: {
+      text: /"([^"]*)"/.exec(line.replace(/^\[\d+\]\s*/, ''))?.[1] || '',
+      ariaLabel: /\blabel="([^"]+)"/.exec(line)?.[1] || '',
+      placeholder: '', name: '', title: '', alt: '',
+      hrefPath: /\bhref="([^"]+)"/.exec(line)?.[1] || '',
+      role: /^\[\d+\]\s*([a-z]+)/.exec(line)?.[1] || ''
+    },
+    inViewport: !/\[off-screen\]/.test(line),
+    distance: 0
+  }));
+  const ranked = rankFindCandidates(records, query).slice(0, 8);
+  return formatFindMessage({ query, foundCount: ranked.length, shownCount: ranked.length, matches: ranked.map((r) => ({ line: r.item })), nearestLabels: [] });
+}
+
+async function serverResult(name, args, snapshot, strip, state = {}) {
+  const { frame = null, shuffled = false, pageSignature = null, onShuffle = () => {}, onOpen = () => {}, blocked = false, onAccept = () => {}, editor = null, orders = null, reads = new Map() } = state;
   const shuffleId = String(snapshot.elementsText || '').split('\n')
     .map((line) => /^\[(\d+)\].*shuffle/i.exec(line))
     .find(Boolean)?.[1];
+  const editorLabel = editor && editor.kind === 'notebook' ? 'textbox "Cell 14 code"' : EDITOR_LABEL;
   switch (name) {
-    case 'get_page_text':
-    case 'read_page_text':
-      return strip.pageText ? '' : snapshot.pageText;
+    case 'read_page': {
+      if (strip.pageText) return '';
+      const hasId = args.element_id !== undefined && args.element_id !== null;
+      let text;
+      if (hasId) {
+        const line = String(snapshot.elementsText || '').split('\n').find((l) => l.startsWith(`[${args.element_id}] `));
+        if (!line) return `Error: Element [${args.element_id}] is not on this page's element list. Use an element_id from the last get_page_elements or find, or read_page without element_id.`;
+        text = /"([^"]*)"/.exec(line.replace(/^\[\d+\]\s*/, ''))?.[1] || '';
+      } else {
+        text = liveText(snapshot, editor, orders);
+      }
+      // The part the request names, read the way the content script and the server read it.
+      const number = args.part === undefined || strip.readPart ? 1 : args.part;
+      const part = pageTextPart(text, number);
+      if (number > part.count) return `Error: Page text has only ${part.count} part${part.count === 1 ? '' : 's'}, so there is no part ${number}. Read part 1 to ${part.count}.`;
+      const body = `${hasId ? `Text of element [${args.element_id}]` : 'Page text'} (${part.note}):\n${wrapUntrusted(sourceOf(snapshot.url || ''), part.text || '(no text)')}`;
+      const key = `${hasId ? args.element_id : ''}|${number}`;
+      const same = reads.get('last') === `${key}|${part.text}`;
+      reads.set('last', `${key}|${part.text}`);
+      return `${same ? `${SAME_TEXT_NOTE}\n` : ''}${body}`;
+    }
     case 'get_page_elements':
       return strip.elements ? '' : snapshot.elementsText;
-    case 'find': {
+    case 'find':
       if (strip.elements) return '';
-      // The engine's own ranking (server.ts), so the walk finds what the extension finds.
-      const matches = rankElementLines(snapshot.elementsText, String(args.query || '')).map((l) => `${l} | matches "${args.query}"`);
-      return matches.length ? matches.join('\n') : `No elements found matching "${args.query}". Try get_page_elements to see all.`;
+      // The engine's own matcher and message (src/content/domCompressor.ts), over the snapshot's lines.
+      return findResult(snapshot.elementsText, String(args.query || ''));
+    case 'type': {
+      const hasId = args.element_id !== undefined && args.element_id !== null;
+      // Without an element id the text goes into the focused element; nothing focused is refused.
+      if (!hasId && !(editor && editor.focused)) return 'Error: Nothing editable has focus, so nothing was typed. Click into the field first, then call type without element_id, or give the element_id of the field.';
+      const before = editor ? editor.text : '';
+      const replaced = args.mode !== 'append' || (editor && editor.selectedAll);
+      if (editor && editor.focused) {
+        editor.text = replaced ? String(args.text) : `${editor.text}${args.text}`;
+        editor.selectedAll = false;
+      }
+      const where = hasId ? `element [${args.element_id}]` : `the focused element (${editorLabel})`;
+      const readBack = editor ? fieldReadBack(editor.text, String(args.text)) : '';
+      return `${args.mode === 'append' ? 'Appended to' : 'Typed into'} ${where}${args.mode === 'append' ? '' : ' (replaced its content)'}${args.submit ? ' and pressed Enter' : ''}${args.reason ? `: ${args.reason}` : ''}${readBack}${observed(strip, { focus: editorLabel, added: editor ? editor.text : '', removed: before })}`;
     }
-    case 'type':
-      return `Typed into element [${args.element_id}]${args.reason ? `: ${args.reason}` : ''}`;
-    case 'scroll':
-      return `Scrolled ${args.direction}${args.reason ? `: ${args.reason}` : ''}`;
+    case 'press_key': {
+      const key = resolveKey(args.key, args.modifiers);
+      if ('error' in key) return key.error;
+      if (editor && editor.focused && args.key === 'select_all') editor.selectedAll = true;
+      // Shift+Enter in the focused editor runs the cell: the output under it changes.
+      if (editor && editor.focused && args.key === 'Enter' && (args.modifiers || []).includes('shift')) {
+        const before = editor.output;
+        editor.runs += 1;
+        if (editor.kind === 'notebook') {
+          // notebook.html's runCode: sudo or apt gets the permission error, the archive prints the version.
+          editor.output = /\bsudo\b|\bapt(-get)?\b/.test(editor.text) ? editor.originalOutput : /ollama-linux-amd64\.tar\.zst/.test(editor.text) ? 'ollama version 0.40.11' : '';
+        } else {
+          const echo = /^echo\s+(.*)$/s.exec(editor.text.trim());
+          editor.output = `Out [${editor.runs}]: ${echo ? echo[1].trim() : `${editor.text.trim().split(/\s+/)[0]}: command not found`}`;
+        }
+        return `Pressed ${key.label}${args.reason ? `: ${args.reason}` : ''}${observed(strip, { focus: editorLabel, added: editor.output, removed: before })}`;
+      }
+      return `Pressed ${key.label}${args.reason ? `: ${args.reason}` : ''}${observed(strip, { focus: editor && editor.focused ? editorLabel : null })}`;
+    }
+    case 'scroll': {
+      // The measured scroll of the server (scrollResultText), and the probe's own observation of
+      // the box that moved. strip.scrollMeasure is the honesty case: the result claims the step,
+      // nothing moved, so the observation measured no scroll (the scroll-lies tamper in a browser).
+      const direction = args.direction === 'up' ? 'up' : 'down';
+      const box = orders ? { label: 'the "Order list" scroll area', top: orders.top, max: ORDERS.rows.length * ORDER_ROW_PX - ORDER_VIEW_PX, step: ORDER_STEP_PX, set: (v) => { orders.top = v; } }
+        : editor && editor.kind === 'notebook' ? { label: NOTEBOOK_PANEL, top: editor.panelTop, max: NOTEBOOK_PANEL_MAX, step: 520, set: (v) => { editor.panelTop = v; } }
+          : { label: 'the page', top: 0, max: 0, step: 640, set: () => {} };
+      const before = box.top;
+      const target = Math.min(box.max, Math.max(0, before + (direction === 'down' ? box.step : -box.step)));
+      if (!strip.scrollMeasure) box.set(target);
+      const moved = strip.scrollMeasure ? (direction === 'down' ? box.step : -box.step) : target - before;
+      const top = before + moved;
+      const text = scrollResultText(direction, { moved, label: box.label, top, max: box.max, atTop: top <= 0, atBottom: top >= box.max });
+      const really = strip.scrollMeasure ? 0 : target - before;
+      return `${text}${observed(strip, { container: really ? { label: `main "${box.label}"`, top: target, moved: really } : null })}`;
+    }
+    case 'web_search':
+      return (await webSearch(args, RESEARCH_SETTINGS, { fetchImpl: fixtureFetch })).text;
+    case 'fetch_url':
+      return (await fetchUrl(args, { fetchImpl: fixtureFetch })).text;
     case 'navigate':
       return `Navigated to ${args.url}${args.reason ? `: ${args.reason}` : ''}`;
     case 'wait':
@@ -166,6 +344,11 @@ function serverResult(name, args, snapshot, strip, state = {}) {
       }
       const line = String(snapshot.elementsText || '').split('\n').find((l) => l.startsWith(`[${args.element_id}] `));
       if (!line) return `Error: Element [${args.element_id}] no longer resolvable in DOM.`;
+      // A click into the editor puts the focus there, which is where a type without an id goes.
+      if (editor && (editor.kind === 'notebook' ? /Cell 14 code/.test(line) : /editor/i.test(line))) {
+        editor.focused = true;
+        return `Clicked element [${args.element_id}]${args.reason ? `: ${args.reason}` : ''}${observed(strip, { focus: editorLabel, focusChanged: true })}`;
+      }
       if (shuffleId !== undefined && Number(shuffleId) === Number(args.element_id)) onShuffle();
       // A page whose consent banner swallows clicks (blocksClicks): a link click stays put and says so
       // with the server's own note, until the banner's Accept button is clicked.
@@ -177,7 +360,8 @@ function serverResult(name, args, snapshot, strip, state = {}) {
         onOpen(opens[1]);
         return `Clicked element [${args.element_id}]${args.reason ? `: ${args.reason}` : ''}\nNOW ON: ${snapshotOf(opens[1]).title}`;
       }
-      return `Clicked element [${args.element_id}]${args.reason ? `: ${args.reason}` : ''}`;
+      // Any other control: the click lands, and the probe sees what it changed (here: nothing).
+      return `Clicked element [${args.element_id}]${args.reason ? `: ${args.reason}` : ''}${observed(strip)}`;
     }
     case 'update_plan':
       return 'Plan approved. Execute the plan step by step.';
@@ -192,7 +376,17 @@ function serverResult(name, args, snapshot, strip, state = {}) {
  * One walk of the MCP loop, the way the client drives it, against the live mock over HTTP.
  * Returns { facts, calls, problems } - the facts the same way the smoke run builds them.
  */
-export async function walkTask(mock, taskName, { strip = {}, maxRounds = 12 } = {}) {
+/** Cell 14 of notebook.html as the walk plays it: its code and output as the recorded page has them. */
+function notebookEditor(snapshot) {
+  const text = snapshot.fullPageText || '';
+  const at = text.indexOf(NOTEBOOK_CELL14);
+  if (at < 0) throw new Error('the notebook snapshot has no cell 14: record it again with smoke.mjs --dump-snapshots=notebook');
+  const after = text.slice(at + NOTEBOOK_CELL14.length + 1);
+  const output = after.split('\n').filter((l) => /^(sudo|E):/.test(l));
+  return { kind: 'notebook', original: NOTEBOOK_CELL14, text: NOTEBOOK_CELL14, originalOutput: output.join('\n'), output: output.join('\n'), runs: 0, focused: false, selectedAll: false, panelTop: 0 };
+}
+
+export async function walkTask(mock, taskName, { strip = {}, maxRounds = TASKS[taskName].maxRounds || 12 } = {}) {
   const task = TASKS[taskName];
   let snapshot = snapshotOf(task.page);
   const firstCall = mock.calls.length;
@@ -202,20 +396,38 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = 12 } = 
 
   const userMessage = `TASK: ${task.prompt}\n\nCURRENT PAGE: ${snapshot.title}\n${snapshot.url}\n\nPage preview:\n${String(snapshot.pageText || '').slice(0, 2000)}`;
   const messages = [
-    { role: 'system', content: `You are ScoutFox, an AI browser agent controlling a Chrome tab.` },
+    { role: 'system', content: `You are ScoutFox, an AI browser agent controlling a Chrome tab.${task.manualApprove ? '\n   - MANUAL APPROVAL IS ON: call update_plan before any other tool even for a simple task; the user must approve the plan before you act.' : ''}` },
     { role: 'user', content: userMessage }
   ];
 
   let step = 0;
   let planCursor = 0;
+  // The client's repeat guard (progress.ts), the same module: strip.repeatGuard is the honesty case.
+  const guard = new ProgressTracker();
   let outcome = null;
   const sent = [];
   const debugRounds = [];
   // The state of the page the walk talks to: whether it was clicked, whether it was shuffled,
   // and the frame the last picture left behind.
-  const state = { clicked: false, shuffled: false, frame: null, pageSignature: 'page-1' };
+  const state = {
+    clicked: false,
+    shuffled: false,
+    frame: null,
+    pageSignature: 'page-1',
+    // The editor page (editor.html) keeps its own state, the way the page's JS model does; so does
+    // cell 14 of the notebook (notebook.html), and the scroll position of the order list.
+    editor: task.page === 'editor.html'
+      ? { text: 'sudo apt install ollama', output: 'Out [1]: sudo: command not found', runs: 1, focused: false, selectedAll: false }
+      : task.page === 'notebook.html'
+        ? notebookEditor(snapshot)
+        : null,
+    orders: task.page === 'virtual-list.html' ? { top: 0 } : null,
+    reads: new Map()
+  };
   for (let round = 0; round < maxRounds; round++) {
-    const body = { model: 'mock-agent', messages, tools: ollamaTools, tool_choice: 'auto', stream: false };
+    // strip.research is the no-research case: Settings > Research is off, so the tools are not offered.
+    const tools = strip.research ? ollamaTools.filter((t) => !RESEARCH_TOOL_NAMES.has(t.function.name)) : ollamaTools;
+    const body = { model: 'mock-agent', messages, tools, tool_choice: 'auto', stream: false };
     sent.push(JSON.parse(JSON.stringify(messages)));
     const res = await fetch(`${mock.url}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const data = await res.json().catch(() => ({}));
@@ -241,6 +453,7 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = 12 } = 
     // The loop collects the pictures of the round and pushes ONE user message after the WHOLE
     // tool block, which is what the client does (runLoop in client.ts).
     const pictures = [];
+    let reflect = false;
     for (const tc of normalized) {
       const name = tc.function.name;
       const args = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments;
@@ -251,7 +464,7 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = 12 } = 
         planSteps.push(...(args.plan || []).map((text) => ({ text, status: 'pending' })));
       }
       if (name === 'click') tally.messages.EXECUTE_ACTION = (tally.messages.EXECUTE_ACTION || 0) + 1;
-      const content = serverResult(name, args, snapshot, strip, {
+      let content = await serverResult(name, args, snapshot, strip, {
         frame: state.frame,
         shuffled: state.shuffled,
         pageSignature: state.pageSignature,
@@ -262,7 +475,10 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = 12 } = 
         onShuffle: () => { state.shuffled = true; },
         onOpen: (page) => { snapshot = snapshotOf(page); },
         blocked: !!task.blocksClicks && !state.accepted,
-        onAccept: () => { state.accepted = true; }
+        onAccept: () => { state.accepted = true; },
+        editor: state.editor,
+        orders: state.orders,
+        reads: state.reads
       });
       // The frame remembers the page signature it was taken with. A shuffle changes the page's
       // text, so a frame taken before it no longer matches: the real server refuses a click on
@@ -299,24 +515,35 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = 12 } = 
           planCursor = Math.min(planCursor + 1, planSteps.length);
         }
       }
+      // The client's executeToolCall: a repeat hint at the end of the result, and the reflection
+      // note for after the tool block. A finish ends the run before either.
+      if (!strip.repeatGuard && !content.startsWith('TASK_COMPLETE:')) {
+        const note = guard.record(name, args, content);
+        if (note.hint) content = `${content}\n${note.hint}`;
+        if (note.reflect) reflect = true;
+      }
       messages.push({ role: 'tool', tool_call_id: tc.id, content });
       // The honesty case (strip.picture) is the real failure mode: the capture SUCCEEDED and its
       // text is in the tool result, but the picture never reached the model. So the picture is
       // not pushed, and the mock has to refuse to describe a page it was not shown.
       if (name === 'take_screenshot' && !failed && !strip.picture) pictures.push(ollamaPictureMessage());
       if (content.startsWith('TASK_COMPLETE:')) {
-        history.push(finishEntry(content.slice('TASK_COMPLETE:'.length).trim()));
+        // The client stores the outcome the finish named (finishOutcomeOf), as the panel card reads it.
+        // strip.outcome is finish-ignores-outcome: the row loses the outcome, as the tamper does in the worker.
+        history.push(finishEntry(content.slice('TASK_COMPLETE:'.length).trim(), '', undefined, strip.outcome ? undefined : finishOutcomeOf(args.outcome)));
         outcome = 'finish';
         break;
       }
     }
     if (pictures.length) messages.push(...pictures);
     if (outcome) break;
+    if (reflect) messages.push({ role: 'user', content: REFLECTION_TEXT });
   }
 
   const facts = runFacts({
     history,
     planSteps,
+    // The mock records what each call brought to the model (callRecord.mjs newToolResults), the same as in a browser run.
     calls: mock.calls.slice(firstCall),
     tally,
     pageClicked: task.expectPageClick ? state.clicked : null
@@ -365,10 +592,10 @@ async function protocolChecks(mock) {
   // so the offline suite cannot pass a request a real Ollama would turn down.
   const echo = (args) => ({
     model: 'mock-agent',
-    tools: [{ type: 'function', function: { name: 'read_page_text', parameters: { type: 'object', properties: {} } } }],
+    tools: [{ type: 'function', function: { name: 'read_page', parameters: { type: 'object', properties: {} } } }],
     messages: [
       { role: 'user', content: 'What is the price on the page?' },
-      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_page_text', arguments: args } }] },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_page', arguments: args } }] },
       { role: 'tool', tool_call_id: 'c1', content: 'Tool result: ok' }
     ]
   });
@@ -440,11 +667,11 @@ async function protocolChecks(mock) {
   const convo = readConversation([
     { role: 'system', content: 'sys' },
     { role: 'user', content: 'TASK: T\n\nPage preview:\nP' },
-    { role: 'assistant', content: '', tool_calls: [{ id: 'a', function: { name: 'get_page_text', arguments: {} } }] },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'a', function: { name: 'read_page', arguments: {} } }] },
     { role: 'tool', tool_call_id: 'a', content: 'PAGE TEXT' }
   ]);
-  check('readConversation joins a tool result to its call by id', convo.results.length === 1 && convo.results[0].name === 'get_page_text' && convo.results[0].content === 'PAGE TEXT');
-  check('readConversation knows the last call', convo.lastCall && convo.lastCall.name === 'get_page_text');
+  check('readConversation joins a tool result to its call by id', convo.results.length === 1 && convo.results[0].name === 'read_page' && convo.results[0].content === 'PAGE TEXT');
+  check('readConversation knows the last call', convo.lastCall && convo.lastCall.name === 'read_page');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -471,6 +698,11 @@ function validatorChecks() {
   check('an enum violation is rejected', validateToolArgs(schema, { element_id: 1, direction: 'sideways' }).some((e) => /"direction" must be one of/.test(e)));
   check('a number below the minimum is rejected', validateToolArgs(schema, { element_id: 0 }).some((e) => /"element_id" must be >= 1/.test(e)));
   check('a non-string array item is rejected', validateToolArgs(schema, { element_id: 1, plan: ['a', 2] }).some((e) => /"plan" must be an array of strings/.test(e)));
+  // The engine's finish requires an outcome: a mock finish without one, or with an unknown one, is a 501, not a silent drift.
+  const finishSchema = ollamaTools.find((t) => t.function.name === 'finish').function.parameters;
+  check('a finish without an outcome is rejected by the engine schema', validateToolArgs(finishSchema, { answer: 'x' }).some((e) => /missing required argument "outcome"/.test(e)));
+  check('a finish with an unknown outcome is rejected by the engine schema', validateToolArgs(finishSchema, { answer: 'x', outcome: 'success' }).some((e) => /"outcome" must be one of/.test(e)));
+  check('a finish with each known outcome passes', ['done', 'partial', 'blocked'].every((outcome) => validateToolArgs(finishSchema, { answer: 'x', outcome }).length === 0));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -483,9 +715,9 @@ async function walkChecks(mock) {
     // or framework.com, so they are excluded here and run only against a real model.
     if (TASKS[name].web) continue;
     // A run that waits for the user's Stop has no end to walk to: a few rounds must be only waits.
-    if (TASKS[name].stopAfterSteps) {
+    if (endedByHarness(TASKS[name])) {
       const { facts } = await walkTask(mock, name, { maxRounds: 3 });
-      const problems = TASKS[name].expectMock(facts);
+      const problems = onlyWaits(facts);
       check(`walk ${name}: the run only waits until it is stopped`, problems.length === 0, problems.join(' | '));
       continue;
     }
@@ -497,12 +729,30 @@ async function walkChecks(mock) {
 /** The honesty walks: what the mock needs from each channel, and a run that lost it must fail with MOCK-FAIL. */
 async function honestyChecks(mock) {
   const cases = [
-    { task: 'store-price', strip: { pageText: true }, needs: 'the page text' }
+    { task: 'store-price', strip: { pageText: true }, needs: 'the page text' },
+    // A model that is not told what its actions did must not pass the editor task.
+    { task: 'editor-replace', strip: { observation: true }, needs: 'the observation line' },
+    // A scroll that claims a move nobody measured (scroll-lies) must not pass either scroll task.
+    { task: 'notebook-fix', strip: { scrollMeasure: true }, needs: 'a scroll that really moves' },
+    { task: 'virtual-scroll', strip: { scrollMeasure: true }, needs: 'a scroll that really moves' },
+    // A read that ignores the part it was asked for (read-repeats) must not pass the notebook task.
+    { task: 'notebook-fix', strip: { readPart: true }, needs: 'the part read_page was asked for' },
+    // A loop that never says the dead click changed nothing (no-repeat-guard) must not pass stuck-recovery.
+    { task: 'stuck-recovery', strip: { repeatGuard: true }, needs: 'the repeat guard' },
+    { task: 'stuck-recovery-manual', strip: { repeatGuard: true }, needs: 'the repeat guard' },
+    // A run that is not offered web_search and fetch_url (no-research) must not answer the research task.
+    { task: 'research-then-answer', strip: { research: true }, needs: 'the research tools' }
   ];
   for (const { task, strip, needs } of cases) {
     const { facts, problems } = await walkTask(mock, task, { strip });
     const failed = problems.length > 0 && facts.answer && facts.answer.includes(MOCK_FAIL_PREFIX);
     check(`honesty ${task} without ${needs}: the run fails with MOCK-FAIL`, failed, problems.join(' | ') || 'the walk unexpectedly passed');
+  }
+  // A finish row without the outcome (finish-ignores-outcome) must not pass stuck-recovery: its
+  // honest "it did not work" would be a green Done card again. The model is fine here, so no MOCK-FAIL.
+  for (const task of ['stuck-recovery', 'stuck-recovery-manual', 'partial-answer']) {
+    const { problems } = await walkTask(mock, task, { strip: { outcome: true } });
+    check(`negative ${task} without the finish outcome: the run fails`, problems.some((p) => /finish outcome is null, expected "(blocked|partial)"/.test(p)), problems.join(' | ') || 'the walk unexpectedly passed');
   }
 }
 

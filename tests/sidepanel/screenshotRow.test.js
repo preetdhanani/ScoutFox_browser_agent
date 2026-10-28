@@ -156,3 +156,22 @@ test('the stylesheet gives the slot a bounded height and the picture its own sha
   assert.match(slot[1], /var\(--border\)/);
   assert.match(slot[1], /var\(--surface\)/);
 });
+
+test('a scroll row says what the engine measured, not only the direction it asked for', () => {
+  assert.equal(describeAction({ action: 'scroll', direction: 'down' }, null).text, 'Scrolled down');
+  const moved = { success: true, message: 'Scrolled the "Notebook cells" panel down 542px, now at 542 of 6182px.\nObservation: ...' };
+  assert.equal(describeAction({ action: 'scroll', direction: 'down' }, moved).text, 'Scrolled the &quot;Notebook cells&quot; panel down 542px');
+  const stuck = { success: true, message: 'Did not move: already at the bottom of the page.' };
+  assert.equal(describeAction({ action: 'scroll', direction: 'down' }, stuck).text, 'Did not move: already at the bottom of the page');
+});
+
+test('a research row says what was searched, and what was read from which host', () => {
+  const searched = describeAction({ action: 'web_search', query: 'ollama linux amd64' }, null);
+  assert.equal(searched.text, 'Searched the web: <em>ollama linux amd64</em>');
+  const read = describeAction({ action: 'fetch_url', url: 'https://www.ollama.com/install.sh' }, { success: true, label: 'install.sh' });
+  assert.equal(read.text, 'Read <em>install.sh</em> (ollama.com)');
+  const titled = describeAction({ action: 'fetch_url', url: 'https://github.com/ollama/ollama/releases', part: 2 }, { success: true, label: 'Releases · ollama/ollama' });
+  assert.equal(titled.text, 'Read <em>Releases · ollama/ollama</em> (github.com) (part 2)');
+  // Before the result arrives the row names the file from the address.
+  assert.equal(describeAction({ action: 'fetch_url', url: 'https://ollama.com/install.sh' }, null).text, 'Read <em>install.sh</em> (ollama.com)');
+});

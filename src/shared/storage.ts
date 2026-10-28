@@ -85,11 +85,6 @@ export interface Settings {
   autoApprove?: boolean;
   modelTier?: 'auto' | 'small' | 'large';
   /**
-   * Opt-in for execute_js (arbitrary JavaScript in the page, with the page's cookies). Off by default: the model is not
-   * offered the verb and the executor refuses it. Only a stored `true` turns it on.
-   */
-  allowExecuteJs: boolean;
-  /**
    * Whether the agent captures images of pages it opens. Always on: every new page load gets a
    * screenshot for clarity. Kept as a stored flag only so the panel can read "is it on"; there is
    * no user toggle for it.
@@ -97,6 +92,37 @@ export interface Settings {
   screenshots: boolean;
   /** User-added third-party providers, keyed by id. Absent in older settings, so reads default to {}. */
   customProviders?: CustomProviders;
+  /**
+   * Research outside the tab: the web_search and fetch_url tools. Absent in older settings;
+   * getSettings fills each missing field from DEFAULT_RESEARCH (a deep merge, see normalizeResearch).
+   */
+  research: ResearchSettings;
+}
+
+/** Where web_search looks. DuckDuckGo's HTML page needs no key; SearXNG is a server the user names. */
+export type ResearchBackend = 'duckduckgo' | 'searxng';
+
+export interface ResearchSettings {
+  /** Whether the model is offered web_search and fetch_url. */
+  enabled: boolean;
+  backend: ResearchBackend;
+  /** The base URL of a SearXNG instance with the JSON format on (https://searx.example). Used when backend is searxng. */
+  searxngUrl: string;
+}
+
+export const DEFAULT_RESEARCH: ResearchSettings = { enabled: true, backend: 'duckduckgo', searxngUrl: '' };
+
+/**
+ * A stored research object (or nothing, from an older build) as a whole ResearchSettings: every
+ * field that is missing or of the wrong kind takes its default, every valid one is kept.
+ */
+export function normalizeResearch(raw: unknown): ResearchSettings {
+  const r = raw && typeof raw === 'object' ? (raw as Partial<ResearchSettings>) : {};
+  return {
+    enabled: typeof r.enabled === 'boolean' ? r.enabled : DEFAULT_RESEARCH.enabled,
+    backend: r.backend === 'searxng' || r.backend === 'duckduckgo' ? r.backend : DEFAULT_RESEARCH.backend,
+    searxngUrl: typeof r.searxngUrl === 'string' ? r.searxngUrl.trim() : DEFAULT_RESEARCH.searxngUrl
+  };
 }
 
 /** Whether the agent captures images of pages it opens. Always on: every new page load gets a screenshot for clarity. */
@@ -158,9 +184,9 @@ export const DEFAULT_SETTINGS: Settings = {
   effortDefault: 'medium',
   effortAdaptive: true,
   autoApprove: true,
-  allowExecuteJs: true,
   modelTier: 'auto',
   screenshots: true,
+  research: { ...DEFAULT_RESEARCH },
 };
 
 /**
@@ -363,15 +389,17 @@ export const Storage = {
           model,
           providerConfigs: mergedConfigs,
           customProviders,
+          // A nested object: the defaults fill what an older build never stored.
+          research: normalizeResearch(loaded.research),
           contextWindow: loaded.contextWindow || {},
-          // JavaScript execution is always on: there is no user toggle for it.
-          allowExecuteJs: true,
           // Screenshots are always on: every new page load gets an image for clarity.
           screenshots: true
         };
         delete (settings as any).engine;
         // Element badges have no setting any more (they are always off); an old stored flag is dropped.
         delete (settings as any).showElementBadges;
+        // There is no execute_js tool any more; an old stored opt-in is dropped.
+        delete (settings as any).allowExecuteJs;
         resolve(settings);
       });
     });
@@ -428,7 +456,9 @@ export const Storage = {
       baseUrl,
       model,
       providerConfigs: updatedProviderConfigs,
-      contextWindow: current.contextWindow
+      contextWindow: current.contextWindow,
+      // A partial research object changes only the fields it names.
+      research: normalizeResearch({ ...current.research, ...(newSettings.research || {}) })
     };
     delete (updated as any).engine;
 

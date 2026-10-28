@@ -124,3 +124,48 @@ test('5. tests/test-count-floor.json floor is valid and enforced by npm run chec
   const ci = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
   assert.match(ci, /npm run check:tests/, 'the floor check must run in CI');
 });
+
+test('6. the pre-MCP action registry and the verbs no MCP tool reaches stay deleted', () => {
+  // shared/ held the old engine's action registry, risk words and challenge rules; nothing read
+  // them after the MCP engine replaced it. execute_js, open_window, read_network_requests and
+  // browser_batch were branches of execute.ts that no tool reached, and the content script's
+  // synthetic press_key was a fallback the CDP-only press_key no longer takes.
+  const deletedPaths = [
+    'shared',
+    'src/background/browser/batch.ts',
+    'src/background/browser/executeJs.ts',
+    'src/background/browser/windows.ts'
+  ];
+  for (const rel of deletedPaths) {
+    assert.equal(fs.existsSync(path.join(ROOT, rel)), false, `dead path must not come back: ${rel}`);
+  }
+
+  const banned: Array<[RegExp, string]> = [
+    [/\bexecute_js\b|\bexecuteJs\b|\ballowExecuteJs\b/, 'execute_js'],
+    [/\bopen_window\b|\bopenNewWindow\b/, 'open_window'],
+    [/\bread_network_requests\b|\breadNetworkRequests\b/, 'read_network_requests'],
+    [/\bbrowser_batch\b|\brunBatch\b|\bdoBrowserBatch\b/, 'browser_batch'],
+    [/\bdoPressKey\b/, 'the synthetic doPressKey'],
+    [/\bexecuteActionOnTab\b|\bsetTabAdoptedCallback\b/, 'the runner execute wiring'],
+    [/shared\/(?:actions|risk|challenge-rules)\.json/, 'the shared/ registry files']
+  ];
+  const dirs = ['src', 'sidepanel', 'content', 'scripts'].map((d) => path.join(ROOT, d));
+  const files = dirs.flatMap((d) => walk(d));
+  const violations: string[] = [];
+  for (const file of files) {
+    const content = fs.readFileSync(file, 'utf8');
+    for (const [re, what] of banned) {
+      // storage.ts drops an old stored allowExecuteJs flag on read: the one place the name may stay.
+      if (what === 'execute_js' && file.endsWith(path.join('src', 'shared', 'storage.ts'))) continue;
+      if (re.test(content)) violations.push(`${path.relative(ROOT, file)}: ${what}`);
+    }
+  }
+  assert.deepEqual(violations, [], 'removed legacy verbs and helpers must not come back');
+
+  // The worker's executeAction must not grow a branch for a verb no tool sends.
+  const execute = fs.readFileSync(path.join(ROOT, 'src', 'background', 'browser', 'execute.ts'), 'utf8');
+  assert.doesNotMatch(execute, /verb === '(?:execute_js|open_window|read_network_requests|browser_batch)'/);
+  // The content executor has no press_key case: press_key is a trusted CDP key press or nothing.
+  const actions = fs.readFileSync(path.join(ROOT, 'src', 'content', 'actions.ts'), 'utf8');
+  assert.doesNotMatch(actions, /case 'press_key'|case 'keypress'|case 'browser_batch'/);
+});

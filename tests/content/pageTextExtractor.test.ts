@@ -252,12 +252,12 @@ test('a scrolled page narrowed to the window says so, with the size of the whole
   assert.match(text, new RegExp(`\\n\\[page text truncated: showing \\d+ of ${fullSize} characters - [^\\]]*scroll position[^\\]]*\\]$`));
 });
 
-test('a long page text cut at the cap ends with a note naming the full size and read_page_text', () => {
+test('a long page text cut at the cap ends with a note naming the full size and read_page', () => {
   const text = extract(tallPage(200, 0), fakeWindow({ scrollY: 0 }));
-  assert.match(text, /\n\[page text truncated: showing \d+ of \d+ characters - [^\]]*read_page_text[^\]]*\]$/);
+  assert.match(text, /\n\[page text truncated: showing \d+ of \d+ characters - [^\]]*read_page[^\]]*\]$/);
 });
 
-test('the full extraction for read_page_text is the whole page text, with no cap and no window', () => {
+test('the full extraction for read_page is the whole page text, with no cap and no window', () => {
   const scrollY = 6000;
   const full = extractFullPageTextFromDocument(fakeDocument(tallPage(200, scrollY)) as unknown as Document, fakeWindow({ scrollY }) as unknown as Window);
   assert.ok(full.length > PAGE_TEXT_CAP * 2);

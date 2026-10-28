@@ -51,7 +51,8 @@ function oldEscapeHtml(str) {
 function oldFormatMarkdownText(text) {
   if (!text) return '';
   let str = oldEscapeHtml(text);
-  str = str.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  // The one change on purpose since: a `code` span is rendered (and never bolded), see inlineCode below.
+  str = str.split(/((?<!`)`[^`\n]+`(?!`))/).map((part, i) => (i % 2 ? `<code class="md-code">${part.slice(1, -1)}</code>` : part.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>'))).join('');
   str = str.replace(/^[\s]*[-*]\s+(.*)$/gm, '• $1');
   return str;
 }
@@ -73,7 +74,7 @@ function mulberry32(seed) {
 }
 
 // The only tags and attributes the renderer may write. A value holds letters, digits, dash and space.
-const TAG = /<(\/?)(div|span|strong|table|thead|tbody|tr|th|td|ul|ol|li)((?: (?:class|role|aria-level|aria-label|aria-hidden|tabindex|scope)="[A-Za-z0-9 -]*")*)>/g;
+const TAG = /<(\/?)(div|span|strong|code|table|thead|tbody|tr|th|td|ul|ol|li)((?: (?:class|role|aria-level|aria-label|aria-hidden|tabindex|scope)="[A-Za-z0-9 -]*")*)>/g;
 const ENTITIES = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"' };
 
 /**
@@ -435,7 +436,7 @@ test('an escaped pipe stays in its cell; an unescaped one splits, also inside ba
   const code = formatMarkdownText('| cmd | note |\n|---|---|\n| `a|b` | ok |');
   assert.ok(code.includes('<td class="md-nw">`a</td><td class="md-nw">b` | ok</td>'));
   const escaped = formatMarkdownText('| cmd | note |\n|---|---|\n| `a\\|b` | ok |');
-  assert.ok(escaped.includes('<td class="md-nw">`a|b`</td><td class="md-nw">ok</td>'));
+  assert.ok(escaped.includes('<td class="md-nw"><code class="md-code">a|b</code></td><td class="md-nw">ok</td>'));
 });
 
 test('ragged rows: a short row is padded, a long row is folded into the last cell, nothing is dropped', () => {

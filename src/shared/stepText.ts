@@ -29,10 +29,33 @@ export function describeStep(tool: string, args: Record<string, any> = {}, label
         ? `Clicking ${element(args.element_id)}`
         : `Clicking at (${args.x}, ${args.y}) on the screenshot`;
       break;
-    case 'type': what = `Typing "${short(args.text, 60)}" into ${element(args.element_id)}${args.submit ? ' and submitting' : ''}`; break;
-    case 'scroll': what = `Scrolling ${args.direction || 'down'}`; break;
-    case 'get_page_text': what = 'Reading the page text'; break;
-    case 'read_page_text': what = 'Scrolling down and reading more of the page'; break;
+    case 'type': {
+      const into = args.element_id !== undefined && args.element_id !== null ? element(args.element_id) : 'the focused element';
+      what = `${args.mode === 'append' ? 'Appending' : 'Typing'} "${short(args.text, 60)}" ${args.mode === 'append' ? 'to' : 'into'} ${into}${args.submit ? ' and submitting' : ''}`;
+      break;
+    }
+    case 'press_key': {
+      const mods = Array.isArray(args.modifiers) ? args.modifiers.map((m: unknown) => String(m)) : [];
+      const names: Record<string, string> = { ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift', meta: 'Meta' };
+      const key = args.key === 'select_all' ? 'select all' : String(args.key ?? '');
+      what = `Pressing ${[...mods.map((m: string) => names[m] || m), key].join('+')}`;
+      break;
+    }
+    case 'scroll':
+      what = `Scrolling ${args.direction || 'down'}${args.element_id !== undefined && args.element_id !== null ? ` the area of ${element(args.element_id)}` : args.x !== undefined && args.y !== undefined ? ` at (${args.x}, ${args.y}) on the screenshot` : ''}`;
+      break;
+    case 'read_page': {
+      const part = Number.isInteger(args.part) && args.part > 1 ? ` (part ${args.part})` : '';
+      what = args.element_id !== undefined && args.element_id !== null ? `Reading the text of ${element(args.element_id)}${part}` : `Reading the page text${part}`;
+      break;
+    }
+    case 'web_search': what = `Searching the web for "${short(args.query, 80)}"`; break;
+    case 'fetch_url': {
+      const part = Number.isInteger(args.part) && args.part > 1 ? ` (part ${args.part})` : '';
+      const lines = typeof args.query === 'string' && args.query.trim() ? `, lines with "${short(args.query, 40)}"` : '';
+      what = `Fetching ${short(args.url, 120)}${part}${lines}`;
+      break;
+    }
     case 'get_page_elements': what = 'Listing the elements on the page it can act on'; break;
     case 'find': what = `Searching the page for "${short(args.query, 60)}"`; break;
     case 'take_screenshot': what = 'Taking a screenshot to look at the page'; break;
@@ -44,7 +67,6 @@ export function describeStep(tool: string, args: Record<string, any> = {}, label
       what = `Planning the work in ${steps} step${steps === 1 ? '' : 's'}`;
       break;
     }
-    case 'render_table': what = `Building a table of ${Array.isArray(args.rows) ? args.rows.length : 0} rows`; break;
     case 'finish': what = 'Finishing with the answer'; break;
     default: what = `Calling ${tool}`;
   }

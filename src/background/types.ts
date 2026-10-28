@@ -20,10 +20,39 @@ export type PageType =
   | 'error' | 'challenge' | 'cookie_wall' | 'other';
 export type Effect =
   | 'url_changed' | 'dom_changed' | 'value_set' | 'focus_changed' | 'none' | 'unknown';
+
+/**
+ * What an action did to the page, as facts the content script measured around it (the effect
+ * probe in content/content.js). `null` in a "changed" field means it could not be measured: an
+ * effect that cannot be measured is reported as unknown, never as changed.
+ */
+export interface EffectDetail {
+  /** False when the page had no baseline to compare with (a new document after the action). */
+  base: boolean;
+  url: string;
+  urlChanged: boolean | null;
+  /** The focused element after the action; null when nothing has focus. */
+  focus: { label: string; editable: boolean; caretLine: string | null; text: string | null } | null;
+  focusChanged: boolean | null;
+  scroll: { x: number; y: number };
+  scrollChanged: boolean | null;
+  /** The scroll container of the focused element (or of the viewport centre), measured before and after. */
+  container: { label: string; top: number; moved: number | null } | null;
+  textHash: string;
+  textChanged: boolean | null;
+  /** The visible lines that appeared and went away, cut to 400 characters together. */
+  added: string;
+  removed: string;
+  /** How many characters of visible text appeared plus went away, before the cut. */
+  changedChars: number;
+}
+
+/** A modifier key held with press_key. */
+export type KeyModifier = 'ctrl' | 'shift' | 'alt' | 'meta';
 export type EndReason =
   | 'all_subgoals_done' | 'goal_achieved' | 'partial' | 'unverified' | 'stopped_early'
   | 'no_subgoal_completed' | 'max_steps' | 'model_unusable' | 'dom_error'
-  | 'plan_rejected' | 'stopped' | 'error';
+  | 'plan_rejected' | 'stopped' | 'interrupted' | 'error';
 
 // Orchestrator / worker node names (kept as type unions only)
 export type OrchestratorNode =
@@ -218,7 +247,7 @@ export type HistoryEntry =
       remembered?: true }
   | { type: 'site_end'; siteId: string; site: string; status: string; reason: string;
       findings: number; stepsUsed: number }
-  | { type: 'finish'; answer: string; unconfirmed?: true; partial?: true; table?: any;
+  | { type: 'finish'; answer: string; outcome?: 'done' | 'partial' | 'blocked'; unconfirmed?: true; partial?: true; table?: any;
       runStats?: RunStats; offer?: any; stoppedEarly?: string; findings?: Finding[];
       audit?: any; evidence?: string }
   | { type: 'partial_result'; answer: string; table: any; reason: EndReason;
@@ -245,27 +274,17 @@ export interface OneShot { label: string; text: string; step: number; note?: str
 
 export interface NetFilter { status?: 'error' | 'success'; since?: 'last_action'; urlContains?: string }
 
-export type BatchStep = {
-  action: 'click' | 'type' | 'scroll' | 'press_key' | 'wait';
-  element_id?: number; text?: string; submit?: boolean;
-  direction?: 'up' | 'down'; key?: string; seconds?: number;
-};
-
 export type PageAction =
   | { action: 'click'; element_id: number }
   | { action: 'click_at'; x: number; y: number }
   | { action: 'take_screenshot' }
-  | { action: 'type'; element_id: number; text: string; submit: boolean }
+  | { action: 'type'; element_id?: number; text: string; submit: boolean; mode?: 'replace' | 'append' }
   | { action: 'scroll'; direction: 'up' | 'down' }
   | { action: 'navigate'; url: string }
   | { action: 'go_back' } | { action: 'go_forward' }
-  | { action: 'press_key'; key: string }
+  | { action: 'press_key'; key: string; modifiers?: KeyModifier[] }
   | { action: 'wait'; seconds: number }
-  | { action: 'read_page_text' }
-  | { action: 'execute_js'; code: string }
-  | { action: 'read_network_requests'; filter?: NetFilter; includeBody?: boolean; limit?: number }
-  | { action: 'browser_batch'; steps: BatchStep[]; stopOnError?: boolean }
-  | { action: 'open_window'; url?: string };
+  | { action: 'read_page'; part?: number; element_id?: number };
 
 export type StateAction =
   | { action: 'record_finding'; values: Record<string, string> }

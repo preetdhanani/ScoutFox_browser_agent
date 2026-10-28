@@ -17,7 +17,7 @@ export interface ClipOptions {
 }
 
 /** How the model reads more of a page text that was cut, in the content script's snapshot and in the prompt alike. */
-export const PAGE_TEXT_MORE_HINT = 'call read_page_text to read the whole page in parts';
+export const PAGE_TEXT_MORE_HINT = 'call read_page to read the whole page in parts';
 
 /** A trailing block note written by clipWithNote; group 1 is "what", 2 the shown size, 3 the full size. */
 const BLOCK_NOTE = /\n\[([^\]\n]*?) truncated: showing (\d+) of (\d+) characters(?: - [^\]\n]*)?\]$/;

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Install the Lantern CLI - Lantern docs</title>
+  <link rel="stylesheet" href="../site.css">
+  <script>window.analytics = { track: function () {} };</script>
+</head>
+<body>
+  <!-- Fixture for the research-then-answer task: the docs page a search finds first. It names the
+       install script, but NOT the archive file or what extracting it needs: only install.sh has that. -->
+  <header class="bar"><a class="logo" href="docs.html">Lantern</a></header>
+  <main>
+    <h1>Install the Lantern CLI</h1>
+    <p>Run the official install script. It picks the right release archive for your platform &amp; unpacks it into <code>~/.local</code>.</p>
+    <pre><code>curl -fsSL http://docs.lantern.test/research/install.sh | sh
+lantern --version</code></pre>
+    <p>Read the script before you run it: <a href="install.sh">install.sh</a>.</p>
+  </main>
+</body>
+</html>

@@ -5,7 +5,7 @@
 // (tests/e2e/lib/mockOllama.selftest.mjs) imports this file to build the same rows the
 // client builds, so it must stay dependency-free.
 
-import type { HistoryEntry } from '../types.ts';
+import type { EndReason, HistoryEntry } from '../types.ts';
 
 /** The parsed arguments of one tool call of the LLM. */
 export interface ToolCallInput {
@@ -22,9 +22,12 @@ export interface ToolCallInput {
 export function mapToolToAction(name: string, args: Record<string, any> | null): Record<string, unknown> | null {
   const a = args || {};
   switch (name) {
-    case 'get_page_text':
-    case 'read_page_text':
-      return { action: 'read_page_text' };
+    case 'read_page':
+      return {
+        action: 'read_page',
+        ...(Number.isInteger(a.part) && a.part > 1 ? { part: a.part } : {}),
+        ...(a.element_id !== undefined && a.element_id !== null ? { element_id: a.element_id } : {})
+      };
     case 'get_page_elements':
       return { action: 'get_page_elements' };
     case 'find':
@@ -37,14 +40,31 @@ export function mapToolToAction(name: string, args: Record<string, any> | null):
         : { action: 'click', element_id: a.element_id };
     case 'take_screenshot':
       return { action: 'take_screenshot' };
-    case 'render_table':
-      return { action: 'render_table', columns: a.columns, rows: a.rows };
     case 'type':
-      return { action: 'type', element_id: a.element_id, text: a.text };
+      return a.element_id !== undefined && a.element_id !== null
+        ? { action: 'type', element_id: a.element_id, text: a.text, ...(a.mode === 'append' ? { mode: 'append' } : {}) }
+        : { action: 'type', text: a.text, ...(a.mode === 'append' ? { mode: 'append' } : {}) };
+    case 'press_key':
+      return Array.isArray(a.modifiers) && a.modifiers.length
+        ? { action: 'press_key', key: a.key, modifiers: a.modifiers }
+        : { action: 'press_key', key: a.key };
     case 'scroll':
-      return { action: 'scroll', direction: a.direction };
+      return a.element_id !== undefined && a.element_id !== null
+        ? { action: 'scroll', direction: a.direction, element_id: a.element_id }
+        : a.x !== undefined && a.y !== undefined
+          ? { action: 'scroll', direction: a.direction, x: a.x, y: a.y }
+          : { action: 'scroll', direction: a.direction };
     case 'navigate':
       return { action: 'navigate', url: a.url };
+    case 'web_search':
+      return { action: 'web_search', query: a.query };
+    case 'fetch_url':
+      return {
+        action: 'fetch_url',
+        url: a.url,
+        ...(Number.isInteger(a.part) && a.part > 1 ? { part: a.part } : {}),
+        ...(typeof a.query === 'string' && a.query.trim() ? { query: a.query } : {})
+      };
     case 'wait':
       return { action: 'wait', amount: a.amount };
     case 'go_back':
@@ -83,12 +103,25 @@ export function agentResponseEntry(
   return { type: 'agent_response', step, thought, action, rawResponse };
 }
 
-export function executionResultEntry(step: number, success: boolean, message: string, table?: any): HistoryEntry {
+export function executionResultEntry(step: number, success: boolean, message: string, table?: any, label?: string): HistoryEntry {
   const entry: any = success
     ? { type: 'execution_result', step, success: true, message }
     : { type: 'execution_result', step, success: false, error: message };
   if (table) entry.table = table;
+  if (label) entry.label = label;
   return entry;
+}
+
+/**
+ * The name a person reads for the element an id stood for, from its element line: the field's
+ * label when the line has one ('label="Code cell editor"'), else its first quoted text
+ * ('[3] button "Buy"' is "Buy"). Empty when the line names nothing.
+ */
+export function elementRowLabel(line: string): string {
+  const text = String(line || '');
+  const labelled = /\blabel="([^"]+)"/.exec(text)?.[1];
+  if (labelled) return labelled.trim();
+  return (/"([^"]+)"/.exec(text.replace(/^\s*\[\d+\]\s*/, ''))?.[1] || '').trim();
 }
 
 /**
@@ -111,15 +144,37 @@ export function errorEntry(content: string): HistoryEntry {
   return { type: 'error', content };
 }
 
+/** The final row of a run the user stopped. The panel shows it under "Stopped by you". */
+export const STOPPED_TEXT = 'The run was stopped before it finished.';
+
+/**
+ * The final row of a run that ended before it finished: a Stop, or a worker that died under it.
+ * The panel draws it as a partial card; the answer's first line is its subtitle.
+ */
+export function partialResultEntry(answer: string, reason: EndReason): HistoryEntry {
+  return { type: 'partial_result', answer, table: null, reason };
+}
+
+/** How a run went, in the model's own words (the finish tool's `outcome`). The panel's card follows it. */
+export type FinishOutcome = 'done' | 'partial' | 'blocked';
+export const FINISH_OUTCOMES: readonly FinishOutcome[] = ['done', 'partial', 'blocked'];
+
+/** The outcome a finish call named, or undefined when it named none or something else. */
+export function finishOutcomeOf(value: unknown): FinishOutcome | undefined {
+  return (FINISH_OUTCOMES as readonly unknown[]).includes(value) ? (value as FinishOutcome) : undefined;
+}
+
 /**
  * The finish row of the timeline.
  *
  * `evidence` is the supporting material of a structured answer, kept apart from the answer
  * itself so the panel can show it in a collapsed section instead of in the middle of the text
- * the user reads.
+ * the user reads. `outcome` is how the run went (done, partial, blocked); a plain-text reply
+ * that never called finish has none.
  */
-export function finishEntry(answer: string, evidence = '', table?: any): HistoryEntry {
+export function finishEntry(answer: string, evidence = '', table?: any, outcome?: FinishOutcome): HistoryEntry {
   const entry: any = evidence ? { type: 'finish', answer, evidence } : { type: 'finish', answer };
   if (table) entry.table = table;
+  if (outcome) entry.outcome = outcome;
   return entry;
 }

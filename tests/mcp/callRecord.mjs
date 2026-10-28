@@ -86,6 +86,34 @@ export function buildCallRecord({ n, status, ms, requestBytes, responseBytes, se
     promptEvalCount: got.prompt_eval_count ?? null,
     evalCount: got.eval_count ?? null,
     doneReason: got.done_reason ?? null,
-    content: typeof got.message?.content === 'string' ? got.message.content : (got.error || '')
+    content: typeof got.message?.content === 'string' ? got.message.content : (got.error || ''),
+    // The tool results this call brought to the model for the first time: the tool messages after
+    // the last assistant turn. What the model was told is evidence a history row cannot give (rows
+    // are cut to one line), so a harness check reads it here.
+    toolResults: newToolResults(sent.messages),
+    // The notes the loop added after that tool block (the reflection, the step limit), in full.
+    loopNotes: newLoopNotes(sent.messages)
   };
+}
+
+/**
+ * The plain user messages after the last assistant message of a request, that come after a tool
+ * result: the notes the loop itself adds after a tool block. A picture message is not one.
+ */
+export function newLoopNotes(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  let i = list.length - 1;
+  while (i >= 0 && list[i] && list[i].role !== 'assistant') i -= 1;
+  const after = list.slice(i + 1);
+  const firstTool = after.findIndex((m) => m && m.role === 'tool');
+  if (firstTool < 0) return [];
+  return after.slice(firstTool).filter((m) => m && m.role === 'user' && typeof m.content === 'string' && !Array.isArray(m.images)).map((m) => m.content);
+}
+
+/** The contents of the tool messages after the last assistant message of a request. */
+export function newToolResults(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  let i = list.length - 1;
+  while (i >= 0 && list[i] && list[i].role !== 'assistant') i -= 1;
+  return list.slice(i + 1).filter((m) => m && m.role === 'tool' && typeof m.content === 'string').map((m) => m.content);
 }
