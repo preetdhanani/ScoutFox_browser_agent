@@ -2559,6 +2559,10 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 
 .cp-heading { margin-bottom: 12px; }
 
+/* Each field of the dialog is its own group; without this a hint runs into the next label. */
+.cp-dialog > .form-group + .form-group,
+.cp-dialog > .form-group + .cp-test-row { margin-top: 14px; }
+
 .cp-title {
   font-family: var(--font-mono, monospace);
   font-size: 15px;
@@ -2607,13 +2611,15 @@ a.audit-url:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   font-size: 10.5px;
   line-height: 1.5;
   color: var(--text-muted);
-  word-break: break-all;
 }
 
+/* The URL gets a line of its own under its label, and breaks only when it cannot fit at all. */
 .cp-preview-line code {
+  display: block;
   font-family: var(--font-mono, monospace);
   font-size: 10.5px;
   color: var(--text-main);
+  overflow-wrap: anywhere;
 }
 
 .cp-segmented {

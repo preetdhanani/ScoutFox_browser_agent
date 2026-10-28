@@ -8,8 +8,11 @@ These rules apply to every agent session working in this repository.
 - Verification has two layers, and a change is only accepted when BOTH pass:
   - Layer 1: the mock self-test (`node tests/mcp/mockOllama.selftest.mjs`). No browser, runs in under a second, and runs first inside every `--mock` e2e run.
   - Layer 2: the Chromium end-to-end run (`npm run test:e2e`). The built extension is loaded into a real Chromium and driven through whole tasks.
-    By default it runs open-web tasks on NVIDIA NIM with `nvidia/nemotron-3.5-super-vl-120b-a12b`: a neutral start page and only a question, the model picks the real websites itself.
-    It needs `NVIDIA_API_KEY` in the environment or `NVIDIA_API` in the repo `.env`.
+    By default it runs open-web tasks on LISA (`lisa-pro`, an OpenAI-compatible custom endpoint at `https://chat-1.ki-awz.iisys.de/api`): a neutral start page and only a question, the model picks the real websites itself.
+    The run adds LISA through the side panel's "Custom model API" dialog, like a user does.
+    It needs `LISA_API_KEY` in the environment or `LISA_API` in the repo `.env`.
+    `npm run test:e2e -- --held-out` runs the held-out open-web tasks: nothing is ever tuned against them, and they run after every change to show it helps in general.
+    `-- --provider=nvidia` runs on NVIDIA NIM instead (`NVIDIA_API_KEY` or `NVIDIA_API`).
     `npm run test:e2e:mock` runs the same harness offline on the scripted mock (CI uses it, since CI has no key).
 - After every implementation or change, run both layers. If either fails, fix the change until both pass. No change is done while a layer is red.
 - The verification harness is for the verification steps only. It never gets into the extension itself: nothing from `tests/e2e/` (mock, driver, fixtures, screenshots) enters `dist/` or the shipped zip.
@@ -18,7 +21,7 @@ These rules apply to every agent session working in this repository.
   - the end state of the page the task ran on.
 - The harness loads the built extension (`dist/`) into Chromium with a fresh temp profile, serves the local fixture site, and drives tasks through the extension's own message path. It never uses Prit's personal Chrome.
 - `--mock` runs fully offline with the scripted LLM server (`tests/mcp/mockOllama.mjs`). Deterministic, no model, no network.
-  It is the offline check (`npm run test:e2e:mock`); the default verification run uses the real NVIDIA model.
+  It is the offline check (`npm run test:e2e:mock`); the default verification run uses the real LISA model.
 - Every new behaviour gets a harness scenario: the feature must be observable in the simulated browser (history entries, side panel DOM, screenshots), not only in unit tests.
 - Negative controls (`--tamper`) prove a check can fail. When adding a check, add or confirm a tamper or a negative scenario for it.
 - Unit tests (`npm test`) are the fast inner loop; the e2e harness (`npm run test:e2e`) is the outer gate.

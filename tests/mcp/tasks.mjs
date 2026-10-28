@@ -573,5 +573,59 @@ export const TASKS = {
         : ['the cookie banner was never accepted: stackoverflow.com has no OptanonAlertBoxClosed cookie'];
     },
     check: (run) => (run.answer || '').length > 15
+  },
+
+  // Held-out open-web tasks (`--held-out`). Nothing in the engine, the prompts or the tools is ever
+  // tuned against these: they only run after a change made for the tasks above, to show that the
+  // change helps in general and is not fitted to those tasks. A held-out task that fails is a finding
+  // about the agent, never a reason to edit the task. Each one asks for a different kind of work:
+  // an official download page, a release log, a wiki fact, a reference doc, a live list, a registry.
+  'held-node-lts': {
+    page: WEB_START,
+    web: true,
+    heldOut: true,
+    prompt: 'Which Node.js major version is the current Active LTS release, and what is its codename? Use the official Node.js website.',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b(2[2-9]|3\d)\b/.test(run.answer || '') && /[A-Z][a-z]+/.test(run.answer || '')
+  },
+  'held-rust-release': {
+    page: WEB_START,
+    web: true,
+    heldOut: true,
+    prompt: 'What is the latest stable version of the Rust programming language, and on which date was it released?',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b1\.\d{2,3}(\.\d+)?\b/.test(run.answer || '') && /\b20\d\d\b/.test(run.answer || '')
+  },
+  'held-munich-population': {
+    page: WEB_START,
+    web: true,
+    heldOut: true,
+    prompt: 'What is the population of Munich according to its English Wikipedia article, and which year is that number from?',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b1[.,]\d{3}[.,]\d{3}\b|\b1[.,]\d+\s*million\b/i.test(run.answer || '') && /\b20[12]\d\b/.test(run.answer || '')
+  },
+  'held-mdn-array-at': {
+    page: WEB_START,
+    web: true,
+    heldOut: true,
+    prompt: 'According to MDN, what does the JavaScript method Array.prototype.at() return when it is given a negative index? Answer with one short example.',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\bend\b|\blast\b|from the back|counting back/i.test(run.answer || '') && /at\(\s*-\d+\s*\)/.test(run.answer || '')
+  },
+  'held-hn-top-story': {
+    page: WEB_START,
+    web: true,
+    heldOut: true,
+    prompt: 'What is the title of the story at position 1 on the Hacker News front page right now, and how many points does it have?',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b\d+\s*points?\b/i.test(run.answer || '') && (run.answer || '').length > 25
+  },
+  'held-pypi-requests': {
+    page: WEB_START,
+    web: true,
+    heldOut: true,
+    prompt: 'What is the latest version of the Python package "requests" on PyPI, and which minimum Python version does it require?',
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b2\.\d{2}\.\d+\b/.test(run.answer || '') && /\b3\.\d{1,2}\b/.test(run.answer || '')
   }
 };

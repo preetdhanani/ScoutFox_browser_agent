@@ -27,7 +27,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
-import { NVIDIA_DEFAULT_MODEL } from './lib/nvidiaProxy.mjs';
+import { NVIDIA_DEFAULT_MODEL } from './lib/providers.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '../..');

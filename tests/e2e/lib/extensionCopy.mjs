@@ -46,6 +46,15 @@ export const TAMPERS = {
       prepend(inside(dir, src.replace(/^\/+/, '')), 'throw new Error(\'panel boom (tamper=broken-panel)\');\n');
     }
   },
+  'custom-provider-unsaved': {
+    does: 'makes "Add provider" of the "Custom model API" dialog close it without saving (a run on a custom provider must fail its provider setup)',
+    apply: (dir) => {
+      const html = fs.readFileSync(inside(dir, 'sidepanel/sidepanel.html'), 'utf8');
+      const src = /<script\b[^>]*\bsrc="([^"]+)"/.exec(html)?.[1];
+      if (!src) throw new Error('tamper=custom-provider-unsaved: sidepanel.html has no <script src>');
+      replaceOnce(inside(dir, src.replace(/^\/+/, '')), 'el("btnCpSave").addEventListener("click", submit);', 'el("btnCpSave").addEventListener("click", close);');
+    }
+  },
   'empty-page-text': {
     does: 'makes the content script report no page text (the model then cannot read the page and must answer wrong)',
     apply: (dir) => {

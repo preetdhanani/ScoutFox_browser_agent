@@ -24,7 +24,9 @@ The temp folder and a fresh Chromium profile are removed at the end, also on a f
 The offline run needs no model and no Ollama. It is what CI runs.
 
 ```
-npm run test:e2e                      # builds dist/ first, then runs on NVIDIA NIM (needs NVIDIA_API_KEY)
+npm run test:e2e                      # builds dist/ first, then runs on LISA (needs LISA_API_KEY or LISA_API in .env)
+npm run test:e2e -- --held-out        # the held-out open-web tasks on LISA
+npm run test:e2e -- --provider=nvidia # the same open-web tasks on NVIDIA NIM (needs NVIDIA_API_KEY)
 npm run test:e2e:mock                 # builds dist/ first, then the offline run on the scripted mock
 node tests/e2e/smoke.mjs --mock       # the offline run on the dist/ you already built
 ```
@@ -32,8 +34,8 @@ node tests/e2e/smoke.mjs --mock       # the offline run on the dist/ you already
 The run against a real local Ollama needs the model to be pulled already.
 
 ```
-node tests/e2e/smoke.mjs                              # all tasks with qwen3.8:27b-mlx
-node tests/e2e/smoke.mjs --task=store-price --model=gemma4:12b
+node tests/e2e/smoke.mjs --provider=ollama            # the open-web tasks with qwen3.8:27b-mlx
+node tests/e2e/smoke.mjs --provider=ollama --task=web-eiffel-tower --model=gemma4:12b
 ```
 
 The run prints every task with its steps, model calls and tokens, then a summary, and it ends with `SMOKE PASSED` or `SMOKE FAILED` with the list of problems. The exit code is 0 for a pass and 1 for a fail. If the sources are newer than `dist/`, it prints a warning to build again (or to use `--build`).
@@ -43,7 +45,9 @@ The run prints every task with its steps, model calls and tokens, then a summary
 | `--mock` | Uses the offline mock instead of Ollama, and runs the mock's self-test first. |
 | `--build` | Runs `npm run build` first, so `dist/` is fresh. |
 | `--task=a,b` | Runs only these tasks, for example `web-eiffel-tower,web-npm-react`, or `store-price` with `--mock`. |
-| `--model=name` | The model name (default `qwen3.8:27b-mlx`, or `mock-agent` with `--mock`). |
+| `--provider=name` | The real model server: `lisa` (default), `nvidia` or `ollama`. The OpenAI-compatible profiles live in `lib/providers.mjs`. |
+| `--held-out` | Runs the held-out open-web tasks instead of the regular ones (see "The tasks"). |
+| `--model=name` | The model name (default: `lisa-pro` on LISA, `nvidia/nemotron-3.5-super-vl-120b-a12b` on NVIDIA, `qwen3.8:27b-mlx` on Ollama, `mock-agent` with `--mock`). |
 | `--max-steps=n` | Saved into the settings (the MCP loop does not read a step cap yet). |
 | `--timeout=ms` | The time limit for one task (default 360000, or 60000 with `--mock`). |
 | `--headless` | Runs without a window. The suite is **headful by default**, because headless Chromium creates no side panel document at all; a headless run photographs the panel as a page instead, and says so in the report. |
@@ -110,7 +114,9 @@ Three findings got there, all of them measured on Chromium 152 rather than assum
 
 There are two kinds of tasks.
 
-The real use cases (`web-*`) are the default set of a real-model run (`npm run test:e2e`, NVIDIA).
+The real use cases (`web-*`) are the default set of a real-model run (`npm run test:e2e`, LISA).
+On a custom provider like LISA, the run first adds it through the side panel's "Custom model API" dialog, like a user: it fills the form, fetches the model list through the key proxy, adds the provider, and shoots the dialog in light and dark.
+A problem there fails the run as "provider setup".
 Each starts on a neutral page (`https://example.com/`) and gets only a question.
 Which site to open, what to search, which cookie banner to accept and when to stop are all the model's decisions.
 The check reads only facts a right answer must contain.
@@ -126,6 +132,19 @@ The check reads only facts a right answer must contain.
 | `web-framework-price` | the official Framework Laptop 16 price compared with one other shop |
 | `web-cookie-accept` | open stackoverflow.com, accept its cookie banner, and name the top question |
 | `web-research-archive` | the exact file name of Ollama's latest Linux amd64 archive and whether it needs zstd, looked up with `web_search` or `fetch_url` (the run must use one) |
+
+The held-out tasks (`held-*`, `--held-out`) are open-web tasks of other kinds that nothing is ever tuned against.
+They run after every change made for the tasks above, to show the change helps in general and is not fitted to those tasks.
+A held-out task that fails is a finding about the agent, never a reason to edit the task.
+
+| Task | The question |
+| --- | --- |
+| `held-node-lts` | the current Active LTS major of Node.js and its codename, from the official site |
+| `held-rust-release` | the latest stable Rust version and its release date |
+| `held-munich-population` | Munich's population from its English Wikipedia article, and the year of the figure |
+| `held-mdn-array-at` | what `Array.prototype.at()` returns for a negative index, per MDN, with an example |
+| `held-hn-top-story` | the title and points of the top story on Hacker News |
+| `held-pypi-requests` | the latest `requests` version on PyPI and its minimum Python version |
 
 A task may list the sites it needs (`reachable`): the harness asks each first, and a site that does not answer skips the task with the reason, never a failure.
 
@@ -221,6 +240,7 @@ The self-test (`tests/mcp/mockOllama.selftest.mjs`) checks the protocol, the val
 | `no-content-script` | Deletes `content/content.js`, which the manifest lists. | Exit 1: Chromium refuses to load the extension, and the error names the missing file. |
 | `worker-error` | Adds a `console.error` at the top of `background/sw.js`. | Exit 1 on the worker error, although all tasks pass. |
 | `broken-panel` | Makes the side panel script throw when it loads. | Exit 1 on the side panel gate. |
+| `custom-provider-unsaved` | Makes "Add provider" of the "Custom model API" dialog close it without saving. | Exit 1 on a custom-provider run (LISA): "provider setup: "Add provider" stored no custom provider "lisa"". |
 | `empty-page-text` | Makes the content script report no page text (the snapshot text and the full text `read_page` pages through). | Exit 1: the mock answers `MOCK-FAIL` (it cannot read a price from an empty page). |
 | `no-history-rows` | Makes the runner drop every history row (`recordEntry` pushes nothing). | Exit 1: the run is invisible (no timeline rows, no final entry). |
 | `zod-not-jitless` | Removes the statement that switches zod code generation off from `background/sw.js`. | Exit 1 on two `service worker CSP violation` lines, although all tasks pass. |
@@ -258,5 +278,7 @@ Branded Chrome ignores `--load-extension`. Use Chromium or Chrome for Testing, a
 - `lib/extensionCopy.mjs`: the copy of `dist/` and the tampers.
 - `lib/fixtureServer.mjs`: the static server for the fixture site.
 - `lib/ollamaProxy.mjs`: the Origin proxy for the real Ollama.
+- `lib/keyProxy.mjs`: the proxy in front of a real OpenAI-compatible server (LISA, NVIDIA) that adds the key, so the extension only holds a placeholder.
+- `lib/providers.mjs`: the real OpenAI-compatible servers `--provider` takes, with their URL, key variables and default model.
 - `lib/twoSources.mjs`: the Chromium host rules that map fake shop names onto the fixture server.
 - `screenshots/<run stamp>/`: the screenshots of the runs (gitignored).

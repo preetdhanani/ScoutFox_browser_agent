@@ -8,10 +8,13 @@
  * message path: the same START_TASK message the side panel sends. When a run ends it prints the
  * outcome, the steps, the wall time, and the model calls and tokens.
  *
- * The model server is one of three:
- *   default  NVIDIA NIM with nvidia/nemotron-3.5-super-vl-120b-a12b (`npm run test:e2e`), through a
- *            small local proxy (lib/nvidiaProxy.mjs) that adds NVIDIA_API_KEY from the environment,
- *            so the key never enters the extension or the browser profile.
+ * The model server is one of these:
+ *   default  LISA (lisa-pro, an OpenAI-compatible custom endpoint; `npm run test:e2e`). The run adds it
+ *            through the side panel's "Custom model API" dialog, like a user, and talks to it through a
+ *            small local proxy (lib/keyProxy.mjs) that adds the key from the environment, so the key
+ *            never enters the extension or the browser profile.
+ *   --provider=nvidia  NVIDIA NIM with nvidia/nemotron-3.5-super-vl-120b-a12b, the built-in provider,
+ *            through the same proxy. The profiles live in lib/providers.mjs.
  *   --mock   an offline, scripted stand-in for Ollama (tests/mcp/mockOllama.mjs). No model, no key
  *            and no network. This is what CI runs (`npm run test:e2e:mock`).
  *   --provider=ollama  a small proxy in front of a real local Ollama (lib/ollamaProxy.mjs, see
@@ -31,9 +34,12 @@
  *         npm run build                     from the repo root, or pass --build
  * Run:    node smoke.mjs --mock                    offline, all tasks, no model needed
  *         node smoke.mjs --mock --build            build first, then the same (npm run test:e2e)
- *         node smoke.mjs                           the open-web tasks on NVIDIA NIM: a neutral start page and
+ *         node smoke.mjs                           the open-web tasks on LISA: a neutral start page and
  *                                                  only a question, the model picks every site (needs the key)
- *         node smoke.mjs --fixtures                the local fixture tasks on NVIDIA NIM
+ *         node smoke.mjs --fixtures                the local fixture tasks on LISA
+ *         node smoke.mjs --held-out                the held-out open-web tasks (never tuned against; run them
+ *                                                  after every change, to show it helps in general)
+ *         node smoke.mjs --provider=nvidia         the open-web tasks on NVIDIA NIM
  *         node smoke.mjs --provider=ollama         all tasks with qwen3.8:27b-mlx on the real Ollama
  *         node smoke.mjs --task=store-price        one task (or a comma list)
  *         node smoke.mjs --model=gemma4:12b
@@ -59,8 +65,9 @@
  *             default medium): the model's reasoning level, checked on the wire for every call.
  *
  * Needs Chromium (branded Chrome ignores --load-extension) at CHROMIUM_PATH, default
- * /Applications/Chromium.app/Contents/MacOS/Chromium. The NVIDIA mode needs NVIDIA_API_KEY in the shell or NVIDIA_API in the repo .env (and
- * takes NVIDIA_URL, default https://integrate.api.nvidia.com). The Ollama mode needs Ollama at
+ * /Applications/Chromium.app/Contents/MacOS/Chromium. The LISA mode needs LISA_API_KEY in the shell or LISA_API in the
+ * repo .env (and takes LISA_URL, default https://chat-1.ki-awz.iisys.de/api). The NVIDIA mode needs NVIDIA_API_KEY or
+ * NVIDIA_API (and takes NVIDIA_URL, default https://integrate.api.nvidia.com/v1). The Ollama mode needs Ollama at
  * OLLAMA_URL, default http://127.0.0.1:11434, with the model already pulled.
  * Other environment variables: FIXTURE_PORT (8765; the committed snapshots contain this port),
  * PROXY_PORT (11435, also the port of the mock) and CHROMIUM_ARGS (extra Chromium flags,
@@ -73,7 +80,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startFixtureServer } from './lib/fixtureServer.mjs';
 import { startOllamaProxy } from './lib/ollamaProxy.mjs';
-import { NVIDIA_DEFAULT_MODEL, NVIDIA_PLACEHOLDER_KEY, startNvidiaProxy } from './lib/nvidiaProxy.mjs';
+import { PLACEHOLDER_KEY, startKeyProxy } from './lib/keyProxy.mjs';
+import { DEFAULT_PROVIDER, REAL_PROVIDER_NAMES, providerSettings, proxiedBaseUrl, resolveProvider } from './lib/providers.mjs';
 import { missingManifestFiles, prepareExtensionCopy, TAMPERS } from './lib/extensionCopy.mjs';
 import { MOCK_FAIL_PREFIX } from '../mcp/callRecord.mjs';
 import { runFacts, TASKS } from '../mcp/tasks.mjs';
@@ -88,22 +96,22 @@ const SNAPSHOT_DIR = path.join(REPO, 'tests', 'fixtures', 'snapshots');
 // read, so these go into the e2e folder, where the mock's self-test reads them.
 const E2E_SNAPSHOT_DIR = path.join(HERE, 'lib', 'snapshots');
 
-const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'headless', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'mock', 'tamper', 'prompt', 'start-url', 'provider', 'fixtures', 'effort']);
+const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'headless', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'mock', 'tamper', 'prompt', 'start-url', 'provider', 'fixtures', 'held-out', 'effort']);
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)(?:=(.*))?$/);
   return m ? [m[1], m[2] === undefined ? true : m[2]] : [a, true];
 }));
 
 const MOCK = !!args.mock;
-// The repo's own .env (gitignored) may hold the NVIDIA key; a variable already set in the shell wins.
+// The repo's own .env (gitignored) may hold the model keys; a variable already set in the shell wins.
 if (fs.existsSync(path.join(REPO, '.env'))) {
   try { process.loadEnvFile(path.join(REPO, '.env')); } catch { /* an unreadable .env is the same as none */ }
 }
-/** The NIM key: NVIDIA_API_KEY, or NVIDIA_API (the name the repo's .env uses). Never logged. */
-const NVIDIA_KEY = (process.env.NVIDIA_API_KEY || process.env.NVIDIA_API || '').trim().replace(/^["']|["']$/g, '');
-// The real model behind the run: NVIDIA NIM by default, or a local Ollama. --mock replaces both.
-const PROVIDER = MOCK ? 'mock' : String(args.provider || 'nvidia');
-const NVIDIA_URL = (process.env.NVIDIA_URL || 'https://integrate.api.nvidia.com').replace(/\/+$/, '');
+// The real model behind the run: LISA by default, another OpenAI-compatible profile of
+// lib/providers.mjs (nvidia), or a local Ollama. --mock replaces them all.
+const PROVIDER = MOCK ? 'mock' : String(args.provider || DEFAULT_PROVIDER);
+/** The resolved profile of a real OpenAI-compatible server, or null (mock, Ollama). Holds the key: never logged. */
+const REAL = REAL_PROVIDER_NAMES.includes(PROVIDER) ? resolveProvider(PROVIDER) : null;
 const CHROMIUM = process.env.CHROMIUM_PATH || '/Applications/Chromium.app/Contents/MacOS/Chromium';
 const CHROMIUM_ARGS = (process.env.CHROMIUM_ARGS || '').split(/\s+/).filter(Boolean);
 // The window every task runs in, and the device pixel ratio it runs at. Wider than the 1568 pixel
@@ -116,7 +124,7 @@ const CHROMIUM_ARGS = (process.env.CHROMIUM_ARGS || '').split(/\s+/).filter(Bool
 const SHOT_VIEWPORT = { width: 2000, height: 1100 };
 const SHOT_DPR = 2;
 const OLLAMA = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
-const MODEL = args.model || (MOCK ? 'mock-agent' : PROVIDER === 'nvidia' ? NVIDIA_DEFAULT_MODEL : 'qwen3.8:27b-mlx');
+const MODEL = args.model || (MOCK ? 'mock-agent' : REAL ? REAL.defaultModel : 'qwen3.8:27b-mlx');
 /** The card title the panel draws for each finish outcome (OUTCOME_CARD in sidepanel/sidepanel.js). */
 const OUTCOME_TITLE = { done: 'Done', partial: 'Partly done', blocked: 'Could not finish' };
 const FIXTURE_PORT = Number(process.env.FIXTURE_PORT || 8765);
@@ -304,18 +312,18 @@ function warnIfDistIsStale() {
   }
 }
 
-/** The NVIDIA key is set and the model is in NIM's catalog; the run does not start otherwise. */
-async function preflightNvidia() {
-  const apiKey = NVIDIA_KEY;
-  if (!apiKey) {
-    throw new UserError('No NVIDIA key: set NVIDIA_API_KEY in this shell or NVIDIA_API in the repo .env, or run offline with --mock.');
+/** The real server's key is set and the model is in its catalog; the run does not start otherwise. */
+async function preflightReal() {
+  const where = `${REAL.origin}${REAL.mount}`;
+  if (!REAL.apiKey) {
+    throw new UserError(`No ${REAL.label} key: set ${REAL.keyEnv.join(' or ')} in this shell or in the repo .env, or run offline with --mock.`);
   }
-  const res = await fetch(`${NVIDIA_URL}/v1/models`, { headers: { Authorization: `Bearer ${apiKey}` } }).catch((err) => ({ ok: false, status: err.message }));
-  if (!res.ok) throw new UserError(`NVIDIA NIM is not reachable at ${NVIDIA_URL} (${res.status}). Check the network, or run offline with --mock.`);
+  const res = await fetch(`${where}/models`, { headers: { Authorization: `Bearer ${REAL.apiKey}` } }).catch((err) => ({ ok: false, status: err.message }));
+  if (!res.ok) throw new UserError(`${REAL.label} is not reachable at ${where} (${res.status}). Check the network and ${REAL.urlEnv}, or run offline with --mock.`);
   const ids = ((await res.json().catch(() => ({}))).data || []).map((m) => m.id);
-  if (!ids.includes(MODEL)) throw new UserError(`NVIDIA NIM does not list the model "${MODEL}". Pick one with --model=.`);
+  if (!ids.includes(MODEL)) throw new UserError(`${REAL.label} does not list the model "${MODEL}" (it lists ${ids.slice(0, 10).join(', ') || 'none'}). Pick one with --model=.`);
   // The key is not returned: `env` goes into the saved report, and the key must never be in it.
-  return { nvidiaUrl: NVIDIA_URL, nvidiaModels: ids.length };
+  return { provider: REAL.name, url: where, models: ids.length };
 }
 
 async function preflightOllama() {
@@ -702,7 +710,7 @@ async function checkTimeoutField(page) {
   await page.waitForFunction(() => document.getElementById('llmTimeoutInput').value !== '1000', { timeout: 3000 }).catch(() => { /* judged below */ });
   result.shown = await page.$eval('#llmTimeoutInput', (el) => el.value);
   // The stored value the engine uses, in timeoutMsOf's order: the provider's own config first
-  // (where the panel saves it for NVIDIA), then a custom provider's descriptor, then the global one.
+  // (where the panel saves it for a built-in provider), then a custom provider's descriptor, then the global one.
   result.stored = await page.evaluate(() => chrome.storage.local.get('agent_settings').then(({ agent_settings: s }) => {
     if (!s) return undefined;
     const own = Number(s.providerConfigs?.[s.provider]?.llmTimeoutMs);
@@ -1699,6 +1707,85 @@ function logsOfRun(stateLogs, portLogs, tabId) {
 }
 
 /**
+ * A custom provider (LISA) is added the way a user adds it: Settings > LLM Provider > "Custom
+ * endpoint…", the "Custom model API" dialog filled in, "Fetch available models" (a real request,
+ * through the key proxy, to the server's model list), then "Add provider". The run then uses the
+ * descriptor the dialog stored, so a broken dialog fails the run instead of being bypassed.
+ *
+ * The dialog is shot in light and dark, with the fetched models listed.
+ */
+async function addCustomProvider(ctx, llm) {
+  const custom = REAL.custom;
+  const baseUrl = proxiedBaseUrl(REAL, llm.url);
+  const result = { id: custom.id, baseUrl, fetchStatus: null, models: [], stored: null, screenshots: [], problems: [] };
+  const shotDir = args['panel-screenshots'] ? path.resolve(String(args['panel-screenshots'])) : path.join(SHOT_ROOT, 'provider-setup');
+  const page = await ctx.browser.newPage();
+  try {
+    await watchPanelPage(page, ctx.panel);
+    await page.setViewport({ width: 400, height: 900 });
+    await page.goto(`chrome-extension://${ctx.extensionId}/sidepanel/sidepanel.html`, { waitUntil: 'load' });
+    await page.click('.nav-btn[data-tab="settings"]');
+    await page.waitForSelector('#providerSelect', { visible: true, timeout: 8000 });
+    await page.select('#providerSelect', '__custom_provider__');
+    await page.waitForSelector('#cpOverlay', { visible: true, timeout: 5000 });
+    const type = async (selector, text) => {
+      await page.click(selector, { clickCount: 3 });
+      await page.type(selector, text);
+    };
+    await type('#cpIdInput', custom.id);
+    await type('#cpNameInput', custom.displayName);
+    await type('#cpBaseUrlInput', baseUrl);
+    await page.click(custom.protocol === 'anthropic' ? '#cpProtocolAnthropic' : '#cpProtocolOpenai');
+    await type('#cpApiKeyInput', PLACEHOLDER_KEY);
+    await type('#cpTimeoutInput', String(REAL.llmTimeoutMs));
+    await page.click('#btnCpFetchModels');
+    await page.waitForFunction(() => {
+      const t = document.getElementById('cpFetchStatus').textContent;
+      return !!t && !/^Fetching/.test(t);
+    }, { timeout: 30000 }).catch(() => { /* judged below */ });
+    result.fetchStatus = await page.$eval('#cpFetchStatus', (el) => el.textContent);
+    result.models = await page.$$eval('#cpModelsList .cp-model-id', (els) => els.map((el) => el.textContent));
+    fs.mkdirSync(shotDir, { recursive: true });
+    // Tall enough that the dialog (max-height: 100%) does not scroll, so the shot shows every field and model.
+    await page.setViewport({ width: 400, height: 2000 });
+    for (const scheme of ['light', 'dark']) {
+      await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: scheme }]);
+      await sleep(400); // the theme transition, so the shot shows the settled colours
+      const file = path.join(shotDir, `provider-setup-${custom.id}-dialog-${scheme}.png`);
+      await (await page.$('#cpDialog')).screenshot({ path: file });
+      result.screenshots.push(file);
+    }
+    await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
+    await page.setViewport({ width: 400, height: 900 });
+    await page.click('#btnCpSave');
+    await page.waitForSelector('#cpOverlay', { hidden: true, timeout: 5000 }).catch(() => { /* judged below */ });
+    result.formError = await page.$eval('#cpError', (el) => (el.style.display === 'none' ? '' : el.textContent)).catch(() => '');
+    result.stored = await page.evaluate((id, key) => chrome.storage.local.get('agent_settings').then(({ agent_settings: s }) => ({
+      descriptor: (s && s.customProviders && s.customProviders[id]) || null,
+      customProviders: (s && s.customProviders) || {},
+      keyIsPlaceholder: !!(s && s.providerConfigs && s.providerConfigs[id] && s.providerConfigs[id].apiKey === key)
+    })), custom.id, PLACEHOLDER_KEY);
+    await collectCsp(page, ctx.panel);
+  } finally {
+    await page.close().catch(() => {});
+  }
+  if (!result.models.includes(MODEL)) result.problems.push(`"Fetch available models" listed ${JSON.stringify(result.models)}, not the run's model "${MODEL}" (status: ${JSON.stringify(result.fetchStatus)})`);
+  if (result.formError) result.problems.push(`"Add provider" showed an error: ${result.formError}`);
+  const d = result.stored && result.stored.descriptor;
+  if (!d) {
+    result.problems.push(`"Add provider" stored no custom provider "${custom.id}"`);
+  } else {
+    if (d.protocol !== custom.protocol) result.problems.push(`the stored protocol is ${JSON.stringify(d.protocol)}, expected ${JSON.stringify(custom.protocol)}`);
+    if (d.baseUrl !== baseUrl) result.problems.push(`the stored base URL is ${JSON.stringify(d.baseUrl)}, expected ${JSON.stringify(baseUrl)}`);
+    if (!d.models.includes(MODEL)) result.problems.push(`the stored model list ${JSON.stringify(d.models)} lacks "${MODEL}"`);
+    if (d.llmTimeoutMs !== REAL.llmTimeoutMs) result.problems.push(`the stored timeout is ${JSON.stringify(d.llmTimeoutMs)}, expected ${REAL.llmTimeoutMs}`);
+    if (!result.stored.keyIsPlaceholder) result.problems.push('the key typed into the dialog was not stored as the provider\'s credential');
+  }
+  ctx.customProviders = (result.stored && result.stored.customProviders) || {};
+  return result;
+}
+
+/**
  * Saves the settings the extension runs with. Same shape the side panel's own save writes: the panel
  * header shows providerConfigs[provider].model, the engine uses the top-level model.
  *
@@ -1708,19 +1795,15 @@ function logsOfRun(stateLogs, portLogs, tabId) {
  * (plan stage 2d), so the mock's /api/show answer will decide it later.
  */
 async function saveSettings(ctx, llm, model) {
-  // NVIDIA: the extension talks to the local proxy as its NIM base URL and holds only a
-  // placeholder key; the proxy adds the real one. The mock and Ollama speak Ollama's API.
-  const connection = PROVIDER === 'nvidia'
-    ? { provider: 'nvidia', baseUrl: `${llm.url}/v1`, apiKey: NVIDIA_PLACEHOLDER_KEY }
-    : { provider: 'ollama', baseUrl: llm.url, apiKey: '' };
+  // A real OpenAI-compatible server (lib/providers.mjs): the extension talks to the local key proxy
+  // and holds only a placeholder key; the proxy adds the real one. A custom provider keeps the
+  // descriptor its dialog created (addCustomProvider). The mock and Ollama speak Ollama's API.
+  const connection = REAL
+    ? providerSettings(REAL, llm.url, model, ctx.customProviders || {})
+    : { provider: 'ollama', baseUrl: llm.url, apiKey: '', providerConfigs: { ollama: { baseUrl: llm.url, apiKey: '', model } } };
   await ctx.driver.evaluate(async (settings) => {
     await chrome.storage.local.set({ agent_settings: settings });
-  }, {
-    ...connection, model, maxSteps: MAX_STEPS, effortDefault: EFFORT,
-    // NIM answers a tool round in seconds; 120 s (not the 300 s default) bounds a call stuck in its
-    // queue, which the client then tries once more.
-    providerConfigs: { [connection.provider]: { baseUrl: connection.baseUrl, apiKey: connection.apiKey, model, ...(PROVIDER === 'nvidia' ? { llmTimeoutMs: 120000 } : {}) } }
-  });
+  }, { ...connection, model, maxSteps: MAX_STEPS, effortDefault: EFFORT });
   ctx.model = model;
   // The plain settings: a task that changed more (Settings > Research) set its own key.
   ctx.settingsKey = '{}';
@@ -2426,6 +2509,9 @@ function judge(ctx, reports, gate) {
   if (ctx.brand) {
     for (const problem of ctx.brand.problems) failures.push(`side panel: ${problem}`);
   }
+  if (ctx.providerSetup) {
+    for (const problem of ctx.providerSetup.problems) failures.push(`provider setup: ${problem}`);
+  }
   return failures;
 }
 
@@ -2454,17 +2540,17 @@ async function main() {
   for (const flag of Object.keys(args)) {
     if (!KNOWN_FLAGS.has(flag)) throw new UserError(`Unknown option "${flag}". Known: ${[...KNOWN_FLAGS].map((f) => `--${f}`).join(', ')}`);
   }
-  if (!MOCK && !['nvidia', 'ollama'].includes(PROVIDER)) throw new UserError(`--provider must be nvidia or ollama, got ${PROVIDER}`);
+  if (!MOCK && !REAL && PROVIDER !== 'ollama') throw new UserError(`--provider must be one of ${[...REAL_PROVIDER_NAMES, 'ollama'].join(', ')}, got ${PROVIDER}`);
   if (args.tamper !== undefined && !TAMPERS[args.tamper]) {
     throw new UserError(`Unknown --tamper "${args.tamper}". Known: ${Object.entries(TAMPERS).map(([k, v]) => `${k} (${v.does})`).join('; ')}`);
   }
   // A real model meets the same goal in a task and in its mock-only variant, so the variants only run with --mock.
   // An open-web task (web) only runs against a real model, and it is the default set of a real run: the model
-  // picks every site itself. --fixtures runs the local fixture tasks on the real model instead. --mock never
-  // touches the open web.
+  // picks every site itself. --fixtures runs the local fixture tasks on the real model instead. --held-out runs
+  // only the held-out open-web tasks (heldOut), which a plain real run leaves out. --mock never touches the open web.
   const names = args.task
     ? String(args.task).split(',')
-    : Object.keys(TASKS).filter((n) => MOCK ? !TASKS[n].web : args.fixtures ? (!TASKS[n].mockOnly && !TASKS[n].web) : TASKS[n].web);
+    : Object.keys(TASKS).filter((n) => MOCK ? !TASKS[n].web : args.fixtures ? (!TASKS[n].mockOnly && !TASKS[n].web) : TASKS[n].web && !!TASKS[n].heldOut === !!args['held-out']);
   for (const name of names) {
     if (!TASKS[name]) throw new UserError(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
   }
@@ -2495,9 +2581,9 @@ async function main() {
     }
     env = { mock: true, mockSelfTest: `${results.length}/${results.length} checks passed` };
     console.log(`mock Ollama self-test: ${results.length}/${results.length} checks passed`);
-  } else if (needsModel && PROVIDER === 'nvidia') {
-    env = await preflightNvidia();
-    console.log(`NVIDIA NIM at ${env.nvidiaUrl} (${env.nvidiaModels} models listed), model ${MODEL}`);
+  } else if (needsModel && REAL) {
+    env = await preflightReal();
+    console.log(`${REAL.label} at ${env.url} (${env.models} models listed), model ${MODEL}`);
   } else if (needsModel) {
     env = await preflightOllama();
     console.log(`Ollama ${env.ollamaVersion} at ${OLLAMA}; direct call with a chrome-extension Origin -> ${env.directStatusFromExtensionOrigin} (so the extension uses the proxy)`);
@@ -2513,14 +2599,14 @@ async function main() {
       // The models of the mock: the one of the run, and the personas of the tasks (/api/show knows exactly these).
       const models = [...new Set([MODEL, ...Object.values(TASKS).map((t) => t.mockModel).filter(Boolean)])];
       llm = await listen('mock Ollama', () => startMockOllama({ port: PROXY_PORT, models }));
-    } else if (PROVIDER === 'nvidia') {
-      llm = await listen('NVIDIA proxy', () => startNvidiaProxy({ port: PROXY_PORT, target: NVIDIA_URL, apiKey: NVIDIA_KEY }));
+    } else if (REAL) {
+      llm = await listen(`${REAL.label} proxy`, () => startKeyProxy({ port: PROXY_PORT, target: REAL.origin, apiKey: REAL.apiKey, label: REAL.label }));
     } else {
       llm = await listen('Ollama proxy', () => startOllamaProxy({ port: PROXY_PORT, target: OLLAMA }));
     }
     onCleanup(closeServer(llm.server));
   }
-  console.log(`fixtures at ${fixtures.origin}${llm ? `, ${MOCK ? 'mock Ollama' : PROVIDER === 'nvidia' ? 'NVIDIA proxy' : 'Ollama proxy'} at ${llm.url}` : ''}`);
+  console.log(`fixtures at ${fixtures.origin}${llm ? `, ${MOCK ? 'mock Ollama' : REAL ? `${REAL.label} proxy` : 'Ollama proxy'} at ${llm.url}` : ''}`);
 
   // The extension the browser loads: a copy of dist/ plus the two test-only pages, never dist/ itself.
   const copy = prepareExtensionCopy({
@@ -2543,6 +2629,11 @@ async function main() {
   if (args['dump-snapshots']) {
     await dumpSnapshots(ctx, fixtures, typeof args['dump-snapshots'] === 'string' ? args['dump-snapshots'].split(',') : null);
   } else {
+    if (REAL && REAL.custom) {
+      ctx.providerSetup = await addCustomProvider(ctx, llm);
+      console.log(`provider setup: ${REAL.label} through the "Custom model API" dialog: ${ctx.providerSetup.problems.length ? `FAILED (${ctx.providerSetup.problems.length} problem(s))` : 'added'}; fetch status: ${ctx.providerSetup.fetchStatus}`);
+      for (const file of ctx.providerSetup.screenshots) console.log(`panel screenshot: ${file}`);
+    }
     await saveSettings(ctx, llm, MODEL);
 
     for (const { task, reason } of skipped) console.log(`\n=== ${task} === SKIPPED (${reason})`);
@@ -2590,7 +2681,7 @@ async function main() {
     // A run that loops makes thousands of calls: the report keeps the first five and the last three of each task, and the count.
     const trimmed = reports.map((r) => ({ ...r, callCount: r.calls.length, calls: r.calls.length <= 8 ? r.calls : [...r.calls.slice(0, 5), ...r.calls.slice(-3)], logLines: r.logLines.length <= 40 ? r.logLines : [...r.logLines.slice(0, 25), ...r.logLines.slice(-15)] }));
     fs.writeFileSync(path.resolve(String(args.out)), JSON.stringify({
-      env, mock: MOCK, tamper: args.tamper || null, model: MODEL, skipped, reports: trimmed, workerErrors: ctx.workerErrors, panel: { ...ctx.panel, gate }, brand: ctx.brand || null, failures
+      env, mock: MOCK, tamper: args.tamper || null, model: MODEL, skipped, reports: trimmed, workerErrors: ctx.workerErrors, panel: { ...ctx.panel, gate }, brand: ctx.brand || null, providerSetup: ctx.providerSetup || null, failures
     }, null, 2));
     console.log(`report saved to ${args.out}`);
   }

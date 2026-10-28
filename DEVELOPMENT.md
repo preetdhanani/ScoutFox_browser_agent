@@ -35,7 +35,7 @@ With nothing committed, `-dirty` is the same for every build, so the time is wha
 | `npm test` | Runs the unit tests (`tests/**/*.test.js` and `tests/**/*.test.ts`) with `node --test`, no browser and no build step needed: Node runs the `.ts` files by stripping their types. |
 | `npm run evalscan` | Fails when `dist/` calls `eval`, `new Function` or `Function()` (five hits are allowed, see "Worker Bundle and CSP" in section 3), so run `npm run build` first. |
 | `npm run zip` | Zips the contents of `dist/` into `scoutfox-chrome-extension.zip` in the repository root, without sourcemaps, so run `npm run build` first. |
-| `npm run test:e2e` | Builds, then runs the open-web tasks in Chromium on NVIDIA NIM (`nvidia/nemotron-3.5-super-vl-120b-a12b`): each starts on a neutral page with only a question, and the model picks and opens the real websites itself. Needs `NVIDIA_API_KEY` in the shell or `NVIDIA_API` in the repo `.env` (one-time setup, see "E2E Smoke" in section 3). Add `-- --fixtures` for the local fixture tasks on the same model. |
+| `npm run test:e2e` | Builds, then runs the open-web tasks in Chromium on LISA (`lisa-pro`, an OpenAI-compatible custom endpoint the run adds through the "Custom model API" dialog): each starts on a neutral page with only a question, and the model picks and opens the real websites itself. Needs `LISA_API_KEY` in the shell or `LISA_API` in the repo `.env` (one-time setup, see "E2E Smoke" in section 3). Add `-- --held-out` for the held-out tasks, `-- --fixtures` for the local fixture tasks, or `-- --provider=nvidia` for NVIDIA NIM. |
 | `npm run test:e2e:mock` | The same smoke test against the offline scripted mock model: no key, no network. CI runs this one. |
 
 ### CI
@@ -333,9 +333,9 @@ One-time setup:
 You also need a Chromium binary, because branded Chrome ignores `--load-extension`.
 Set `CHROMIUM_PATH` if it is not at the macOS default (`/Applications/Chromium.app/Contents/MacOS/Chromium`).
 
-Run (on NVIDIA NIM, with your key in the shell):
+Run (on LISA, with your key in the shell or as `LISA_API` in the repo `.env`):
 ```bash
-export NVIDIA_API_KEY=nvapi-...
+export LISA_API_KEY=...
 npm run test:e2e
 ```
 The key stays in the harness: a local proxy adds it to each request, and the extension only holds a placeholder.

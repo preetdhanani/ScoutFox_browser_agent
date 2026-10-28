@@ -1,12 +1,14 @@
 /**
- * Local proxy in front of NVIDIA NIM (integrate.api.nvidia.com) for the smoke run.
+ * Local proxy in front of a real OpenAI-compatible model server for the smoke run (NVIDIA NIM,
+ * LISA, any other profile of lib/providers.mjs).
  *
- * The extension is configured with provider "nvidia" and this proxy as its base URL. The proxy
- * adds the real key (NVIDIA_API_KEY from the environment) to every request on the way out, so the
- * key never enters the extension's settings, the temp browser profile or a screenshot: the
- * extension only holds a placeholder.
+ * The extension is configured with this proxy as its base URL. The proxy adds the real key (read
+ * from the environment by the profile) to every request on the way out, so the key never enters
+ * the extension's settings, the temp browser profile or a screenshot: the extension only holds a
+ * placeholder. The request path is forwarded unchanged, so the extension builds the same URLs it
+ * builds for the real server (a base URL of <proxy>/api gives <proxy>/api/chat/completions).
  *
- * It also records every /v1/chat/completions call in the same shape as the Ollama proxy and the
+ * It also records every chat completions call in the same shape as the Ollama proxy and the
  * offline mock (see callRecord.mjs), so the report counts model calls and tokens the same way in
  * every mode. OpenAI's `usage` and `finish_reason` are mapped onto Ollama's names for that record.
  */
@@ -19,11 +21,8 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization'
 };
 
-/** The default NIM model of the smoke run: NVIDIA's vision-language Nemotron 3.5 Super. */
-export const NVIDIA_DEFAULT_MODEL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
-
 /** The placeholder key the extension is given. The proxy replaces it with the real one. */
-export const NVIDIA_PLACEHOLDER_KEY = 'nvapi-local-proxy-placeholder';
+export const PLACEHOLDER_KEY = 'local-proxy-placeholder-key';
 
 /** An OpenAI /chat/completions answer in the shape callRecord reads (Ollama's field names). */
 export function asCallRecordReply(body) {
@@ -42,8 +41,18 @@ export function asCallRecordReply(body) {
   };
 }
 
-export function startNvidiaProxy({ host = '127.0.0.1', port = 11435, target = 'https://integrate.api.nvidia.com', apiKey, onCall = () => {} } = {}) {
-  if (!apiKey) throw new Error('startNvidiaProxy needs the NVIDIA API key');
+/** A chat call, whatever mount path the server uses (/v1/chat/completions, /api/chat/completions). */
+function isChatCall(url) {
+  return /\/chat\/completions(\?|$)/.test(url || '');
+}
+
+/**
+ * Starts the proxy. `target` is the server's origin (its paths come from the extension's
+ * requests), `apiKey` the real key, `label` names the server in errors.
+ */
+export function startKeyProxy({ host = '127.0.0.1', port = 11435, target, apiKey, label = 'model server', onCall = () => {} } = {}) {
+  if (!target) throw new Error(`startKeyProxy needs the ${label} address`);
+  if (!apiKey) throw new Error(`startKeyProxy needs the ${label} API key`);
   const upstreamBase = target.replace(/\/+$/, '');
   const calls = [];
 
@@ -75,12 +84,12 @@ export function startNvidiaProxy({ host = '127.0.0.1', port = 11435, target = 'h
         signal: upstreamAbort.signal
       });
     } catch (err) {
-      res.writeHead(502, { 'Content-Type': 'text/plain', ...CORS }).end(`proxy error: ${err.message}`);
+      res.writeHead(502, { 'Content-Type': 'text/plain', ...CORS }).end(`proxy error (${label}): ${err.message}`);
       return;
     }
     const respBody = Buffer.from(await upstream.arrayBuffer());
 
-    if (req.url.startsWith('/v1/chat/completions')) {
+    if (isChatCall(req.url)) {
       let sent = {};
       let got = {};
       try { sent = JSON.parse(reqBody.toString('utf8')); } catch { /* not JSON */ }
