@@ -231,11 +231,13 @@ The script is stateless: it reads only the conversation of the request, the way 
   Then it `finish`es honestly with `outcome` "blocked": the button did not work, and what the user can do next.
   The panel card must then be "Could not finish" (class `blocked`), never the green "Done".
   In manual mode it plans first, and the harness approves the plan card like a user.
-- A research goal (`research-then-answer`): `web_search`, then `fetch_url` on the result that is the install script, then `finish` with the archive name only that script names.
+- A research goal (`research-then-answer`): `web_search`, then `fetch_url` on the docs page (the first result), then `fetch_url` on the result that is the install script, then `finish` with the archive name only that script names.
+  The docs page is HTML with leak-prone attributes: a `>` inside a quoted attribute (a Stimulus `click->menu#toggle` action) and a `<!-- -->` inside one (a Wikipedia `data-mw` value), each carrying the sentinel `MARKUP_SENTINEL` (`lib/twoSources.mjs`).
+  The mock answers `MOCK-FAIL` when the sentinel is in the fetched text (markup leaked) or the sentence right after those attributes is missing.
   Both results must come in the untrusted envelope, and without the research tools on offer it answers `MOCK-FAIL`, never a guess.
   Before the run the harness sets Settings > Research to SearXNG through the side panel's Settings tab, like a user, pointing at the fixture's search endpoint under `docs.lantern.test` (`RESEARCH_HOST` in `lib/twoSources.mjs`).
   The fixture server serves `research/search` as `research/search.json`, with `__ORIGIN__` replaced by the origin asked.
-  The run also checks that the tab stayed on its page and that the panel rows read "Searched the web: ..." and "Read install.sh (docs.lantern.test)", and it shoots the Research section in light and dark.
+  The run also checks that the tab stayed on its page and that the panel rows read "Searched the web: ...", "Read Install the Lantern CLI - Lantern docs (docs.lantern.test)" and "Read install.sh (docs.lantern.test)", and that no search or fetch result holds the markup sentinel, and it shoots the Research section in light and dark.
 - Anything it cannot find: a finish whose answer starts with `MOCK-FAIL:` and says what is missing. The run then ends without the data, and no check accepts it.
 
 Every reply is validated before it is sent: the tool name must be one the request offered, and the arguments must fit the tool's parameters schema (`validateToolArgs`). A violation is an HTTP 500 - a mock bug, named, not papered over.
@@ -270,6 +272,7 @@ The self-test (`tests/mcp/mockOllama.selftest.mjs`) checks the protocol, the val
 | `read-repeats` | Makes `read_page` ignore `part` and always read part 1. | Exit 1 on `notebook-fix`: the mock asks for part 2, gets part 1, and answers `MOCK-FAIL`. |
 | `no-repeat-guard` | Turns the repeat guard off: no repeat hint, no reflection note. | Exit 1 on `stuck-recovery`: the mock clicks the dead button until it gives up and answers `MOCK-FAIL`, and `expectMock` finds no hint and no reflection. |
 | `finish-ignores-outcome` | Drops the `outcome` the finish tool named from the finish row, so the panel falls back to the old rule (Done unless a step failed). | Exit 1 on `stuck-recovery` and `partial-answer`: the honest "it did not work" and "only part of it" answers get the green "Done" card instead of "Could not finish" and "Partly done", and `expectMock` finds no finish outcome. |
+| `html-regex-tags` | Turns fetched HTML into text with the old regex reader, where a tag ends at the first `>` even inside a quoted attribute. | Exit 1 on `research-then-answer`: the mock answers `MOCK-FAIL` with "markup leaked into the fetched page text (attribute sentinel ...)", and the run check names the leaked fetch. |
 | `no-research` | Stops offering `web_search` and `fetch_url`, as if Settings > Research were off. | Exit 1 on `research-then-answer`: the mock answers `MOCK-FAIL` (the research tools are not offered), no research row appears, and the card says Failed. |
 
 ## Real mode and the Origin note

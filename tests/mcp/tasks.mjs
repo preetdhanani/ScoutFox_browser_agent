@@ -78,6 +78,7 @@
 
 import { REFLECTION_TEXT, REPEAT_HINT_PREFIX } from '../../src/background/mcp/progress.ts';
 import { UNTRUSTED_PREFIX } from '../../src/background/mcp/untrusted.ts';
+import { DOCS_PROSE, MARKUP_SENTINEL } from '../e2e/lib/twoSources.mjs';
 
 /** A task that only ends when the harness ends it (Stop, a worker restart, New chat). */
 export const endedByHarness = (task) => !!(task.stopAfterSteps || task.restartWorkerAfterSteps || task.clearAfterSteps);
@@ -247,18 +248,25 @@ export const RESEARCH_ARCHIVE = 'lantern-linux-amd64-v3.8.1.tar.zst';
 export const researchSteps = (run) => run.steps.filter((s) => s.action && (s.action.action === 'web_search' || s.action.action === 'fetch_url'));
 
 /**
- * The problems of a research run: the search and the fetch results the model got came in the
- * untrusted envelope, and the tab never moved (research does not touch it).
+ * The problems of a research run: every search and fetch result the model got came in the
+ * untrusted envelope, no fetched page carries markup as text (the attribute sentinel of the docs
+ * fixture, MARKUP_SENTINEL), and the docs page's prose came through.
  */
 export function researchProblems(run) {
   const problems = [];
   const results = run.toolResults || [];
-  const search = results.find((r) => /^Web search \(/.test(r));
-  const fetched = results.find((r) => /^Fetched https?:\/\//.test(r));
-  if (!search) problems.push('no web_search result reached the model');
-  else if (!search.includes(UNTRUSTED_PREFIX)) problems.push('the web_search result is not in the untrusted envelope');
-  if (!fetched) problems.push('no fetch_url result reached the model');
-  else if (!fetched.includes(UNTRUSTED_PREFIX)) problems.push('the fetch_url result is not in the untrusted envelope');
+  const searches = results.filter((r) => /^Web search \(/.test(r));
+  const fetches = results.filter((r) => /^Fetched https?:\/\//.test(r));
+  if (!searches.length) problems.push('no web_search result reached the model');
+  if (!fetches.length) problems.push('no fetch_url result reached the model');
+  for (const r of [...searches, ...fetches]) {
+    const what = r.split('\n')[0].slice(0, 120);
+    if (!r.includes(UNTRUSTED_PREFIX)) problems.push(`a result is not in the untrusted envelope: ${what}`);
+    if (r.includes(MARKUP_SENTINEL)) problems.push(`markup leaked into the text of: ${what}`);
+  }
+  const docs = fetches.find((r) => /^Fetched \S+\/docs\.html /.test(r));
+  if (!docs) problems.push('the docs page was not fetched');
+  else if (!docs.includes(DOCS_PROSE)) problems.push(`the docs page text lost its prose ("${DOCS_PROSE}")`);
   return problems;
 }
 
@@ -335,9 +343,9 @@ export const TASKS = {
       ...observationProblems(run, ['click', 'press_key', 'type', 'press_key'])
     ],
     expectPage: async (page) => {
-      const state = await page.evaluate(() => ({ text: document.body.getAttribute('data-editor-text'), out: document.getElementById('output').textContent }));
+      const state = await page.evaluate(() => ({ text: document.body.getAttribute('data-editor-text'), out: document.getElementById('output').textContent, log: document.body.getAttribute('data-editor-log') }));
       const problems = [];
-      if (state.text !== 'echo scoutfox') problems.push(`the editor holds ${JSON.stringify(state.text)}, expected exactly "echo scoutfox" (replaced, not appended)`);
+      if (state.text !== 'echo scoutfox') problems.push(`the editor holds ${JSON.stringify(state.text)}, expected exactly "echo scoutfox" (replaced, not appended); its edits: ${state.log}`);
       if (state.out !== 'Out [2]: scoutfox') problems.push(`the output line is ${JSON.stringify(state.out)}, expected "Out [2]: scoutfox" (the cell did not run with a trusted Shift+Enter)`);
       return problems;
     }
@@ -433,9 +441,9 @@ export const TASKS = {
     mockOnly: true,
     research: { backend: 'searxng', path: '/research' },
     cardShots: true,
-    expectPanelRows: [/^Searched the web: /, /^Read install\.sh \(docs\.lantern\.test\)/],
+    expectPanelRows: [/^Searched the web: /, /^Read Install the Lantern CLI - Lantern docs \(docs\.lantern\.test\)/, /^Read install\.sh \(docs\.lantern\.test\)/],
     check: (run) => (run.answer || '').includes(RESEARCH_ARCHIVE) && /zstd/i.test(run.answer || ''),
-    expectMock: (run) => [...expectActions(run, ['web_search', 'fetch_url', 'finish']), ...researchProblems(run)],
+    expectMock: (run) => [...expectActions(run, ['web_search', 'fetch_url', 'fetch_url', 'finish']), ...researchProblems(run)],
     expectPage: async (page) => (/\/store\.html$/.test(page.url()) ? [] : [`the tab moved to ${page.url()}: research must leave the tab alone`])
   },
   'partial-answer': {

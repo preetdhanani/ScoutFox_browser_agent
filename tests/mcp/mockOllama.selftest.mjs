@@ -97,6 +97,15 @@ async function fixtureFetch(input) {
   Object.defineProperty(res, 'url', { value: url.href });
   return res;
 }
+// The markup honesty case (strip.markup): the docs page comes back as text/plain, so fetch_url
+// passes its raw source through, attributes and all, the way a tag-blind HTML reader leaks them.
+async function rawMarkupFetch(input) {
+  const res = await fixtureFetch(input);
+  if (!/text\/html/.test(res.headers.get('content-type') || '')) return res;
+  const raw = new Response(await res.text(), { status: res.status, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+  Object.defineProperty(raw, 'url', { value: res.url });
+  return raw;
+}
 const RESEARCH_SETTINGS = { enabled: true, backend: 'searxng', searxngUrl: `${RESEARCH_ORIGIN}/research` };
 
 // The snapshot files are named after the page without its .html ending (store.html -> store.json).
@@ -306,7 +315,7 @@ async function serverResult(name, args, snapshot, strip, state = {}) {
     case 'web_search':
       return (await webSearch(args, RESEARCH_SETTINGS, { fetchImpl: fixtureFetch })).text;
     case 'fetch_url':
-      return (await fetchUrl(args, { fetchImpl: fixtureFetch })).text;
+      return (await fetchUrl(args, { fetchImpl: strip.markup ? rawMarkupFetch : fixtureFetch })).text;
     case 'navigate':
       return `Navigated to ${args.url}${args.reason ? `: ${args.reason}` : ''}`;
     case 'wait':
@@ -741,7 +750,9 @@ async function honestyChecks(mock) {
     { task: 'stuck-recovery', strip: { repeatGuard: true }, needs: 'the repeat guard' },
     { task: 'stuck-recovery-manual', strip: { repeatGuard: true }, needs: 'the repeat guard' },
     // A run that is not offered web_search and fetch_url (no-research) must not answer the research task.
-    { task: 'research-then-answer', strip: { research: true }, needs: 'the research tools' }
+    { task: 'research-then-answer', strip: { research: true }, needs: 'the research tools' },
+    // A fetched page whose attributes leak into its text (html-regex-tags) must not pass the research task.
+    { task: 'research-then-answer', strip: { markup: true }, needs: 'page text free of markup' }
   ];
   for (const { task, strip, needs } of cases) {
     const { facts, problems } = await walkTask(mock, task, { strip });

@@ -118,6 +118,11 @@ export const TAMPERS = {
     does: 'stores every finish row with outcome "partial", whatever the model said: an open-web task whose answer passes its check must still fail on "expected done"',
     apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'if (outcome) entry.outcome = outcome;', 'if (outcome) entry.outcome = "partial";')
   },
+  'html-regex-tags': {
+    does: 'turns fetched HTML into text with the old regex reader (a tag ends at the first ">", even inside a quoted attribute): the docs page attribute sentinel leaks into the fetch_url text, and research-then-answer must fail on "markup leaked"',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'const page = kind === "html" ? readHtml(fetched.text) : null;',
+      'const page = kind === "html" ? { title: "", text: fetched.text.replace(/<\\/?([a-z][a-z0-9-]*)\\b[^>]*>/gi, "\\n").replace(/\\n\\s*/g, "\\n").trim() } : null;')
+  },
   'broken-net-recorder': {
     does: 'makes content/net-recorder.js (the MAIN-world content script) throw when it loads (the fixture page checks must fail)',
     apply: (dir) => prepend(inside(dir, 'content/net-recorder.js'), 'throw new Error(\'recorder boom (tamper=broken-net-recorder)\');\n')

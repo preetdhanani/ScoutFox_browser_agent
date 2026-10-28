@@ -42,6 +42,7 @@ import http from 'node:http';
 import { buildCallRecord, MOCK_FAIL_PREFIX } from './callRecord.mjs';
 import { REFLECTION_TEXT, REPEAT_HINT_PREFIX } from '../../src/background/mcp/progress.ts';
 import { UNTRUSTED_PREFIX } from '../../src/background/mcp/untrusted.ts';
+import { DOCS_PROSE, MARKUP_SENTINEL } from '../e2e/lib/twoSources.mjs';
 
 export const MOCK_VERSION = '0.0.0-mock';
 export { MOCK_FAIL_PREFIX };
@@ -400,10 +401,12 @@ export function scriptFor(convo) {
 }
 
 /**
- * The research-then-answer walk: web_search, then fetch_url on the result that is the install
- * script, then finish with the archive name only that script names. Both results must come in the
- * untrusted envelope, and the walk needs the research tools to be offered at all: without them
- * (the no-research tamper) it is a MOCK-FAIL, never a guess.
+ * The research-then-answer walk: web_search, then fetch_url on the docs page (the first result),
+ * then fetch_url on the result that is the install script, then finish with the archive name only
+ * that script names. Every result must come in the untrusted envelope, and the walk needs the
+ * research tools to be offered at all: without them (the no-research tamper) it is a MOCK-FAIL,
+ * never a guess. The docs page is HTML with leak-prone attributes: its text must hold the prose
+ * and never the attribute sentinel (MARKUP_SENTINEL), or markup leaked into what a model reads.
  */
 function researchScript(convo) {
   const last = convo.lastCall && convo.lastCall.name;
@@ -415,8 +418,19 @@ function researchScript(convo) {
   if (/^Error:/.test(result)) return { fail: `the ${last} failed: ${result.slice(0, 200)}`, note: `research: ${last} failed` };
   if (!result.includes(UNTRUSTED_PREFIX)) return { fail: `the ${last} result is not in the untrusted envelope: ${result.slice(0, 160)}`, note: `research: ${last} not wrapped` };
   if (last === 'web_search') {
-    const url = (/^\s+(https?:\/\/\S+\/install\.sh)\s*$/m.exec(result) || [])[1];
-    if (!url) return { fail: `the search results list no install.sh: ${result.slice(0, 240)}`, note: 'research: no script in the results' };
+    const url = (/^\s+(https?:\/\/\S+\/docs\.html)\s*$/m.exec(result) || [])[1];
+    if (!url) return { fail: `the search results list no docs page: ${result.slice(0, 240)}`, note: 'research: no docs page in the results' };
+    return { call: { name: 'fetch_url', arguments: { url, reason: 'Read the install docs' } }, note: 'research: fetch the docs page' };
+  }
+  if (last === 'fetch_url' && /\/docs\.html$/.test(convo.lastCall.args.url || '')) {
+    if (result.includes(MARKUP_SENTINEL)) {
+      const at = result.indexOf(MARKUP_SENTINEL);
+      return { fail: `markup leaked into the fetched page text (attribute sentinel ${MARKUP_SENTINEL}): ...${result.slice(Math.max(0, at - 160), at + 40)}`, note: 'research: markup leaked' };
+    }
+    if (!result.includes(DOCS_PROSE)) return { fail: `the fetched docs text lost its prose ("${DOCS_PROSE}"): ${result.slice(0, 400)}`, note: 'research: docs prose missing' };
+    const search = convo.results.find((r) => /^Web search \(/.test(r.content));
+    const url = search && (/^\s+(https?:\/\/\S+\/install\.sh)\s*$/m.exec(search.content) || [])[1];
+    if (!url) return { fail: 'the search results list no install.sh', note: 'research: no script in the results' };
     return { call: { name: 'fetch_url', arguments: { url, reason: 'Read the install script itself' } }, note: 'research: fetch the script' };
   }
   if (last === 'fetch_url') {

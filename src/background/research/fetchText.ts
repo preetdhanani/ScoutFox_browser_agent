@@ -4,14 +4,14 @@
 // The request carries no cookies or credentials (credentials: 'omit'), so it reads what an
 // anonymous visitor reads and can never act as the user. It gives up after FETCH_TIMEOUT_MS and
 // reads at most FETCH_MAX_BYTES (the body is streamed and the read stops there). Redirects are
-// followed and the final address is reported. HTML becomes text (htmlText.ts); JSON, plain text
+// followed and the final address is reported. HTML is parsed like a browser parses it and becomes text (htmlText.ts); JSON, plain text
 // and scripts (install.sh) pass through. A long text comes in parts, like read_page, and a query
 // keeps only the lines that name one of its words.
 //
 // Pure apart from the fetch it is handed, so the tests stub the network.
 import { pageTextPart } from '../../shared/textPaging.ts';
 import { wrapUntrusted, sourceOf } from '../mcp/untrusted.ts';
-import { htmlTitle, htmlToText } from './htmlText.ts';
+import { readHtml } from './htmlText.ts';
 import { checkWebUrl } from './urlPolicy.ts';
 
 export const FETCH_TIMEOUT_MS = 15000;
@@ -247,8 +247,9 @@ export async function fetchUrl(args: { url?: unknown; part?: unknown; query?: un
   }
 
   const kind = kindOf(fetched.contentType, fetched.text);
-  const title = kind === 'html' ? htmlTitle(fetched.text) : '';
-  let body = kind === 'html' ? htmlToText(fetched.text) : kind === 'json' ? prettyJson(fetched.text) : plainText(fetched.text);
+  const page = kind === 'html' ? readHtml(fetched.text) : null;
+  const title = page?.title ?? '';
+  let body = page ? page.text : kind === 'json' ? prettyJson(fetched.text) : plainText(fetched.text);
   const label = title || file || new URL(finalUrl).hostname;
 
   let matchNote = '';

@@ -31,6 +31,18 @@ export const SHOP_B = 'shop-b.test';
  */
 export const RESEARCH_HOST = 'docs.lantern.test';
 
+/**
+ * The markup-leak check of the research fixture (tests/fixtures/site/research/docs.html). The docs
+ * page carries this sentinel only inside attribute values, in the shapes that leaked from real
+ * pages when fetch_url tokenized HTML with regexes: a `>` inside a quoted attribute (Stimulus
+ * `click->menu#toggle`, frame.work) and a `<!-- -->` inside one (Wikipedia `data-mw`). A browser
+ * never shows an attribute as text, so the sentinel in a fetch_url result means markup leaked.
+ */
+export const MARKUP_SENTINEL = 'zq-markup-leak-7f3a';
+
+/** The sentence right after the leak-prone attributes, in the same element: it must come through whole. */
+export const DOCS_PROSE = 'Run the official install script.';
+
 export const HOST_RULES = `MAP ${SHOP_A} 127.0.0.1, MAP ${RESEARCH_HOST} 127.0.0.1, MAP ${SHOP_B} ~NOTFOUND`;
 
 /**

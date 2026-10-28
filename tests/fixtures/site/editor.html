@@ -101,9 +101,18 @@
         draw(start + text.length);
       }
 
+      // Every edit the editor sees, for the harness: a run whose end text is wrong reports how it got there.
+      const editLog = [];
+      function logEdit(what) {
+        editLog.push(what);
+        if (editLog.length > 30) editLog.shift();
+        document.body.setAttribute('data-editor-log', JSON.stringify(editLog));
+      }
+
       editor.addEventListener('beforeinput', (event) => {
         // The editor does its own editing: the browser never touches the DOM.
         if (event.cancelable) event.preventDefault();
+        logEdit(`beforeinput ${event.inputType} ${JSON.stringify(event.data)} trusted=${event.isTrusted} cancelable=${event.cancelable}`);
         if (!event.isTrusted) return;
         const { start, end } = selectionOffsets();
         switch (event.inputType) {
@@ -130,6 +139,7 @@
       // An input the browser applied without a cancelable beforeinput (an IME commit) is trusted
       // too: the model takes the DOM's text then. A script's write fires no input event.
       editor.addEventListener('input', (event) => {
+        logEdit(`input ${event.inputType} ${JSON.stringify(event.data)} trusted=${event.isTrusted} dom=${JSON.stringify(editor.textContent)}`);
         if (!event.isTrusted) { draw(); return; }
         if (editor.textContent !== model) {
           model = editor.textContent;
@@ -138,6 +148,7 @@
       });
 
       function run() {
+        logEdit(`run ${JSON.stringify(model)}`);
         runs += 1;
         const code = model.trim();
         const echo = /^echo\s+(.*)$/s.exec(code);
