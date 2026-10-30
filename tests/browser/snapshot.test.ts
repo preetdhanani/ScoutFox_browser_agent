@@ -102,7 +102,7 @@ test('takeSnapshot - captures snapshot successfully on first attempt', async () 
   (globalThis as any).chrome = {
     tabs: {
       get: (id: number, cb: (tab: any) => void) => cb({ id, url: 'https://example.com', title: 'Example' }),
-      sendMessage: (id: number, msg: any, cb: (resp: any) => void) => {
+      sendMessage: (id: number, msg: any, _opts: unknown, cb: (resp: any) => void) => {
         cb({
           success: true,
           data: { url: 'https://example.com', title: 'Example', elementsText: '[1] button "Search"' },
@@ -131,7 +131,7 @@ test('takeSnapshot - performs injection fallback when primary attempt fails', as
   (globalThis as any).chrome = {
     tabs: {
       get: (id: number, cb: (tab: any) => void) => cb({ id, url: 'https://example.com', title: 'Example' }),
-      sendMessage: (id: number, msg: any, cb: (resp: any) => void) => {
+      sendMessage: (id: number, msg: any, _opts: unknown, cb: (resp: any) => void) => {
         attempts++;
         if (attempts === 1) {
           cb(null); // Triggers primary error
@@ -156,8 +156,8 @@ test('takeSnapshot - performs injection fallback when primary attempt fails', as
   try {
     const snap = await takeSnapshot(101, {}, { isTabInScope: async () => true, sleep: async () => {} });
     assert.equal(attempts, 2);
-    assert.equal(injectedFiles.length, 3); // isolated files, then net-recorder, then the per-frame relay (BUG-45)
-    assert.deepEqual(injectedFiles[2], ['content/netRelay.js'], 'the third injection is the all-frames relay');
+    assert.equal(injectedFiles.length, 3); // isolated files, then net-recorder, then the per-frame scripts
+    assert.deepEqual(injectedFiles[2], ['content/netRelay.js', 'content/frameAgent.js'], 'the third injection is the all-frames relay (BUG-45) and the frame agent');
     assert.equal(snap.docId, 'doc-99');
     assert.equal(snap.title, 'Example (Injected)');
   } finally {

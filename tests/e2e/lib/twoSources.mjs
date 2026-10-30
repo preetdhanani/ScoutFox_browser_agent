@@ -43,7 +43,16 @@ export const MARKUP_SENTINEL = 'zq-markup-leak-7f3a';
 /** The sentence right after the leak-prone attributes, in the same element: it must come through whole. */
 export const DOCS_PROSE = 'Run the official install script.';
 
-export const HOST_RULES = `MAP ${SHOP_A} 127.0.0.1, MAP ${RESEARCH_HOST} 127.0.0.1, MAP ${SHOP_B} ~NOTFOUND`;
+/**
+ * The origin of the embedded lesson (tests/fixtures/site/frame-lesson-body.html). The shell page is served
+ * under 127.0.0.1, so a frame from this host is cross-origin, like a lesson iframe on a learning platform.
+ */
+export const LESSON_HOST = 'lesson.lantern.test';
+
+/** The fact that only the embedded lesson frame holds. */
+export const LESSON_FACT = 'AMBER-4471';
+
+export const HOST_RULES = `MAP ${SHOP_A} 127.0.0.1, MAP ${RESEARCH_HOST} 127.0.0.1, MAP ${LESSON_HOST} 127.0.0.1, MAP ${SHOP_B} ~NOTFOUND`;
 
 /**
  * What the mock writes for the shop it never opened. The price is NOT the price of shop A (the

@@ -42,7 +42,7 @@ import http from 'node:http';
 import { buildCallRecord, MOCK_FAIL_PREFIX } from './callRecord.mjs';
 import { REFLECTION_TEXT, REPEAT_HINT_PREFIX } from '../../src/background/mcp/progress.ts';
 import { UNTRUSTED_PREFIX } from '../../src/background/mcp/untrusted.ts';
-import { DOCS_PROSE, MARKUP_SENTINEL } from '../e2e/lib/twoSources.mjs';
+import { DOCS_PROSE, LESSON_FACT, MARKUP_SENTINEL } from '../e2e/lib/twoSources.mjs';
 
 export const MOCK_VERSION = '0.0.0-mock';
 export { MOCK_FAIL_PREFIX };
@@ -296,6 +296,8 @@ export function kindOfGoal(goal) {
   if (/\bcode editor\b/i.test(String(goal || ''))) return 'editor';
   // Fix cell 14 of a JupyterLab-like notebook whose cells scroll in a panel (notebook-fix).
   if (/\bcell 14 of this notebook\b/i.test(String(goal || ''))) return 'notebook';
+  // A lesson that lives in a cross-origin iframe of a shell that does not scroll (frame-lesson).
+  if (/\breview code of this lesson\b/i.test(String(goal || ''))) return 'lesson';
   // Scroll a windowed list until a row far down is drawn (virtual-scroll).
   if (/\bscroll the order list\b/i.test(String(goal || ''))) return 'orders';
   // Press a button that is dead: the run must notice, reflect and end honestly (stuck-recovery).
@@ -373,6 +375,7 @@ export function scriptFor(convo) {
   if (kind === 'orders') return ordersScript(convo);
   if (kind === 'stuck') return stuckScript(convo);
   if (kind === 'research') return researchScript(convo);
+  if (kind === 'lesson') return lessonScript(convo);
 
   if (!convo.lastCall) {
     if (kind === 'unknown') return { fail: `I do not know this goal: "${convo.task.slice(0, 80)}".`, note: 'unknown goal' };
@@ -627,6 +630,33 @@ function ordersScript(convo) {
     return scroll;
   }
   return { fail: `the orders run is in a state the mock has no script for (last call ${last}).`, note: 'orders: unknown state' };
+}
+
+/**
+ * The frame-lesson walk: look at the page, read it, scroll it, finish with the code. The lesson is
+ * a cross-origin iframe in a shell that does not scroll, so each step only works when the engine
+ * reaches into the frame: the read must hold the code (only the frame has it), and the scroll must
+ * move the frame (the shell cannot move).
+ */
+function lessonScript(convo) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const result = convo.results.length ? convo.results[convo.results.length - 1].content : '';
+  if (!last) return { call: { name: 'take_screenshot', arguments: { reason: 'See the lesson' } }, note: 'lesson: look at the page' };
+  if (last === 'take_screenshot') {
+    if (!convo.screenshotTaken) return { fail: `the screenshot failed: ${result.slice(0, 160)}`, note: 'lesson: no picture' };
+    return { call: { name: 'read_page', arguments: {} }, note: 'lesson: read the page' };
+  }
+  if (last === 'read_page') {
+    if (!result.includes(LESSON_FACT)) return { fail: `the page text has no lesson text (the embedded frame was not read): ${result.replace(/\s+/g, ' ').slice(0, 200)}`, note: 'lesson: frame not read' };
+    return { call: { name: 'scroll', arguments: { direction: 'down', reason: 'Move to the end of the lesson' } }, note: 'lesson: scroll the lesson' };
+  }
+  if (last === 'scroll') {
+    const problem = scrollProblem(result, 'lesson scroll');
+    if (problem) return problem;
+    const code = new RegExp(`${LESSON_FACT}`).exec(convo.pageText)?.[0] || LESSON_FACT;
+    return { call: finish(`The review code of this lesson is ${code}.`), note: 'lesson: finish with the code' };
+  }
+  return { fail: `the lesson run is in a state the mock has no script for (last call ${last}).`, note: 'lesson: unknown state' };
 }
 
 /**

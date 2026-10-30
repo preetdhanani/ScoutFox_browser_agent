@@ -160,7 +160,7 @@ const LOOP_LIMIT = 15;
 // How long a run may stand paused with no hold the harness can answer, before it is stopped.
 const PAUSE_GRACE_MS = 3000;
 
-const SNAPSHOT_PAGES = ['store', 'store-spans', 'error', 'far-link', 'configurator', 'consent-link', 'editor', 'notebook', 'virtual-list', 'dead-button'];
+const SNAPSHOT_PAGES = ['store', 'store-spans', 'error', 'far-link', 'configurator', 'consent-link', 'editor', 'notebook', 'virtual-list', 'dead-button', 'frame-lesson'];
 // Every run saves its screenshots here (one folder per task): the side panel with the steps and
 // the end result, and the end state of the page. Gitignored; --panel-screenshots overrides the root.
 const RUN_STAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -626,14 +626,26 @@ async function probePage(ctx, page, tabId) {
 /** Every part of read_page on a tab, joined: the page's whole text as the model can read it. */
 async function fullPageTextOf(driver, tabId) {
   const parts = [];
+  // The embedded frames' texts, asked of each frame's agent the way the engine does
+  // (readFrameTexts in src/background/browser/frames.ts), so the snapshot holds what read_page gives.
+  const frames = await driver.evaluate(async (id) => {
+    const out = [];
+    const rows = await chrome.scripting.executeScript({ target: { tabId: id, allFrames: true }, func: () => globalThis.__scoutfoxFrameAgent === true }).catch(() => []);
+    for (const row of rows) {
+      if (row.frameId === 0 || row.result !== true) continue;
+      const answer = await chrome.tabs.sendMessage(id, { action: 'FRAME_TEXT' }, { frameId: row.frameId }).catch(() => null);
+      if (answer && answer.success && typeof answer.text === 'string' && answer.text.trim()) out.push({ origin: answer.origin, text: answer.text.trim() });
+    }
+    return out;
+  }, tabId);
   for (let part = 1; part <= 50; part++) {
-    const res = await driver.evaluate(async (id, n) => {
+    const res = await driver.evaluate(async (id, n, frameTexts) => {
       try {
-        return await chrome.tabs.sendMessage(id, { action: 'EXECUTE_ACTION', payload: { action: 'read_page', part: n } });
+        return await chrome.tabs.sendMessage(id, { action: 'EXECUTE_ACTION', payload: { action: 'read_page', part: n, ...(frameTexts.length ? { frames: frameTexts } : {}) } }, { frameId: 0 });
       } catch (err) {
         return { success: false, error: err.message };
       }
-    }, tabId, part);
+    }, tabId, part, frames);
     if (!res || !res.success) throw new Error(`read_page part ${part} failed on tab ${tabId}: ${res && res.error}`);
     parts.push(res.result.pageText);
     if (res.result.part >= res.result.parts) break;
@@ -1173,7 +1185,7 @@ function shotExpectation(facts) {
   return { width: shot.imageWidth, height: shot.imageHeight };
 }
 
-async function readPanelShot(ctx, tabId, expect, shotName = '', shotDir = '', screenshots = []) {
+async function readPanelShot(ctx, tabId, expect, shotName = '', shotDir = '', screenshots = [], spots = []) {
   const panel = await panelSurface(ctx, tabId);
   const problems = [];
   try {
@@ -1226,6 +1238,33 @@ async function readPanelShot(ctx, tabId, expect, shotName = '', shotDir = '', sc
         }
         if (expect.height && withImage.decodedHeight !== expect.height) {
           problems.push(`the panel thumbnail is ${withImage.decodedHeight} high, the picture the tool reported is ${expect.height}`);
+        }
+        // What the model saw at named spots of the page (task.shotPixels): a privacy cover is dark
+        // (#2b2b2b), page content is light. Read off the picture's own pixels, not the page.
+        if (spots.length) {
+          const seen = await panel.evaluate(async (list) => {
+            const img = [...document.querySelectorAll('.act-shot-slot img')].find((i) => String(i.getAttribute('src') || '').startsWith('data:image/'));
+            if (!img) return null;
+            if (!img.complete) await new Promise((r) => { img.onload = r; img.onerror = r; });
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            const g = canvas.getContext('2d');
+            g.drawImage(img, 0, 0);
+            return list.map((spot) => {
+              const x = Math.round(spot.fx * canvas.width);
+              const y = Math.round(spot.fy * canvas.height);
+              const data = g.getImageData(Math.max(0, x - 2), Math.max(0, y - 2), 5, 5).data;
+              let sum = 0;
+              for (let i = 0; i < data.length; i += 4) sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+              return { ...spot, lum: Math.round(sum / (data.length / 4)) };
+            });
+          }, spots);
+          if (!seen) problems.push('the panel thumbnail could not be read for its pixels');
+          for (const spot of seen || []) {
+            if (spot.expect === 'covered' && !(spot.lum < 90)) problems.push(`the picture shows ${spot.name} uncovered (brightness ${spot.lum}, a cover is below 90)`);
+            if (spot.expect === 'visible' && !(spot.lum > 170)) problems.push(`the picture does not show ${spot.name} (brightness ${spot.lum}, page content is above 170: a cover over it?)`);
+          }
         }
       }
     }
@@ -2331,7 +2370,7 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   // step that took it, on Chrome's real panel. And the viewport it ran in is checked too, so the
   // downscale and the coordinate mapping were really exercised (see requireShotViewport).
   const shotProblems = task.expectShot
-    ? [...await requireShotViewport(ctx, tabId), ...await readPanelShot(ctx, tabId, shotExpectation(facts), shotName, shotDir, screenshots)]
+    ? [...await requireShotViewport(ctx, tabId), ...await readPanelShot(ctx, tabId, shotExpectation(facts), shotName, shotDir, screenshots, task.shotPixels ? await task.shotPixels(page).catch((err) => { console.log(`shot pixels: ${err.message}`); return []; }) : [])]
     : [];
   // The composer's model picker, driven like a user would between tasks: open the menu from the
   // model name, read the provider's list, filter it, pick, and watch the badge follow.

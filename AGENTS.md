@@ -13,7 +13,7 @@ These rules apply to every agent session working in this repository.
     It needs `LISA_API_KEY` in the environment or `LISA_API` in the repo `.env`.
     `npm run test:e2e -- --held-out` runs the held-out open-web tasks: nothing is ever tuned against them, and they run after every change to show it helps in general.
     `npm run test:e2e -- --sealed` runs the sealed tasks, which show only verdicts and numbers; never read a sealed task's trace.
-    A real model is not deterministic: compare changes with `-- --repeat=3` (median and p90 per task), not with one run.
+    Run each task once (the default). Do not use `-- --repeat` unless Prit asks for it.
     `-- --provider=nvidia` runs on NVIDIA NIM instead (`NVIDIA_API_KEY` or `NVIDIA_API`).
     `npm run test:e2e:mock` runs the same harness offline on the scripted mock (CI uses it, since CI has no key).
 - After every implementation or change, run both layers. If either fails, fix the change until both pass. No change is done while a layer is red.

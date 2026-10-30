@@ -12,6 +12,7 @@ import { generateCompletion } from '../llm/index.ts';
 import { inputDispatcher } from '../browser/input.ts';
 import { cdp } from '../browser/cdp.ts';
 import { lastRuntimeError } from '../browser/tabs.ts';
+import { TOP_FRAME } from '../browser/frames.ts';
 import { NetworkBuffers } from '../browser/network.ts';
 import { ensureScoutFoxGroup, isTabInScope, groupIdForWindow } from '../browser/groups.ts';
 import { takeSnapshot } from '../browser/snapshot.ts';
@@ -198,7 +199,7 @@ export class AgentRunner {
       waitDomQuiet: async (tabId: number, quietMs: number, maxMs: number) => {
         if (typeof chrome === 'undefined' || !chrome.tabs?.sendMessage) return;
         await new Promise((resolve) => {
-          chrome.tabs.sendMessage(tabId, { action: 'WAIT_DOM_QUIET', payload: { quietMs, maxWaitMs: maxMs } }, () => {
+          chrome.tabs.sendMessage(tabId, { action: 'WAIT_DOM_QUIET', payload: { quietMs, maxWaitMs: maxMs } }, TOP_FRAME, () => {
             lastRuntimeError();
             resolve(undefined);
           });
@@ -221,7 +222,7 @@ export class AgentRunner {
       clearBadges: async (tabId: number) => {
         if (typeof chrome === 'undefined' || !chrome.tabs?.sendMessage) return;
         return new Promise<void>((resolve) => {
-          chrome.tabs.sendMessage(tabId, { action: 'CLEAR_BADGES' }, () => {
+          chrome.tabs.sendMessage(tabId, { action: 'CLEAR_BADGES' }, TOP_FRAME, () => {
             lastRuntimeError();
             resolve();
           });

@@ -27,6 +27,7 @@
 // it cannot line up with the page. That is the check that can actually be wrong.
 
 import { describeRestrictedUrl } from './tabs.ts';
+import { TOP_FRAME, frameMasksHold, maskEmbeddedFrames, unmaskEmbeddedFrames, type FrameMasks } from './frames.ts';
 import { decodeImageSize } from './imageSize.ts';
 import { fitToBudget, scaleForTarget, type ImageSize } from '../../shared/imageBudget.ts';
 import type { PageSig } from '../types.ts';
@@ -67,7 +68,13 @@ export interface ScreenshotPagePort {
    * false refuses the capture. (A stand-in port that resolves nothing does not report either way.)
    */
   hideUi(tabId: number): Promise<boolean>;
-  /** Put the badges and the cursor overlay back. Best effort: it never throws. */
+  /**
+   * After the capture: the covers are still up in the top page and in every embedded frame shown
+   * uncovered, in the same documents, and nothing appeared that needed one. False throws the picture
+   * away. (A stand-in port without it is not checked.)
+   */
+  verifyUi?(tabId: number): Promise<boolean>;
+  /** Put the badges and the cursor overlay back, and take the covers down. Best effort: it never throws. */
   showUi(tabId: number): Promise<void>;
 }
 
@@ -117,6 +124,10 @@ export const ZOOMED_MESSAGE =
 export const UNMASKED_MESSAGE =
   'Error: this page cannot be photographed safely, because the covers over password, card and one-time-code fields could not be put up. Read the page text instead.';
 
+/** The refusal a picture gets when the covers did not hold until it was taken. */
+export const MASKS_CHANGED_MESSAGE =
+  'Error: the page changed while it was photographed (a frame navigated or a new field or frame appeared), so the picture was thrown away. Take the screenshot again.';
+
 /** The refusal a picture of the wrong shape gets. */
 export const WRONG_SHAPE_MESSAGE =
   'Error: the page was captured at an unexpected shape, so a coordinate in the picture would not line up with the page. Take a new screenshot.';
@@ -133,7 +144,7 @@ async function askContentScript(tabId: number, message: unknown): Promise<any> {
     // through lastError instead of rejecting the caller.
     return await new Promise<any>((resolve) => {
       try {
-        chrome.tabs.sendMessage(tabId, message, (response) => {
+        chrome.tabs.sendMessage(tabId, message, TOP_FRAME, (response) => {
           resolve(chrome.runtime?.lastError ? null : response ?? null);
         });
       } catch (_) {
@@ -144,6 +155,9 @@ async function askContentScript(tabId: number, message: unknown): Promise<any> {
     return null;
   }
 }
+
+/** The embedded frames that put up covers for the capture in progress, per tab. */
+const frameMasks = new Map<number, FrameMasks>();
 
 /**
  * The real page port: chrome.scripting for the probe, the content script for the signature and
@@ -208,13 +222,27 @@ export function chromePagePort(): ScreenshotPagePort {
     },
 
     async hideUi(tabId: number): Promise<boolean> {
+      // The embedded frames first, deepest first: an iframe of the top page is shown only when its
+      // own agent confirmed its covers; every other one the top page covers whole.
+      const masks = await maskEmbeddedFrames(tabId).catch((): FrameMasks => ({ shownFramePaths: [], masked: [] }));
+      frameMasks.set(tabId, masks);
       // Only an explicit success counts: no answer means no content script, so no covers.
-      const resp = await askContentScript(tabId, { action: 'HIDE_AGENT_UI' });
+      const resp = await askContentScript(tabId, { action: 'HIDE_AGENT_UI', payload: { shownFramePaths: masks.shownFramePaths } });
       return resp?.success === true;
+    },
+
+    async verifyUi(tabId: number): Promise<boolean> {
+      const top = await askContentScript(tabId, { action: 'CHECK_AGENT_UI' });
+      if (top?.success !== true) return false;
+      const masks = frameMasks.get(tabId);
+      return masks ? await frameMasksHold(tabId, masks).catch(() => false) : true;
     },
 
     async showUi(tabId: number): Promise<void> {
       await askContentScript(tabId, { action: 'SHOW_AGENT_UI' });
+      const masks = frameMasks.get(tabId);
+      frameMasks.delete(tabId);
+      if (masks) await unmaskEmbeddedFrames(tabId, masks).catch(() => undefined);
     }
   };
 }
@@ -336,6 +364,10 @@ export async function captureScreenshot(tabId: number, deps: ScreenshotDeps): Pr
       }
     }
 
+    // 7. The covers must have held until the picture was taken: a frame that navigated, or a field or
+    // frame that appeared after the walk, was in the picture with no cover.
+    if (deps.page.verifyUi && (await deps.page.verifyUi(tabId)) !== true) throw new ScreenshotError(MASKS_CHANGED_MESSAGE);
+
     return {
       base64: shot.base64,
       mediaType: 'image/jpeg',
@@ -349,7 +381,7 @@ export async function captureScreenshot(tabId: number, deps: ScreenshotDeps): Pr
       sig
     };
   } finally {
-    // 7. Always put the UI back, also when the capture threw.
+    // 8. Always put the UI back, also when the capture threw.
     await deps.page.showUi(tabId);
   }
 }

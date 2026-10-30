@@ -78,7 +78,7 @@
 
 import { REFLECTION_TEXT, REPEAT_HINT_PREFIX } from '../../src/background/mcp/progress.ts';
 import { UNTRUSTED_PREFIX } from '../../src/background/mcp/untrusted.ts';
-import { DOCS_PROSE, MARKUP_SENTINEL } from '../e2e/lib/twoSources.mjs';
+import { DOCS_PROSE, LESSON_FACT, MARKUP_SENTINEL } from '../e2e/lib/twoSources.mjs';
 
 /** A task that only ends when the harness ends it (Stop, a worker restart, New chat). */
 export const endedByHarness = (task) => !!(task.stopAfterSteps || task.restartWorkerAfterSteps || task.clearAfterSteps);
@@ -369,6 +369,49 @@ export const TASKS = {
     ],
     expectPage: notebookPageProblems
   },
+  'frame-lesson': {
+    // A course shell like a learning platform: the shell does not scroll, and the lesson is an
+    // iframe from another origin. The code is only in the frame, so the run must read into it,
+    // see it in the picture (not a mask over the whole frame), and scroll it.
+    page: 'frame-lesson.html',
+    prompt: 'What is the review code of this lesson? Look at the page, read it and scroll to the end.',
+    mockOnly: true,
+    expectShot: true,
+    check: (run) => (run.answer || '').includes(LESSON_FACT),
+    expectMock: (run) => [
+      ...expectActions(run, ['take_screenshot', 'read_page', 'scroll', 'finish']),
+      ...observationProblems(run, ['scroll'])
+    ],
+    // Where the first screenshot (taken before the scroll) had the lesson and its password field,
+    // as shares of the viewport: the lesson must be visible, the field covered.
+    shotPixels: async (page) => {
+      const frame = page.frames().find((f) => /frame-lesson-body/.test(f.url()));
+      if (!frame) throw new Error('the lesson frame is not on the page');
+      const outer = await page.evaluate(() => {
+        const r = document.getElementById('lesson').getBoundingClientRect();
+        return { left: r.left, top: r.top, w: window.innerWidth, h: window.innerHeight };
+      });
+      const inner = await frame.evaluate(() => {
+        const at = (el) => {
+          const r = el.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + window.scrollY + r.height / 2 };
+        };
+        const filler = document.querySelector('.filler').getBoundingClientRect();
+        return { field: at(document.querySelector('input[type=password]')), lesson: { x: filler.left + 40, y: filler.top + window.scrollY + 40 } };
+      });
+      const share = (p) => ({ fx: (outer.left + p.x) / outer.w, fy: (outer.top + p.y) / outer.h });
+      return [
+        { name: 'the lesson inside the cross-origin frame', expect: 'visible', ...share(inner.lesson) },
+        { name: 'the password field inside the frame', expect: 'covered', ...share(inner.field) }
+      ];
+    },
+    expectPage: async (page) => {
+      const frame = page.frames().find((f) => /frame-lesson-body/.test(f.url()));
+      if (!frame) return ['the lesson frame is not on the page'];
+      const scrolled = await frame.evaluate(() => window.scrollY);
+      return scrolled > 0 ? [] : ['the lesson frame was never scrolled'];
+    }
+  },
   'virtual-scroll': {
     // A windowed list (only the rows near the view are in the DOM) inside a panel, on a page that
     // does not scroll. The target row is far down: the run must scroll the list, and each scroll
@@ -537,16 +580,6 @@ export const TASKS = {
     check: (run) => {
       const a = run.answer || '';
       return a.length > 20 && /\b\d{1,2}:\d{2}\b/.test(a) && !/unable|could not|couldn't|blocked|bot detection|not able/i.test(a);
-    }
-  },
-  'web-framework-price': {
-    page: WEB_START,
-    web: true,
-    prompt: 'How much does the Framework Laptop 16 cost? Find the official price, then compare it with at least one other shop, and tell me which is cheaper.',
-    timeoutMs: 8 * 60 * 1000,
-    check: (run) => {
-      const a = run.answer || '';
-      return a.length > 40 && /framework/i.test(a) && /\d/.test(a) && /eur|€|\$|usd/i.test(a);
     }
   },
   'web-notebook-fix': {

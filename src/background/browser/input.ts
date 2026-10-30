@@ -8,6 +8,7 @@
 import { cdp as defaultCdp, CDPManager } from './cdp.ts';
 import type { ResolvePointResponse } from '../../content/types.ts';
 import { Logger } from '../../shared/logger.ts';
+import { TOP_FRAME, FRAME_ANSWER_MS, chromeFramePort, frameIdAtPath, type FramePort } from './frames.ts';
 import type { EffectDetail, KeyModifier } from '../types.ts';
 
 export interface DispatchOptions {
@@ -225,10 +226,19 @@ export class InputDispatcher {
   private cdp: CDPManager;
   /** Whether the browser is on a Mac (select-all is Meta+A there). A test sets it. */
   private mac: boolean;
+  /** The embedded frames' agents, for a scroll that goes into a frame. A test stands in for it. */
+  private frames: FramePort;
+  /**
+   * The embedded frame the last scroll moved, per tab, and where it was before. The effect probe
+   * runs in the top page, which cannot see inside the frame, so the probe's reading is completed
+   * with the frame's own position, read again by its agent (probeEnd).
+   */
+  private frameScroll = new Map<number, { frameId: number; label: string; top: number }>();
 
-  constructor(cdp: CDPManager = defaultCdp, { mac }: { mac?: boolean } = {}) {
+  constructor(cdp: CDPManager = defaultCdp, { mac, frames }: { mac?: boolean; frames?: FramePort } = {}) {
     this.cdp = cdp;
     this.mac = mac ?? isMacPlatform();
+    this.frames = frames ?? chromeFramePort();
   }
 
   /**
@@ -240,6 +250,7 @@ export class InputDispatcher {
     options: DispatchOptions = {}
   ): Promise<DispatchResult> {
     const { signal, docId, sleep, control } = options;
+    this.frameScroll.delete(tabId);
 
     if (signal?.aborted || control?.stopRequested || control?.pauseRequested) {
       return {
@@ -731,23 +742,50 @@ export class InputDispatcher {
     control?: { stopRequested?: boolean; pauseRequested?: boolean; signal?: AbortSignal }
   ): Promise<DispatchResult> {
     const direction = payload.direction === 'up' ? 'up' : 'down';
+    // The frame the scroll acts in: the top page (0), or an embedded frame whose agent answers.
+    let frameId = 0;
     const ask = async (body: Record<string, unknown>): Promise<any> => {
+      if (frameId !== 0) {
+        const answer = await this.frames.send(tabId, { frameId }, { action: 'FRAME_SCROLL', payload: body }, FRAME_ANSWER_MS);
+        return answer ?? { success: false, error: 'The embedded frame did not answer. Nothing was scrolled.' };
+      }
       try {
         return await this.sendToTab<any>(tabId, { action: 'EXECUTE_ACTION', payload: body });
       } catch (err: any) {
         return { success: false, error: err?.message || String(err) };
       }
     };
-    const target = await ask({
+    let target = await ask({
       action: 'scroll_target',
       direction,
       ...(payload.element_id !== undefined && payload.element_id !== null ? { element_id: payload.element_id } : {}),
       ...(Number.isFinite(Number(payload.x)) && Number.isFinite(Number(payload.y)) && payload.x !== undefined && payload.y !== undefined ? { x: Number(payload.x), y: Number(payload.y) } : {})
     });
+    // A page whose own box cannot move, with the content in an iframe (a lesson in a course shell),
+    // names that frame: the same question goes to the frame's agent, and its point is moved into
+    // the top page's viewport, where the wheel goes (Chrome routes it into the frame under it).
+    const offset = { left: 0, top: 0 };
+    for (let hops = 0; target?.success && target.result?.frame && hops < 8; hops++) {
+      const route = target.result.frame;
+      const before = target;
+      frameId = (await frameIdAtPath(tabId, String(route.path || ''), this.frames).catch(() => null)) ?? -1;
+      offset.left += Number(route.offset?.left) || 0;
+      offset.top += Number(route.offset?.top) || 0;
+      target = frameId > 0 ? await ask({ action: 'scroll_target', direction, ...(route.point ? { x: route.point.x, y: route.point.y } : {}) }) : null;
+      if (!target?.success || !target.result) {
+        // A frame that cannot answer: the top page's own answer stands (it says it cannot move).
+        frameId = 0;
+        offset.left = 0;
+        offset.top = 0;
+        target = { ...before, result: { ...before.result, frame: undefined } };
+        break;
+      }
+    }
     if (!target?.success || !target.result) {
       return { success: false, error: target?.error || 'The page did not answer, so it is not known what to scroll. Nothing was scrolled.', via: 'cdp' };
     }
-    const { point, label, step } = target.result;
+    const { label, step } = target.result;
+    const point = { x: (Number(target.result.point?.x) || 0) + offset.left, y: (Number(target.result.point?.y) || 0) + offset.top };
     const before: ScrollReading = pickReading(target.result);
     await this.probeBegin(tabId);
 
@@ -769,6 +807,7 @@ export class InputDispatcher {
       }
     }
 
+    if (frameId > 0) this.frameScroll.set(tabId, { frameId, label, top: before.top });
     const probe = await this.probeEnd(tabId);
     const moved = after.top - before.top;
     return {
@@ -1001,7 +1040,13 @@ export class InputDispatcher {
       const res = await this.sendToTab<{ success: boolean; effect?: string; detail?: EffectDetail }>(tabId, {
         action: 'EFFECT_PROBE_END'
       });
-      const detail = res?.detail && typeof res.detail === 'object' ? res.detail : undefined;
+      let detail = res?.detail && typeof res.detail === 'object' ? res.detail : undefined;
+      const inFrame = this.frameScroll.get(tabId);
+      if (detail && detail.base && inFrame) {
+        const read = await this.frames.send(tabId, { frameId: inFrame.frameId }, { action: 'FRAME_SCROLL', payload: { action: 'scroll_measure', quietMs: 80, maxMs: 600 } }, FRAME_ANSWER_MS);
+        const top = Number(read?.result?.top);
+        if (read?.success && Number.isFinite(top)) detail = { ...detail, container: { label: inFrame.label, top, moved: top - inFrame.top } };
+      }
       return { effect: res?.effect || 'none', ...(detail ? { detail } : {}) };
     } catch (_) {
       return { effect: 'unknown' };
@@ -1083,7 +1128,7 @@ export class InputDispatcher {
       if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.sendMessage) {
         return reject(new Error('chrome.tabs.sendMessage is not available.'));
       }
-      chrome.tabs.sendMessage(tabId, message, (response) => {
+      chrome.tabs.sendMessage(tabId, message, TOP_FRAME, (response) => {
         if (chrome.runtime.lastError) {
           return reject(new Error(chrome.runtime.lastError.message));
         }

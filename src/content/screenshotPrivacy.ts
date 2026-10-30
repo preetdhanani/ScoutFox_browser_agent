@@ -66,6 +66,17 @@ export function describePointElement(el: Element | null): string {
     || ''
   ).trim().replace(/\s+/g, ' ');
   if (label) out += ` ${JSON.stringify(label.slice(0, 60))}`;
+  // An embedded frame has no text of its own here: its title and host say what it is (a lesson, a
+  // CAPTCHA), and the click refusal for bot checks reads them.
+  if (tag === 'iframe') {
+    const title = (el.getAttribute?.('title') || '').trim().replace(/\s+/g, ' ');
+    let host = '';
+    try {
+      host = new URL(el.getAttribute?.('src') || '', el.ownerDocument?.baseURI || undefined).host;
+    } catch (_) {}
+    if (title) out += ` ${JSON.stringify(title.slice(0, 60))}`;
+    if (host) out += ` (${host})`;
+  }
   return out;
 }
 
@@ -235,55 +246,26 @@ export function maskedFieldRefusal(kind: string): string {
   return `Error: that point is on a ${FIELD_KIND_WORDS[kind] || 'sensitive field'}, so the click was refused.`;
 }
 
+type Rect = { left: number; top: number; width: number; height: number };
+
 /**
- * Draws the covers over the sensitive fields and the cross-origin iframes, and returns the layer
- * so it can be removed again. Nothing in the page is modified except one appended element.
- *
- * A same-origin iframe is not masked as a whole: its document is readable, so its own fields,
- * shadow roots and nested iframes are walked like the rest of the page (it is treated as
- * cross-origin only when its document is not readable). Open shadow roots are walked too, since
- * querySelectorAll does not enter them; a closed shadow root cannot be reached from here.
+ * Says whether an iframe this script cannot read may stay uncovered: true only for a frame whose
+ * own frame agent confirmed its covers (content/frameAgent.js). The caller maps the element to the
+ * frame's path (frameIds.ts); anything it cannot map is not shown.
  */
-export function maskSensitiveFields(doc: Doc, win?: Window): HTMLElement | null {
-  if (!doc || !doc.createElement) return null;
-  // A layer from an earlier capture that never got removed must not stack up.
-  removeSensitiveMasks(doc);
+export type FrameShown = (frame: HTMLIFrameElement) => boolean;
 
-  const layer = doc.createElement('div');
-  layer.id = MASK_LAYER_ID;
-  layer.style.position = 'fixed';
-  layer.style.top = '0';
-  layer.style.left = '0';
-  layer.style.width = '100%';
-  layer.style.height = '100%';
-  layer.style.pointerEvents = 'none';
-  layer.style.zIndex = '2147483646';
+/** Nothing is shown: every unreadable iframe is covered whole. */
+const NONE_SHOWN: FrameShown = () => false;
 
-  const parent = doc.body || doc.documentElement;
-  if (!parent) return null;
-
-  const cover = (rect: { left: number; top: number; width: number; height: number }, label: string) => {
-    if (rect.width <= 0 || rect.height <= 0) return;
-    const box = doc.createElement('div');
-    box.className = 'scoutfox-shot-mask';
-    box.setAttribute('data-mask', label);
-    box.style.position = 'fixed';
-    box.style.left = `${Math.max(0, rect.left)}px`;
-    box.style.top = `${Math.max(0, rect.top)}px`;
-    box.style.width = `${rect.width}px`;
-    box.style.height = `${rect.height}px`;
-    // The same weight as the field, so the picture shows THAT a field is there without showing
-    // what is in it. The label is not drawn: it would be read by the model.
-    box.style.background = '#2b2b2b';
-    box.style.borderRadius = '2px';
-    box.style.boxShadow = 'inset 0 0 0 1px rgba(255,255,255,0.18)';
-    layer.appendChild(box);
-  };
-
-  // Every field the text path refuses to read, and every iframe whose document this script
-  // cannot read, in this document, in every open shadow root under it, and in every same-origin
-  // iframe under it (recursively, so a cross-origin payment frame inside a same-origin wrapper is
-  // still covered). `offset` moves a frame's own viewport coordinates into the page's.
+/**
+ * Every field the text path refuses to read, and every iframe whose document this script cannot
+ * read, in this document, in every open shadow root under it, and in every same-origin iframe under
+ * it (recursively, so a cross-origin payment frame inside a same-origin wrapper is still found).
+ * Rects are in this document's viewport coordinates.
+ */
+function walkSensitive(doc: Doc, onField: (el: Element, rect: Rect, kind: string) => void, onFrame: (frame: HTMLIFrameElement, rect: Rect) => void): void {
+  // `offset` moves a frame's own viewport coordinates into the page's.
   const walkDocument = (root: Doc, offset: { left: number; top: number }, depth: number) => {
     for (const scope of collectRoots(root)) {
       for (const el of Array.from(scope.querySelectorAll('input, textarea'))) {
@@ -292,11 +274,9 @@ export function maskSensitiveFields(doc: Doc, win?: Window): HTMLElement | null 
         const tag = (el.tagName || '').toLowerCase();
         const type = tag === 'input' ? (el as HTMLInputElement).type : '';
         const kind = computeFieldKind(el, tag, type);
-        if (kind && MASKED_FIELD_KINDS.has(kind)) cover(shift(el.getBoundingClientRect(), offset), kind);
+        if (kind && MASKED_FIELD_KINDS.has(kind)) onField(el, shift(el.getBoundingClientRect(), offset), kind);
       }
 
-      // The mask over an unreadable frame is the whole rectangle, which means the model cannot
-      // see anything inside it. That trade-off is stated in docs/screenshot.md.
       for (const frame of Array.from(scope.querySelectorAll('iframe')) as HTMLIFrameElement[]) {
         const frameRect = shift(frame.getBoundingClientRect(), offset);
         let inner: Doc | null = null;
@@ -320,22 +300,125 @@ export function maskSensitiveFields(doc: Doc, win?: Window): HTMLElement | null 
             );
             continue;
           } catch (_) {
-            // A frame that turned unreadable mid-walk is covered whole below.
+            // A frame that turned unreadable mid-walk is handled as unreadable below.
           }
         }
-        cover(frameRect, 'iframe');
+        onFrame(frame, frameRect);
       }
     }
   };
   walkDocument(doc, { left: 0, top: 0 }, 0);
+}
+
+/**
+ * What the last mask walk covered or let through in each document, so the check after the capture
+ * can tell a field or frame that appeared since (it was in the picture uncovered).
+ */
+const seenAtMask = new WeakMap<Doc, { fields: WeakSet<Element>; frames: WeakSet<Element>; layer: HTMLElement | null }>();
+
+/**
+ * Draws the covers over the sensitive fields and the cross-origin iframes, and returns the layer
+ * so it can be removed again. Nothing in the page is modified except one appended element.
+ *
+ * A same-origin iframe is not masked as a whole: its document is readable, so its own fields,
+ * shadow roots and nested iframes are walked like the rest of the page (it is treated as
+ * cross-origin only when its document is not readable). Open shadow roots are walked too, since
+ * querySelectorAll does not enter them; a closed shadow root cannot be reached from here.
+ *
+ * An unreadable iframe for which `shown` says true is left uncovered: its own frame agent covered
+ * its fields (fail closed: the default shows none).
+ */
+export function maskSensitiveFields(doc: Doc, win?: Window, shown: FrameShown = NONE_SHOWN): HTMLElement | null {
+  if (!doc || !doc.createElement) return null;
+  // A layer from an earlier capture that never got removed must not stack up.
+  removeSensitiveMasks(doc);
+
+  const layer = doc.createElement('div');
+  layer.id = MASK_LAYER_ID;
+  layer.style.position = 'fixed';
+  layer.style.top = '0';
+  layer.style.left = '0';
+  layer.style.width = '100%';
+  layer.style.height = '100%';
+  layer.style.pointerEvents = 'none';
+  layer.style.zIndex = '2147483646';
+
+  const parent = doc.body || doc.documentElement;
+  if (!parent) return null;
+
+  const cover = (rect: Rect, label: string) => {
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const box = doc.createElement('div');
+    box.className = 'scoutfox-shot-mask';
+    box.setAttribute('data-mask', label);
+    box.style.position = 'fixed';
+    box.style.left = `${Math.max(0, rect.left)}px`;
+    box.style.top = `${Math.max(0, rect.top)}px`;
+    box.style.width = `${rect.width}px`;
+    box.style.height = `${rect.height}px`;
+    // The same weight as the field, so the picture shows THAT a field is there without showing
+    // what is in it. The label is not drawn: it would be read by the model.
+    box.style.background = '#2b2b2b';
+    box.style.borderRadius = '2px';
+    box.style.boxShadow = 'inset 0 0 0 1px rgba(255,255,255,0.18)';
+    layer.appendChild(box);
+  };
+
+  const seen = { fields: new WeakSet<Element>(), frames: new WeakSet<Element>(), layer: null as HTMLElement | null };
+  // The mask over an unreadable frame that no agent vouched for is the whole rectangle, which means
+  // the model cannot see anything inside it. That trade-off is stated in docs/screenshot.md.
+  walkSensitive(
+    doc,
+    (el, rect, kind) => {
+      seen.fields.add(el);
+      cover(rect, kind);
+    },
+    (frame, rect) => {
+      seen.frames.add(frame);
+      let vouched = false;
+      try {
+        vouched = shown(frame) === true;
+      } catch (_) {
+        vouched = false;
+      }
+      if (!vouched) cover(rect, 'iframe');
+    }
+  );
 
   // A layer with no covers is not worth appending: an empty fixed layer is still a DOM change.
-  if (layer.childElementCount === 0) return null;
-  parent.appendChild(layer);
+  if (layer.childElementCount > 0) {
+    parent.appendChild(layer);
+    seen.layer = layer;
+  }
+  seenAtMask.set(doc, seen);
   // The window argument is kept for the signature the callers use; the layer is positioned in
   // viewport coordinates by CSS, so no scroll offset is needed.
   void win;
-  return layer;
+  return seen.layer;
+}
+
+/**
+ * After the capture: do the covers drawn by the last maskSensitiveFields still hold? False when no
+ * mask walk ran in this document, when the layer was taken out of the page, or when a sensitive
+ * field or an unreadable iframe exists now that the walk did not see (it was in the picture with
+ * no cover). A false throws the picture away.
+ */
+export function masksStillHold(doc: Doc): boolean {
+  if (!doc) return false;
+  const seen = seenAtMask.get(doc);
+  if (!seen) return false;
+  if (seen.layer && (seen.layer.isConnected === false || (typeof doc.contains === 'function' && !doc.contains(seen.layer)))) return false;
+  let holds = true;
+  walkSensitive(
+    doc,
+    (el) => {
+      if (!seen.fields.has(el)) holds = false;
+    },
+    (frame) => {
+      if (!seen.frames.has(frame)) holds = false;
+    }
+  );
+  return holds;
 }
 
 /** Removes the mask layer, if one is up. */

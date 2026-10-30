@@ -45,7 +45,8 @@
     {
       "matches": ["<all_urls>"],
       "js": [
-        "content/netRelay.js"
+        "content/netRelay.js",
+        "content/frameAgent.js"
       ],
       "run_at": "document_start",
       "all_frames": true

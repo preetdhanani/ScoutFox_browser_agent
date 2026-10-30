@@ -5,6 +5,7 @@
 // tool loop. There is no JSON-RPC transport and no @modelcontextprotocol/sdk: the tools are a
 // plain list of names and argument schemas (./tools.ts) and a tool call is a method call.
 import { takeSnapshot } from '../browser/snapshot.ts';
+import { TOP_FRAME, readFrameTexts } from '../browser/frames.ts';
 import { executeAction } from '../browser/execute.ts';
 import { cdp } from '../browser/cdp.ts';
 import { captureScreenshot, ScreenshotError, chromePagePort, type ScreenshotDeps } from '../browser/screenshot.ts';
@@ -86,11 +87,15 @@ export function coordinateClickRefusal(args: Record<string, any>): string | null
 }
 
 /** The words a bot check or CAPTCHA control uses. ScoutFox never clicks one: a person must pass it. */
-export const BOT_CHECK_PATTERN = /verify (?:that )?you(?: are|'re) (?:a )?human|i'?m not a robot|are you a robot|captcha|human verification|bot check/i;
+export const BOT_CHECK_PATTERN = /verify (?:that )?you(?: are|'re) (?:a )?human|i'?m not a robot|are you a robot|captcha|human verification|bot check|challenges\.cloudflare\.com|turnstile/i;
 
 /** The refusal of a click on a bot check, worded so the model stops and tells the user. */
 export function botCheckRefusal(elementId: unknown, label: string): string {
   return `Refused: element [${elementId}] is a bot check (${label.trim().slice(0, 80)}). ScoutFox never clicks or solves bot checks or CAPTCHAs. Call finish now and tell the user the page is behind a bot check that a person has to pass.`;
+}
+
+export function botCheckPointRefusal(what: string): string {
+  return `Refused: that point is on a bot check (${what.trim().slice(0, 80)}). ScoutFox never clicks or solves bot checks or CAPTCHAs. Call finish now and tell the user the page is behind a bot check that a person has to pass.`;
 }
 
 /**
@@ -370,7 +375,10 @@ export class ScoutFoxMCPServer {
         const part = readPagePart(args?.part);
         if (part === null) return { text: `Error: part must be a whole number from 1 up, got ${JSON.stringify(args?.part)}.`, isError: true };
         const hasId = args?.element_id !== undefined && args?.element_id !== null;
-        const outcome = await this.run(tabId, { action: 'read_page', part, ...(hasId ? { element_id: args.element_id } : {}) }, rt);
+        // innerText never enters an iframe: the text of each embedded frame (a lesson, a document
+        // viewer) is read by that frame's own agent and added after the page text.
+        const frames = hasId ? [] : await readFrameTexts(tabId).catch(() => []);
+        const outcome = await this.run(tabId, { action: 'read_page', part, ...(hasId ? { element_id: args.element_id } : {}), ...(frames.length ? { frames } : {}) }, rt);
         if (!outcome.ok) return outcome.result;
         const read: any = outcome.exec?.result || {};
         const body = typeof read.pageText === 'string' && read.pageText ? read.pageText : '(no text)';
@@ -679,6 +687,11 @@ export class ScoutFoxMCPServer {
     if (described.refused) {
       return { text: described.refused, isError: true };
     }
+    // A bot check is never clicked, by element or by point. Embedded frames are shown in pictures,
+    // so a CAPTCHA frame can be seen and pointed at: what is under the point decides.
+    if (described.what && BOT_CHECK_PATTERN.test(described.what)) {
+      return { text: botCheckPointRefusal(described.what), isError: true };
+    }
     if (described.snapped) point = { x: described.snapped.x, y: described.snapped.y };
 
     this.refusalCount = 0;
@@ -753,7 +766,7 @@ export class ScoutFoxMCPServer {
     try {
       const response: any = await new Promise((resolve) => {
         try {
-          chrome.tabs.sendMessage(tabId, { action: 'DESCRIBE_POINT', payload: { ...point, snap: true } }, (resp) => {
+          chrome.tabs.sendMessage(tabId, { action: 'DESCRIBE_POINT', payload: { ...point, snap: true } }, TOP_FRAME, (resp) => {
             resolve(chrome.runtime?.lastError ? null : resp ?? null);
           });
         } catch (_) {

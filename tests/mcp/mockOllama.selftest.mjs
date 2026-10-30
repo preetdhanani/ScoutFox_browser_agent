@@ -194,6 +194,8 @@ function drawnOrders(top) {
 /** The notebook of notebook.html as the walk plays it: cell 14's code and output, and the cells panel. */
 const NOTEBOOK_CELL14 = '!sudo apt-get update && sudo apt-get install -y zstd\n!curl -fsSL https://ollama.com/install.sh | sh';
 const NOTEBOOK_PANEL = 'the "Notebook cells" panel';
+// How the frame agent names the lesson frame of frame-lesson.html (src/content/frameAgent.ts).
+const LESSON_FRAME = 'the embedded frame (lesson.lantern.test:8765)';
 const NOTEBOOK_PANEL_MAX = 6200;
 
 /** The page text of a snapshot as the walk shows it now: the edits and runs of the walk applied. */
@@ -229,7 +231,7 @@ function findResult(elementsText, query) {
 }
 
 async function serverResult(name, args, snapshot, strip, state = {}) {
-  const { frame = null, shuffled = false, pageSignature = null, onShuffle = () => {}, onOpen = () => {}, blocked = false, onAccept = () => {}, editor = null, orders = null, reads = new Map() } = state;
+  const { frame = null, shuffled = false, pageSignature = null, onShuffle = () => {}, onOpen = () => {}, blocked = false, onAccept = () => {}, editor = null, orders = null, lesson = null, reads = new Map() } = state;
   const shuffleId = String(snapshot.elementsText || '').split('\n')
     .map((line) => /^\[(\d+)\].*shuffle/i.exec(line))
     .find(Boolean)?.[1];
@@ -302,6 +304,8 @@ async function serverResult(name, args, snapshot, strip, state = {}) {
       const direction = args.direction === 'up' ? 'up' : 'down';
       const box = orders ? { label: 'the "Order list" scroll area', top: orders.top, max: ORDERS.rows.length * ORDER_ROW_PX - ORDER_VIEW_PX, step: ORDER_STEP_PX, set: (v) => { orders.top = v; } }
         : editor && editor.kind === 'notebook' ? { label: NOTEBOOK_PANEL, top: editor.panelTop, max: NOTEBOOK_PANEL_MAX, step: 520, set: (v) => { editor.panelTop = v; } }
+          // The course shell does not scroll; the lesson frame does (frameToScroll in src/content/scrollActions.ts).
+          : lesson ? { label: LESSON_FRAME, top: lesson.top, max: 1400, step: 640, set: (v) => { lesson.top = v; } }
           : { label: 'the page', top: 0, max: 0, step: 640, set: () => {} };
       const before = box.top;
       const target = Math.min(box.max, Math.max(0, before + (direction === 'down' ? box.step : -box.step)));
@@ -431,6 +435,7 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = TASKS[t
         ? notebookEditor(snapshot)
         : null,
     orders: task.page === 'virtual-list.html' ? { top: 0 } : null,
+    lesson: task.page === 'frame-lesson.html' ? { top: 0 } : null,
     reads: new Map()
   };
   for (let round = 0; round < maxRounds; round++) {
@@ -487,6 +492,7 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = TASKS[t
         onAccept: () => { state.accepted = true; },
         editor: state.editor,
         orders: state.orders,
+        lesson: state.lesson,
         reads: state.reads
       });
       // The frame remembers the page signature it was taken with. A shuffle changes the page's

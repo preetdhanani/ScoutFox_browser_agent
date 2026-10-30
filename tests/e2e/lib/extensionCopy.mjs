@@ -55,6 +55,20 @@ export const TAMPERS = {
       replaceOnce(inside(dir, src.replace(/^\/+/, '')), 'el("btnCpSave").addEventListener("click", submit);', 'el("btnCpSave").addEventListener("click", close);');
     }
   },
+  'frame-no-field-mask': {
+    does: 'makes the frame agent confirm its covers without drawing them (FRAME_MASK skips the mask walk): the check after the capture must throw the picture away, so frame-lesson must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'content/frameAgent.js'),
+      'maskSensitiveFields(doc, win, shownFrames(request.payload && request.payload.shownFramePaths));',
+      ';')
+  },
+  'frame-field-uncovered': {
+    does: 'makes the frame agent draw no cover over a password field while it still counts the field as covered: only the picture itself shows the leak, so frame-lesson must fail its pixel check',
+    apply: (dir) => replaceOnce(inside(dir, 'content/frameAgent.js'), 'cover(rect, kind);', ';')
+  },
+  'frame-agent-silent': {
+    does: 'keeps the frame agent from installing in any frame (no agent answers): the lesson frame must be covered whole and unread, so frame-lesson must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'content/frameAgent.js'), 'if (!g || g.top === g || g.__scoutfoxFrameAgent) return;', 'return;')
+  },
   'empty-page-text': {
     does: 'makes the content script report no page text (the model then cannot read the page and must answer wrong)',
     apply: (dir) => {

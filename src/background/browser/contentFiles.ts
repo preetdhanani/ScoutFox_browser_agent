@@ -16,7 +16,12 @@ export const MAIN_CONTENT_FILES = [
 // postMessage never reaches the top frame's listener - BUG-45).
 export const ALL_FRAMES_ISOLATED_FILES = [
   'content/netRelay.js',
+  'content/frameAgent.js',
 ] as const;
+
+// The frame agent: reads, masks and scrolls one embedded frame for the background (it does
+// nothing in the top frame). See src/content/frameAgent.ts.
+export const FRAME_AGENT_FILE = 'content/frameAgent.js';
 
 // Backwards-compatible aliases
 export const CONTENT_SCRIPT_FILES = ISOLATED_CONTENT_FILES;

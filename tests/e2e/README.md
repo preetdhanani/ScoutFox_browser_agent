@@ -131,7 +131,6 @@ The check reads only facts a right answer must contain.
 | `web-arxiv-agents` | one recent arXiv paper about web-browsing LLM agents: title, first author, id |
 | `web-github-playwright` | the stars and the latest release of microsoft/playwright |
 | `web-train-hof-munich` | a train from Hof to München Hbf tomorrow around 08:00 (bahn.de has a cookie layer in a shadow root) |
-| `web-framework-price` | the official Framework Laptop 16 price compared with one other shop |
 | `web-cookie-accept` | open stackoverflow.com, accept its cookie banner, and name the top question |
 | `web-research-archive` | the exact file name of Ollama's latest Linux amd64 archive and whether it needs zstd, looked up with `web_search` or `fetch_url` (the run must use one) |
 

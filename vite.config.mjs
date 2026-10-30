@@ -78,7 +78,8 @@ export const CONTENT_ENTRIES = [
   { input: 'src/content/actionExecutorEntry.ts', output: 'content/actionExecutor.js' },
   { input: 'content/content.js', output: 'content/content.js' },
   { input: 'src/content/net-recorder.ts', output: 'content/net-recorder.js' },
-  { input: 'content/netRelay.js', output: 'content/netRelay.js' }
+  { input: 'content/netRelay.js', output: 'content/netRelay.js' },
+  { input: 'src/content/frameAgent.ts', output: 'content/frameAgent.js' }
 ];
 
 /**

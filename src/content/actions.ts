@@ -5,7 +5,7 @@
 
 import { formatFindMessage } from './domCompressor.ts';
 import { normalizePageText, pageTextPart } from './pageText.ts';
-import { pickScrollTarget, positionOf, scrollInstantly, settledPosition, stepOf, type ScrollBox, type ScrollPosition } from './scrollMeasure.ts';
+import { runScrollAction } from './scrollActions.ts';
 
 export interface ActionExecutionContext {
   doc?: Document;
@@ -19,6 +19,25 @@ export interface ActionExecutionContext {
   setFieldValue: (el: Element, text: unknown) => { success: boolean; error?: string };
   doClick: (elementId: number | string) => any;
   doType: (elementId: number | string, text: unknown, submit?: unknown) => any;
+  /** The path key of the frame an iframe element shows (frameIds.ts), for a scroll that goes into it. */
+  framePathOf?: (frame: HTMLIFrameElement) => string | null;
+}
+
+/** The text of one embedded frame, read by its frame agent and passed in by the background. */
+export interface FrameText {
+  origin: string;
+  text: string;
+}
+
+/**
+ * The page text with the text of its embedded frames after it. innerText never enters an iframe,
+ * so a lesson or a document inside one is only readable this way. Each frame gets a heading line
+ * that names where its text comes from.
+ */
+export function withFrameTexts(text: string, frames: unknown): string {
+  const list = Array.isArray(frames) ? frames.filter((f): f is FrameText => !!f && typeof f.text === 'string' && f.text.trim() !== '' && typeof f.origin === 'string') : [];
+  if (!list.length) return text;
+  return [text, ...list.map((f) => `--- Embedded frame from ${f.origin} ---\n${f.text.trim()}`)].filter((part) => part.trim() !== '').join('\n\n');
 }
 
 const SafeKeyboardEvent = typeof KeyboardEvent !== 'undefined' ? KeyboardEvent : (Event as any);
@@ -288,17 +307,6 @@ export function readableText(el: Element): { text: string; hidesLines: boolean }
   return { text: normalizePageText(String(raw)), hidesLines };
 }
 
-/** The box the last scroll_target picked, which scroll_measure and scroll_fallback read and move. */
-let scrollBox: ScrollBox = null;
-
-function liveScrollBox(doc: Document): ScrollBox {
-  return scrollBox && (scrollBox as Element).isConnected !== false && doc.contains(scrollBox) ? scrollBox : null;
-}
-
-function positionPayload(position: ScrollPosition) {
-  return { top: position.top, max: position.max, height: position.height, atTop: position.atTop, atBottom: position.atBottom };
-}
-
 export async function execute(
   actionPayload: any,
   context: ActionExecutionContext,
@@ -312,52 +320,14 @@ export async function execute(
       return context.doClick(element_id);
     case 'type':
       return context.doType(element_id, text, submit);
-    case 'scroll': {
-      // Only reached when the background could not drive the trusted wheel (see InputDispatcher.handleScroll):
-      // the picked box is moved at once and measured, so the reply is what really happened.
-      if (!doc || !win) return { success: false, error: 'scroll needs a page.' };
-      const picked = pickScrollTarget(doc, win, {});
-      const before = positionOf(picked.box, doc, win);
-      const sign = direction === 'up' ? -1 : 1;
-      scrollInstantly(picked.box, win, sign * stepOf(before));
-      const after = positionOf(picked.box, doc, win);
-      return { success: true, result: { moved: after.top - before.top, label: picked.label, ...positionPayload(after) } };
-    }
-    case 'scroll_target': {
-      // The box a scroll moves and where the wheel goes: an element's box, the box under a point,
-      // or the largest visible scrolling box. It is kept for scroll_measure and scroll_fallback.
-      if (!doc || !win) return { success: false, error: 'scroll needs a page.' };
-      let element: Element | null = null;
-      if (element_id !== undefined && element_id !== null) {
-        element = context.resolveElement(element_id);
-        if (!element) return { success: false, error: `Element [${element_id}] is not on this page any more. Get the element list again, or scroll without element_id.` };
-      }
-      const hasPoint = Number.isFinite(Number(actionPayload.x)) && Number.isFinite(Number(actionPayload.y)) && actionPayload.x !== null && actionPayload.y !== null && actionPayload.x !== undefined && actionPayload.y !== undefined;
-      const point = hasPoint ? { x: Number(actionPayload.x), y: Number(actionPayload.y) } : null;
-      const hit = point && typeof doc.elementFromPoint === 'function' ? doc.elementFromPoint(point.x, point.y) : null;
-      const picked = pickScrollTarget(doc, win, { element, point, hit });
-      scrollBox = picked.box;
-      const before = positionOf(picked.box, doc, win);
-      return { success: true, result: { point: picked.point, label: picked.label, step: stepOf(before), ...positionPayload(before) } };
-    }
-    case 'scroll_measure': {
-      // The kept box's position once it stopped moving (a wheel scroll can animate).
-      if (!doc || !win) return { success: false, error: 'scroll needs a page.' };
-      const box = liveScrollBox(doc);
-      const settled = await settledPosition(() => positionOf(box, doc, win), {
-        quietMs: Number(actionPayload.quietMs) > 0 ? Number(actionPayload.quietMs) : undefined,
-        maxMs: Number(actionPayload.maxMs) > 0 ? Number(actionPayload.maxMs) : undefined
+    case 'scroll':
+    case 'scroll_target':
+    case 'scroll_measure':
+    case 'scroll_fallback':
+      return runScrollAction(actionPayload, doc, win, {
+        resolveElement: (id) => context.resolveElement(id),
+        framePathOf: context.framePathOf ? (frame) => context.framePathOf!(frame) : undefined
       });
-      return { success: true, result: positionPayload(settled) };
-    }
-    case 'scroll_fallback': {
-      // The wheel did not move the kept box: move it at once by delta, and measure it.
-      if (!doc || !win) return { success: false, error: 'scroll needs a page.' };
-      const box = liveScrollBox(doc);
-      scrollInstantly(box, win, Number(actionPayload.delta) || 0);
-      const settled = await settledPosition(() => positionOf(box, doc, win), { quietMs: 80, maxMs: 600 });
-      return { success: true, result: positionPayload(settled) };
-    }
     case 'navigate':
       if (win && win.location) win.location.href = url;
       return { success: true, message: `Navigating to ${url}` };
@@ -395,7 +365,7 @@ export async function execute(
             ? normalizePageText((doc.body as HTMLElement).innerText || doc.body.textContent || '')
             : '';
         const hidesLines = !!(doc && typeof doc.querySelector === 'function' && doc.querySelector('.cm-content .cm-gap'));
-        source = { text: String(text), hidesLines };
+        source = { text: withFrameTexts(String(text), actionPayload.frames), hidesLines };
         what = 'Page text';
       }
       const part = pageTextPart(source.text, partNumber);

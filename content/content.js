@@ -675,8 +675,20 @@
           sendResponse({ success: false, error: 'The page executor is not loaded, so the privacy covers could not be put up.' });
           return true;
         }
-        window.actionExecutor.hideAgentUi();
+        window.actionExecutor.hideAgentUi(request.payload && request.payload.shownFramePaths);
         sendResponse({ success: true });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+      return true;
+    }
+
+    if (action === 'CHECK_AGENT_UI') {
+      // After the capture: the covers are still up and nothing appeared that needed one. Anything
+      // but a clear yes throws the picture away (fail closed).
+      try {
+        const holds = !!(window.actionExecutor && typeof window.actionExecutor.masksHold === 'function' && window.actionExecutor.masksHold());
+        sendResponse({ success: holds });
       } catch (err) {
         sendResponse({ success: false, error: err.message });
       }

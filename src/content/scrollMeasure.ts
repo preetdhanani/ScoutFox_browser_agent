@@ -120,10 +120,13 @@ export function positionOf(box: ScrollBox, doc: Document, win: Window): ScrollPo
     const root = (doc.scrollingElement || doc.documentElement) as HTMLElement | null;
     top = win.scrollY || 0;
     height = win.innerHeight || 0;
-    max = Math.max(0, (root ? root.scrollHeight : 0) - height);
+    // The room the window can scroll is the root's own client height (no scrollbar), not innerHeight.
+    max = Math.max(0, (root ? root.scrollHeight : 0) - ((root && root.clientHeight) || height));
   }
-  top = Math.round(top);
+  // A fractional position on a high-density display can round past a max that rounded down
+  // ("now at 693 of 692px"): the position is never past the end.
   max = Math.round(max);
+  top = Math.min(Math.round(top), max);
   return { top, max, height: Math.round(height), atTop: top <= EDGE_SLACK, atBottom: top >= max - EDGE_SLACK };
 }
 

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The agent architecture - Lantern Learning</title>
+  <link rel="stylesheet" href="site.css">
+  <style>
+    /* Fixture: a course shell like a learning platform. The shell never scrolls, and the lesson is an
+       iframe from ANOTHER origin (lesson.lantern.test), whose own document scrolls. */
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    body { display: flex; flex-direction: column; }
+    .crumbs { padding: 8px 16px; font-size: 14px; }
+    #lesson { flex: 1; width: 100%; border: 0; border-top: 1px solid #ddd; }
+    .pager { display: flex; justify-content: space-between; padding: 8px 16px; }
+  </style>
+</head>
+<body>
+  <header class="bar">
+    <a class="logo" href="index.html">Lantern Learning</a>
+  </header>
+  <nav class="crumbs">Agent Architect Certification &gt; Understand agents &gt; The agent architecture</nav>
+  <iframe id="lesson" title="Lesson"></iframe>
+  <div class="pager">
+    <button type="button">Previous</button>
+    <button type="button">Next</button>
+  </div>
+  <script>
+    document.getElementById('lesson').src = `http://lesson.lantern.test:${location.port}/frame-lesson-body.html`;
+  </script>
+</body>
+</html>

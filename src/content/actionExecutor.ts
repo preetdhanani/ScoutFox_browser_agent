@@ -13,9 +13,10 @@ import {
   removeCursorOverlay,
   highlightElement
 } from './cursor.ts';
-import { maskSensitiveFields, removeSensitiveMasks, describePoint, snapPoint, maskedFieldRefusal, type PointDescription, type PointSnap } from './screenshotPrivacy.ts';
+import { maskSensitiveFields, masksStillHold, removeSensitiveMasks, describePoint, snapPoint, maskedFieldRefusal, type PointDescription, type PointSnap } from './screenshotPrivacy.ts';
 import { resolveElement, resolveElementDetailed } from './resolve.ts';
 import { waitForDomQuiet } from './domQuiet.ts';
+import { framePathKeyOf, shownFrames } from './frameIds.ts';
 import {
   describeElement,
   setFieldValue,
@@ -109,7 +110,7 @@ export class ActionExecutor implements ActionExecutionContext {
    * So the containers are made invisible, and the visibility they had is remembered here so it
    * can be put back exactly.
    */
-  hideAgentUi(): void {
+  hideAgentUi(shownFramePaths: unknown = []): void {
     const doc = this.getDoc();
     if (!doc || !doc.getElementById) return;
     const containers = ['scoutfox-badge-container', 'scoutfox-cursor-container'];
@@ -120,7 +121,18 @@ export class ActionExecutor implements ActionExecutionContext {
       el.style.visibility = 'hidden';
     }
     // The values the text path refuses to read must not leave as pixels.
-    maskSensitiveFields(doc, this.getWin());
+    // An embedded frame is shown only when its own agent confirmed its covers (shownFramePaths).
+    maskSensitiveFields(doc, this.getWin(), shownFrames(shownFramePaths));
+  }
+
+  /** After the capture: the covers drawn by hideAgentUi still hold, and nothing new needs one. */
+  masksHold(): boolean {
+    return masksStillHold(this.getDoc() as Document);
+  }
+
+  /** The path key of the frame an iframe element shows, for a scroll that goes into it. */
+  framePathOf(frame: HTMLIFrameElement): string | null {
+    return framePathKeyOf(frame);
   }
 
   /** Puts back what hideAgentUi hid, and removes the privacy covers. */

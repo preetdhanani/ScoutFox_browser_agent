@@ -3,6 +3,7 @@
 // content script injection fallback, and error mapping to PerceiveError.
 
 import { describeRestrictedUrl, lastRuntimeError } from './tabs.ts';
+import { TOP_FRAME } from './frames.ts';
 import { CONTENT_SCRIPT_FILES, NET_RECORDER_FILE, ALL_FRAMES_ISOLATED_FILES } from './contentFiles.ts';
 import { Logger } from '../../shared/logger.ts';
 import type { PerceiveError } from '../types.ts';
@@ -194,6 +195,7 @@ export async function takeSnapshot(
             showBadges: opts.showBadges === true,
           },
         },
+        TOP_FRAME,
         (resp) => {
           const err = lastRuntimeError();
           if (err) {
