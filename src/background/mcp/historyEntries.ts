@@ -1,9 +1,8 @@
 // src/background/mcp/historyEntries.ts
 // Pure helpers that turn MCP tool calls into the side panel's HistoryEntry rows.
 //
-// No chrome APIs and no imports from the background runtime: the e2e mock's self-test
-// (tests/e2e/lib/mockOllama.selftest.mjs) imports this file to build the same rows the
-// client builds, so it must stay dependency-free.
+// No chrome APIs and no imports from the background runtime, so the helpers stay pure and
+// unit tests (tests/mcp/historyEntries.test.ts) can import this file on its own.
 
 import type { EndReason, HistoryEntry } from '../types.ts';
 

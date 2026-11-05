@@ -30,6 +30,7 @@ import { AgentRunner } from './runner/AgentRunner.ts';
 import { partialResultEntry } from './mcp/historyEntries.ts';
 import { callProvider, fetchAvailableModels, getFallbackModels } from './llm/index.ts';
 import { resolveEffortSupport } from './llm/effort.ts';
+import { getEffectiveContextWindow } from './llm/models.ts';
 import { BUILTIN_PROVIDER_IDS } from '../shared/storage.ts';
 import { Logger } from '../shared/logger.ts';
 import { BUILD_STAMP } from '../shared/build.ts';
@@ -719,6 +720,18 @@ function setPanelVisibility(tabId: number, shouldShow: boolean): void {
   });
 }
 
+/**
+ * The context meter follows the settings: a new model, a window the user typed, or a model list
+ * that named windows changes what every open chat's ring shows. Each session resolves its window
+ * again (cached on the runner, never per model call) and broadcasts when it changed.
+ */
+if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || (!changes.agent_settings && !changes.models_ctx_cache)) return;
+    for (const session of new Set(sessions.values())) void session.engine.refreshContext();
+  });
+}
+
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener((request: any, sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => {
     let handled: boolean;
@@ -808,6 +821,15 @@ function routeMessage(
     return true;
   }
 
+  if (action === 'GET_CONTEXT_WINDOW') {
+    // The Settings field's line: the window the provider and model in the payload (a settings
+    // snapshot, like FETCH_MODELS) would run with, and where that number comes from.
+    getEffectiveContextWindow(payload || {})
+      .then((window) => sendResponse({ success: true, window }))
+      .catch((err) => sendResponse({ success: false, error: errorText(err) }));
+    return true;
+  }
+
   if (action === 'TEST_PROVIDER') {
     // The connectivity probe of the Add/Edit dialog (the "Test" button): one minimal chat call
     // through the very same path a real task uses, so what it reports is what a run would meet.
@@ -847,7 +869,8 @@ function routeMessage(
     'RESOLVE_CHALLENGE',
     'CONTINUE_BUDGET',
     'CLEAR_HISTORY',
-    'GET_SCREENSHOT'
+    'GET_SCREENSHOT',
+    'COMPACT_CHAT'
   ]);
 
   if (TAB_ACTIONS.has(action)) {
@@ -870,7 +893,23 @@ function routeMessage(
       // answer before it would be the empty state, and the panel would show the start screen.
       Promise.all([Logger.logsRestored(), runner.restorePromise.catch(() => {})]).then(() => {
         sendResponse({ ...runner.getState(), logs: Logger.getLogsHistory() });
+        // The context meter's window: resolved after the answer, and broadcast when it changed.
+        void runner.refreshContext();
       });
+      return true;
+    }
+
+    if (action === 'COMPACT_CHAT') {
+      // A Compact holds the task claim like a task does: no task starts while the summary is being
+      // written, and no Compact starts while a task is claimed or running.
+      const claim = runner.claimForTask();
+      if (!claim.success) {
+        sendResponse({ success: false, error: 'Stop the task before you compact the chat.' });
+        return true;
+      }
+      runner.compactChat()
+        .then((result) => sendResponse(result), (err) => sendResponse({ success: false, error: errorText(err) }))
+        .finally(() => runner.releaseTaskClaim());
       return true;
     }
 

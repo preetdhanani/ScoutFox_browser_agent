@@ -41,6 +41,7 @@ import { ProviderError, classifyProviderFailure, describeOllamaFailure, statusOf
 import { toLangChainMessages, watchFetch } from './factory.ts';
 import { baseUrlOf, modelOf } from './settings.ts';
 import { fetchModelContextWindow, getEffectiveContextWindow } from './models.ts';
+import { usageOfMessage } from './usage.ts';
 import type { ChatTurn, CompletionOptions, LlmSettings } from './types.ts';
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
@@ -171,8 +172,8 @@ export async function callOllama(settings: LlmSettings, messages: ChatTurn[], sy
   const turns = toLangChainMessages(messages, systemPrompt);
   const startTime = Date.now();
 
-  // Use dynamic context window: fetch from endpoint, fallback to stored setting, then to model-specific default
-  const numCtx = await getEffectiveContextWindow(settings);
+  // The context window of this model (llm/models.ts): the user's, the server's, the family table, then num_ctx.
+  const numCtx = (await getEffectiveContextWindow(settings)).tokens;
 
   let sendThink = !THINK_UNSUPPORTED.has(model);
   let format: string | object | undefined;
@@ -239,6 +240,8 @@ export async function callOllama(settings: LlmSettings, messages: ChatTurn[], sy
   }
 
   const elapsed = Date.now() - startTime;
+  const usage = usageOfMessage(reply);
+  if (usage) options.onUsage?.(usage);
   const text = reply.text;
   const reasoning = reply.additional_kwargs?.reasoning_content;
   const content = text.trim() ? text : (typeof reasoning === 'string' && reasoning.trim() ? reasoning : '');

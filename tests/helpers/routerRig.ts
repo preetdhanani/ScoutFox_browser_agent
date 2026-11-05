@@ -200,6 +200,8 @@ export interface RouterRig {
   readonly site: FakeDom | undefined;
   /** The router module as imported (everything it exports; the router exports nothing today). */
   readonly module: Record<string, unknown>;
+  /** Every request the model fetch got, in order, with its parsed body (what the extension really sent). */
+  readonly httpCalls: Array<{ url: string; body: any }>;
 
   /** A side panel sendMessage round trip: the response of the router. */
   send(message: Record<string, unknown>, sender?: Record<string, unknown>): Promise<any>;
@@ -366,6 +368,7 @@ export async function routerRig(options: RouterRigOptions = {}): Promise<RouterR
     llm,
     site,
     module,
+    httpCalls,
 
     send,
     connect: async (tabId, connectOptions = {}) => {

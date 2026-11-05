@@ -1,13 +1,7 @@
 /**
- * The record kept for every /api/chat call, shared by the Ollama proxy (real mode) and the
- * offline mock (--mock), so a report looks the same in both modes and the two cannot drift.
+ * The record kept for every model call, shared by the Ollama proxy and the key proxy of the smoke
+ * run (tests/e2e/lib), so a report looks the same for every provider and the two cannot drift.
  */
-
-/**
- * What a reply of the offline mock starts with when the prompt did not contain what its task needs (an empty page, no price line,
- * a goal it does not know). It lives here so the smoke harness can look for it without loading the mock.
- */
-export const MOCK_FAIL_PREFIX = 'MOCK-FAIL:';
 
 /**
  * A /api/chat answer as one object, whichever way it came: a single JSON object (stream:false, or an error), or
@@ -94,8 +88,24 @@ export function buildCallRecord({ n, status, ms, requestBytes, responseBytes, se
     // The notes the loop added after that tool block (the reflection, the step limit), in full.
     loopNotes: newLoopNotes(sent.messages),
     // The run state the request ended with (the goal, the plan, what was saved, the steps).
-    runState: runStateOf(sent.messages)
+    runState: runStateOf(sent.messages),
+    // The text of the first user message: the task, and above it the chain of the chat (the earlier
+    // turns, or the summary of a Compact), which a follow-up check reads.
+    firstUserText: firstUserTextOf(sent.messages)
   };
+}
+
+/** How much of the first user message a record keeps. */
+const FIRST_USER_CHARS = 30_000;
+
+/** The text of the first user message of a request ('' when it has none), the run state taken off. */
+export function firstUserTextOf(messages) {
+  const first = (Array.isArray(messages) ? messages : []).find((m) => m && m.role === 'user');
+  if (!first) return '';
+  const text = Array.isArray(first.content)
+    ? first.content.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n')
+    : String(first.content ?? '');
+  return withoutRunState(text).slice(0, FIRST_USER_CHARS);
 }
 
 /**
@@ -107,12 +117,12 @@ export const RUN_STATE_MARK = '[Run state]';
 const RUN_STATE_TAIL = /\n*\[Run state\][\s\S]*$/;
 
 /** A message text without the run state at its end. */
-export function withoutRunState(text) {
+function withoutRunState(text) {
   return typeof text === 'string' ? text.replace(RUN_STATE_TAIL, '') : text;
 }
 
 /** The run state a request carries on its last message, or null. */
-export function runStateOf(messages) {
+function runStateOf(messages) {
   const list = Array.isArray(messages) ? messages : [];
   const last = list[list.length - 1];
   if (!last) return null;

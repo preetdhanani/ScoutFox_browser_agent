@@ -15,10 +15,13 @@
  *            never enters the extension or the browser profile.
  *   --provider=nvidia  NVIDIA NIM with nvidia/nemotron-3.5-super-vl-120b-a12b, the built-in provider,
  *            through the same proxy. The profiles live in lib/providers.mjs.
- *   --mock   an offline, scripted stand-in for Ollama (tests/mcp/mockOllama.mjs). No model, no key
- *            and no network. This is what CI runs (`npm run test:e2e:mock`).
  *   --provider=ollama  a small proxy in front of a real local Ollama (lib/ollamaProxy.mjs, see
  *            there for why a proxy is needed).
+ *
+ * A task with a followUp (tasks.mjs, web-chat-chain) gets a second turn in the same tab and chat once
+ * the first has ended: the harness can compact the chat first through the context ring's card in the
+ * real side panel (real clicks, close-ups of the ring, the card and the divider in light and dark),
+ * send the tab to another fixture page, and then judges the second turn on its own.
  *
  * A graph run stops at the holds of the engine, and the harness answers them like a user at the side panel would:
  * it approves the plan the engine proposes, approves a confirmation to navigate to a host of the task's fixture site, denies
@@ -32,18 +35,17 @@
  *
  * Setup:  cd tests/e2e && npm ci            (puppeteer-core only)
  *         npm run build                     from the repo root, or pass --build
- * Run:    node smoke.mjs --mock                    offline, all tasks, no model needed
- *         node smoke.mjs --mock --build            build first, then the same (npm run test:e2e)
- *         node smoke.mjs                           the open-web tasks on LISA: a neutral start page and
- *                                                  only a question, the model picks every site (needs the key)
- *         node smoke.mjs --fixtures                the local fixture tasks on LISA
+ * Run:    node smoke.mjs                           the default tasks on LISA: the open-web tasks (a neutral
+ *                                                  start page and only a question, the model picks every
+ *                                                  site) and the three local fixture-page tasks (needs the key)
+ *         node smoke.mjs --build                   build first, then the same (npm run test:e2e)
  *         node smoke.mjs --held-out                the held-out open-web tasks (never tuned against; run them
  *                                                  after every change, to show it helps in general)
  *         node smoke.mjs --sealed                  the sealed open-web tasks: only verdicts and numbers, no trace
  *         node smoke.mjs --repeat=3                every task 3 times, summarised as median and p90 per task
  *         node smoke.mjs --provider=nvidia         the open-web tasks on NVIDIA NIM
  *         node smoke.mjs --provider=ollama         all tasks with qwen3.8:27b-mlx on the real Ollama
- *         node smoke.mjs --task=store-price        one task (or a comma list)
+ *         node smoke.mjs --task=web-eiffel-tower   one task (or a comma list)
  *         node smoke.mjs --model=gemma4:12b
  *         node smoke.mjs --headful                 watch it in a real window
  *         node smoke.mjs --out=report.json         also save the full report as JSON
@@ -52,17 +54,11 @@
  *         node smoke.mjs --timeout=360000          per task, in milliseconds
  *         node smoke.mjs --dump-snapshots          save what the content script sees on each
  *                                                  fixture page to tests/fixtures/snapshots/
- *                                                  (the evals read these files; no model needed).
- *                                                  The pages that a task serves under another host
- *                                                  name (shop-a.html) go to tests/e2e/lib/snapshots/.
- *         node smoke.mjs --dump-snapshots=shop-a   only the pages named here
+ *                                                  (the unit tests read these files; no model needed)
+ *         node smoke.mjs --dump-snapshots=store    only the pages named here
+ *         node smoke.mjs --prompt="..."            one run of your own on a real site (--start-url=)
+ *         node smoke.mjs --help                    the options
  *   --build   runs `npm run build` first (a child process this script owns), so dist/ is fresh.
- *   --mock    uses the offline mock. It first runs the mock's own quick self-test, and it also
- *             skips the Ollama preflight and the proxy.
- *   --tamper=<name>   makes one deliberate break in the temp COPY (never in dist/) to prove that
- *             this run can fail: no-content-script, worker-error, broken-panel, empty-page-text,
- *             zod-not-jitless, no-history-rows, broken-net-recorder, bad-tool-schema, no-fox-mark,
- *             no-effort, stale-worker, scroll-lies, read-repeats (and the ones in lib/extensionCopy.mjs).
  *   --effort=<level>  the effort every task starts with (auto, off, low, medium, high, max;
  *             default medium): the model's reasoning level, checked on the wire for every call.
  *
@@ -72,7 +68,7 @@
  * NVIDIA_API (and takes NVIDIA_URL, default https://integrate.api.nvidia.com/v1). The Ollama mode needs Ollama at
  * OLLAMA_URL, default http://127.0.0.1:11434, with the model already pulled.
  * Other environment variables: FIXTURE_PORT (8765; the committed snapshots contain this port),
- * PROXY_PORT (11435, also the port of the mock) and CHROMIUM_ARGS (extra Chromium flags,
+ * PROXY_PORT (11435, the model proxy) and CHROMIUM_ARGS (extra Chromium flags,
  * separated by spaces, for example --no-sandbox on a Linux CI runner).
  */
 import { spawn } from 'node:child_process';
@@ -84,10 +80,8 @@ import { startFixtureServer } from './lib/fixtureServer.mjs';
 import { startOllamaProxy } from './lib/ollamaProxy.mjs';
 import { PLACEHOLDER_KEY, startKeyProxy } from './lib/keyProxy.mjs';
 import { DEFAULT_PROVIDER, REAL_PROVIDER_NAMES, providerSettings, proxiedBaseUrl, resolveProvider } from './lib/providers.mjs';
-import { missingManifestFiles, prepareExtensionCopy, TAMPERS } from './lib/extensionCopy.mjs';
-import { MOCK_FAIL_PREFIX } from '../mcp/callRecord.mjs';
-import { runFacts, TASKS } from '../mcp/tasks.mjs';
-import { HOST_RULES, RESEARCH_HOST, SHOP_B } from './lib/twoSources.mjs';
+import { missingManifestFiles, prepareExtensionCopy } from './lib/extensionCopy.mjs';
+import { pageReadSteps, runFacts, TASKS } from '../mcp/tasks.mjs';
 import { aggregate, aggregateLines, callsForReport, expectedFinishOutcome, runVerdict } from './lib/metrics.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -95,17 +89,13 @@ const REPO = path.resolve(HERE, '..', '..');
 const DIST = path.join(REPO, 'dist');
 const SITE = path.join(REPO, 'tests', 'fixtures', 'site');
 const SNAPSHOT_DIR = path.join(REPO, 'tests', 'fixtures', 'snapshots');
-// Pages that a task serves under another host name. The committed fixture snapshots are what the evals
-// read, so these go into the e2e folder, where the mock's self-test reads them.
-const E2E_SNAPSHOT_DIR = path.join(HERE, 'lib', 'snapshots');
 
-const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'headless', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'mock', 'tamper', 'prompt', 'start-url', 'provider', 'fixtures', 'held-out', 'sealed', 'repeat', 'effort']);
+const KNOWN_FLAGS = new Set(['task', 'model', 'headful', 'headless', 'out', 'panel-screenshots', 'dump-snapshots', 'max-steps', 'timeout', 'build', 'prompt', 'start-url', 'provider', 'held-out', 'sealed', 'repeat', 'effort', 'help']);
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)(?:=(.*))?$/);
   return m ? [m[1], m[2] === undefined ? true : m[2]] : [a, true];
 }));
 
-const MOCK = !!args.mock;
 /** How often each task runs (--repeat=k). A real model is not deterministic, so its numbers are read as median and p90. */
 const REPEAT = args.repeat === undefined ? 1 : Number(args.repeat);
 /**
@@ -119,66 +109,42 @@ if (fs.existsSync(path.join(REPO, '.env'))) {
   try { process.loadEnvFile(path.join(REPO, '.env')); } catch { /* an unreadable .env is the same as none */ }
 }
 // The real model behind the run: LISA by default, another OpenAI-compatible profile of
-// lib/providers.mjs (nvidia), or a local Ollama. --mock replaces them all.
-const PROVIDER = MOCK ? 'mock' : String(args.provider || DEFAULT_PROVIDER);
-/** The resolved profile of a real OpenAI-compatible server, or null (mock, Ollama). Holds the key: never logged. */
+// lib/providers.mjs (nvidia), or a local Ollama.
+const PROVIDER = String(args.provider || DEFAULT_PROVIDER);
+/** The resolved profile of a real OpenAI-compatible server, or null (Ollama). Holds the key: never logged. */
 const REAL = REAL_PROVIDER_NAMES.includes(PROVIDER) ? resolveProvider(PROVIDER) : null;
 const CHROMIUM = process.env.CHROMIUM_PATH || '/Applications/Chromium.app/Contents/MacOS/Chromium';
 const CHROMIUM_ARGS = (process.env.CHROMIUM_ARGS || '').split(/\s+/).filter(Boolean);
-// The window every task runs in, and the device pixel ratio it runs at. Wider than the 1568 pixel
-// image budget on purpose: that is what makes the capture shrink, which is the arithmetic the
-// screenshot tasks exist to prove. CHROMIUM_ARGS can still override either flag for a one-off run.
-// The width is set on the page, not on the window: a launch flag cannot make a window wider than
-// the display, so on a 1512 px screen every `--window-size` above that lands back at 1512, and the
-// picture would never shrink. page.setViewport overrides the page's own metrics, which is what the
-// capture reads, and it is per page, so no other task is affected.
-const SHOT_VIEWPORT = { width: 2000, height: 1100 };
+// The device pixel ratio every task runs at: the picture and the CSS pixels are different grids, so
+// the coordinate mapping of a screenshot is real. CHROMIUM_ARGS can still override it for a one-off run.
 const SHOT_DPR = 2;
 const OLLAMA = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
-const MODEL = args.model || (MOCK ? 'mock-agent' : REAL ? REAL.defaultModel : 'qwen3.8:27b-mlx');
+const MODEL = args.model || (REAL ? REAL.defaultModel : 'qwen3.8:27b-mlx');
 /** The card title the panel draws for each finish outcome (OUTCOME_CARD in sidepanel/sidepanel.js). */
 const OUTCOME_TITLE = { done: 'Done', partial: 'Partly done', blocked: 'Could not finish' };
 const FIXTURE_PORT = Number(process.env.FIXTURE_PORT || 8765);
 const PROXY_PORT = Number(process.env.PROXY_PORT || 11435);
-// A mock task takes a few seconds, so a run that hangs should fail early.
 // Per task: --timeout, else the task's own timeoutMs, else this default.
-const TASK_TIMEOUT_MS = Number(args.timeout || (MOCK ? 60 * 1000 : 6 * 60 * 1000));
-// The fixture tasks need 1 to 3 steps. The cap is also the hard cap the graph engine builds its step budget from:
-// a Medium site gets up to 24 steps, and with a cap of 30 that budget is not scaled down. So the cap is not lowered to
-// the step count of a task. A run that loops is stopped by the loop guard below.
-// Open-web research takes more steps than a fixture page (search, open, read, compare), so it gets 60.
-const MAX_STEPS = Number(args['max-steps'] || (MOCK || args.fixtures ? 30 : 60));
+const TASK_TIMEOUT_MS = Number(args.timeout || 6 * 60 * 1000);
+// The engine's hard step cap. Open-web research takes many steps (search, open, read, compare), so it gets 60.
+const MAX_STEPS = Number(args['max-steps'] || 60);
 // The effort every task starts with: the model's reasoning level (llm/effort.ts), sent in the
 // provider's own field. --effort=low|high|... compares how hard the model thinks on the same tasks.
 const EFFORT_LEVELS = ['auto', 'off', 'low', 'medium', 'high', 'max'];
 const EFFORT = args.effort || 'medium';
-const EFFORT_LABEL = { auto: 'Auto', off: 'Off', low: 'Low', medium: 'Medium', high: 'High', max: 'Max' }[EFFORT];
 const POLL_MS = 250;
-// The mock keeps count of identical requests in a row. A model that gets the same prompt this many times in a row
-// is in a loop that nothing breaks, and the run is stopped instead of waiting for the task timeout.
-const LOOP_LIMIT = 15;
 // How long a run may stand paused with no hold the harness can answer, before it is stopped.
 const PAUSE_GRACE_MS = 3000;
 
-const SNAPSHOT_PAGES = ['store', 'store-spans', 'error', 'far-link', 'configurator', 'consent-link', 'editor', 'notebook', 'virtual-list', 'dead-button', 'frame-lesson', 'credentials'];
+// The fixture pages whose snapshot the unit tests read (tests/fakeDom.test.ts), for --dump-snapshots.
+const SNAPSHOT_PAGES = ['store'];
 // Every run saves its screenshots here (one folder per task): the side panel with the steps and
 // the end result, and the end state of the page. Gitignored; --panel-screenshots overrides the root.
 const RUN_STAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const SHOT_ROOT = path.join(HERE, 'screenshots', RUN_STAMP);
-// `page` is the address the task starts on, query included; `name` is the file it is served from.
-const HOST_PAGES = Object.values(TASKS).filter((t) => t.host).map((t) => ({ name: t.page.replace(/[?#].*$/, '').replace(/\.html$/, ''), page: t.page, host: t.host }))
-  .filter((p, i, all) => all.findIndex((q) => q.name === p.name) === i);
 
-/** A task's start address: the fixture server plus the page, or, for --prompt, the real URL given. */
-const absolute = (page, fixtures, host) => (/^https?:\/\//.test(page) ? page : `${originFor(fixtures, host)}/${page}`);
-
-/** The origin of the fixture server as a site of the task's host name (http://shop-a.test:8765), or as it is without one. */
-function originFor(fixtures, host) {
-  if (!host) return fixtures.origin;
-  const url = new URL(fixtures.origin);
-  url.hostname = host;
-  return url.origin;
-}
+/** A task's start address: the fixture server plus the page, or a real URL (an open-web task, --prompt) as it stands. */
+const absolute = (page, fixtures) => (/^https?:\/\//.test(page) ? page : `${fixtures.origin}/${page}`);
 
 // The side panel links Google Fonts. When the machine is offline those two requests fail, which
 // is a network fact and not an extension bug, so that one console line is not counted.
@@ -203,7 +169,6 @@ if (!EFFORT_LEVELS.includes(EFFORT)) throw new UserError(`--effort must be one o
 // user would notice: it finished, the answer is not empty, the panel shows the steps, and nothing
 // in the page, the worker, or the panel threw an error on the way.
 if (args.prompt) {
-  if (MOCK) throw new UserError('--prompt is a run against a real model: drop --mock (or run the scripted tasks with --task)');
   const startUrl = args['start-url'] ? String(args['start-url']) : 'https://www.google.com';
   if (!/^https?:\/\//.test(startUrl)) throw new UserError(`--start-url must be a full http(s) URL, got ${startUrl}`);
   TASKS.live = {
@@ -327,10 +292,10 @@ function warnIfDistIsStale() {
 async function preflightReal() {
   const where = `${REAL.origin}${REAL.mount}`;
   if (!REAL.apiKey) {
-    throw new UserError(`No ${REAL.label} key: set ${REAL.keyEnv.join(' or ')} in this shell or in the repo .env, or run offline with --mock.`);
+    throw new UserError(`No ${REAL.label} key: set ${REAL.keyEnv.join(' or ')} in this shell or in the repo .env.`);
   }
   const res = await fetch(`${where}/models`, { headers: { Authorization: `Bearer ${REAL.apiKey}` } }).catch((err) => ({ ok: false, status: err.message }));
-  if (!res.ok) throw new UserError(`${REAL.label} is not reachable at ${where} (${res.status}). Check the network and ${REAL.urlEnv}, or run offline with --mock.`);
+  if (!res.ok) throw new UserError(`${REAL.label} is not reachable at ${where} (${res.status}). Check the network and ${REAL.urlEnv}.`);
   const ids = ((await res.json().catch(() => ({}))).data || []).map((m) => m.id);
   if (!ids.includes(MODEL)) throw new UserError(`${REAL.label} does not list the model "${MODEL}" (it lists ${ids.slice(0, 10).join(', ') || 'none'}). Pick one with --model=.`);
   // The key is not returned: `env` goes into the saved report, and the key must never be in it.
@@ -340,7 +305,7 @@ async function preflightReal() {
 async function preflightOllama() {
   const version = await fetch(`${OLLAMA}/api/version`).then((r) => r.json()).catch(() => null);
   if (!version) {
-    throw new UserError(`Ollama is not reachable at ${OLLAMA}. Start it, or run offline with --mock (a scripted stand-in, no model needed).`);
+    throw new UserError(`Ollama is not reachable at ${OLLAMA}. Start it, or use the default provider (LISA).`);
   }
   // What the extension would get if it talked to Ollama directly. A 403 here is why the
   // proxy exists.
@@ -384,8 +349,7 @@ function textOfArgs(list) {
  * A CSP violation in a worker is NOT a console message and not a log entry. Chromium reports it
  * only as a `ContentSecurityPolicyIssue` of the Audits domain (and as a `securitypolicyviolation`
  * event in the worker, which is too late to listen for at start-up). That is why zod's blocked
- * `new Function('')` probe passed this harness before Audits was watched (--tamper=zod-not-jitless
- * is the control). Audits.enable replays the issues collected so far, like Runtime.enable does.
+ * `new Function('')` probe passed this harness before Audits was watched. Audits.enable replays the issues collected so far, like Runtime.enable does.
  */
 async function watchWorker(target, errors) {
   const session = await target.createCDPSession();
@@ -399,10 +363,6 @@ async function watchWorker(target, errors) {
   session.on('Runtime.consoleAPICalled', (e) => {
     if (e.type !== 'error' && e.type !== 'assert') return;
     const text = textOfArgs(e.args);
-    // shop-b.test is made unresolvable on purpose (twoSources.mjs HOST_RULES), so a run that opens it stands on
-    // Chromium's own error page, where no extension script can be injected. The engine logs that at error level
-    // (snapshot.ts INJECT_FAILED) and then ends the site without a value; for this one host it is the expected path.
-    if (/\[INJECT_FAILED\]/.test(text) && /is showing error page/.test(text) && text.includes(`${SHOP_B}/`)) return;
     errors.push(`service worker console.${e.type}: ${oneLine(text, 300)}`);
   });
   session.on('Runtime.exceptionThrown', (e) => {
@@ -509,12 +469,9 @@ async function launch(puppeteer, extensionDir) {
       '--no-first-run',
       '--no-default-browser-check',
       // The display's device pixel ratio is forced to 2 here, so the picture and the CSS pixels
-      // are different grids, which is what makes the coordinate mapping real. The WIDTH is set on
-      // the page (see the shot tasks below), because a launch flag cannot exceed the display.
+      // are different grids, which is what makes the coordinate mapping real.
       `--window-size=1920,1200`,
       `--force-device-scale-factor=${SHOT_DPR}`,
-      // shop-a.test -> the fixture server (see twoSources.mjs): a task about named sites runs on a page of one of them.
-      `--host-resolver-rules=${HOST_RULES}`,
       ...CHROMIUM_ARGS
     ]
   });
@@ -659,16 +616,13 @@ async function fullPageTextOf(driver, tabId) {
 }
 
 async function dumpSnapshots(ctx, fixtures, only) {
-  const pages = [
-    ...SNAPSHOT_PAGES.map((name) => ({ name, origin: fixtures.origin, dir: SNAPSHOT_DIR })),
-    ...HOST_PAGES.map(({ name, page, host }) => ({ name, page, origin: originFor(fixtures, host), dir: E2E_SNAPSHOT_DIR }))
-  ];
+  const pages = SNAPSHOT_PAGES.map((name) => ({ name, origin: fixtures.origin, dir: SNAPSHOT_DIR }));
   const wanted = only ? pages.filter((p) => only.includes(p.name)) : pages;
   for (const name of only || []) {
     if (!pages.some((p) => p.name === name)) throw new UserError(`Unknown page "${name}" for --dump-snapshots. Known: ${pages.map((p) => p.name).join(', ')}`);
   }
-  for (const { name, page: startPage, origin, dir } of wanted) {
-    const url = `${origin}/${startPage || `${name}.html`}`;
+  for (const { name, origin, dir } of wanted) {
+    const url = `${origin}/${name}.html`;
     const page = await ctx.browser.newPage();
     await page.goto(url, { waitUntil: 'load' });
     const tabId = await tabIdFor(ctx.driver, url);
@@ -677,7 +631,7 @@ async function dumpSnapshots(ctx, fixtures, only) {
     // so they are left out to keep the files small and readable.
     const { elements, ...forModel } = snap;
     // The whole page text, the way read_page reads it (every part through the real content
-    // script, joined back at the line breaks they were cut at), so the self-test pages it exactly.
+    // script, joined back at the line breaks they were cut at).
     const full = await fullPageTextOf(ctx.driver, tabId);
     forModel.fullPageText = full.text;
     // Only a page with links in what it reads carries the blocks, so the other snapshots stay as they were.
@@ -1052,6 +1006,22 @@ async function panelViaCdp(panel) {
       fs.writeFileSync(file, Buffer.from(data, 'base64'));
       return { width, height };
     },
+    /** prefers-color-scheme of the panel document, the way the system setting sets it. */
+    setColorScheme: (scheme) => panel.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] }),
+    /** A close-up: one element as it is drawn now, with a margin around it. */
+    shootElement: async (selector, file, margin = 8) => {
+      const found = await panel.send('Runtime.evaluate', {
+        expression: `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; el.scrollIntoView({ block: 'nearest' }); const r = el.getBoundingClientRect(); return { x: r.left, y: r.top, width: r.width, height: r.height }; })()`,
+        returnByValue: true
+      });
+      const box = found.result?.value;
+      if (!box || !box.width || !box.height) throw new Error(`no visible element matches ${selector} on the panel`);
+      const x = Math.max(0, box.x - margin);
+      const y = Math.max(0, box.y - margin);
+      const clip = { x, y, width: Math.ceil(box.width + margin * 2), height: Math.ceil(box.height + margin * 2), scale: 1 };
+      const { data } = await panel.send('Page.captureScreenshot', { format: 'png', clip });
+      fs.writeFileSync(file, Buffer.from(data, 'base64'));
+    },
     close: () => panel.detach().catch(() => {})
   };
 }
@@ -1063,17 +1033,6 @@ async function pollUntil(read, timeoutMs) {
     const value = await read();
     if (value && value.trim()) return value;
     if (Date.now() > deadline) return value || '';
-    await sleep(250);
-  }
-}
-
-/** Like pollUntil, for a read that returns an object: the first truthy value, or null after the timeout. */
-async function pollValue(read, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await read();
-    if (value) return value;
-    if (Date.now() > deadline) return null;
     await sleep(250);
   }
 }
@@ -1149,162 +1108,17 @@ async function panelSurface(ctx, tabId) {
       await page.screenshot({ path: file, fullPage: true });
       return { width: 400, height: 900 };
     },
+    setColorScheme: (scheme) => page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: scheme }]),
+    shootElement: async (selector, file, margin = 8) => {
+      const el = await page.$(selector);
+      const box = el && await el.boundingBox();
+      if (!box) throw new Error(`no visible element matches ${selector} on the panel`);
+      await page.screenshot({ path: file, clip: { x: Math.max(0, box.x - margin), y: Math.max(0, box.y - margin), width: box.width + margin * 2, height: box.height + margin * 2 } });
+    },
     // The fallback page's console output and CSP hook are collected by watchPanelPage instead.
     errors: () => [],
     close: () => page.close().catch(() => {})
   };
-}
-
-
-/**
- * The viewport a picture task really ran in.
- *
- * The window size is not the viewport size: `defaultViewport: null` means the page uses the real
- * window, and the browser chrome takes some of it. So the flag value is a starting point, not a
- * guarantee, and the picture task asserts on what the page actually reports:
- *   - the width is wider than the 1568 pixel budget, so the capture really has to shrink;
- *   - the device pixel ratio is above 1, so the picture is in a different grid from the CSS pixels.
- * A run that lands at the wrong size is a RUN problem, not a task failure: the control would be
- * vacuous, and a vacuous control that passes is worse than one that fails.
- */
-async function requireShotViewport(ctx, tabId) {
-  // Read from the tab the extension drives, through the extension's own scripting API: the
-  // driver page is not that tab (`chrome.tabs.getCurrent()` is undefined there and puppeteer
-  // gave that page its own size), so asking it would measure a different window.
-  const seen = await ctx.driver.evaluate(async (id) => {
-    try {
-      const [result] = await chrome.scripting.executeScript({
-        target: { tabId: id },
-        func: () => ({
-          width: window.innerWidth,
-          height: window.innerHeight,
-          devicePixelRatio: window.devicePixelRatio
-        })
-      });
-      return result?.result ?? null;
-    } catch (_) {
-      return null;
-    }
-  }, tabId).catch(() => null);
-  const problems = [];
-  if (!seen) return ['the page could not be asked for its viewport'];
-  if (!(seen.width > 1568)) {
-    problems.push(`the window is ${seen.width} CSS pixels wide, so the picture would not shrink and the scale arithmetic is never exercised (run with --window-size wider than 1568 and --force-device-scale-factor=2)`);
-  }
-  if (!(seen.devicePixelRatio > 1)) {
-    problems.push(`the device pixel ratio is ${seen.devicePixelRatio}, so the picture and the CSS pixels are the same grid and the coordinate mapping is never exercised (run with --force-device-scale-factor=2)`);
-  }
-  return problems.map((p) => `screenshot viewport: ${p}`);
-}
-
-/**
- * The thumbnail of a picture in the panel, read off Chrome's real panel.
- *
- * The panel keeps the picture's bytes out of the history and fetches them by id, so this is the
- * end of that path: a row that says the page was looked at, a slot for the picture, and an
- * <img> that really decodes. A broken image still has a src, so the size is read from the
- * decoded element, never from the attribute.
- */
-/**
- * The picture size the panel's thumbnail must decode to: the size this run's screenshot tool
- * reported to the model, read from the tool result in the history. A constant here would be a
- * stale expectation the moment the viewport or the budget changes; the run's own report cannot be.
- */
-function shotExpectation(facts) {
-  const rows = (facts.rows || []).filter((row) => row.type === 'execution_result' && row.imageId);
-  const shot = rows[rows.length - 1];
-  if (!shot) return {};
-  return { width: shot.imageWidth, height: shot.imageHeight };
-}
-
-async function readPanelShot(ctx, tabId, expect, shotName = '', shotDir = '', screenshots = [], spots = []) {
-  const panel = await panelSurface(ctx, tabId);
-  const problems = [];
-  try {
-    await panel.waitForText('.act-text', 8000);
-    // A finished turn folds its action group, so the picture inside it is not on screen in the
-    // wide shot. AGENTS.md asks for an action-group-open shot of every case; opening the group
-    // here is also what makes the thumbnail visible evidence rather than an off-screen element.
-    const opened = await panel.evaluate(() => {
-      const head = document.querySelector('.act-head');
-      if (!head) return false;
-      if (head.getAttribute('aria-expanded') !== 'true') head.click();
-      return head.getAttribute('aria-expanded') === 'true';
-    });
-    if (!opened) problems.push('the side panel action group could not be opened');
-    // Let the group expand and the pictures settle before the shot is taken.
-    await sleep(400);
-    if (shotDir && shotName) {
-      const file = path.join(shotDir, `${shotName}-group-open.png`);
-      await panel.screenshot(file);
-      // It goes into the run's screenshot list, so the report counts it like every other shot.
-      screenshots.push(file);
-    }
-    const shots = await panel.evaluate(() => [...document.querySelectorAll('.act-shot-slot')].map((slot) => {
-      const img = slot.querySelector('img');
-      return {
-        shot: slot.getAttribute('data-shot') || '',
-        hasImg: Boolean(img),
-        src: img ? String(img.getAttribute('src') || '') : '',
-        decodedWidth: img ? img.naturalWidth : 0,
-        decodedHeight: img ? img.naturalHeight : 0,
-        // A slot with no picture says so, in the muted line the panel renders for one.
-        placeholder: slot.textContent.trim()
-      };
-    }));
-    problems.push(...panel.errors().map((e) => `the side panel page threw: ${e}`));
-    await collectCsp(panel, ctx.panel);
-    if (shots.length === 0) {
-      problems.push('the side panel shows no picture slot for the screenshot step');
-    } else {
-      const withImage = shots.find((shot) => shot.hasImg && shot.src.startsWith('data:image/'));
-      if (!withImage) {
-        problems.push(`the side panel shows no decodable thumbnail: ${JSON.stringify(shots)}`);
-      } else {
-        // A broken image would still carry a src, so the decoded size is what is checked.
-        if (withImage.decodedWidth <= 1 || withImage.decodedHeight <= 1) {
-          problems.push(`the panel thumbnail did not decode: ${withImage.decodedWidth}x${withImage.decodedHeight}`);
-        }
-        if (expect.width && withImage.decodedWidth !== expect.width) {
-          problems.push(`the panel thumbnail is ${withImage.decodedWidth} wide, the picture the tool reported is ${expect.width}`);
-        }
-        if (expect.height && withImage.decodedHeight !== expect.height) {
-          problems.push(`the panel thumbnail is ${withImage.decodedHeight} high, the picture the tool reported is ${expect.height}`);
-        }
-        // What the model saw at named spots of the page (task.shotPixels): a privacy cover is dark
-        // (#2b2b2b), page content is light. Read off the picture's own pixels, not the page.
-        if (spots.length) {
-          const seen = await panel.evaluate(async (list) => {
-            const img = [...document.querySelectorAll('.act-shot-slot img')].find((i) => String(i.getAttribute('src') || '').startsWith('data:image/'));
-            if (!img) return null;
-            if (!img.complete) await new Promise((r) => { img.onload = r; img.onerror = r; });
-            const canvas = document.createElement('canvas');
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            const g = canvas.getContext('2d');
-            g.drawImage(img, 0, 0);
-            return list.map((spot) => {
-              const x = Math.round(spot.fx * canvas.width);
-              const y = Math.round(spot.fy * canvas.height);
-              const data = g.getImageData(Math.max(0, x - 2), Math.max(0, y - 2), 5, 5).data;
-              let sum = 0;
-              for (let i = 0; i < data.length; i += 4) sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-              return { ...spot, lum: Math.round(sum / (data.length / 4)) };
-            });
-          }, spots);
-          if (!seen) problems.push('the panel thumbnail could not be read for its pixels');
-          for (const spot of seen || []) {
-            if (spot.expect === 'covered' && !(spot.lum < 90)) problems.push(`the picture shows ${spot.name} uncovered (brightness ${spot.lum}, a cover is below 90)`);
-            if (spot.expect === 'visible' && !(spot.lum > 170)) problems.push(`the picture does not show ${spot.name} (brightness ${spot.lum}, page content is above 170: a cover over it?)`);
-          }
-        }
-      }
-    }
-  } finally {
-    ctx.panel.pageErrors.push(...panel.errors());
-    await panel.close();
-  }
-  return problems;
 }
 
 /** The panel opened as an ordinary tab: the fallback when Chrome gives no panel document. */
@@ -1330,32 +1144,16 @@ async function openPanelAsPage(ctx, tabId, scheme = 'light') {
 }
 
 /**
- * The composer's model picker, driven on Chrome's real panel: the model name is a button, the
- * menu lists every model of the chosen provider, and picking one configures it. A task with
- * `modelPick` runs this probe before its own task, as a user would: open, read the list, filter,
- * pick, and see the badge follow. The open menu is also screenshotted as evidence.
- */
-/**
  * The effort that went out on the wire (llm/effort.ts), call by call. The effort is the model's
  * reasoning level, so every request of a run at EFFORT must carry that level in the dialect of the
- * provider: `think` for Ollama (the mock), enable_thinking and a reasoning budget for Nemotron on
- * NIM. The first call gets the chosen level; with "one level less on routine steps" (the default)
+ * provider: enable_thinking and a reasoning budget for Nemotron on NIM (the one dialect checked here). The first call gets the chosen level; with "one level less on routine steps" (the default)
  * later calls may carry the level below it. A request with no field at all is the bug this checks:
  * the composer's effort reaching nothing.
  */
-function effortWireProblems(calls, { mock, provider, model, effort }) {
+function effortWireProblems(calls, { provider, model, effort }) {
   if (effort === 'auto' || calls.length === 0) return [];
   const problems = [];
   const lower = { max: 'high', high: 'medium', medium: 'low', low: 'low', off: 'off' };
-  if (mock || provider === 'ollama') {
-    // The mock's models think with a boolean `think` (its /api/show says thinking [true,false]).
-    if (!mock) return [];
-    const want = effort !== 'off';
-    calls.forEach((call, i) => {
-      if (call.effort?.think !== want) problems.push(`model call ${i + 1} went out with think=${JSON.stringify(call.effort?.think)}, expected ${want} for effort ${effort}`);
-    });
-    return problems;
-  }
   if (provider === 'nvidia' && /nemotron/i.test(model)) {
     const budget = { low: 1024, medium: 4096, high: 12000, max: 24000 };
     calls.forEach((call, i) => {
@@ -1372,162 +1170,6 @@ function effortWireProblems(calls, { mock, provider, model, effort }) {
     return problems;
   }
   return [];
-}
-
-/**
- * The composer's effort menu, read like a user reads it: the button names the level the run uses,
- * the menu lists the levels the model supports, the note under them says why. The open menu is
- * screenshotted.
- */
-async function checkEffortMenu(ctx, tabId, want, shotName, shotDir, screenshots) {
-  const problems = [];
-  const panel = await panelSurface(ctx, tabId);
-  try {
-    await sleep(panel.real ? 1500 : 2000);
-    const seen = await panel.evaluate(async () => {
-      const btn = document.getElementById('btnEffort');
-      const menu = document.getElementById('effortMenu');
-      if (!btn || !menu) return { missing: true };
-      // The support answer comes from the background after the model is known.
-      for (let i = 0; i < 30 && !(document.getElementById('effortMenuNote')?.textContent || '').trim(); i++) await new Promise((r) => setTimeout(r, 100));
-      btn.click();
-      for (let i = 0; i < 20 && menu.hidden; i++) await new Promise((r) => setTimeout(r, 100));
-      return {
-        open: !menu.hidden,
-        button: btn.textContent.trim(),
-        disabled: btn.disabled,
-        levels: [...menu.querySelectorAll('.menu-item')].filter((el) => !el.hidden).map((el) => el.getAttribute('data-effort')),
-        checked: [...menu.querySelectorAll('.menu-item')].filter((el) => el.getAttribute('aria-checked') === 'true').map((el) => el.getAttribute('data-effort')),
-        note: (document.getElementById('effortMenuNote')?.textContent || '').trim()
-      };
-    });
-    problems.push(...panel.errors().map((e) => `the side panel page threw: ${e}`));
-    if (seen.missing) return [...problems, 'the composer effort button or its menu is missing'];
-    if (!seen.open) problems.push('clicking the effort button did not open the effort menu');
-    if (seen.button !== want.label) problems.push(`the effort button says ${JSON.stringify(seen.button)}, expected ${JSON.stringify(want.label)}`);
-    if (JSON.stringify(seen.levels) !== JSON.stringify(want.levels)) problems.push(`the effort menu offers ${seen.levels.join(', ')}, expected ${want.levels.join(', ')}`);
-    if (JSON.stringify(seen.checked) !== JSON.stringify([want.level])) problems.push(`the effort menu marks ${seen.checked.join(', ') || 'nothing'} as chosen, expected ${want.level}`);
-    if (!seen.note) problems.push('the effort menu has no note saying what the model supports');
-    if (seen.open) {
-      fs.mkdirSync(shotDir, { recursive: true });
-      const shot = path.join(shotDir, `${shotName}-effort-menu.png`);
-      try {
-        await panel.screenshot(shot);
-        screenshots.push(shot);
-      } catch (err) {
-        problems.push(`the effort menu screenshot could not be taken: ${oneLine(err.message, 200)}`);
-      }
-      await panel.evaluate(() => document.getElementById('btnEffort')?.click());
-    }
-  } finally {
-    await panel.close();
-  }
-  return problems;
-}
-
-async function checkComposerModelPick(ctx, tabId, wantModel, shotName, shotDir, screenshots) {
-  const problems = [];
-  const panel = await panelSurface(ctx, tabId);
-  ctx.panelSurfaces = ctx.panelSurfaces || new Map();
-  ctx.panelSurfaces.set(`${shotName}-model-menu`, panel.real ? 'real Chrome side panel' : `panel page (fallback: ${panel.reason})`);
-  try {
-    await sleep(panel.real ? 1500 : 2000); // let the panel boot and its model list load
-    const picked = await panel.evaluate(async (wanted) => {
-      const out = { open: false, scrollable: false, items: [], filteredEmpty: false, closed: null, expanded: null, badge: '', composer: '', errors: [] };
-      const btn = document.getElementById('composerModel');
-      const menu = document.getElementById('modelMenu');
-      const list = document.getElementById('modelMenuList');
-      if (!btn || !menu || !list) {
-        out.errors.push('the composer model button or its menu is missing from the panel');
-        return out;
-      }
-      btn.click();
-      for (let i = 0; i < 30 && menu.hidden; i++) await new Promise((r) => setTimeout(r, 100));
-      // The list may still be fetched when the menu opens; wait for it to fill.
-      for (let i = 0; i < 30 && list.querySelectorAll('.menu-item').length === 0 && !list.querySelector('.menu-empty'); i++) {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      out.open = !menu.hidden;
-      out.scrollable = getComputedStyle(list).overflowY === 'auto';
-      out.items = [...list.querySelectorAll('.menu-item')].map((el) => ({
-        id: el.getAttribute('data-model'),
-        checked: el.getAttribute('aria-checked') === 'true'
-      }));
-
-      const search = document.getElementById('modelMenuSearch');
-      if (search) {
-        search.value = 'zz-no-such-model-at-any-provider';
-        search.dispatchEvent(new Event('input', { bubbles: true }));
-        out.filteredEmpty = !!list.querySelector('.menu-empty');
-        search.value = '';
-        search.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      return out;
-    }, wantModel);
-    problems.push(...panel.errors().map((e) => `the side panel page threw: ${e}`));
-
-    if (!picked.open) problems.push('clicking the model name did not open the model menu');
-    if (picked.open && !picked.scrollable) problems.push('the model menu list is not scrollable (overflow-y is not auto)');
-    if (picked.open && !picked.filteredEmpty) problems.push("filtering the model menu with a search that matches nothing did not show the 'no models' note");
-    if (picked.errors.length) problems.push(...picked.errors);
-    const wanted = picked.items.find((i) => i.id === wantModel);
-    if (!wanted) {
-      problems.push(`the model menu does not list the run's model ${JSON.stringify(wantModel)}; it shows: ${picked.items.map((i) => i.id).join(', ') || 'nothing'}`);
-    } else if (!wanted.checked) {
-      problems.push(`the model menu lists ${JSON.stringify(wantModel)} but no item is marked as the active model`);
-    } else if (picked.open) {
-      // The open menu first, then the pick that closes it again. The pick re-opens the menu if
-      // anything re-rendered it closed in between, and reports that instead of guessing.
-      fs.mkdirSync(shotDir, { recursive: true });
-      const menuShot = path.join(shotDir, `${shotName}-model-menu.png`);
-      try {
-        await panel.screenshot(menuShot);
-        screenshots.push(menuShot);
-      } catch (err) {
-        ctx.pageShotProblems = ctx.pageShotProblems || [];
-        ctx.pageShotProblems.push(`${shotName}: the model menu screenshot could not be taken: ${oneLine(err.message, 200)}`);
-      }
-      const decision = await panel.evaluate(async (id) => {
-        const out = { reopened: false, missing: false, notFound: false, itemsBefore: 0, closed: null, expanded: null, badge: '', composer: '' };
-        const menu = document.getElementById('modelMenu');
-        const btn = document.getElementById('composerModel');
-        if (!menu || !btn) {
-          out.missing = true;
-          return out;
-        }
-        if (menu.hidden) {
-          out.reopened = true;
-          btn.click();
-          for (let i = 0; i < 30 && menu.hidden; i++) await new Promise((r) => setTimeout(r, 100));
-          for (let i = 0; i < 30 && !document.querySelectorAll('#modelMenuList .menu-item').length; i++) await new Promise((r) => setTimeout(r, 100));
-        }
-        const item = [...document.querySelectorAll('#modelMenuList .menu-item')].find((el) => el.getAttribute('data-model') === id);
-        out.itemsBefore = document.querySelectorAll('#modelMenuList .menu-item').length;
-        out.ids = [...document.querySelectorAll('#modelMenuList .menu-item')].map((el) => el.getAttribute('data-model'));
-        if (!item) {
-          out.notFound = true;
-          return out;
-        }
-        item.click();
-        await new Promise((r) => setTimeout(r, 250));
-        out.closed = menu.hidden;
-        out.expanded = btn.getAttribute('aria-expanded');
-        out.badge = (document.getElementById('currentModelBadge')?.textContent || '').trim();
-        out.composer = (document.getElementById('composerModel')?.textContent || '').trim();
-        return out;
-      }, wantModel);
-      if (decision.missing) problems.push('after the screenshot the composer model button or menu was gone from the panel');
-      if (decision.reopened) problems.push('the model menu had closed again between read and pick (something re-rendered the panel)');
-      if (decision.notFound) problems.push(`the model menu no longer lists ${JSON.stringify(wantModel)} at pick time (items: ${decision.ids ? decision.ids.join(', ') : 'none'})`);
-      if (decision.closed !== true) problems.push('picking a model in the composer menu did not close the menu');
-      if (decision.badge !== wantModel) problems.push(`after the pick the header badge shows ${JSON.stringify(decision.badge)}, expected ${JSON.stringify(wantModel)}`);
-      if (decision.composer !== wantModel) problems.push(`after the pick the composer shows ${JSON.stringify(decision.composer)}, expected ${JSON.stringify(wantModel)}`);
-    }
-  } finally {
-    ctx.panel.pageErrors.push(...panel.errors());
-    await panel.close();
-  }
-  return problems;
 }
 
 /**
@@ -1651,76 +1293,6 @@ async function stopAndWakeWorker(ctx, tabId) {
   while (ctx.workerStarts.count <= startsBefore && Date.now() < deadline) await sleep(100);
   if (ctx.workerStarts.count <= startsBefore) return ['the service worker did not restart, so the restart check proved nothing'];
   return [];
-}
-
-/**
- * The panel after New chat: the start screen, no card and no step rows. A run that kept going
- * after the clear would write its rows back into the cleared thread.
- */
-async function readPanelCleared(ctx, tabId) {
-  const panel = await panelSurface(ctx, tabId);
-  const problems = [];
-  try {
-    await sleep(500);
-    const seen = await panel.evaluate(() => {
-      const empty = document.getElementById('emptyState');
-      return {
-        startScreen: !!empty && getComputedStyle(empty).display !== 'none',
-        cards: document.querySelectorAll('.finish-card').length,
-        rows: document.querySelectorAll('.act-row').length
-      };
-    });
-    problems.push(...panel.errors().map((e) => `the side panel page threw: ${e}`));
-    if (!seen.startScreen) problems.push('after New chat the side panel does not show the start screen');
-    if (seen.cards) problems.push(`after New chat the side panel still shows ${seen.cards} final card(s)`);
-    if (seen.rows) problems.push(`after New chat the side panel still shows ${seen.rows} step row(s)`);
-  } finally {
-    ctx.panel.pageErrors.push(...panel.errors());
-    await panel.close();
-  }
-  return problems;
-}
-
-/**
- * The final card in light and dark, as a tall panel and as a close-up of the card itself, for a
- * task whose ending is the thing it checks (cardShots). Problems when there is no card to show.
- */
-async function cardScreenshots(ctx, tabId, name, dir, screenshots) {
-  const problems = [];
-  for (const scheme of ['light', 'dark']) {
-    const panel = await openPanelAsPage(ctx, tabId, scheme);
-    try {
-      const card = await panel.waitForSelector('.finish-card', { timeout: 8000 }).catch(() => null);
-      if (!card) {
-        problems.push(`the ${scheme} panel shows no final card to take a picture of`);
-        continue;
-      }
-      await sleep(400); // the theme transition, so the shot shows the settled colours
-      const tall = path.join(dir, `${name}-card-${scheme}.png`);
-      const close = path.join(dir, `${name}-card-${scheme}-closeup.png`);
-      fs.mkdirSync(dir, { recursive: true });
-      await panel.screenshot({ path: tall });
-      await card.screenshot({ path: close });
-      screenshots.push(tall, close);
-      // The steps that led to the card, with the action group open (AGENTS.md asks for that shot).
-      const opened = await panel.evaluate(() => {
-        const head = document.querySelector('.act-head');
-        if (!head) return null;
-        if (head.getAttribute('aria-expanded') !== 'true') head.click();
-        return head.getAttribute('aria-expanded') === 'true';
-      });
-      if (opened === false) problems.push(`the ${scheme} panel's action group could not be opened`);
-      if (opened) {
-        await sleep(400);
-        const group = path.join(dir, `${name}-group-open-${scheme}.png`);
-        await panel.screenshot({ path: group });
-        screenshots.push(group);
-      }
-    } finally {
-      await panel.close();
-    }
-  }
-  return problems;
 }
 
 async function readPanelCard(ctx, tabId, expect) {
@@ -1873,13 +1445,12 @@ async function addCustomProvider(ctx, llm) {
  *
  * What makes a graph run the same every time: the engine kind, the model and its server, the hard step cap
  * (maxSteps, the base of the step budget) and the effort level (effortDefault; START_TASK asks for the same level
- * too, because the engine reads the words of a task when the level is "auto"). The engine reads no tier setting yet
- * (plan stage 2d), so the mock's /api/show answer will decide it later.
+ * too, because the engine reads the words of a task when the level is "auto").
  */
 async function saveSettings(ctx, llm, model) {
   // A real OpenAI-compatible server (lib/providers.mjs): the extension talks to the local key proxy
   // and holds only a placeholder key; the proxy adds the real one. A custom provider keeps the
-  // descriptor its dialog created (addCustomProvider). The mock and Ollama speak Ollama's API.
+  // descriptor its dialog created (addCustomProvider). Ollama speaks its own API.
   const connection = REAL
     ? providerSettings(REAL, llm.url, model, ctx.customProviders || {})
     : { provider: 'ollama', baseUrl: llm.url, apiKey: '', providerConfigs: { ollama: { baseUrl: llm.url, apiKey: '', model } } };
@@ -1887,8 +1458,6 @@ async function saveSettings(ctx, llm, model) {
     await chrome.storage.local.set({ agent_settings: settings });
   }, { ...connection, model, maxSteps: MAX_STEPS, effortDefault: EFFORT });
   ctx.model = model;
-  // The plain settings: a task that changed more (Settings > Research) set its own key.
-  ctx.settingsKey = '{}';
 }
 
 /**
@@ -1910,233 +1479,6 @@ async function unreachableTasks(names) {
   }
   return out;
 }
-
-/**
- * Settings > Research, set the way a user sets it: the side panel's Settings tab, the backend
- * select, the SearXNG URL field. The stored settings must then hold what was chosen, and the
- * section is shot in light and dark (the second opening also proves the panel loads it back).
- */
-async function configureResearch(ctx, fixtures, tabId, research, shotName, shotDir, screenshots) {
-  const problems = [];
-  const want = { enabled: true, backend: research.backend, searxngUrl: research.backend === 'searxng' ? `${originFor(fixtures, RESEARCH_HOST)}${research.path || ''}` : '' };
-  for (const scheme of ['light', 'dark']) {
-    const panel = await openPanelAsPage(ctx, tabId, scheme);
-    try {
-      await panel.click('.nav-btn[data-tab="settings"]');
-      await panel.waitForSelector('#researchSection', { visible: true, timeout: 8000 });
-      if (scheme === 'light') {
-        await panel.select('#researchEnabledSelect', want.enabled ? 'on' : 'off');
-        await panel.select('#researchBackendSelect', want.backend);
-        if (want.backend === 'searxng') {
-          await panel.waitForSelector('#searxngUrlInput', { visible: true, timeout: 3000 });
-          await panel.click('#searxngUrlInput', { clickCount: 3 });
-          await panel.type('#searxngUrlInput', want.searxngUrl);
-          // A user leaves the field (Tab): that is the change that saves it.
-          await panel.keyboard.press('Tab');
-        }
-        await panel.waitForFunction((w) => chrome.storage.local.get('agent_settings').then(({ agent_settings: s }) => {
-          const r = (s && s.research) || {};
-          return r.enabled === w.enabled && r.backend === w.backend && r.searxngUrl === w.searxngUrl;
-        }), { timeout: 5000 }, want).catch(() => {});
-        const stored = await panel.evaluate(() => chrome.storage.local.get('agent_settings').then(({ agent_settings: s }) => (s && s.research) || null));
-        const same = !!stored && stored.enabled === want.enabled && stored.backend === want.backend && stored.searxngUrl === want.searxngUrl;
-        if (!same) problems.push(`Settings > Research stored ${JSON.stringify(stored)}, expected ${JSON.stringify(want)}`);
-      } else {
-        const shown = await panel.evaluate(() => ({
-          enabled: document.getElementById('researchEnabledSelect').value,
-          backend: document.getElementById('researchBackendSelect').value,
-          url: document.getElementById('searxngUrlInput').value
-        }));
-        if (shown.backend !== want.backend || shown.url !== want.searxngUrl) problems.push(`the reopened Settings tab shows ${JSON.stringify(shown)}, not the stored research settings`);
-      }
-      await panel.evaluate(() => document.getElementById('researchSection').scrollIntoView({ block: 'center' }));
-      await sleep(400); // the theme transition, so the shot shows the settled colours
-      const section = await panel.$('#researchSection');
-      const file = path.join(shotDir, `${shotName}-settings-research-${scheme}.png`);
-      fs.mkdirSync(shotDir, { recursive: true });
-      await section.screenshot({ path: file });
-      screenshots.push(file);
-    } finally {
-      await panel.close();
-    }
-  }
-  ctx.settingsKey = JSON.stringify({ research: want });
-  return problems;
-}
-
-/** The timeline rows of the panel must show one row per pattern (task.expectPanelRows). */
-async function readPanelRows(ctx, tabId, patterns) {
-  const panel = await panelSurface(ctx, tabId);
-  const problems = [];
-  try {
-    await panel.waitForText('.act-row .act-text', 8000);
-    const rows = await panel.evaluate(() => [...document.querySelectorAll('.act-row .act-text')].map((el) => el.textContent.replace(/\s+/g, ' ').trim()));
-    for (const pattern of patterns) {
-      if (!rows.some((row) => pattern.test(row))) problems.push(`no timeline row of the side panel matches ${pattern}: the rows are ${JSON.stringify(rows)}`);
-    }
-  } finally {
-    ctx.panel.pageErrors.push(...panel.errors());
-    await panel.close();
-  }
-  return problems;
-}
-
-/**
- * The file a finish card offers, downloaded the way a user gets it: a real click on its chip in
- * Chrome's side panel, and the browser's own download into a folder of the temp profile
- * (Browser.setDownloadBehavior). The saved file must carry the name the run gave it, and its
- * content must pass the task's own check (task.expectDownload.problems).
- */
-/**
- * The answer as the user reads it: not a box (no border, no background on the card), a code box
- * with a Copy button for the fenced block, JSON coloured when the task says so, and http(s) links
- * that open in a new tab. Copy is clicked like a user does; the button must say "Copied".
- * Screenshots of the answer in light and dark go with the report.
- */
-async function readPanelAnswerBox(ctx, tabId, expect, name, dir, screenshots) {
-  const panel = await panelSurface(ctx, tabId);
-  const problems = [];
-  try {
-    await panel.waitForText('.finish-card .finish-body', 8000);
-    const seen = await panel.evaluate(() => {
-      const cards = document.querySelectorAll('.finish-card');
-      const card = cards[cards.length - 1];
-      if (!card) return null;
-      const style = getComputedStyle(card);
-      const box = card.querySelector('.finish-body .code-box');
-      return {
-        border: ['Top', 'Right', 'Bottom', 'Left'].map((side) => parseFloat(style[`border${side}Width`]) || 0),
-        background: style.backgroundColor,
-        box: !!box,
-        lang: box?.querySelector('.code-lang')?.textContent.trim() || '',
-        copy: !!box?.querySelector('.code-copy'),
-        keys: box ? box.querySelectorAll('.tok-key').length : 0,
-        links: [...card.querySelectorAll('.finish-body a.md-link')].map((a) => ({ href: a.getAttribute('href'), target: a.getAttribute('target'), rel: a.getAttribute('rel') }))
-      };
-    });
-    if (!seen) return ['the side panel shows no final card'];
-    if (seen.border.some((w) => w > 0)) problems.push(`the answer still has a border (${seen.border.join(' ')} px): it should read as a reply, not a box`);
-    if (!/rgba\(0, 0, 0, 0\)|transparent/.test(seen.background)) problems.push(`the answer still has a background (${seen.background}): it should read as a reply, not a box`);
-    if (!seen.box) problems.push('the fenced block of the answer is not shown as a code box');
-    else {
-      if (!seen.copy) problems.push('the code box has no Copy button');
-      if (expect.lang && seen.lang !== expect.lang) problems.push(`the code box is labelled ${JSON.stringify(seen.lang)}, expected ${JSON.stringify(expect.lang)}`);
-      if (expect.json && !seen.keys) problems.push('the JSON in the code box is not coloured (no key spans)');
-    }
-    if (expect.link) {
-      const link = seen.links.find((l) => /^https:\/\//.test(l.href || ''));
-      if (!link) problems.push(`the answer shows no clickable https link (links: ${JSON.stringify(seen.links)})`);
-      else if (link.target !== '_blank' || !/noopener/.test(link.rel || '')) problems.push(`the answer link opens without target=_blank and rel=noopener: ${JSON.stringify(link)}`);
-    }
-    if (seen.box && seen.copy) {
-      // The copy button of the LAST card, marked so a real (trusted) click can find it.
-      await panel.evaluate(() => {
-        const buttons = document.querySelectorAll('.finish-card .code-copy');
-        buttons[buttons.length - 1]?.setAttribute('data-harness', 'copy');
-      });
-      await panel.click('.code-copy[data-harness="copy"]');
-      const label = await pollUntil(() => panel.evaluate(() => {
-        const buttons = document.querySelectorAll('.finish-card .code-copy');
-        const text = buttons[buttons.length - 1]?.textContent.trim() || '';
-        return text === 'Copy' ? '' : text;
-      }), 3000).catch(() => '');
-      if (label !== 'Copied') problems.push(`clicking Copy on the code box showed ${JSON.stringify(label || 'nothing')}, expected "Copied"`);
-    }
-    for (const scheme of ['light', 'dark']) {
-      await panel.evaluate((s) => document.documentElement.setAttribute('data-theme', s), scheme);
-      await panel.evaluate(() => {
-        const cards = document.querySelectorAll('.finish-card');
-        cards[cards.length - 1]?.scrollIntoView({ block: 'start' });
-      });
-      await sleep(200);
-      const file = path.join(dir, `${name}-answer-${scheme}.png`);
-      fs.mkdirSync(dir, { recursive: true });
-      await panel.screenshot(file);
-      screenshots.push(file);
-    }
-  } catch (err) {
-    problems.push(`the answer check failed: ${oneLine(err.message, 200)}`);
-  } finally {
-    ctx.panel.pageErrors.push(...panel.errors());
-    await panel.close();
-  }
-  return problems;
-}
-
-async function readPanelDownload(ctx, tabId, expect, shotName = 'file', dir = null, screenshots = []) {
-  const downloads = fs.mkdtempSync(path.join(os.tmpdir(), 'scoutfox-download-'));
-  const browserCdp = await ctx.browser.target().createCDPSession();
-  const begun = new Map();
-  let done = null;
-  const finished = new Promise((resolve) => { done = resolve; });
-  browserCdp.on('Browser.downloadWillBegin', (e) => begun.set(e.guid, e.suggestedFilename));
-  browserCdp.on('Browser.downloadProgress', (e) => { if (e.state === 'completed' || e.state === 'canceled') done(e); });
-  const panel = await panelSurface(ctx, tabId);
-  const problems = [];
-  try {
-    await browserCdp.send('Browser.setDownloadBehavior', { behavior: 'allowAndName', downloadPath: downloads, eventsEnabled: true });
-    // The clipboard, granted to the extension's pages, so Copy can be read back like a paste.
-    const origin = await panel.evaluate(() => location.origin);
-    await browserCdp.send('Browser.grantPermissions', { origin, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] }).catch((err) => console.log(`note: clipboard permission not granted: ${oneLine(err.message, 120)}`));
-    await panel.waitForText('.file-chip', 8000);
-    const chips = await panel.evaluate(() => [...document.querySelectorAll('.file-chip .file-name')].map((el) => el.textContent.trim()));
-    const index = chips.indexOf(expect.name);
-    if (index < 0) return [`the finish card offers no file "${expect.name}" (it offers ${JSON.stringify(chips)})`];
-    // The chip opens the file's preview; the download is the preview's Download button.
-    await panel.click(`.finish-files .file-chip:nth-child(${index + 1})`);
-    const preview = await pollValue(() => panel.evaluate(() => {
-      const d = document.querySelector('dialog.file-preview');
-      return d && d.open ? { name: d.querySelector('.file-name')?.textContent.trim() || '', text: d.querySelector('.file-preview-body code')?.textContent || '' } : null;
-    }), 5000);
-    if (!preview) return [`clicking "${expect.name}" on the finish card opened no preview`];
-    if (preview.name !== expect.name) problems.push(`the preview is titled ${JSON.stringify(preview.name)}, expected "${expect.name}"`);
-    if (expect.previewHas) for (const needle of expect.previewHas) if (!preview.text.includes(needle)) problems.push(`the preview of "${expect.name}" does not show ${JSON.stringify(needle)}`);
-    if (dir) {
-      for (const scheme of ['light', 'dark']) {
-        await panel.evaluate((s) => document.documentElement.setAttribute('data-theme', s), scheme);
-        await sleep(200);
-        const file = path.join(dir, `${shotName}-preview-${scheme}.png`);
-        fs.mkdirSync(dir, { recursive: true });
-        await panel.screenshot(file);
-        screenshots.push(file);
-      }
-    }
-    // Copy puts the file as it is stored on the clipboard; the button must say so.
-    await panel.click('dialog.file-preview .file-copy');
-    const copied = await pollUntil(() => panel.evaluate(() => {
-      const text = document.querySelector('dialog.file-preview .file-copy')?.textContent.trim() || '';
-      return text === 'Copy' ? '' : text;
-    }), 3000).catch(() => '');
-    if (copied !== 'Copied') problems.push(`clicking Copy in the preview of "${expect.name}" showed ${JSON.stringify(copied || 'nothing')}, expected "Copied"`);
-    const clip = await panel.evaluate(() => navigator.clipboard.readText().then((t) => ({ text: t }), (err) => ({ error: String(err && err.message || err) })));
-    if (clip.error) console.log(`note: the clipboard could not be read back in this browser (${oneLine(clip.error, 120)}); the Copied label was checked`);
-    else problems.push(...expect.problems(clip.text).map((p) => `copied ${expect.name}: ${p}`));
-    await panel.click('dialog.file-preview .file-download');
-    const event = await Promise.race([finished, sleep(10000).then(() => null)]);
-    if (!event) return [`clicking "${expect.name}" on the finish card started no download within 10 s`];
-    if (event.state !== 'completed') return [`the download of "${expect.name}" ended ${event.state}`];
-    const name = begun.get(event.guid);
-    if (name !== expect.name) problems.push(`the downloaded file is named ${JSON.stringify(name)}, expected "${expect.name}"`);
-    const content = fs.readFileSync(path.join(downloads, event.guid), 'utf8');
-    problems.push(...expect.problems(content).map((p) => `downloaded ${expect.name}: ${p}`));
-    // Close returns to the chat.
-    await panel.click('dialog.file-preview .file-close');
-    const open = await panel.evaluate(() => !!document.querySelector('dialog.file-preview')?.open);
-    if (open) problems.push(`the preview of "${expect.name}" did not close`);
-  } catch (err) {
-    problems.push(`the download of "${expect.name}" failed: ${oneLine(err.message, 200)}`);
-  } finally {
-    ctx.panel.pageErrors.push(...panel.errors());
-    await panel.close();
-    await browserCdp.send('Browser.setDownloadBehavior', { behavior: 'default' }).catch(() => {});
-    await browserCdp.detach().catch(() => {});
-    fs.rmSync(downloads, { recursive: true, force: true });
-  }
-  return problems;
-}
-
-/** The model a task runs with: the mock's behaviour can depend on the model name (see mockOllama.mjs), a real run never does. */
-const modelOf = (name) => (MOCK && TASKS[name].mockModel) || MODEL;
 
 // ---------------------------------------------------------------------------------------------
 // The holds of the engine, answered like a user at the side panel
@@ -2168,15 +1510,15 @@ function fire(ctx, message) {
   }, message);
 }
 
-/** A host the task runs on: the fixture server's, and the host name the task serves its page under. */
-function fixtureHostsOf(fixtures, task) {
-  return [new URL(fixtures.origin).hostname, task.host].filter(Boolean).map((h) => h.toLowerCase());
+/** The hosts of the fixture site: a confirmation to navigate to one of them is approved. */
+function fixtureHostsOf(fixtures) {
+  return [new URL(fixtures.origin).hostname.toLowerCase()];
 }
 
 /**
  * Answers every hold the state shows that has not been answered yet, the way a user would, and writes what it did into
  * run.decisions (the report prints them):
- *   - the plan card: not expected (START_TASK never sets autoApprove, so the engine approves the plan itself); kept as a fallback for an explicit autoApprove:false run;
+ *   - the plan card: not expected (START_TASK always asks for autoApprove), so a plan hold is a problem; it is still approved so the run can end;
  *   - a confirmation: approve when it is a navigation to a host of the task's fixture site, deny everything else;
  *   - a question: answer it only when the task defines an answer for it, else stop the run and fail it (the harness never
  *     makes an answer up);
@@ -2200,11 +1542,9 @@ async function answerHolds(ctx, run, task, tabId, state, hosts) {
     const approval = state.pendingApproval;
     const steps = (approval.plan || []).map((s) => String(s));
     const summary = steps.length ? `${steps.length} step(s): ${steps.map((s) => oneLine(s, 60)).join(' | ')}` : 'no steps';
-    if (!task.manualApprove) {
-      // Auto mode must never stop here; a hold that appears anyway is a real failure, not a
-      // reason to quietly approve it.
-      run.problems.push('the run stopped at a plan even though auto-approve was on');
-    }
+    // Auto mode must never stop here; a hold that appears anyway is a real failure, not a
+    // reason to quietly approve it.
+    run.problems.push('the run stopped at a plan even though auto-approve was on');
     await decide('plan', 'approve', summary, { action: 'APPROVE_PLAN', payload: { decision: 'approve' } });
   }
 
@@ -2243,23 +1583,15 @@ async function answerHolds(ctx, run, task, tabId, state, hosts) {
 // Running one task
 // ---------------------------------------------------------------------------------------------
 
-/** The first MOCK-FAIL text anywhere in what the model said or the engine showed, or null (see mockOllama.mjs). */
-function findMockFail(facts, calls) {
-  const texts = [...facts.steps.map((s) => s.raw), facts.answer, ...calls.map((c) => c.content), ...facts.errors];
-  const hit = texts.find((t) => typeof t === 'string' && t.includes(MOCK_FAIL_PREFIX));
-  return hit ? oneLine(hit.slice(hit.indexOf(MOCK_FAIL_PREFIX)), 240) : null;
-}
-
 /** How many user_goal entries a history has: one per task started in the tab. */
 const goalsIn = (state) => ((state && state.history) || []).filter((h) => h.type === 'user_goal').length;
 
 /**
  * Starts one task in the tab the way the side panel does (START_TASK), answers its holds like a user, and waits until
- * the run has ended. Returns what the run left behind. A task that has a `before` task runs in a tab that already ran
- * a task (same tab id, so the same session and thread), which is why the start of the run is a NEW user_goal entry and
- * not just any user_goal in the history.
+ * the run has ended. Returns what the run left behind. The start of the run is a NEW user_goal entry, not just any
+ * user_goal in the history, so a tab that already ran a task is read right too.
  *
- * @param {object} task  the task (or its `before` task): its answers to questions are used for the holds
+ * @param {object} task  the task: its answers to questions are used for the holds
  * @param {{name: string, dir: string, list: object[]} | null} shot  where the mid-run panel screenshot goes, or null
  */
 async function driveTask(ctx, llm, task, tabId, hosts, shot) {
@@ -2291,18 +1623,18 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot) {
   const firstCall = llm.calls.length;
   const tallyBefore = await readTally(ctx);
   const startedAt = Date.now();
-  // The panel's own choice: autonomous unless the task asks for the manual-approve card.
-  const started = await ctx.driver.evaluate((id, prompt, effort, autoApprove) => chrome.runtime.sendMessage({
-    action: 'START_TASK', tabId: id, payload: { prompt, effort, autoApprove }
-  }), tabId, task.prompt, EFFORT, !task.manualApprove);
+  // The panel's own choice: autonomous, no manual plan approval.
+  const started = await ctx.driver.evaluate((id, prompt, effort) => chrome.runtime.sendMessage({
+    action: 'START_TASK', tabId: id, payload: { prompt, effort, autoApprove: true }
+  }), tabId, task.prompt, EFFORT);
   if (!started || !started.success) throw new Error(`START_TASK was rejected: ${JSON.stringify(started)}`);
 
   // START_TASK answers before the engine flips to "running", so the end of the run is the first
   // status that is neither "running" nor "paused" AFTER the run started ("paused" is a hold: a confirmation,
-  // a question, a challenge, a budget question). A fast run (the mock answers in milliseconds) can begin and end between
+  // a question, a challenge, a budget question). A fast run can begin and end between
   // two polls, so "started" is also read from the history: the turn's user_goal entry is written right after
   // the status becomes "running", and this run's is the one after the goalsBefore entries the tab already had.
-  const run = { startedAt, decisions: [], problems: [], armed: { plan: true, confirm: true, question: true, challenge: true, budget: true }, stopped: null, loop: null };
+  const run = { startedAt, decisions: [], problems: [], armed: { plan: true, confirm: true, question: true, challenge: true, budget: true }, stopped: null };
   let state = null;
   let seenRunning = false;
   let liveShotTaken = false;
@@ -2321,26 +1653,6 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot) {
     }
     if (running) {
       seenRunning = true;
-      // The user's Stop, on purpose: the task wants to see how a stopped run ends.
-      if (task.stopAfterSteps && !run.userStop && (state.stepCount || 0) >= task.stopAfterSteps) {
-        run.userStop = true;
-        await stop();
-      }
-      // Chrome stops the worker in the middle of the run. The next poll wakes a new one, which
-      // must end the run it could not go on with, with a card that says why.
-      if (task.restartWorkerAfterSteps && !run.workerRestarted && (state.stepCount || 0) >= task.restartWorkerAfterSteps) {
-        run.workerRestarted = true;
-        run.problems.push(...(await stopAndWakeWorker(ctx, tabId)).map((p) => `mid-run worker restart: ${p}`));
-      }
-      // The user presses New chat while the run is going: the run must stop with it.
-      if (task.clearAfterSteps && !run.cleared && (state.stepCount || 0) >= task.clearAfterSteps) {
-        run.cleared = true;
-        const cleared = await ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'CLEAR_HISTORY', tabId: id }), tabId);
-        if (!cleared || cleared.success === false) run.problems.push(`CLEAR_HISTORY was rejected: ${JSON.stringify(cleared)}`);
-        // A request the loop had already sent before the clear may still be arriving at the model.
-        await sleep(300);
-        run.callsAtClear = llm.calls.length;
-      }
     } else if (begun && state.status !== 'paused') {
       break;
     }
@@ -2366,15 +1678,6 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot) {
     if (!begun && waited > 15000) {
       throw new Error(`The engine did not start the run within 15 s of START_TASK (status "${state.status}").`);
     }
-    // The mock counts identical requests in a row. The reply never depends on it, but a run that gets the same
-    // prompt again and again changes nothing and will not end by itself.
-    const lastCall = MOCK ? llm.calls[llm.calls.length - 1] : null;
-    if (lastCall && llm.calls.length > firstCall && lastCall.repeat + 1 >= LOOP_LIMIT) {
-      run.loop = { calls: lastCall.repeat + 1, lastCall: lastCall.n, node: lastCall.node, mode: lastCall.mode };
-      run.stopped = 'loop guard';
-      await stop();
-      break;
-    }
     if (waited > (args.timeout ? TASK_TIMEOUT_MS : task.timeoutMs || TASK_TIMEOUT_MS)) {
       timedOut = true;
       run.stopped = 'timeout';
@@ -2384,24 +1687,9 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot) {
     await sleep(POLL_MS);
   }
   // The harness stopped it: the state read above is from before the Stop, so read it again (the engine settles in a moment).
-  if (run.stopped || run.userStop) {
+  if (run.stopped) {
     await sleep(500);
     state = await getState();
-  }
-  // The new worker cannot go on with the run it found: it must end it as stopped (with its
-  // "Interrupted" row), never leave it idle as if nothing had been running.
-  if (run.workerRestarted && state.status !== 'stopped') {
-    run.problems.push(`after a mid-run worker restart the status is "${state.status}", expected "stopped"`);
-  }
-  // After New chat: a loop that kept going would ask the model again within about a second (the
-  // mock's wait step), so a few seconds of silence is the evidence that it stopped.
-  if (run.cleared) {
-    await sleep(3000);
-    state = await getState();
-    const more = llm.calls.length - run.callsAtClear;
-    if (more > 0) run.problems.push(`after New chat the run went on: the model got ${more} more call(s)`);
-    if (state.status !== 'idle') run.problems.push(`after New chat the status is "${state.status}", expected "idle"`);
-    if ((state.history || []).length) run.problems.push(`after New chat the history has ${(state.history || []).length} row(s) again`);
   }
   const wallMs = Date.now() - startedAt;
   const logs = logsOfRun(state.logs, await ctx.driver.evaluate(() => window.__logs), tabId);
@@ -2413,7 +1701,7 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot) {
     }
   }
 
-  // The status of every broadcast of the run. A fast mock run lasts about two seconds, so the 3 s "standing pause" check above can
+  // The status of every broadcast of the run. A fast run can last about two seconds, so the 3 s "standing pause" check above can
   // never see a pause that is wrong for only part of the run; this reads each state the panel was sent instead. A pause is
   // fine when somebody has to answer something (a hold) or the user paused; anything else is a Resume button with no
   // reason, which is what users reported ("it stops after every task and I have to press Resume").
@@ -2437,56 +1725,154 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot) {
 }
 
 /**
- * The problems of a task's `before` task: it must end as it expects, with a right answer, like any task. The follow-up
- * task is only meaningful when the task before it really left its state (its findings, its plan) behind.
+ * Compact, the way a user does it (a task's followUp.compact): the context ring of the composer must
+ * show a share above 0% after the first turn, a real click on the ring opens its card, a real click
+ * on "Compact chat" asks the model for the summary, and the timeline must then show the "Chat
+ * compacted" divider. The ring, the open card and the divider (its summary opened, like a reader
+ * does) are shot as close-ups, light and dark. Returns the problems, the screenshots and the
+ * summary the runner kept (the follow-up's first request must hold it).
  */
-function beforeTaskProblems(before, done) {
-  const label = `the first task in the tab ("${oneLine(before.prompt, 60)}")`;
-  const problems = [];
-  const expectOutcome = before.expectOutcome || 'finish';
-  if (done.run.stopped) problems.push(`${label}: the harness stopped it (${done.run.stopped})`);
-  if (done.facts.outcome !== expectOutcome) problems.push(`${label} ended with a ${done.facts.outcome || 'missing'} entry, expected ${expectOutcome}`);
-  else if (!done.facts.answer || !before.check(done.facts)) problems.push(`${label}: the answer is wrong: ${oneLine(done.facts.answer, 200)}`);
-  if (MOCK && before.expectMock) problems.push(...before.expectMock(done.facts).map((p) => `${label}: ${p}`));
-  if (MOCK) {
-    const mockFail = findMockFail(done.facts, done.calls);
-    if (mockFail) problems.push(`${label}: the mock could not find what it needs in the prompt: ${mockFail}`);
+async function compactThroughPanel(ctx, tabId, shotDir, shotName) {
+  const out = { problems: [], screenshots: [], ringLabel: '', cardText: '', summary: '' };
+  fs.mkdirSync(shotDir, { recursive: true });
+  const panel = await panelSurface(ctx, tabId);
+  const closeUps = async (selector, what) => {
+    for (const scheme of ['light', 'dark']) {
+      await panel.setColorScheme(scheme);
+      await sleep(400); // the theme transition, so the shot shows the settled colours
+      const file = path.join(shotDir, `${shotName}-${what}-${scheme}.png`);
+      try {
+        await panel.shootElement(selector, file);
+        out.screenshots.push(file);
+      } catch (err) {
+        out.problems.push(`the ${what} close-up (${scheme}) could not be taken: ${oneLine(err.message, 160)}`);
+      }
+    }
+    await panel.setColorScheme('light');
+  };
+  const ringLabel = () => panel.evaluate(() => document.getElementById('btnContext')?.getAttribute('aria-label') || '');
+  try {
+    // The ring after the first turn: the chat has a turn, so the next request is more than nothing.
+    await pollUntil(async () => (/^Context: (<1|[1-9]\d*)% of /.test(await ringLabel()) ? 'ok' : ''), 8000);
+    out.ringLabel = await ringLabel();
+    if (!/^Context: (<1|[1-9]\d*)% of /.test(out.ringLabel)) out.problems.push(`after the first turn the context ring says ${JSON.stringify(out.ringLabel)}, expected a share above 0%`);
+    await closeUps('#composer', 'context-ring');
+
+    await panel.click('#btnContext');
+    const opened = await pollUntil(() => panel.evaluate(() => {
+      const menu = document.getElementById('contextMenu');
+      return menu && !menu.hidden && menu.querySelector('.ctx-compact') ? 'open' : '';
+    }), 4000);
+    if (!opened) {
+      out.problems.push('a click on the context ring did not open its card');
+      return out;
+    }
+    const card = await panel.evaluate(() => {
+      const menu = document.getElementById('contextMenu');
+      return { text: menu.innerText, compactOff: menu.querySelector('.ctx-compact').disabled };
+    });
+    out.cardText = card.text;
+    if (card.compactOff) out.problems.push('the card\'s "Compact chat" button is off after a finished turn');
+    if (!/This chat/.test(card.text) || !/of \d+(\.\d)?[KM]? ·/.test(card.text)) out.problems.push(`the context card does not show the bar of this chat: ${JSON.stringify(oneLine(card.text, 200))}`);
+    if (!/earlier answers of this chat are sent/i.test(card.text)) out.problems.push('the context card does not say that earlier answers are sent with each request');
+    await closeUps('#contextMenu', 'context-card');
+
+    await panel.click('#contextMenu .ctx-compact');
+    // The summary is a real model call: up to the model's own timeout.
+    const tag = await pollUntil(() => panel.evaluate(() => document.querySelector('#timeline .chat-compacted .compact-tag')?.textContent || ''), 180000);
+    if (!/Chat compacted/.test(tag)) {
+      const toast = await panel.evaluate(() => document.getElementById('toastContainer')?.innerText || '').catch(() => '');
+      out.problems.push(`no "Chat compacted" row appeared after "Compact chat"${toast ? ` (the panel said: ${oneLine(toast, 200)})` : ''}`);
+      return out;
+    }
+    // A reader opens the summary under the divider.
+    await panel.click('#timeline .chat-compacted .compact-summary > summary');
+    await sleep(300);
+    const shown = await panel.evaluate(() => document.querySelector('#timeline .chat-compacted .compact-summary')?.open === true);
+    if (!shown) out.problems.push('a click on the divider\'s summary line did not open the summary');
+    await closeUps('#timeline .chat-compacted', 'compacted');
+  } finally {
+    ctx.panel.pageErrors.push(...panel.errors());
+    await panel.close(); // Chrome owns the real panel: the harness only lets go of it
   }
-  problems.push(...done.run.problems.map((p) => `${label}: ${p}`));
-  return problems;
+  const state = await ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE', tabId: id }), tabId);
+  const row = [...((state && state.history) || [])].reverse().find((h) => h.type === 'chat_compacted');
+  if (!row || !String(row.summary || '').trim()) out.problems.push('the history has no chat_compacted row with a summary');
+  else out.summary = String(row.summary);
+  return out;
+}
+
+/**
+ * The second turn of a task with a followUp (tasks.mjs), in the same tab and the same chat: a Compact
+ * through the panel first when the task asks for it, then the tab goes to followUp.navigate, then the
+ * second prompt is sent like the first. Its own checks: the answer, the outcome, no page reads when
+ * noReads is set, the summary in the first request after a Compact, and the panel's end card.
+ */
+async function runFollowUp(ctx, fixtures, llm, task, tabId, page, hosts, shotDir, shotName, screenshots) {
+  const fu = task.followUp;
+  const out = { prompt: fu.prompt, problems: [], compact: null, answer: null, answerCorrect: false, facts: null, calls: [], wallMs: 0 };
+  if (fu.compact) {
+    out.compact = await compactThroughPanel(ctx, tabId, shotDir, shotName);
+    out.problems.push(...out.compact.problems);
+    screenshots.push(...out.compact.screenshots);
+  }
+  if (fu.navigate) {
+    await page.goto(absolute(fu.navigate, fixtures), { waitUntil: 'load' });
+    await page.bringToFront();
+  }
+  const name = `${shotName}-followup`;
+  const turn = await driveTask(ctx, llm, { prompt: fu.prompt, answers: fu.answers || [], timeoutMs: fu.timeoutMs || task.timeoutMs }, tabId, hosts, { name, dir: shotDir, list: screenshots });
+  const f = turn.facts;
+  out.facts = f;
+  out.calls = turn.calls;
+  out.answer = f.answer;
+  out.wallMs = turn.wallMs;
+  out.answerCorrect = !!(f.answer && fu.check(f));
+  out.problems.push(...turn.run.problems);
+  if (turn.run.stopped) out.problems.push(`the harness stopped the follow-up (${turn.run.stopped})`);
+  if (f.outcome !== 'finish') out.problems.push(`the follow-up ended with ${f.outcome || 'no final entry'}, expected a finish`);
+  else if (f.finishOutcome !== 'done') out.problems.push(`the follow-up finished with outcome ${JSON.stringify(f.finishOutcome)}, expected "done"`);
+  if (!out.answerCorrect) out.problems.push(`the follow-up answer is wrong: ${JSON.stringify(oneLine(f.answer || '', 200))}`);
+  if (fu.noReads) {
+    const reads = pageReadSteps(f);
+    if (reads.length) out.problems.push(`the follow-up read or looked at the page (${reads.map((s) => s.action.action).join(', ')}); its answer must come from the chat`);
+  }
+  if (fu.compact && out.compact && out.compact.summary) {
+    const first = turn.calls[0];
+    const sent = String((first && first.firstUserText) || '');
+    if (!first) out.problems.push('the follow-up made no model call');
+    else if (!sent.startsWith('EARLIER IN THIS CHAT')) out.problems.push(`the first request of the follow-up does not start with the chain: ${JSON.stringify(oneLine(sent, 120))}`);
+    else if (!sent.includes(out.compact.summary.trim())) out.problems.push('the first request of the follow-up does not hold the summary of the Compact');
+  }
+  out.problems.push(...effortWireProblems(turn.calls, { provider: PROVIDER, model: MODEL, effort: EFFORT }).map((p) => `follow-up: ${p}`));
+  const pageEnd = path.join(shotDir, `${name}-page-end.png`);
+  await page.screenshot({ path: pageEnd, fullPage: true }).catch(() => page.screenshot({ path: pageEnd, fullPage: false })).catch((err) => {
+    out.problems.push(`the follow-up page end screenshot could not be taken: ${oneLine(err.message, 200)}`);
+  });
+  screenshots.push(pageEnd);
+  screenshots.push(...await panelScreenshots(ctx, tabId, name, shotDir, pageEnd));
+  out.problems.push(...(await readPanelCard(ctx, tabId, { title: 'Done' })).map((p) => `follow-up: ${p}`));
+  return out;
 }
 
 async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   const task = TASKS[name];
   if (!task) throw new Error(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
-  const model = modelOf(name);
+  const model = MODEL;
   if (ctx.model !== model) await saveSettings(ctx, llm, model);
-  const url = absolute(task.page, fixtures, task.host);
-  const firstUrl = task.before ? absolute(task.before.page, fixtures, task.host) : url;
+  const url = absolute(task.page, fixtures);
 
   const page = await ctx.browser.newPage();
   const pageErrors = [];
   watchFixturePage(page, pageErrors);
-  await page.goto(firstUrl, { waitUntil: 'load' });
+  await page.goto(url, { waitUntil: 'load' });
   await page.bringToFront();
-  const tabId = await tabIdFor(ctx.driver, firstUrl);
+  const tabId = await tabIdFor(ctx.driver, url);
   // Before the run: the page as loaded. After the run (below): the page the task ended on, which
   // is a new document when a click navigated.
   const probes = [await probePage(ctx, page, tabId)];
 
-  const hosts = fixtureHostsOf(fixtures, task);
-  const beforeProblems = [];
-  if (task.before) {
-    // The task before runs to its end in this tab. Then the same tab (same id, so the same session and thread) goes to
-    // the page of the task itself, and the task is the follow-up of a user who keeps the side panel open.
-    const done = await driveTask(ctx, llm, task.before, tabId, hosts, null);
-    beforeProblems.push(...beforeTaskProblems(task.before, done));
-    await page.goto(url, { waitUntil: 'load' });
-    const sameTab = await tabIdFor(ctx.driver, url);
-    if (sameTab !== tabId) throw new Error(`The follow-up page opened in tab ${sameTab}, not in the tab of the first task (${tabId}).`);
-    probes.push(await probePage(ctx, page, tabId));
-  }
-
+  const hosts = fixtureHostsOf(fixtures);
   const shotName = `${name}-${model.replace(/[^a-z0-9.]+/gi, '_')}`;
   // Screenshots are part of every run, not an option: each test case gets its folder with the
   // side panel (steps and end result, light and dark) and the end state of the page.
@@ -2494,15 +1880,6 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   const shotRoot = args['panel-screenshots'] ? path.resolve(String(args['panel-screenshots'])) : path.join(SHOT_ROOT, name);
   const shotDir = REPEAT > 1 ? path.join(shotRoot, `run-${attempt}`) : shotRoot;
   const screenshots = [];
-
-  // A task about pictures runs in a viewport wider than the 1568 pixel image budget, so the
-  // capture really has to shrink. Without this the scale is 1, the arithmetic is never exercised,
-  // and a negative control over it could never fail.
-  if (task.expectShot) {
-    await page.setViewport({ width: SHOT_VIEWPORT.width, height: SHOT_VIEWPORT.height, deviceScaleFactor: SHOT_DPR });
-  }
-
-  const researchProblems = task.research ? await configureResearch(ctx, fixtures, tabId, task.research, shotName, shotDir, screenshots) : [];
 
   const { state, run, timedOut, wallMs, logs, replies, states, stateStatuses, calls, facts } =
     await driveTask(ctx, llm, task, tabId, hosts, { name: shotName, dir: shotDir, list: screenshots });
@@ -2529,23 +1906,18 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   // The title the card deserves follows from how the run ended. A task may add its own checks on
   // what the card says (expectCard.body, expectCard.noBody) and may override the title.
   const expectCard = {
-    // A run the harness stopped (a timeout, the loop guard) without a final entry ends like a user's Stop.
+    // A run the harness stopped (a timeout) without a final entry ends like a user's Stop.
     title: run.stopped && (!facts.outcome || facts.outcome === 'partial_result') && !facts.failed
       ? 'Stopped by you'
       : task.expectOutcome && task.expectOutcome !== 'finish'
       ? 'Failed'
       // A finish that said how the run went: the card follows the outcome, a failed step is only a note.
-      : facts.outcome === 'finish' && OUTCOME_TITLE[facts.finishOutcome] && !/^MOCK-FAIL:/i.test(String(facts.answer || '').trim())
+      : facts.outcome === 'finish' && OUTCOME_TITLE[facts.finishOutcome]
       ? OUTCOME_TITLE[facts.finishOutcome]
       : (facts.failed ? 'Failed' : (facts.unconfirmed ? 'Unconfirmed answer' : 'Done')),
     ...(task.expectCard || {})
   };
-  // After New chat there is no run left to end: the panel must be the clean start screen.
-  const cardProblems = run.cleared ? await readPanelCleared(ctx, tabId) : await readPanelCard(ctx, tabId, expectCard);
-  if (task.cardShots) cardProblems.push(...await cardScreenshots(ctx, tabId, shotName, shotDir, screenshots));
-  const rowProblems = task.expectPanelRows ? await readPanelRows(ctx, tabId, task.expectPanelRows) : [];
-  if (task.expectAnswerBox) rowProblems.push(...await readPanelAnswerBox(ctx, tabId, task.expectAnswerBox, shotName, shotDir, screenshots));
-  if (task.expectDownload) rowProblems.push(...await readPanelDownload(ctx, tabId, task.expectDownload, shotName, shotDir, screenshots));
+  const cardProblems = await readPanelCard(ctx, tabId, expectCard);
   // Element badges are off: whatever the run did, the page must not end with numbers drawn on it.
   const badgeCount = await Promise.race([
     page.evaluate(() => document.querySelectorAll('.scoutfox-badge').length),
@@ -2554,48 +1926,21 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   const badgeProblems = badgeCount > 0 ? [`the page shows ${badgeCount} numbered element badge(s), but element badges are off`] : [];
   const restartProblems = task.restartWorker ? await restartWorkerAndReadCard(ctx, tabId, expectCard) : [];
   const logProblems = task.expectLogs ? await checkLogsTab(ctx, tabId, shotName, shotDir, screenshots) : [];
-  // A task that takes a picture is also checked where the user sees it: the thumbnail in the
-  // step that took it, on Chrome's real panel. And the viewport it ran in is checked too, so the
-  // downscale and the coordinate mapping were really exercised (see requireShotViewport).
-  const shotProblems = task.expectShot
-    ? [...await requireShotViewport(ctx, tabId), ...await readPanelShot(ctx, tabId, shotExpectation(facts), shotName, shotDir, screenshots, task.shotPixels ? await task.shotPixels(page).catch((err) => { console.log(`shot pixels: ${err.message}`); return []; }) : [])]
-    : [];
-  // The composer's model picker, driven like a user would between tasks: open the menu from the
-  // model name, read the provider's list, filter it, pick, and watch the badge follow.
-  const modelPickProblems = task.modelPick
-    ? await checkComposerModelPick(ctx, tabId, model, shotName, shotDir, screenshots)
-    : [];
-  // The effort is the model's reasoning level: every request of the run must carry it, and the
-  // composer must show the levels this model takes (the panel shows what goes out on the wire).
-  const effortProblems = [
-    ...effortWireProblems(calls, { mock: MOCK, provider: PROVIDER, model, effort: EFFORT }),
-    ...(task.effortMenu
-      ? await checkEffortMenu(ctx, tabId, { label: EFFORT_LABEL, level: EFFORT, levels: ['auto', 'off', 'medium'] }, shotName, shotDir, screenshots)
-      : [])
-  ];
-  // A task that only a real click on the page can pass says so, and the page is asked before it
-  // closes: the page's own record is the evidence, not the history row the engine wrote.
-  if (task.expectPageClick) {
-    const clicked = await page.evaluate(() => document.body.getAttribute('data-clicked') === 'yes').catch(() => null);
-    facts.pageClicked = clicked;
-  }
+  // The effort is the model's reasoning level: every request of the run must carry it.
+  const effortProblems = effortWireProblems(calls, { provider: PROVIDER, model, effort: EFFORT });
   // A task can ask the page itself for evidence of what the run did (a consent cookie set by the
   // banner's own button): the page is the witness, not the history the engine wrote.
   const pageProblems = task.expectPage
     ? await Promise.race([task.expectPage(page), sleep(10000).then(() => ['the page did not answer the page check within 10 s'])]).catch((err) => [`the page check failed: ${oneLine(err.message, 200)}`])
     : [];
+  // A second turn in the same tab and chat (task.followUp): the chain, after a Compact through the panel.
+  const followUp = task.followUp ? await runFollowUp(ctx, fixtures, llm, task, tabId, page, hosts, shotDir, shotName, screenshots) : null;
   // Chromium's own error page (a host that does not resolve) never gets content scripts, so there is nothing to probe there.
   if (page.url() !== probes[probes.length - 1].url && !page.url().startsWith('chrome-error://')) probes.push(await probePage(ctx, page, tabId));
   await sleep(300); // late page errors
   await page.close();
 
   const expectOutcome = task.expectOutcome || 'finish';
-  // Manual approve is only verified if the run actually stopped at the plan card and a user
-  // decision let it continue; a run that never held would pass the answer check and prove nothing.
-  const approvalProblems = task.manualApprove
-    && !run.decisions.some((d) => d.hold === 'plan' && d.decision === 'approve')
-    ? ['manual approval mode: the run never stopped at a plan for the user to approve']
-    : [];
   return {
     task: name,
     attempt,
@@ -2605,10 +1950,6 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
     status: state.status,
     timedOut,
     stopped: run.stopped,
-    userStopped: !!run.userStop,
-    cleared: !!run.cleared,
-    workerRestarted: !!run.workerRestarted,
-    loop: run.loop,
     outcome: facts.outcome,
     expectOutcome,
     finishOutcome: facts.finishOutcome,
@@ -2617,10 +1958,23 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
     answer,
     answerCorrect: answer ? !!task.check(facts) : false,
     notes: answer && task.warn ? task.warn(facts) : [],
-    expectProblems: [...beforeProblems, ...(MOCK && task.expectMock ? task.expectMock(facts) : []), ...cardProblems, ...badgeProblems, ...restartProblems, ...logProblems, ...shotProblems, ...approvalProblems, ...modelPickProblems, ...effortProblems, ...pageProblems, ...researchProblems, ...rowProblems],
+    expectProblems: [...cardProblems, ...badgeProblems, ...restartProblems, ...logProblems, ...effortProblems, ...pageProblems, ...(followUp ? followUp.problems : [])],
+    followUp: followUp ? {
+      prompt: followUp.prompt,
+      answer: followUp.answer,
+      answerCorrect: followUp.answerCorrect,
+      problems: followUp.problems,
+      ringLabel: followUp.compact ? followUp.compact.ringLabel : null,
+      summary: followUp.compact ? followUp.compact.summary : null,
+      steps: followUp.facts ? followUp.facts.steps : [],
+      outcome: followUp.facts ? followUp.facts.outcome : null,
+      finishOutcome: followUp.facts ? followUp.facts.finishOutcome : null,
+      modelCalls: followUp.calls.length,
+      wallMs: followUp.wallMs,
+      calls: callsForReport(followUp.calls)
+    } : null,
     holdProblems: run.problems,
     stateUpdates: { count: states.length, byStatus: stateStatuses },
-    mockFail: MOCK ? findMockFail(facts, calls) : null,
     decisions: run.decisions,
     replies,
     facts,
@@ -2646,7 +2000,6 @@ function callLines(calls) {
     if (c === null) { lines.push(`  ... ${calls.length - 5} more call(s) ...`); continue; }
     lines.push(`  call ${c.n} (${c.node}${c.mode ? `:${c.mode}` : ''}): ${(c.ms / 1000).toFixed(1)} s, status ${c.status}, format ${c.format}, think ${c.think}, system ${fmtInt(c.systemChars)} chars, request ${fmtInt(c.requestBytes)} B, prompt_eval ${fmtInt(c.promptEvalCount)}, eval ${fmtInt(c.evalCount)}, done ${c.doneReason}`);
     lines.push(`          reply: ${oneLine(c.content, 150)}`);
-    if (c.note) lines.push(`          mock:  ${c.note}${c.repeat ? ` (the same request ${c.repeat + 1} times in a row)` : ''}`);
   }
   return lines;
 }
@@ -2658,13 +2011,12 @@ function printReport(r) {
   console.log(`\n=== ${r.task}${REPEAT > 1 ? ` (run ${r.attempt} of ${REPEAT})` : ''} (${r.model}) ===`);
   console.log(`start page: ${r.startUrl}`);
   console.log(`prompt:     ${r.prompt}`);
-  const how = r.stopped ? `; the harness stopped it (${r.stopped}${r.loop ? `: the same prompt ${r.loop.calls} times in a row, ${r.loop.node}:${r.loop.mode}, call ${r.loop.lastCall}` : ''})` : '';
+  const how = r.stopped ? `; the harness stopped it (${r.stopped})` : '';
   const outcome = r.outcome === 'finish' ? 'FINISH' : r.outcome === 'partial_result' ? 'PARTIAL RESULT' : `NO FINAL ENTRY (status ${r.status})`;
   console.log(`outcome:    ${outcome}${r.unconfirmed ? ' (unconfirmed)' : ''}, status ${r.status}${how}; expected ${r.expectOutcome}; model's outcome: ${r.finishOutcome || 'none'}${r.expectFinishOutcome ? ` (expected ${r.expectFinishOutcome})` : ''}; answer check: ${r.answerCorrect ? 'PASS' : 'FAIL'}`);
   for (const note of r.notes || []) console.log(`note:       ${note}`);
   if (r.answer) console.log(`answer:     ${oneLine(r.answer, 400)}`);
   for (const p of r.expectProblems) console.log(`run check:  ${oneLine(p, 300)}`);
-  if (r.mockFail) console.log(`mock fail:  ${r.mockFail}`);
   for (const p of r.holdProblems) console.log(`hold:       ${oneLine(p, 300)}`);
   console.log(`states:     ${r.stateUpdates.count} state update(s) reached the panel port: ${countsText(r.stateUpdates.byStatus)}`);
   for (const e of r.errors) console.log(`error:      ${oneLine(e, 300)}`);
@@ -2696,6 +2048,15 @@ function printReport(r) {
     console.log(`warnings (${r.warnings.length}):`);
     for (const w of r.warnings.slice(0, 12)) console.log(`  ${w}`);
   }
+  if (r.followUp) {
+    const fu = r.followUp;
+    console.log(`follow-up:  ${oneLine(fu.prompt, 160)}`);
+    if (fu.ringLabel !== null) console.log(`  ring after turn 1: ${fu.ringLabel || 'none'}`);
+    if (fu.summary !== null) console.log(`  summary of the Compact: ${oneLine(fu.summary || 'none', 300)}`);
+    console.log(`  outcome ${fu.outcome || 'none'} (${fu.finishOutcome || 'no outcome'}); answer check: ${fu.answerCorrect ? 'PASS' : 'FAIL'}; ${fu.steps.length} step(s), ${fu.modelCalls} model call(s), ${(fu.wallMs / 1000).toFixed(1)} s`);
+    if (fu.answer) console.log(`  answer: ${oneLine(fu.answer, 300)}`);
+    for (const s of fu.steps.slice(0, 8)) console.log(`  #${s.step} ${s.action ? oneLine(s.action, 130) : oneLine(s.raw, 100)}${s.result ? ` -> ${oneLine(s.result, 100)}` : ''}`);
+  }
   for (const s of r.screenshots) console.log(`panel screenshot: ${s}`);
 }
 
@@ -2712,10 +2073,7 @@ function judge(ctx, reports, gate) {
   }
   for (const problem of ctx.pageShotProblems || []) failures.push(problem);
   for (const r of reports) {
-    if (r.stopped) failures.push(`${r.task}: the harness stopped the run (${r.stopped})${r.loop ? `: the model got the same prompt ${r.loop.calls} times in a row` : ''}`);
-    if (TASKS[r.task]?.restartWorkerAfterSteps && !r.workerRestarted) failures.push(`${r.task}: the run ended before the harness could stop the worker`);
-    if (TASKS[r.task]?.clearAfterSteps && !r.cleared) failures.push(`${r.task}: the run ended before the harness could press New chat`);
-    if (TASKS[r.task]?.stopAfterSteps && !r.userStopped) failures.push(`${r.task}: the run ended before the harness could click Stop`);
+    if (r.stopped) failures.push(`${r.task}: the harness stopped the run (${r.stopped})`);
     // Every run is judged by the success rule of lib/metrics.mjs (final entry, the model's own outcome, the answer).
     const verdict = runVerdict(r);
     const label = REPEAT > 1 ? `${r.task} (run ${r.attempt})` : r.task;
@@ -2732,14 +2090,6 @@ function judge(ctx, reports, gate) {
     // are the site's, not the extension's: there only an error that names the extension fails.
     const pageErrors = TASKS[r.task]?.web ? r.pageErrors.filter((e) => /chrome-extension:|scoutfox/i.test(e)) : r.pageErrors;
     if (pageErrors.length) failures.push(`${r.task}: the page logged ${pageErrors.length} console error(s) or page error(s): ${oneLine(pageErrors[0], 200)}`);
-    if (MOCK) {
-      // The mock is deterministic and never fails a call, so any of these is a change in the extension.
-      if (r.mockFail) failures.push(`${r.task}: the mock could not find what it needs in the prompt: ${r.mockFail}`);
-      if (r.unconfirmed) failures.push(`${r.task}: the run ended with an unconfirmed (auto-wrapped) finish`);
-      if (r.errors.length) failures.push(`${r.task}: the run logged ${r.errors.length} error entr${r.errors.length === 1 ? 'y' : 'ies'}: ${oneLine(r.errors[0], 200)}`);
-      const refused = r.calls.filter((c) => c.status !== 200);
-      if (refused.length) failures.push(`${r.task}: ${refused.length} model call(s) were refused by the mock (HTTP ${[...new Set(refused.map((c) => c.status))].join('/')}): ${oneLine(refused[0].content, 240)}`);
-    }
   }
   if (ctx.workerErrors.length) failures.push(`${ctx.workerErrors.length} service worker or driver page error(s)`);
   if (gate) {
@@ -2780,36 +2130,57 @@ function printFailureDetails(ctx, reports) {
 // Main
 // ---------------------------------------------------------------------------------------------
 
+/** The options, for --help (the header of this file says more about each). */
+const HELP = `Usage: node tests/e2e/smoke.mjs [options]   (npm run test:e2e runs it with --build)
+
+  (no option)          the default tasks on LISA: the open-web tasks and the three local fixture-page tasks
+  --held-out           the held-out open-web tasks
+  --sealed             the sealed open-web tasks: only verdicts and numbers, never a trace
+  --task=a,b           these tasks only
+  --repeat=k           every task k times (1 to 20), summarised as median and p90
+  --provider=name      ${[...REAL_PROVIDER_NAMES, 'ollama'].join(', ')} (default ${DEFAULT_PROVIDER})
+  --model=id           the model (default: the provider's default model)
+  --effort=level       ${EFFORT_LEVELS.join(', ')} (default medium)
+  --build              run npm run build first
+  --headful, --headless
+  --out=file.json      also save the full report as JSON
+  --panel-screenshots=dir   where the screenshots go (default tests/e2e/screenshots/<time>)
+  --max-steps=n        the engine's step cap (default 60)
+  --timeout=ms         per task (default: the task's own, else 6 minutes)
+  --prompt="..."       one run of your own on a real site (--start-url=, default https://www.google.com)
+  --dump-snapshots[=store]  save what the content script sees on the fixture pages (no model needed)
+
+Tasks: ${Object.keys(TASKS).join(', ')}`;
+
 async function main() {
+  if (args.help) {
+    console.log(HELP);
+    return;
+  }
   for (const flag of Object.keys(args)) {
     if (!KNOWN_FLAGS.has(flag)) throw new UserError(`Unknown option "${flag}". Known: ${[...KNOWN_FLAGS].map((f) => `--${f}`).join(', ')}`);
   }
   if (!Number.isInteger(REPEAT) || REPEAT < 1 || REPEAT > 20) throw new UserError(`--repeat must be a whole number from 1 to 20, got ${args.repeat}`);
-  if (SEALED && (MOCK || args['held-out'] || args.fixtures)) throw new UserError('--sealed runs the sealed open-web tasks on a real model; it cannot be combined with --mock, --held-out or --fixtures');
+  if (SEALED && args['held-out']) throw new UserError('--sealed runs the sealed open-web tasks; it cannot be combined with --held-out');
   // Naming a sealed task without --sealed would print its trace and unseal it.
   for (const n of args.task ? String(args.task).split(',') : []) {
     if (TASKS[n]?.sealed && !SEALED) throw new UserError(`"${n}" is a sealed task: run it only with --sealed, which shows its verdict and numbers but not its trace`);
   }
-  if (!MOCK && !REAL && PROVIDER !== 'ollama') throw new UserError(`--provider must be one of ${[...REAL_PROVIDER_NAMES, 'ollama'].join(', ')}, got ${PROVIDER}`);
-  if (args.tamper !== undefined && !TAMPERS[args.tamper]) {
-    throw new UserError(`Unknown --tamper "${args.tamper}". Known: ${Object.entries(TAMPERS).map(([k, v]) => `${k} (${v.does})`).join('; ')}`);
-  }
-  // A real model meets the same goal in a task and in its mock-only variant, so the variants only run with --mock.
-  // An open-web task (web) only runs against a real model, and it is the default set of a real run: the model
-  // picks every site itself. --fixtures runs the local fixture tasks on the real model instead. --held-out runs
-  // only the held-out open-web tasks (heldOut), which a plain real run leaves out. --sealed runs only the sealed
-  // tasks, and shows only their verdicts and numbers. --mock never touches the open web.
+  if (!REAL && PROVIDER !== 'ollama') throw new UserError(`--provider must be one of ${[...REAL_PROVIDER_NAMES, 'ollama'].join(', ')}, got ${PROVIDER}`);
+  // The default set is every task that is neither held out nor sealed: the open-web tasks (the model picks every
+  // site itself) and the three local fixture-page tasks. --held-out runs only the held-out open-web tasks (heldOut),
+  // which a plain run leaves out. --sealed runs only the sealed tasks, and shows only their verdicts and numbers.
   const names = args.task
     ? String(args.task).split(',')
-    : Object.keys(TASKS).filter((n) => MOCK ? !TASKS[n].web : args.fixtures ? (!TASKS[n].mockOnly && !TASKS[n].web) : TASKS[n].web && !!TASKS[n].heldOut === !!args['held-out'] && !!TASKS[n].sealed === SEALED);
+    : Object.keys(TASKS).filter((n) => TASKS[n].web && !!TASKS[n].heldOut === !!args['held-out'] && !!TASKS[n].sealed === SEALED);
   for (const name of names) {
     if (!TASKS[name]) throw new UserError(`Unknown task "${name}". Known: ${Object.keys(TASKS).join(', ')}`);
   }
   // A pending task is skipped with its reason and is never a failure: the engine cannot do what it checks yet.
   const skipped = names.filter((n) => TASKS[n].pending).map((n) => ({ task: n, reason: `pending: ${TASKS[n].pending}` }));
   // A real-model task that names the sites it needs (reachable) is skipped when one does not answer:
-  // an offline machine or a site outage is not an agent failure. The mock never touches the web.
-  const unreachable = MOCK ? [] : await unreachableTasks(names.filter((n) => !TASKS[n].pending));
+  // an offline machine or a site outage is not an agent failure.
+  const unreachable = await unreachableTasks(names.filter((n) => !TASKS[n].pending));
   skipped.push(...unreachable);
   const runNames = names.filter((n) => !TASKS[n].pending && !unreachable.some((u) => u.task === n));
 
@@ -2822,17 +2193,7 @@ async function main() {
   // The model server. The snapshot dump needs none: it never calls a model.
   const needsModel = !args['dump-snapshots'];
   let env = {};
-  if (needsModel && MOCK) {
-    const { runMockSelfTest } = await import('../mcp/mockOllama.selftest.mjs');
-    const results = await runMockSelfTest();
-    const failed = results.filter((r) => !r.ok);
-    if (failed.length) {
-      for (const r of failed) console.error(`mock self-test FAILED: ${r.name}\n  ${r.detail}`);
-      throw new UserError(`The mock's self-test failed (${failed.length} of ${results.length} checks). The mock is broken, the browser was not started.`);
-    }
-    env = { mock: true, mockSelfTest: `${results.length}/${results.length} checks passed` };
-    console.log(`mock Ollama self-test: ${results.length}/${results.length} checks passed`);
-  } else if (needsModel && REAL) {
+  if (needsModel && REAL) {
     env = await preflightReal();
     console.log(`${REAL.label} at ${env.url} (${env.models} models listed), model ${MODEL}`);
   } else if (needsModel) {
@@ -2845,32 +2206,25 @@ async function main() {
   onCleanup(closeServer(fixtures.server));
   let llm = null;
   if (needsModel) {
-    if (MOCK) {
-      const { startMockOllama } = await import('../mcp/mockOllama.mjs');
-      // The models of the mock: the one of the run, and the personas of the tasks (/api/show knows exactly these).
-      const models = [...new Set([MODEL, ...Object.values(TASKS).map((t) => t.mockModel).filter(Boolean)])];
-      llm = await listen('mock Ollama', () => startMockOllama({ port: PROXY_PORT, models }));
-    } else if (REAL) {
+    if (REAL) {
       llm = await listen(`${REAL.label} proxy`, () => startKeyProxy({ port: PROXY_PORT, target: REAL.origin, apiKey: REAL.apiKey, label: REAL.label }));
     } else {
       llm = await listen('Ollama proxy', () => startOllamaProxy({ port: PROXY_PORT, target: OLLAMA }));
     }
     onCleanup(closeServer(llm.server));
   }
-  console.log(`fixtures at ${fixtures.origin}${llm ? `, ${MOCK ? 'mock Ollama' : REAL ? `${REAL.label} proxy` : 'Ollama proxy'} at ${llm.url}` : ''}`);
+  console.log(`fixtures at ${fixtures.origin}${llm ? `, ${REAL ? `${REAL.label} proxy` : 'Ollama proxy'} at ${llm.url}` : ''}`);
 
   // The extension the browser loads: a copy of dist/ plus the two test-only pages, never dist/ itself.
   const copy = prepareExtensionCopy({
     distDir: DIST,
     driverHtml: path.join(HERE, 'driver.html'),
     panelTriggerHtml: path.join(HERE, 'panel-trigger.html'),
-    panelTriggerJs: path.join(HERE, 'panel-trigger.js'),
-    tamper: args.tamper
+    panelTriggerJs: path.join(HERE, 'panel-trigger.js')
   });
   tempDirs.add(copy.dir);
   onCleanup(() => { copy.remove(); tempDirs.delete(copy.dir); });
   console.log(`extension: copy of dist/ in ${copy.dir} (${copy.files.length - 3} shipped files, no sourcemaps, plus driver.html and panel-trigger.html)`);
-  if (args.tamper) console.log(`TAMPERED copy (${args.tamper}): ${TAMPERS[args.tamper].does}`);
 
   const ctx = await launch(puppeteer, copy.dir);
   console.log(`browser ${await ctx.browser.version()}, extension ${ctx.extensionId}`);
@@ -2897,9 +2251,6 @@ async function main() {
         else printReport(report);
       }
     }
-    // A task can use another model name (the mock's persona) and its own settings (the screenshots
-    // mode): the side panel gate reads the configured one, so the plain settings are written back.
-    if (ctx.model !== MODEL || (ctx.settingsKey && ctx.settingsKey !== '{}')) await saveSettings(ctx, llm, MODEL);
     gate = await checkSidePanel(ctx);
     ctx.brand = await checkBrandMark(ctx);
   }
@@ -2940,7 +2291,7 @@ async function main() {
     // A run that loops makes thousands of calls: the report keeps the first five and the last three of each task, and the count.
     const trimmed = reports.map((r) => ({ ...r, callCount: r.calls.length, calls: callsForReport(r.calls), logLines: r.logLines.length <= 40 ? r.logLines : [...r.logLines.slice(0, 25), ...r.logLines.slice(-15)] }));
     fs.writeFileSync(path.resolve(String(args.out)), JSON.stringify({
-      env, mock: MOCK, tamper: args.tamper || null, model: MODEL, repeat: REPEAT, sealed: SEALED, skipped, aggregate: aggregate(reports), reports: SEALED ? [] : trimmed, workerErrors: ctx.workerErrors, panel: { ...ctx.panel, gate }, brand: ctx.brand || null, providerSetup: ctx.providerSetup || null, failures
+      env, provider: PROVIDER, model: MODEL, repeat: REPEAT, sealed: SEALED, skipped, aggregate: aggregate(reports), reports: SEALED ? [] : trimmed, workerErrors: ctx.workerErrors, panel: { ...ctx.panel, gate }, brand: ctx.brand || null, providerSetup: ctx.providerSetup || null, failures
     }, null, 2));
     console.log(`report saved to ${args.out}`);
   }

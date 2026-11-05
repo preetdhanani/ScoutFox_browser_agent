@@ -35,8 +35,7 @@ With nothing committed, `-dirty` is the same for every build, so the time is wha
 | `npm test` | Runs the unit tests (`tests/**/*.test.js` and `tests/**/*.test.ts`) with `node --test`, no browser and no build step needed: Node runs the `.ts` files by stripping their types. |
 | `npm run evalscan` | Fails when `dist/` calls `eval`, `new Function` or `Function()` (five hits are allowed, see "Worker Bundle and CSP" in section 3), so run `npm run build` first. |
 | `npm run zip` | Zips the contents of `dist/` into `scoutfox-chrome-extension.zip` in the repository root, without sourcemaps, so run `npm run build` first. |
-| `npm run test:e2e` | Builds, then runs the open-web tasks in Chromium on LISA (`lisa-pro`, an OpenAI-compatible custom endpoint the run adds through the "Custom model API" dialog): each starts on a neutral page with only a question, and the model picks and opens the real websites itself. Needs `LISA_API_KEY` in the shell or `LISA_API` in the repo `.env` (one-time setup, see "E2E Smoke" in section 3). Add `-- --held-out` for the held-out tasks, `-- --fixtures` for the local fixture tasks, or `-- --provider=nvidia` for NVIDIA NIM. |
-| `npm run test:e2e:mock` | The same smoke test against the offline scripted mock model: no key, no network. CI runs this one. |
+| `npm run test:e2e` | Builds, then runs the real-model tasks in Chromium on LISA (`lisa-pro`, an OpenAI-compatible custom endpoint the run adds through the "Custom model API" dialog): the open-web tasks start on a neutral page with only a question, and the model picks and opens the real websites itself; two more run on local fixture pages. Needs `LISA_API_KEY` in the shell or `LISA_API` in the repo `.env` (one-time setup, see "E2E Smoke" in section 3). Add `-- --held-out` for the held-out tasks, `-- --sealed` for the sealed ones, or `-- --provider=nvidia` for NVIDIA NIM. |
 
 ### CI
 `.github/workflows/ci.yml` runs on every push to `main` or `dev` and on every pull request into them, on Node 22.x and 24.x.
@@ -139,7 +138,7 @@ zod 4 makes exactly that call, once, to probe whether it may compile object pars
 `npm run build` checks the order in `dist/` ("zod is jitless before any library code"): the flag must be a top-level statement, and the only `//#region` blocks above it may be rolldown's own helpers.
 The check reads comments, so it needs unminified output, and it refuses a bundle without them.
 `tests/boot/zodJitless.test.ts` runs zod with and without the module and counts constructions of a `Function` (0 with it, at least 2 without).
-The smoke test watches the worker's CSP violations too, which Chromium reports only to the CDP Audits domain and not as a console message, and `--tamper=zod-not-jitless` shows that it fails without the flag.
+The smoke test watches the worker's CSP violations too, which Chromium reports only to the CDP Audits domain and not as a console message.
 
 `npm run evalscan` reads the map of a built file from `<file>.map` only, and refuses a built file that ends in a `sourceMappingURL` comment, because the build writes hidden maps and a string of our own code must not be able to name a map.
 It allows five hits, each keyed by the original file (through the sourcemap), the kind of hit and the source line:
@@ -262,7 +261,7 @@ The tool calls in `src/background/llm/index.ts` apply the fields, and a 400 that
 The tool loop (`src/background/mcp/client.ts`) sends the chosen level on the first round, after a failed tool and at the step limit, and one level less on routine rounds unless `effortAdaptive` is false.
 Each "Model call" log event carries the effort as chosen and as sent, and the model's reasoning text when the provider returns it.
 The side panel asks `GET_EFFORT_SUPPORT` whenever the model changes and offers only the supported levels.
-Tests: `tests/llm/effort.test.ts`, and the effort wire check of `tests/e2e/smoke.mjs` (negative control `--tamper=no-effort`).
+Tests: `tests/llm/effort.test.ts`, and the effort wire check of `tests/e2e/smoke.mjs`.
 
 Reflection and replanning run between sites in `reflectNode` (`src/background/graph/orchestrator.ts`).
 `src/background/agent/reflectPrompt.ts` generates structured reflection prompts and parses model decisions (`continue`, `stop_early`, `replan`).
@@ -339,11 +338,10 @@ export LISA_API_KEY=...
 npm run test:e2e
 ```
 The key stays in the harness: a local proxy adds it to each request, and the extension only holds a placeholder.
-To run offline on the scripted mock instead, use `npm run test:e2e:mock`.
 It builds first, runs the tasks, and ends with `SMOKE PASSED` or `SMOKE FAILED`.
 It fails on a console error or an exception in the worker, on a CSP violation in the worker or in the side panel, and on an error on a fixture page.
-See [tests/e2e/README.md](tests/e2e/README.md) for all options, what a run checks, and the negative controls.
-In CI it runs from `.github/workflows/e2e.yml`, when a pull request gets the `e2e` label or when you start it by hand.
+See [tests/e2e/README.md](tests/e2e/README.md) for all options and what a run checks.
+CI does not run it: it needs a model key.
 
 ---
 

@@ -17,8 +17,6 @@ replay job never fetches the live web.
   `baseline.json` fails the job.
 - `node tests/e2e/replay-real.mjs --update-baseline` stores the current counts as the
   baseline. Run it after a corpus refresh, never to silence an alarm.
-- `node tests/e2e/replay-real.mjs --tamper=<name>` proves the assertions can fail (see
-  `tests/e2e/lib/extensionCopy.mjs`).
 - `node --test tests/realCorpus.test.js` audits the committed corpus without a browser and
   runs in the normal `npm test` suite.
 

@@ -8,9 +8,8 @@
  * placeholder. The request path is forwarded unchanged, so the extension builds the same URLs it
  * builds for the real server (a base URL of <proxy>/api gives <proxy>/api/chat/completions).
  *
- * It also records every chat completions call in the same shape as the Ollama proxy and the
- * offline mock (see callRecord.mjs), so the report counts model calls and tokens the same way in
- * every mode. OpenAI's `usage` and `finish_reason` are mapped onto Ollama's names for that record.
+ * It also records every chat completions call in the same shape as the Ollama proxy (see
+ * callRecord.mjs), so the report counts model calls and tokens the same way in every mode. OpenAI's `usage` and `finish_reason` are mapped onto Ollama's names for that record.
  */
 import http from 'node:http';
 import { buildCallRecord } from '../../mcp/callRecord.mjs';

@@ -13,8 +13,9 @@ name: ScoutFox Real-Page Corpus
 # artifact; committing the refreshed corpus is a human step (CI has no write token), and the
 # baseline must be updated in the same change (see the README's rules).
 #
-# NOT YET VERIFIED ON GITHUB. The smoke test has only run on macOS so far; the same
-# Chromium-install tuning notes as e2e.yml apply here.
+# NOT YET VERIFIED ON GITHUB. The browser runs have only run on macOS so far. Expect to tune the
+# Chromium install first: CHROMIUM_ARGS (--no-sandbox, --disable-dev-shm-usage), a pinned
+# Chromium build id if a snapshot breaks, and any system library the install step reports missing.
 
 on:
   schedule:

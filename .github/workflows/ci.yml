@@ -1,7 +1,7 @@
 name: ScoutFox AI Browser Agent CI
 
 # Runs on every push and pull request to main and dev.
-# The browser smoke test is not part of this workflow, see e2e.yml.
+# The browser e2e run is not part of this workflow: it needs a model key (see tests/e2e/README.md).
 # No test retries anywhere: a flaky test is fixed, never retried.
 
 on:

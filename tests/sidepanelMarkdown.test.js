@@ -126,7 +126,7 @@ const classesOf = (html) => new Set([...html.matchAll(/class="([^"]*)"/g)].flatM
 const count = (html, needle) => html.split(needle).length - 1;
 
 // ---------------------------------------------------------------------------------------------
-// The incident answer (tests/e2e/lib/mockOllama.mjs writes the same text)
+// The incident answer: a model invented a full row for a shop it never opened
 // ---------------------------------------------------------------------------------------------
 
 const URL_A = 'http://shop-a.test:8765/shop-a.html?product=framework-laptop-16-diy-edition&configuration=ryzen7-7840hs-16gb-ddr5-512gb-nvme-windows11pro&session=3f9a1c7e5b2d4a60918e7c3b5d1f2a4e';

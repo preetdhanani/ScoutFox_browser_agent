@@ -890,3 +890,56 @@ test('a text answer after the run took steps is asked once to become a finish wi
   assert.equal(twice.requests.length, 3, 'asked once, not again');
   assert.equal(rowsOfType(twice.rec.history, 'finish')[0].answer, 'It costs 99 USD.');
 });
+
+// ---------------------------------------------------------------------------------------------
+// The chain of a chat, the turn number, and the tokens of each call
+// ---------------------------------------------------------------------------------------------
+
+test('a follow-up task carries the earlier turns of its chat at the top of its first message', async (t) => {
+  const { client, rec, requests } = withClient(t, { replies: [toolCall('finish', { outcome: 'done', answer: '70' })] });
+  rec.history.push(
+    { type: 'user_goal', turn: 1, prompt: 'How many certifications does this page list?', timestamp: '', isNewRun: true },
+    { type: 'finish', answer: 'The page lists 10 certifications.', outcome: 'done' }
+  );
+  await client.startTask('Multiply that by 7.');
+  const messages = requests[0].body.messages as any[];
+  const first = messages.find((m) => m.role === 'user');
+  const text = String(first.content);
+  assert.ok(text.startsWith('EARLIER IN THIS CHAT (for context; the task below is the current one):'), 'the chain opens the first user message');
+  assert.match(text, /You asked: How many certifications does this page list\?/);
+  assert.match(text, /Answer: The page lists 10 certifications\./);
+  assert.ok(text.indexOf('EARLIER IN THIS CHAT') < text.indexOf('TASK: Multiply that by 7.'), 'the task comes after the chain');
+  assert.equal(messages[0].role, 'system');
+  assert.equal(messages.filter((m) => typeof m.content === 'string' && m.content.includes('EARLIER IN THIS CHAT')).length, 1, 'the chain is in the task message, not a message of its own');
+});
+
+test('a first task has no chain, and the turn after a trimmed history is one above the highest', async (t) => {
+  const first = withClient(t, { replies: [toolCall('finish', { outcome: 'done', answer: 'ok' })] });
+  await first.client.startTask('What does item 42 cost?');
+  const user = (first.requests[0].body.messages as any[]).find((m) => m.role === 'user');
+  assert.ok(String(user.content).startsWith('TASK: '), 'no earlier turn, no chain');
+
+  const later = withClient(t, { replies: [toolCall('finish', { outcome: 'done', answer: 'ok' })] });
+  // The oldest turns were cut from the kept history: only turn 4 is left.
+  later.rec.history.push({ type: 'user_goal', turn: 4, prompt: 'Old goal', timestamp: '', isNewRun: true }, { type: 'finish', answer: 'old', outcome: 'done' });
+  await later.client.startTask('New goal');
+  const goals = rowsOfType(later.rec.history, 'user_goal');
+  assert.equal(goals.at(-1).turn, 5);
+});
+
+test('every model call reports its tokens to the runner: the provider\'s count, or an estimate', async (t) => {
+  const usages: any[] = [];
+  const withUsage = (reply: Record<string, unknown>, usage?: Record<string, number>) => (usage ? { ...reply, usage } : reply);
+  const { client, rec } = withClient(t, {
+    replies: [
+      withUsage(toolCall('read_page', {}), { prompt_tokens: 4321, completion_tokens: 12 }),
+      toolCall('finish', { outcome: 'done', answer: 'done' })
+    ]
+  });
+  (rec.recorder as any).noteUsage = (u: any) => usages.push(u);
+  await client.startTask('What does item 42 cost?');
+  assert.equal(usages.length, 2, 'one report per model call');
+  assert.deepEqual(usages[0], { promptTokens: 4321, outputTokens: 12, estimated: false });
+  assert.equal(usages[1].estimated, true, 'no usage from the provider: an estimate');
+  assert.ok(usages[1].promptTokens > 1000, `the estimate counts the system prompt, the tools and the history: ${usages[1].promptTokens}`);
+});

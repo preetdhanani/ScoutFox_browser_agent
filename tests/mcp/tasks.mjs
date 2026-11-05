@@ -1,13 +1,11 @@
 /**
- * The smoke tasks. The real ones (`web`) are the use cases: they start on a neutral page and give
- * only a question, and the model (NVIDIA Nemotron by default) picks and opens every real website
- * itself. Two small tasks on the fixture site (tests/fixtures/site/store.html) stay for the offline
- * mock run in CI: a price read, and the same read after the composer's model pick (which also reads
- * the effort menu). They check that the extension loads and a run reaches the page, not use cases. Every task has a `check` that reads the facts of the run (the final answer first) and says whether the run was right, so
- * a run that "finishes" with a wrong answer is not a pass.
- *
- * Shared by smoke.mjs and by the mock's self-test (mockOllama.selftest.mjs), so the mock is
- * judged by the same checks as a real model.
+ * The smoke tasks: the real-model e2e tasks, where a real model (LISA by default) acts in a real
+ * Chromium through the built extension. The open-web ones start on a neutral page and give only a
+ * question, and the model picks and opens every real website itself. Three run on local fixture pages
+ * (tests/fixtures/site/notebook.html and credentials.html) that only a real model can do justice; one
+ * of them (web-chat-chain) has a second turn in the same chat.
+ * Every task has a `check` that reads the facts of the run (the final answer first) and says whether
+ * the run was right, so a run that "finishes" with a wrong answer is not a pass.
  *
  * What a run is, for these checks (runFacts below builds it from what the MCP engine leaves behind: the
  * history of the panel, the plan rows, the calls the model got, and the messages the engine sent to the page):
@@ -21,7 +19,7 @@
  *   steps        the model's tool calls: { step, action, raw, result }. action is the mapped action object the
  *                panel renders (mapToolToAction in src/background/mcp/historyEntries.ts); update_plan has no
  *                action row, it is the plan checklist
- *   calls        the model calls: { total, byNode } (the mock records node 'mcp')
+ *   calls        the model calls: { total, byNode }
  *   toolResults  every tool result the model was sent, in full, in order (from the call records: a history row
  *                is cut to one line, so what the model really read is checked here)
  *   loopNotes    the notes the loop added after a tool block (the reflection, the step limit), in order
@@ -29,66 +27,38 @@
  *   cdpCommands  what the engine sent over the debugger, by method (null when the harness could not count)
  *
  * A task can also carry:
- *   host        the site the start page is served as (mapped to the fixture server by the harness, see
- *               HOST_RULES in twoSources.mjs)
- *   mockModel   the model name to use with --mock (the mock's behaviour can depend on it)
- *   mockOnly    true = left out of the default list of a real-Ollama run
  *   expectLogs  true = the Logs tab is read after the run: model calls and steps as JSON trees, no plumbing
  *   restartWorker  true = after the run the harness stops the service worker, wakes a new one, and
  *               the real side panel must still show the finished run
  *   web         true = a real-model task: an open-web task (a neutral start page and only a question), or
- *               a local fixture task that only a real model can do justice (web-notebook-fix). The default
- *               set of a real-model run (NVIDIA or Ollama); never run with --mock
+ *               a local fixture task (web-notebook-fix, web-credentials-json, web-chat-chain). The default set of a run
  *   heldOut     true = a held-out open-web task: run only with --held-out, never tuned against
  *   sealed      true = a sealed open-web task: run only with --sealed, which shows its verdict and numbers
  *               but never its trace (see the sealed tasks below)
- *   maxRounds   the most model rounds the mock's self-test walks for this task (default 12)
  *   expectOutcome  the final entry the run must end with (default 'finish')
  *   expectFinishOutcome  the outcome the model must name in finish (default 'done' for a web task, none
  *               otherwise; see lib/metrics.mjs). A right-looking answer the model calls "partial" fails
- *   expectMock  with --mock only: the engine's own facts about the run (the action sequence, the plan rows,
- *               whether a click really reached the page) as a list of problems. The mock is deterministic,
- *               so these are exact. `check` judges the ANSWER (what the user reads), `expectMock` judges
- *               what the engine did to get there
+ *   expectCard  what the final card of the side panel must show: { title, classes, body, noBody }
  *   answers     the answers to questions the run asks the user: [{ match: RegExp, answer: string }]
  *   pending     a reason: the task is skipped and does not count as a failure. Its data stays for the stage that
  *               brings it back
- *   before      a task ({page, prompt, check, expectOutcome?, expectMock?}) that runs to its end in the same tab first.
  *   expectPage  async (puppeteer page) => problems: evidence the page itself gives after the run (a
  *               cookie its own button set), read before the tab closes.
- *   blocksClicks  true = the page's consent banner swallows every link click until it is answered. The
- *               self-test walk plays the page that way (the live page does it with its own script)
- *   stopAfterSteps  the harness clicks Stop, like a user, once the run has taken this many steps. The run
- *               then ends with a "Stopped by you" partial_result entry
- *   restartWorkerAfterSteps  the harness stops the service worker in the MIDDLE of the run, once it has taken
- *               this many steps, and wakes a new one. The new worker cannot go on with the run, so it must end
- *               it with an "Interrupted" card
- *   cardShots   true = the final card is also shot in light and dark, tall and as a close-up
- *   manualApprove  true = the run starts with manual plan approval; the harness approves the plan card like a
- *               user, and the run fails if it never stopped at one
- *   clearAfterSteps  the harness presses New chat (CLEAR_HISTORY) once the run has taken this many steps. The
- *               run must stop with it: no more model calls, no rows, and the clean start screen
- *   research    the Research settings the harness sets through the side panel's Settings tab before the run, like a
- *               user: { backend: 'searxng', path } points SearXNG at the fixture's research host (RESEARCH_HOST in
- *               twoSources.mjs) plus that path. The section is screenshotted in light and dark
- *   expectPanelRows  patterns the timeline rows of the side panel must show (one row per pattern), read on the panel
+ *   warn        (run) => notes: printed with the report, never a failure
  *   reachable   addresses a real-model task needs: the harness checks them first and skips the task (not a failure)
  *               when one does not answer, so an offline machine or a site outage never reads as an agent bug
+ *   timeoutMs   the task's own time limit (--timeout overrides it)
+ *   followUp    a second turn in the same tab and the same chat, after the first one ended (see the
+ *               web-chat-chain task): { compact, navigate, prompt, check, noReads, timeoutMs }
+ *                 compact   true = before the second turn the harness opens the context ring's card in
+ *                           the real side panel and clicks "Compact chat", like a user, and waits for the
+ *                           "Chat compacted" row; the second turn's first request must then hold the summary
+ *                 navigate  a fixture page the tab is sent to before the second turn (a page without the fact)
+ *                 prompt    the second turn's prompt
+ *                 check     (run) => boolean, on the facts of the second turn (runFacts)
+ *                 noReads   true = the second turn may not read or look at the page (read_page,
+ *                           get_page_elements, find, take_screenshot): its answer must come from the chat
  */
-
-import { REFLECTION_TEXT, REPEAT_HINT_PREFIX, STALL_AT, STALL_END_TEXT, STALL_TEXT } from '../../src/background/mcp/progress.ts';
-import { LINKS_HEADING } from '../../src/content/pageLinks.ts';
-import { TEXT_ANSWER_TEXT } from '../../src/background/mcp/client.ts';
-import { UNTRUSTED_PREFIX } from '../../src/background/mcp/untrusted.ts';
-import { DOCS_PROSE, LESSON_FACT, MARKUP_SENTINEL } from '../e2e/lib/twoSources.mjs';
-
-/** A task that only ends when the harness ends it (Stop, a worker restart, New chat). */
-export const endedByHarness = (task) => !!(task.stopAfterSteps || task.restartWorkerAfterSteps || task.clearAfterSteps);
-
-/** The problems of a run that should only have waited (the mock's "keep waiting" goal). */
-export const onlyWaits = (run) => (run.steps.length > 0 && run.steps.every((s) => s.action && s.action.action === 'wait')
-  ? []
-  : [`the run's actions were [${run.steps.map((s) => s.action && s.action.action).join(', ')}], expected only waits`]);
 
 /**
  * Where an open-web task starts: a real page with nothing on it about any task, so the model has to
@@ -106,7 +76,7 @@ export function lastTurn(history) {
 }
 
 /**
- * The facts of a run, from what the panel shows. `calls` is the record of the model calls of this run (the mock's, or the
+ * The facts of a run, from what the panel shows. `calls` is the record of the model calls of this run (the
  * proxy's), `tally` what the harness counted at the worker: { messages, cdp } or null.
  *
  * @param {{history: object[], planSteps?: object[], calls?: object[], tally?: {messages: object, cdp: object} | null}} input
@@ -157,7 +127,7 @@ export function runFacts({ history, planSteps, calls, tally, pageClicked = null 
     executions: turn.filter((h) => h.type === 'execution_result').length,
     errors: turn.filter((h) => h.type === 'error').map((h) => h.content),
     calls: { total: modelCalls.length, byNode },
-    // The size of each request in order, as the mock or the proxy measured it (bytes of the body).
+    // The size of each request in order, as the proxy measured it (bytes of the body).
     requestSizes: modelCalls.map((call) => Number(call.requestBytes) || 0),
     // The run state each request ended with ("[Run state] Goal: ..."), in order; null where none.
     runStates: modelCalls.map((call) => (typeof call.runState === 'string' ? call.runState : null)),
@@ -171,65 +141,7 @@ export function runFacts({ history, planSteps, calls, tally, pageClicked = null 
   };
 }
 
-/** The run's tool calls, as the action names the panel renders, exactly these, in this order. */
-export function expectActions(run, names) {
-  const got = run.steps.map((s) => (s.action && s.action.action) || null);
-  return got.length === names.length && got.every((g, i) => g === names[i])
-    ? []
-    : [`the run's actions were [${got.join(', ') || 'none'}], expected [${names.join(', ')}]`];
-}
-
-/**
- * The problems of a run whose actions must each have told the model what they did: every result
- * of these actions, as the model was sent it, must carry an "Observation:" line, and the type
- * must have read the field back.
- */
-export function observationProblems(run, actions) {
-  const problems = [];
-  const results = run.toolResults || [];
-  const observed = results.filter((r) => /\nObservation: /.test(r));
-  if (observed.length < actions.length) {
-    problems.push(`only ${observed.length} tool result(s) the model got carry an "Observation:" line, expected at least ${actions.length} (one per ${actions.join(', ')})`);
-  }
-  if (actions.includes('type') && !results.some((r) => /Field now starts with: "/.test(r))) {
-    problems.push('no type result the model got read the field back ("Field now starts with:")');
-  }
-  return problems;
-}
-
-/** The stuck-recovery task: a dead button, and a run that must notice it and end honestly. */
-export const STUCK_PROMPT = 'Download the monthly sales report as a CSV file with the Download CSV button on this page, and tell me whether it worked.';
-
-/** The most steps a stuck-recovery run may take: the guard must end the loop long before the step limit. */
-export const STUCK_STEP_BUDGET = 10;
-
-/**
- * The problems of a stuck-recovery run: the hint and the reflection reached the model (the
- * reflection exactly once), the run finished within its budget, and the answer is honest.
- */
-export function stuckProblems(run) {
-  const problems = [];
-  const hints = (run.toolResults || []).filter((r) => r.includes(REPEAT_HINT_PREFIX));
-  const reflections = (run.loopNotes || []).filter((n) => n === REFLECTION_TEXT);
-  if (!hints.length) problems.push('no tool result the model got carries the repeat hint');
-  if (reflections.length !== 1) problems.push(`the reflection reached the model ${reflections.length} time(s), expected exactly once`);
-  if (run.steps.length > STUCK_STEP_BUDGET) problems.push(`the run took ${run.steps.length} steps, more than its budget of ${STUCK_STEP_BUDGET}`);
-  const clicks = run.steps.filter((s) => s.action && s.action.action === 'click').length;
-  if (clicks < 2) problems.push(`the run clicked ${clicks} time(s); the scenario needs the dead click repeated`);
-  // The button never worked, so the run could not do the task: the finish says "blocked", and the
-  // card is "Could not finish", never the green "Done" an honest "it did not work" used to get.
-  if (run.finishOutcome !== 'blocked') problems.push(`the finish outcome is ${JSON.stringify(run.finishOutcome)}, expected "blocked" (the button never worked)`);
-  return problems;
-}
-
-/** An honest answer about the dead button: it says it did not work, and never that it did. */
-export const stuckAnswerHonest = (run) => {
-  const a = run.answer || '';
-  return /download csv/i.test(a) && /did not work|didn't work|nothing (on the page )?changed|did nothing/i.test(a)
-    && !/\b(successfully|was downloaded|download (started|completed))\b/i.test(a);
-};
-
-/** The notebook task, for the mock and for the real model alike. */
+/** The notebook task (web-notebook-fix). */
 export const NOTEBOOK_PROMPT = 'Cell 14 of this notebook fails with a permission error. Fix that cell so it installs Ollama without sudo: replace its code with one shell command that downloads ollama-linux-amd64.tar.zst from https://ollama.com/download/ into ~/.local and prints the installed version, run the cell with Shift+Enter, and tell me the version it prints.';
 
 /** What notebook.html must show after a run that fixed cell 14: the new code, run, with the version. */
@@ -246,37 +158,16 @@ export async function notebookPageProblems(page) {
   return problems;
 }
 
-/** The research task: a fact that is only in a file the run has to find and read outside the tab. */
-export const RESEARCH_PROMPT = 'Which archive file does the official Lantern CLI install script download on Linux amd64, and does extracting it need zstd? Use web search and fetch, not just this tab.';
+/** The steps of a run that read or look at the page: a follow-up that answers from the chat makes none. */
+export const PAGE_READ_ACTIONS = ['read_page', 'get_page_elements', 'find_elements', 'take_screenshot'];
+export const pageReadSteps = (run) => run.steps.filter((s) => s.action && PAGE_READ_ACTIONS.includes(s.action.action));
 
-/** The archive name, written only in tests/fixtures/site/research/install.sh. */
-export const RESEARCH_ARCHIVE = 'lantern-linux-amd64-v3.8.1.tar.zst';
+/** The chain task (web-chat-chain): the first turn asks for a count, the second derives a number from that answer. */
+export const CHAIN_FIRST_PROMPT = 'How many certifications does this page list? Answer with the number in one short sentence.';
+export const CHAIN_FOLLOW_UP_PROMPT = 'Take the number of certifications you gave me in your last answer, multiply it by 7, and reply with the result only.';
 
 /** The research steps of a run (web_search and fetch_url), as the panel renders them. */
 export const researchSteps = (run) => run.steps.filter((s) => s.action && (s.action.action === 'web_search' || s.action.action === 'fetch_url'));
-
-/**
- * The problems of a research run: every search and fetch result the model got came in the
- * untrusted envelope, no fetched page carries markup as text (the attribute sentinel of the docs
- * fixture, MARKUP_SENTINEL), and the docs page's prose came through.
- */
-export function researchProblems(run) {
-  const problems = [];
-  const results = run.toolResults || [];
-  const searches = results.filter((r) => /^Web search \(/.test(r));
-  const fetches = results.filter((r) => /^Fetched https?:\/\//.test(r));
-  if (!searches.length) problems.push('no web_search result reached the model');
-  if (!fetches.length) problems.push('no fetch_url result reached the model');
-  for (const r of [...searches, ...fetches]) {
-    const what = r.split('\n')[0].slice(0, 120);
-    if (!r.includes(UNTRUSTED_PREFIX)) problems.push(`a result is not in the untrusted envelope: ${what}`);
-    if (r.includes(MARKUP_SENTINEL)) problems.push(`markup leaked into the text of: ${what}`);
-  }
-  const docs = fetches.find((r) => /^Fetched \S+\/docs\.html /.test(r));
-  if (!docs) problems.push('the docs page was not fetched');
-  else if (!docs.includes(DOCS_PROSE)) problems.push(`the docs page text lost its prose ("${DOCS_PROSE}")`);
-  return problems;
-}
 
 /** The certifications task: a JSON file whose URLs are only in the links' targets, never in the page text. */
 export const CREDENTIALS_PROMPT = 'Make me a JSON file of the certifications on this page: for each certificate its name, issue date and credential URL.';
@@ -298,7 +189,7 @@ export const CREDENTIALS = [
 /**
  * The problems of a JSON text that should list the ten credentials: it must parse, be a list, and
  * hold every credential's name, issue date (the month and year, with or without "Issued") and its
- * exact URL. Used on the finish row's file and on the file the harness downloaded from the panel.
+ * exact URL. Used on the files the finish row hands over.
  */
 export function credentialsFileProblems(text) {
   let data;
@@ -320,7 +211,6 @@ export function credentialsFileProblems(text) {
   return problems;
 }
 
-/** The problems of a run that should have planned, read the links, saved, marked and written certifications.json. */
 /**
  * The file is attached and the panel previews it, so the answer must not paste it again
  * (ATTACHED_FILE_RULE): at most two of the credential URLs may be in the answer.
@@ -330,413 +220,9 @@ export function answerRepeatProblems(answer) {
   return repeated > 2 ? [`the answer repeats ${repeated} of the ${CREDENTIALS.length} credential URLs; the file is attached, so it should show at most two`] : [];
 }
 
-export function credentialsRunProblems(run) {
-  const problems = [...answerRepeatProblems(run.answer)];
-  const file = run.files.find((f) => f.name === 'certifications.json');
-  if (!file) problems.push(`the finish handed over no certifications.json (files: ${run.files.map((f) => f.name).join(', ') || 'none'})`);
-  else problems.push(...credentialsFileProblems(file.content).map((p) => `certifications.json: ${p}`));
-  const read = (run.toolResults || []).find((r) => r.includes(LINKS_HEADING));
-  if (!read) problems.push(`no read the model got lists the links ("${LINKS_HEADING}")`);
-  else for (const [, , url] of CREDENTIALS) if (!read.includes(url)) problems.push(`the links block of the read lacks ${url}`);
-  const silent = run.steps.filter((s) => s.action && s.action.action !== 'finish' && !s.thought.trim());
-  if (silent.length) problems.push(`${silent.length} step(s) carry no reason: ${silent.map((s) => s.action.action).join(', ')}`);
-  if (!run.plan.length || run.plan.some((st) => st.status !== 'completed')) problems.push(`the plan does not end with every step done: ${JSON.stringify(run.plan)}`);
-  return problems;
-}
-
-/** The task of a field the page never shows: a model that reads element after element must be stopped by the stall note. */
-export const WANDER_PROMPT = 'For each certification on this page, tell me the date its credential expires.';
-
-/** The most steps a stall run may take: the stall comes after STALL_AT steps, the finish soon after. */
-export const STALL_STEP_BUDGET = STALL_AT + 4;
-
-/** The problems of a run that must have stalled once, and been told so exactly once. */
-export function stallProblems(run, outcome) {
-  const problems = [];
-  const notes = (run.loopNotes || []).filter((n) => n === STALL_TEXT);
-  if (notes.length !== 1) problems.push(`the stall note reached the model ${notes.length} time(s), expected exactly once`);
-  if (run.steps.length > STALL_STEP_BUDGET) problems.push(`the run took ${run.steps.length} steps, more than its budget of ${STALL_STEP_BUDGET}`);
-  if (run.finishOutcome !== outcome) problems.push(`the finish outcome is ${JSON.stringify(run.finishOutcome)}, expected "${outcome}"`);
-  return problems;
-}
-
-/** The long-read task: many rounds of reads, so the request size shows whether old results are shortened. */
-export const LONG_READ_PROMPT = 'Check the certifications on this page twelve times and save each check.';
-
-/**
- * The problems of a long run's request sizes. Without the compaction every request is bigger than
- * the one before (each read brings the whole page back); with it, the requests after the first
- * compaction stay about as big as the largest one before it.
- */
-export function compactionProblems(run) {
-  const sizes = run.requestSizes || [];
-  if (sizes.length < 20) return [`the run made ${sizes.length} model calls, too few to show the compaction (20 or more)`];
-  const before = Math.max(...sizes.slice(0, 13));
-  const after = Math.max(...sizes.slice(13));
-  const shrank = sizes.some((n, i) => i > 0 && n < sizes[i - 1]);
-  const problems = [];
-  if (!shrank) problems.push(`no request was smaller than the one before it (sizes ${sizes.join(', ')}): old results were never shortened`);
-  if (after > before * 1.25) problems.push(`the requests grew to ${after} bytes after round 13, more than 1.25 times the largest before it (${before}): the context is not bounded`);
-  return problems;
-}
-
 // ---- the tasks ----------------------------------------------------------------------------------
 
 export const TASKS = {
-  'user-stop': {
-    // The user clicks Stop mid-run. The card must say so, not "Failed: the run ended with an error".
-    page: 'store.html',
-    prompt: 'Keep waiting on this page until I stop you.',
-    mockOnly: true,
-    stopAfterSteps: 1,
-    expectOutcome: 'partial_result',
-    expectCard: { title: 'Stopped by you' },
-    cardShots: true,
-    check: () => true,
-    expectMock: onlyWaits
-  },
-  'worker-restart-midrun': {
-    // Chrome stops the worker in the middle of a run (an idle worker after about 30 s, or an
-    // update). The new worker cannot go on with the run, but the panel must end it with a card
-    // that says why, never an idle thread with no ending.
-    page: 'store.html',
-    prompt: 'Keep waiting on this page until I stop you.',
-    mockOnly: true,
-    restartWorkerAfterSteps: 2,
-    expectOutcome: 'partial_result',
-    expectCard: { title: 'Interrupted', classes: ['partial'] },
-    cardShots: true,
-    check: (run) => /restarted/i.test(run.answer || ''),
-    expectMock: onlyWaits
-  },
-  'clear-midrun': {
-    // The user presses New chat while a run is going. The run must stop with it, and the thread
-    // stays clean: no more model calls and no rows written back into it.
-    page: 'store.html',
-    prompt: 'Keep waiting on this page until I stop you.',
-    mockOnly: true,
-    clearAfterSteps: 1,
-    check: () => true,
-    expectMock: (run) => (run.rows.length === 0 ? [] : [`the cleared thread has ${run.rows.length} row(s) again`])
-  },
-  'far-link': {
-    // frame.work in small: identical "Configure now" links far below the first screen. Only the
-    // link path says which one is the Laptop 16, and the click has to reach a link off the screen.
-    page: 'far-link.html',
-    prompt: 'Open the Configure now link for the Framework Laptop 16 and tell me what that page says.',
-    mockOnly: true,
-    check: (run) => /For in-stock laptop/.test(run.answer || ''),
-    expectMock: (run) => expectActions(run, ['find_elements', 'click', 'read_page', 'finish'])
-  },
-  'consent-link': {
-    // frame.work's cookie banner swallows every click until it is answered. The click must say the
-    // link did not open, so the run answers the banner instead of believing it arrived.
-    page: 'consent-link.html',
-    prompt: 'Open the configurator of the Framework Laptop 16 and tell me what that page says.',
-    mockOnly: true,
-    blocksClicks: true,
-    check: (run) => /For in-stock laptop/.test(run.answer || ''),
-    expectMock: (run) => expectActions(run, ['find_elements', 'click', 'find_elements', 'click', 'find_elements', 'click', 'read_page', 'finish'])
-  },
-  'editor-replace': {
-    // A notebook cell like CodeMirror: its text lives in its own model and only trusted input
-    // changes it. The run clicks into it, selects all with a real key, types without an element
-    // id (into the focused editor), runs it with Shift+Enter and reads the output line. Every
-    // action's result must carry the observation line, and the page itself is the witness.
-    page: 'editor.html',
-    prompt: 'In the code editor on this page, replace the whole code with: echo scoutfox. Then run the cell with Shift+Enter and tell me the output line.',
-    mockOnly: true,
-    cardShots: true,
-    check: (run) => /Out \[2\]: scoutfox/.test(run.answer || ''),
-    expectMock: (run) => [
-      ...expectActions(run, ['get_page_elements', 'click', 'press_key', 'type', 'press_key', 'read_page', 'finish']),
-      ...observationProblems(run, ['click', 'press_key', 'type', 'press_key'])
-    ],
-    expectPage: async (page) => {
-      const state = await page.evaluate(() => ({ text: document.body.getAttribute('data-editor-text'), out: document.getElementById('output').textContent, log: document.body.getAttribute('data-editor-log') }));
-      const problems = [];
-      if (state.text !== 'echo scoutfox') problems.push(`the editor holds ${JSON.stringify(state.text)}, expected exactly "echo scoutfox" (replaced, not appended); its edits: ${state.log}`);
-      if (state.out !== 'Out [2]: scoutfox') problems.push(`the output line is ${JSON.stringify(state.out)}, expected "Out [2]: scoutfox" (the cell did not run with a trusted Shift+Enter)`);
-      return problems;
-    }
-  },
-  'notebook-fix': {
-    // JupyterLab in small: the page never scrolls, the cells do, inside a panel; every cell is a
-    // real CodeMirror 6 editor, and a kernel status ticks all the time. Cell 14 fails with the
-    // apt/sudo permission error. The run scrolls the panel (and the scroll must say what really
-    // moved), reads the page in parts (part 2 holds cell 14), clicks into the cell, selects all
-    // with a real key, types the fix into the focused editor, runs it with Shift+Enter and reads
-    // the output. The page itself is the witness of the edit and the run.
-    page: 'notebook.html',
-    prompt: NOTEBOOK_PROMPT,
-    mockOnly: true,
-    cardShots: true,
-    maxRounds: 16,
-    check: (run) => /ollama version 0\.40\.11/.test(run.answer || ''),
-    expectMock: (run) => [
-      ...expectActions(run, ['scroll', 'read_page', 'read_page', 'get_page_elements', 'click', 'press_key', 'type', 'press_key', 'read_page', 'finish']),
-      ...observationProblems(run, ['scroll', 'click', 'press_key', 'type', 'press_key'])
-    ],
-    expectPage: notebookPageProblems
-  },
-  'frame-lesson': {
-    // A course shell like a learning platform: the shell does not scroll, and the lesson is an
-    // iframe from another origin. The code is only in the frame, so the run must read into it,
-    // see it in the picture (not a mask over the whole frame), and scroll it.
-    page: 'frame-lesson.html',
-    prompt: 'What is the review code of this lesson? Look at the page, read it and scroll to the end.',
-    mockOnly: true,
-    expectShot: true,
-    check: (run) => (run.answer || '').includes(LESSON_FACT),
-    expectMock: (run) => [
-      ...expectActions(run, ['take_screenshot', 'read_page', 'scroll', 'finish']),
-      ...observationProblems(run, ['scroll'])
-    ],
-    // Where the first screenshot (taken before the scroll) had the lesson and its password field,
-    // as shares of the viewport: the lesson must be visible, the field covered.
-    shotPixels: async (page) => {
-      const frame = page.frames().find((f) => /frame-lesson-body/.test(f.url()));
-      if (!frame) throw new Error('the lesson frame is not on the page');
-      const outer = await page.evaluate(() => {
-        const r = document.getElementById('lesson').getBoundingClientRect();
-        return { left: r.left, top: r.top, w: window.innerWidth, h: window.innerHeight };
-      });
-      const inner = await frame.evaluate(() => {
-        const at = (el) => {
-          const r = el.getBoundingClientRect();
-          return { x: r.left + r.width / 2, y: r.top + window.scrollY + r.height / 2 };
-        };
-        const filler = document.querySelector('.filler').getBoundingClientRect();
-        return { field: at(document.querySelector('input[type=password]')), lesson: { x: filler.left + 40, y: filler.top + window.scrollY + 40 } };
-      });
-      const share = (p) => ({ fx: (outer.left + p.x) / outer.w, fy: (outer.top + p.y) / outer.h });
-      return [
-        { name: 'the lesson inside the cross-origin frame', expect: 'visible', ...share(inner.lesson) },
-        { name: 'the password field inside the frame', expect: 'covered', ...share(inner.field) }
-      ];
-    },
-    expectPage: async (page) => {
-      const frame = page.frames().find((f) => /frame-lesson-body/.test(f.url()));
-      if (!frame) return ['the lesson frame is not on the page'];
-      const scrolled = await frame.evaluate(() => window.scrollY);
-      return scrolled > 0 ? [] : ['the lesson frame was never scrolled'];
-    }
-  },
-  'virtual-scroll': {
-    // A windowed list (only the rows near the view are in the DOM) inside a panel, on a page that
-    // does not scroll. The target row is far down: the run must scroll the list, and each scroll
-    // must really move it, until the row is drawn and can be read.
-    page: 'virtual-list.html',
-    prompt: 'Scroll the order list until you find the order from Zanzibar Spice Co., and tell me its order number and status.',
-    mockOnly: true,
-    maxRounds: 30,
-    check: (run) => /41096/.test(run.answer || '') && /refund approved/i.test(run.answer || ''),
-    expectMock: (run) => {
-      const actions = run.steps.map((s) => (s.action && s.action.action) || null);
-      const scrolls = actions.filter((a) => a === 'scroll').length;
-      const problems = [];
-      if (actions[0] !== 'scroll') problems.push(`the run did not start with a scroll: [${actions.join(', ')}]`);
-      if (scrolls < 3) problems.push(`the run scrolled ${scrolls} time(s); the row is far down, so it takes at least 3`);
-      if (actions.some((a) => a !== 'scroll' && a !== 'read_page' && a !== 'finish')) problems.push(`unexpected actions: [${actions.join(', ')}]`);
-      return [...problems, ...observationProblems(run, Array.from({ length: scrolls }, () => 'scroll'))];
-    },
-    expectPage: async (page) => {
-      const state = await page.evaluate(() => ({
-        top: document.getElementById('orders').scrollTop,
-        drawn: Number(document.body.getAttribute('data-rows-drawn')),
-        target: [...document.querySelectorAll('#orders .row')].some((r) => /Zanzibar Spice Co\./.test(r.textContent))
-      }));
-      const problems = [];
-      if (!(state.top > 0)) problems.push('the order list was never scrolled');
-      if (!(state.drawn > 0 && state.drawn <= 40)) problems.push(`the list drew ${state.drawn} rows; it is a windowed list, so it draws only the rows near the view`);
-      if (!state.target) problems.push('the Zanzibar Spice Co. row is not drawn: the list did not end where the run read it');
-      return problems;
-    }
-  },
-  'stuck-recovery': {
-    // A dead button: its handler fails silently, so every click changes nothing. A stubborn model
-    // clicks it again and again (a real run repeated click(700,420) six times). The loop must tell
-    // it so: a repeat hint on the second quiet click, then one reflection note, and the run ends
-    // honestly within its budget, long before the step limit.
-    page: 'dead-button.html',
-    prompt: STUCK_PROMPT,
-    mockOnly: true,
-    cardShots: true,
-    expectCard: { title: 'Could not finish', classes: ['blocked'] },
-    check: stuckAnswerHonest,
-    expectMock: stuckProblems,
-    expectPage: async (page) => {
-      const text = await page.evaluate(() => document.body.innerText);
-      return /Download CSV/.test(text) ? [] : ['the report page lost its Download CSV button'];
-    }
-  },
-  'stuck-recovery-manual': {
-    // The same dead button with manual approval: the plan card must come up and be approved by
-    // the user (the harness), and the guard must never get past it or ask the user anything else.
-    page: 'dead-button.html',
-    prompt: STUCK_PROMPT,
-    mockOnly: true,
-    manualApprove: true,
-    expectCard: { title: 'Could not finish', classes: ['blocked'] },
-    check: stuckAnswerHonest,
-    expectMock: (run) => [
-      ...stuckProblems(run),
-      ...(run.plan.length === 2 ? [] : [`the plan has ${run.plan.length} row(s), expected the 2 the user approved`])
-    ]
-  },
-  'research-then-answer': {
-    // Research outside the tab: the fact (the archive name) is only in an install script on
-    // another site. The run searches the web (SearXNG, set in Settings > Research like a user
-    // would, pointing at the fixture's search endpoint), fetches the script from the service
-    // worker, and answers with the name. The tab stays on the store page the whole time.
-    page: 'store.html',
-    prompt: RESEARCH_PROMPT,
-    mockOnly: true,
-    research: { backend: 'searxng', path: '/research' },
-    cardShots: true,
-    expectPanelRows: [/^Searched the web: /, /^Read Install the Lantern CLI - Lantern docs \(docs\.lantern\.test\)/, /^Read install\.sh \(docs\.lantern\.test\)/],
-    check: (run) => (run.answer || '').includes(RESEARCH_ARCHIVE) && /zstd/i.test(run.answer || ''),
-    expectMock: (run) => [...expectActions(run, ['web_search', 'fetch_url', 'fetch_url', 'finish']), ...researchProblems(run)],
-    expectPage: async (page) => (/\/store\.html$/.test(page.url()) ? [] : [`the tab moved to ${page.url()}: research must leave the tab alone`])
-  },
-  'partial-answer': {
-    // Two facts asked, and the page has only one: the run answers the price and says the battery
-    // life is not on the page. The finish says "partial", and the card is the amber "Partly done".
-    // The price is written as inline code, so the card shot also shows a rendered code span.
-    page: 'store.html',
-    prompt: 'What does the Framework Laptop 16 cost on this page, and how many hours does its battery last?',
-    mockOnly: true,
-    cardShots: true,
-    // The inline code is rendered: the reader sees the price, and never the backticks around it.
-    expectCard: { title: 'Partly done', classes: ['partial'], body: { 'name the price': '1\\.399,00 EUR' }, noBody: ['`'] },
-    check: (run) => /1\.399,00 EUR/.test(run.answer || '') && /battery/i.test(run.answer || ''),
-    expectMock: (run) => [
-      ...expectActions(run, ['read_page', 'finish']),
-      ...(run.finishOutcome === 'partial' ? [] : [`the finish outcome is ${JSON.stringify(run.finishOutcome)}, expected "partial" (the battery is not on the page)`])
-    ]
-  },
-  'credentials-json': {
-    // The case of a real run that read 74 elements and never finished: a JSON file of the
-    // certifications with their credential URLs. The URLs are only in the links' targets, so the
-    // read must list them; the run plans, saves the records, marks its steps, and the finish
-    // writes them to certifications.json, which the user downloads from the card.
-    page: 'credentials.html',
-    prompt: CREDENTIALS_PROMPT,
-    mockOnly: true,
-    cardShots: true,
-    expectCard: { title: 'Done' },
-    expectPanelRows: [/^Saved 10 new records \(10 in total\)/],
-    expectDownload: { name: 'certifications.json', problems: credentialsFileProblems, previewHas: CREDENTIALS.map(([name]) => name) },
-    // The answer reads as a reply: a json code box with Copy, coloured keys, and a link that opens in a new tab.
-    expectAnswerBox: { lang: 'json', json: true, link: true },
-    check: (run) => /certifications\.json/.test(run.answer || ''),
-    expectMock: (run) => [...expectActions(run, ['read_page', 'save_data', 'finish']), ...credentialsRunProblems(run)]
-  },
-  'stall-wander': {
-    // The same page, asked for a field it never shows. The scripted model reads element after
-    // element like the real run did; only the stall note stops it, and it ends honestly.
-    page: 'credentials.html',
-    prompt: WANDER_PROMPT,
-    mockOnly: true,
-    cardShots: true,
-    expectCard: { title: 'Partly done', classes: ['partial'] },
-    check: (run) => /does not show when any credential expires/.test(run.answer || ''),
-    expectMock: (run) => stallProblems(run, 'partial')
-  },
-  'stall-out': {
-    // A model that does not listen: it goes on reading after the stall note. The second stall in
-    // a row ends the run with a last round that offers only finish, and the card is honest.
-    page: 'credentials.html',
-    prompt: 'For each certification on this page, tell me the name of the person who signed it.',
-    mockOnly: true,
-    maxRounds: 24,
-    cardShots: true,
-    expectCard: { title: 'Partly done', classes: ['partial'] },
-    check: (run) => /does not say who signed/.test(run.answer || ''),
-    expectMock: (run) => {
-      const problems = [];
-      const first = (run.loopNotes || []).filter((n) => n === STALL_TEXT).length;
-      const end = (run.loopNotes || []).filter((n) => n === STALL_END_TEXT).length;
-      if (first !== 1) problems.push(`the stall note reached the model ${first} time(s), expected exactly once`);
-      if (end !== 1) problems.push(`the run-ending stall note reached the model ${end} time(s), expected exactly once`);
-      if (run.steps.length > STALL_AT * 2 + 2) problems.push(`the run took ${run.steps.length} steps, more than ${STALL_AT * 2 + 2}`);
-      if (run.finishOutcome !== 'partial') problems.push(`the finish outcome is ${JSON.stringify(run.finishOutcome)}, expected "partial"`);
-      return problems;
-    }
-  },
-  'stall-recover': {
-    // The stall note is a nudge, not an end: after it the scripted model reads the page once,
-    // saves what it needs and finishes done.
-    page: 'credentials.html',
-    prompt: 'List the certifications on this page with the issuer of each.',
-    mockOnly: true,
-    expectPanelRows: [/^Saved 10 new records \(10 in total\)/],
-    check: (run) => /10 certifications/.test(run.answer || ''),
-    expectMock: (run) => stallProblems(run, 'done')
-  },
-  'text-then-finish': {
-    // A model that answers in text after its steps: the run asks it once to finish with an
-    // outcome, so the card can say how the run went.
-    page: 'credentials.html',
-    prompt: 'How many certifications does this page list?',
-    mockOnly: true,
-    check: (run) => /lists 10 certifications/.test(run.answer || ''),
-    expectMock: (run) => [
-      ...((run.loopNotes || []).filter((n) => n === TEXT_ANSWER_TEXT).length === 1 ? [] : ['the note asking for finish after a text answer did not reach the model exactly once']),
-      ...(run.finishOutcome === 'done' ? [] : [`the finish outcome is ${JSON.stringify(run.finishOutcome)}, expected "done"`])
-    ]
-  },
-  'bad-json': {
-    // A hand-written JSON file with a trailing comma: the engine refuses it with the reason, the
-    // model writes it again, and the file the user downloads parses.
-    page: 'credentials.html',
-    prompt: 'Write me a small JSON file with the names of the first two certifications on this page.',
-    mockOnly: true,
-    expectDownload: {
-      name: 'first-two.json',
-      problems: (text) => {
-        try {
-          const list = JSON.parse(text);
-          return Array.isArray(list) && list.length === 2 ? [] : [`the file holds ${JSON.stringify(list).slice(0, 80)}, expected two records`];
-        } catch (err) {
-          return [`the file is not valid JSON: ${err.message}`];
-        }
-      }
-    },
-    check: () => true,
-    expectMock: (run) => [
-      ...((run.toolResults || []).some((r) => /is not valid JSON/.test(r)) ? [] : ['the broken JSON file was never refused']),
-      ...(run.files.length === 1 && run.files[0].name === 'first-two.json' ? [] : [`the finish handed over ${run.files.map((f) => f.name).join(', ') || 'no file'}, expected first-two.json`])
-    ]
-  },
-  'long-read': {
-    // Thirteen reads of the whole page, each saved: the context compaction must keep the requests
-    // bounded instead of growing with every read.
-    page: 'credentials.html',
-    prompt: LONG_READ_PROMPT,
-    mockOnly: true,
-    maxRounds: 32,
-    check: (run) => /checked the certifications 13 times/.test(run.answer || ''),
-    expectMock: compactionProblems
-  },
-  'store-price': {
-    page: 'store.html',
-    prompt: 'What does the Framework Laptop 16 cost on this page? Give the price exactly as the page shows it.',
-    check: (run) => /1\.399,00 EUR/.test(run.answer || ''),
-    expectMock: (run) => expectActions(run, ['read_page', 'finish'])
-  },
-  'model-pick': {
-    // The composer's model picker, used like a user would before sending anything: the model
-    // name opens the provider's model list, a pick configures it. The task itself is the plain
-    // price question, so the run also proves the picked model actually executed.
-    page: 'store.html',
-    prompt: 'What does the Framework Laptop 16 cost on this page? Give the price exactly as the page shows it.',
-    modelPick: true,
-    // The composer's effort menu: the levels the model takes, the chosen one, the note (smoke.mjs).
-    effortMenu: true,
-    check: (run) => /1\.399,00 EUR/.test(run.answer || ''),
-    expectMock: (run) => expectActions(run, ['read_page', 'finish'])
-  },
   // ---------------------------------------------------------------------------------------------
   // The open web. Each task starts on a neutral page that has nothing to do with the question
   // (WEB_START), and the prompt is only the question: which site to open, what to search, where to
@@ -799,7 +285,7 @@ export const TASKS = {
   'web-notebook-fix': {
     // The JupyterLab case on the local notebook fixture, with the real model: an inner scroll
     // panel, CodeMirror 6 cells, a ticking kernel status, and the apt/sudo error in cell 14. Not
-    // an open-web question, but it runs with the real model only (the mock has notebook-fix).
+    // an open-web question, but a task only a real model can do justice.
     page: 'notebook.html',
     web: true,
     prompt: NOTEBOOK_PROMPT,
@@ -815,8 +301,29 @@ export const TASKS = {
     prompt: CREDENTIALS_PROMPT,
     timeoutMs: 6 * 60 * 1000,
     check: (run) => run.files.some((f) => /\.json$/i.test(f.name) && credentialsFileProblems(f.content).length === 0),
-    // A real model may still paste the file: a note, not a failure (the mock checks it hard).
+    // A real model may still paste the file: a note, not a failure.
     warn: (run) => answerRepeatProblems(run.answer)
+  },
+  'web-chat-chain': {
+    // A chat is a chain: a second request in the same chat gets the earlier turns (here, after a
+    // Compact, their summary). Turn 1 counts the certifications on credentials.html. The harness then
+    // compacts the chat through the context ring's card like a user, and sends the tab to
+    // notebook.html, a page that does not have the fact. Turn 2 must derive its answer from turn 1's
+    // (10 x 7 = 70) without reading or looking at the page, and its first request must hold the summary.
+    page: 'credentials.html',
+    web: true,
+    prompt: CHAIN_FIRST_PROMPT,
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => /\b10\b|\bten\b/i.test(run.answer || ''),
+    followUp: {
+      compact: true,
+      navigate: 'notebook.html',
+      prompt: CHAIN_FOLLOW_UP_PROMPT,
+      noReads: true,
+      timeoutMs: 4 * 60 * 1000,
+      // 70, and no other number than the 10 and the 7 it comes from.
+      check: (run) => /\b70\b/.test(run.answer || '') && !/\d/.test(String(run.answer || '').replace(/\b(?:70|10|7)\b/g, ''))
+    }
   },
   'web-research-archive': {
     // The fact the JupyterLab run guessed wrong (a 404 URL): the name of Ollama's Linux archive.

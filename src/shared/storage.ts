@@ -68,7 +68,10 @@ export interface Settings {
   llmTimeoutMs: number;
   ollamaNumCtx: number;
   ollamaNumPredict: number;
-  /** Per-provider per-model context window override. Keyed by "provider|model". */
+  /**
+   * The context window the user set per model, keyed by "provider|model". In saveSettings a value
+   * of null or 0 removes that key (the Settings field emptied); the other keys stay.
+   */
   contextWindow?: Record<string, number>;
   actionDelayMs: number;
   autoScroll: boolean;
@@ -144,6 +147,23 @@ interface ModelsCacheEntry {
 }
 
 type ModelsCache = Record<string, ModelsCacheEntry>;
+
+/** The context windows the model lists named, by provider id, then model id (llm/models.ts). */
+type ModelsCtxCache = Record<string, Record<string, number>>;
+
+/**
+ * The user's windows after a save: the stored ones, with each key of `patch` set to its value, or
+ * removed when the value is null, 0 or not a number above zero. No patch keeps the stored map.
+ */
+export function mergeContextWindow(stored: Record<string, number> | undefined, patch: Record<string, number | null> | undefined): Record<string, number> {
+  const out: Record<string, number> = { ...(stored || {}) };
+  for (const [key, value] of Object.entries(patch || {})) {
+    const n = Number(value);
+    if (value !== null && Number.isFinite(n) && n > 0) out[key] = Math.round(n);
+    else delete out[key];
+  }
+  return out;
+}
 
 export const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', model: 'anthropic/claude-3.5-sonnet' },
@@ -456,7 +476,7 @@ export const Storage = {
       baseUrl,
       model,
       providerConfigs: updatedProviderConfigs,
-      contextWindow: current.contextWindow,
+      contextWindow: mergeContextWindow(current.contextWindow, newSettings.contextWindow as Record<string, number | null> | undefined),
       // A partial research object changes only the fields it names.
       research: normalizeResearch({ ...current.research, ...(newSettings.research || {}) })
     };
@@ -514,6 +534,34 @@ export const Storage = {
       } else {
         resolve();
       }
+    });
+  },
+
+  /** The context windows a provider's model list named, by model id, or null when none is kept. */
+  async getCachedContextWindows(provider: string): Promise<Record<string, number> | null> {
+    return new Promise((resolve) => {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+        resolve(null);
+        return;
+      }
+      chrome.storage.local.get<{ models_ctx_cache?: ModelsCtxCache }>(['models_ctx_cache'], (res) => {
+        resolve(res?.models_ctx_cache?.[provider] || null);
+      });
+    });
+  },
+
+  /** Keeps the context windows a provider's model list named (replacing that provider's earlier ones). */
+  async saveCachedContextWindows(provider: string, windows: Record<string, number>): Promise<void> {
+    return new Promise((resolve) => {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+        resolve();
+        return;
+      }
+      chrome.storage.local.get<{ models_ctx_cache?: ModelsCtxCache }>(['models_ctx_cache'], (res) => {
+        const cache = res?.models_ctx_cache || {};
+        cache[provider] = { ...windows };
+        chrome.storage.local.set({ models_ctx_cache: cache }, () => resolve());
+      });
     });
   },
 

@@ -142,6 +142,8 @@
               </button>
 
               <div class="composer-meta">
+                <!-- Context meter: how much of the model's context window this chat uses. Opens #contextMenu. -->
+                <button type="button" class="composer-ring" id="btnContext" aria-haspopup="dialog" aria-expanded="false" aria-controls="contextMenu" aria-label="Context: 0% of 256K used" title="Context: 0% of 256K used"><span class="composer-ring-slot" id="contextRing"></span></button>
                 <button type="button" class="composer-meta-btn" id="btnEffort" aria-haspopup="menu" aria-expanded="false" title="How hard the model thinks">Medium</button>
                 <span class="composer-sep">·</span>
                 <button type="button" class="composer-model" id="composerModel" aria-haspopup="menu" aria-expanded="false" title="Model">qwen3.8:27b-mlx</button>
@@ -181,6 +183,9 @@
               <button type="button" class="menu-item" data-effort="max" role="menuitemradio" aria-checked="false"><span class="menu-label">Max</span><span class="menu-check" aria-hidden="true"></span></button>
               <div class="menu-note" id="effortMenuNote"></div>
             </div>
+
+            <!-- Context card: the bar of this chat, the window and where it comes from, and Compact (sidepanel/contextMeter.js). -->
+            <div class="menu ctx-menu" id="contextMenu" role="dialog" aria-label="Context of this chat" hidden></div>
 
             <!-- Model menu: every model of the chosen provider, scrollable, plus a hand-typed id -->
             <div class="menu menu-scroll" id="modelMenu" role="menu" hidden>
@@ -272,6 +277,13 @@
             <select id="modelSelect" class="form-select" style="display: none;"></select>
             <input type="text" id="modelCustomInput" class="form-input" style="display: none; margin-top: 6px;" placeholder="Or type custom model name...">
             <span class="subtext-hint" id="modelFetchStatus">Click model box to search and select</span>
+          </div>
+
+          <!-- The context window of the chosen model: what the composer's ring measures against. -->
+          <div class="form-group" id="contextWindowGroup">
+            <label class="form-label" for="contextWindowInput">Context window (tokens)</label>
+            <input type="text" id="contextWindowInput" class="form-input" placeholder="From the provider, or 256K" autocomplete="off" spellcheck="false" inputmode="text">
+            <span class="subtext-hint" id="contextWindowHint">Takes 200000, 200K or 1M. Empty uses the provider's number. For Ollama it is also num_ctx.</span>
           </div>
 
           <!-- Advanced Tuning -->

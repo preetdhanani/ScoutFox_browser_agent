@@ -11,7 +11,7 @@
 // storage.local list) is the long-term record. Its quota (10 MB) is shared by every tab, so one
 // thread is held to RUN_SNAPSHOT_MAX_CHARS.
 import type { StorageSessionArea } from './actionJournal.ts';
-import type { HistoryEntry, RunStatus } from '../types.ts';
+import type { HistoryEntry, RunStats, RunStatus } from '../types.ts';
 import { Logger } from '../../shared/logger.ts';
 
 export interface RunSnapshot {
@@ -22,6 +22,10 @@ export interface RunSnapshot {
   stepCount: number;
   pauseReason: 'user' | 'llm_failure' | 'worker_restart' | null;
   stateVersion: number;
+  /** The tokens of the last model call of the task, for the context meter (absent in older snapshots). */
+  lastCall?: { promptTokens: number; outputTokens: number; estimated: boolean } | null;
+  /** The task's counts (model calls, tokens in and out); absent in older snapshots. */
+  runStats?: RunStats | null;
   savedAt: number;
 }
 
@@ -51,19 +55,31 @@ function slimRow(row: HistoryEntry): HistoryEntry {
 
 /**
  * The snapshot made to fit the per-thread budget: large fields first, then the oldest turns
- * (a turn starts at a user_goal row), never the last turn.
+ * (a turn starts at a user_goal row), never the last turn. The last chat_compacted row is kept
+ * whatever is cut: its summary is what the chain of the next request starts from.
  */
 export function fitSnapshot(snapshot: RunSnapshot, maxChars = RUN_SNAPSHOT_MAX_CHARS): RunSnapshot {
   let history = snapshot.history.map(slimRow);
+  let compacted: HistoryEntry | null = null;
+  for (let i = history.length - 1; i >= 0 && !compacted; i--) if (history[i].type === 'chat_compacted') compacted = history[i];
+  /** The rows from `at` on, with the last compacted row in front when the cut took it. */
+  const keepFrom = (at: number) => {
+    const rest = history.slice(at);
+    return compacted && !rest.includes(compacted) ? [compacted, ...rest] : rest;
+  };
   let fitted = { ...snapshot, history };
   while (JSON.stringify(fitted).length > maxChars) {
-    const secondGoal = history.findIndex((row, i) => i > 0 && row.type === 'user_goal');
+    const goals = history.map((row, i) => (row.type === 'user_goal' ? i : -1)).filter((i) => i >= 0);
+    // The cut starts at the second turn; rows before the first turn (the kept compacted row) do not count as one.
+    const secondGoal = goals.length >= 2 ? goals[1] : -1;
     if (secondGoal <= 0) {
       // One turn too large on its own: keep its newest rows.
-      history = history.slice(Math.ceil(history.length / 4));
+      const next = keepFrom(Math.ceil(history.length / 4));
+      if (next.length >= history.length) break;
+      history = next;
       if (history.length <= 1) break;
     } else {
-      history = history.slice(secondGoal);
+      history = keepFrom(secondGoal);
     }
     fitted = { ...snapshot, history };
   }

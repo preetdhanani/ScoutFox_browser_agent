@@ -624,7 +624,7 @@ test('navigate returns the text of the page it opened, so the model needs no rea
 test('a link click that does not change the page carries no page text, and says the link did not open', async (t) => {
   // The fake page cannot follow a CDP click, so the click stays on the page: its result must not
   // claim a new page, and must say the link did not open (a consent banner swallows clicks like
-  // that). The click that opens one is checked on real Chromium (far-link, consent-link).
+  // that). The click that opens one is checked on real Chromium by the real-model e2e tasks.
   const { server, runtime } = withPage(t);
   realisticLoads(runtime);
   await server.callTool('get_page_elements', {});

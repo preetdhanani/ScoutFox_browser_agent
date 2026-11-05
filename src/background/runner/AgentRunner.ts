@@ -16,10 +16,41 @@ import { TOP_FRAME } from '../browser/frames.ts';
 import { NetworkBuffers } from '../browser/network.ts';
 import { ensureScoutFoxGroup, isTabInScope, groupIdForWindow } from '../browser/groups.ts';
 import { takeSnapshot } from '../browser/snapshot.ts';
-import { ScoutFoxMCPClient } from '../mcp/client.ts';
+import { ScoutFoxMCPClient, idleRequestTokens, type CallUsage } from '../mcp/client.ts';
 import { STOPPED_TEXT, partialResultEntry } from '../mcp/historyEntries.ts';
+import { CHAIN_WINDOW_SHARE, COMPACT_PROMPT, COMPACT_SYSTEM, chainTokens, chainTurns, compactionInput, hasEarlierTurn, lastSummary } from '../mcp/chatChain.ts';
 import { normalizeEffort } from '../llm/effort.ts';
-import type { RunStatus, HistoryEntry, Limits, EffortChoice, EffortProfile, RunStats } from '../types.ts';
+import { DEFAULT_CONTEXT_WINDOW, getEffectiveContextWindow, type ContextWindow, type ContextWindowSource } from '../llm/models.ts';
+import { CHARS_PER_TOKEN } from '../../shared/tokens.ts';
+import type { RunStatus, HistoryEntry, Limits, EffortChoice, EffortProfile, RunStats, Level } from '../types.ts';
+
+/**
+ * What the context meter of the panel shows (getState().context):
+ *   used           tokens: during a run the prompt of the last model call; between runs an estimate
+ *                  of what the next request starts with (system prompt, tool definitions, the chain);
+ *                  0 for an empty chat
+ *   window         the model's context window, and windowSource where that number comes from
+ *   estimated      `used` is an estimate (between runs, or a provider that reported no usage)
+ *   summarizedTurns  how many turns the last Compact summarized (0: never compacted)
+ *   hasEarlierTurn whether a Compact has anything to summarize
+ *   compacting     a Compact is in flight
+ */
+export interface ContextState {
+  used: number;
+  window: number;
+  windowSource: ContextWindowSource;
+  estimated: boolean;
+  summarizedTurns: number;
+  hasEarlierTurn: boolean;
+  compacting: boolean;
+}
+
+/** The answer of compactChat. */
+export interface CompactResult {
+  success: boolean;
+  error?: string;
+  summary?: string;
+}
 
 export class AgentRunner {
   public threadId: string;
@@ -48,6 +79,21 @@ export class AgentRunner {
   public effortProfile: EffortProfile | null = null;
   public runStats: RunStats | null = null;
   public findings: any[] = [];
+
+  /** The context window of the chosen model, resolved by refreshContext (never per call). */
+  public contextWindow: ContextWindow = { tokens: DEFAULT_CONTEXT_WINDOW, source: 'default' };
+  /** The tokens of the system prompt and the tool definitions, estimated: what every request starts with. */
+  private contextBase = 0;
+  /** The tokens of the last model call of the current task, or null before its first call. */
+  private lastCall: CallUsage | null = null;
+  /** True while a Compact is in flight (the panel's card says so and keeps the button off). */
+  private compacting = false;
+  /** Goes up on New chat: a Compact that started in the old chat must not land in the new one. */
+  private chatGeneration = 0;
+  /** Cancels the Compact a task start runs (auto-compact) when the user stops the task. */
+  private compactAbort: AbortController | null = null;
+  /** Orders the refreshes of the window: only the newest one is kept. */
+  private contextRefreshes = 0;
 
   public scoutFoxGroupIds = new Map<number, number>();
   public networkBuffers = new NetworkBuffers(100);
@@ -367,6 +413,13 @@ export class AgentRunner {
 
       await this.ensureScoutFoxGroup(tabId);
 
+      // The window of the model this task runs on, and the chain of the chat checked against it: a
+      // chain over a quarter of the window is compacted first (the timeline shows the divider).
+      // This happens while the task is still being claimed, so a Stop here lands as a Stop before
+      // the start, and it cancels the summary call.
+      await this.refreshContext();
+      if (!this.stopDuringClaim) await this.autoCompactIfLong();
+
       const stopLanded = this.stopDuringClaim;
       const pauseLanded = this.pauseDuringClaim;
       this.stopDuringClaim = false;
@@ -399,6 +452,9 @@ export class AgentRunner {
       const settings = await Storage.getSettings();
       const level = normalizeEffort(requestedEffort ?? settings.effortDefault);
       this.effort = { requested: level, level, suggestedBy: requestedEffort ? 'user' : 'default' };
+      // The meter shows this task's own calls from its first one on; its token counts start at zero.
+      this.lastCall = null;
+      this.runStats = { level: level as Level, modelCalls: 0, stepsUsed: 0, tokensIn: 0, tokensOut: 0, sitesDone: 0, sitesPartial: 0, elapsedMs: 0 };
       this.mcpClient = new ScoutFoxMCPClient(this.runtime, this);
       await this.mcpClient.startTask(userPrompt, { startPaused: pauseLanded, effort: level });
 
@@ -458,6 +514,8 @@ export class AgentRunner {
     if (!this.endRun('stopped', partialResultEntry(STOPPED_TEXT, 'stopped'))) {
       if (this.taskClaimed) {
         this.stopDuringClaim = true;
+        // A task start that is compacting the chat first: the summary call is cancelled too.
+        this.compactAbort?.abort({ scoutfox: 'user', reason: 'user_stop' });
         this.notifyStateChange({ stopped: true });
         return { success: true };
       }
@@ -560,6 +618,10 @@ export class AgentRunner {
     this.endRun('idle', null);
     this.mcpClient = null;
     this.dirty = true;
+    // A Compact still in flight belongs to the chat that is gone: its summary is dropped.
+    this.chatGeneration += 1;
+    this.lastCall = null;
+    this.runStats = null;
     this.history = [];
     this.currentTask = '';
     this.planSteps = [];
@@ -597,8 +659,132 @@ export class AgentRunner {
       effort: this.effort,
       effortProfile: this.effortProfile,
       runStats: this.runStats,
-      findings: this.findings
+      findings: this.findings,
+      context: this.contextState()
     };
+  }
+
+  /** The context meter's numbers (see ContextState). */
+  contextState(): ContextState {
+    const live = (this.status === 'running' || this.status === 'paused') && this.lastCall !== null;
+    const empty = this.history.length === 0;
+    return {
+      used: live ? this.lastCall!.promptTokens : empty ? 0 : this.contextBase + chainTokens(this.history),
+      window: this.contextWindow.tokens,
+      windowSource: this.contextWindow.source,
+      estimated: live ? this.lastCall!.estimated : !empty,
+      summarizedTurns: lastSummary(this.history)?.summarizedTurns ?? 0,
+      hasEarlierTurn: hasEarlierTurn(this.history),
+      compacting: this.compacting
+    };
+  }
+
+  /** The tokens of the model call that just returned (the MCP client's RunRecorder.noteUsage). */
+  noteUsage(usage: CallUsage): void {
+    this.lastCall = { ...usage };
+    if (this.runStats) {
+      this.runStats = {
+        ...this.runStats,
+        modelCalls: this.runStats.modelCalls + 1,
+        stepsUsed: this.stepCount,
+        tokensIn: (this.runStats.tokensIn ?? 0) + usage.promptTokens,
+        tokensOut: (this.runStats.tokensOut ?? 0) + usage.outputTokens
+      };
+    }
+    this.dirty = true;
+    this.notifyStateChange();
+  }
+
+  /**
+   * Resolves the window of the chosen model and the size of what a request starts with, and
+   * broadcasts when either changed. Called when a task starts, when the panel asks for the state,
+   * and when the settings or the model lists change (background.ts), never per model call.
+   */
+  async refreshContext(): Promise<void> {
+    const mine = ++this.contextRefreshes;
+    try {
+      const settings = await Storage.getSettings();
+      const window = await getEffectiveContextWindow(settings);
+      const base = idleRequestTokens({
+        instructions: (settings.systemInstructions || '').trim(),
+        autoApprovePlan: settings.autoApprove !== false,
+        research: settings.research?.enabled !== false
+      });
+      if (mine !== this.contextRefreshes) return;
+      const changed = window.tokens !== this.contextWindow.tokens || window.source !== this.contextWindow.source || base !== this.contextBase;
+      this.contextWindow = window;
+      this.contextBase = base;
+      if (changed) this.notifyStateChange();
+    } catch (err) {
+      Logger.warn('AgentRunner', `[CONTEXT] Could not resolve the context window: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * The one model call of a Compact: the fixed instruction and the chat as data, a plain answer.
+   * A seam of its own, so a test can stand in for the model.
+   */
+  async summarizeChat(input: string, signal?: AbortSignal): Promise<string> {
+    const settings = await Storage.getSettings();
+    return generateCompletion(settings, [{ role: 'user', content: `${COMPACT_PROMPT}\n\n${input}` }], COMPACT_SYSTEM, { signal });
+  }
+
+  /**
+   * Compact: one model call summarizes the chat (the earlier summary and the turns after it), and
+   * the summary is kept in a chat_compacted row, which the chain of every later request starts
+   * from. Refused while a task runs. A failed call, or a New chat while it was in flight, leaves
+   * the chat as it was.
+   */
+  async compactChat(options: { auto?: boolean; signal?: AbortSignal } = {}): Promise<CompactResult> {
+    await this.restorePromise;
+    if (this.status === 'running' || this.status === 'paused') return { success: false, error: 'Stop the task before you compact the chat.' };
+    if (this.compacting) return { success: false, error: 'The chat is already being compacted.' };
+    const turns = chainTurns(this.history);
+    if (turns.length === 0) return { success: false, error: 'There is no earlier turn to compact.' };
+
+    const generation = this.chatGeneration;
+    const summarizedTurns = (lastSummary(this.history)?.summarizedTurns ?? 0) + turns.length;
+    // The input is held to half the window: the oldest turns are left out first.
+    const maxChars = Math.max(8_000, Math.floor(this.contextWindow.tokens * CHARS_PER_TOKEN * 0.5));
+    const input = compactionInput(this.history, maxChars);
+    this.compacting = true;
+    this.notifyStateChange();
+    try {
+      const summary = String(await this.summarizeChat(input, options.signal) || '').trim();
+      if (generation !== this.chatGeneration) return { success: false, error: 'The chat was cleared while it was being compacted.' };
+      if (options.signal?.aborted) return { success: false, error: 'The compaction was stopped.' };
+      if (!summary) return { success: false, error: 'The model gave an empty summary, so the chat is unchanged.' };
+      this.compacting = false;
+      this.recordEntry({ type: 'chat_compacted', summary, summarizedTurns, ...(options.auto ? { auto: true } : {}), timestamp: new Date().toLocaleTimeString() });
+      Logger.event('agent', 'AgentRunner', `Compacted the chat: ${summarizedTurns} turn${summarizedTurns === 1 ? '' : 's'} in a summary of ${summary.length} characters${options.auto ? ' (automatically, the chain was long)' : ''}`, { summarizedTurns, auto: !!options.auto, summary });
+      return { success: true, summary };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      Logger.warn('AgentRunner', `[COMPACT] The chat could not be compacted: ${message}`);
+      return { success: false, error: `The chat could not be compacted: ${message}` };
+    } finally {
+      if (this.compacting) {
+        this.compacting = false;
+        this.notifyStateChange();
+      }
+    }
+  }
+
+  /** Compacts the chat before a task when its chain takes more than CHAIN_WINDOW_SHARE of the window. */
+  private async autoCompactIfLong(): Promise<void> {
+    if (!hasEarlierTurn(this.history)) return;
+    const tokens = chainTokens(this.history);
+    if (tokens <= this.contextWindow.tokens * CHAIN_WINDOW_SHARE) return;
+    Logger.info('AgentRunner', `[COMPACT] The chain of this chat is ${tokens} tokens, over ${Math.round(CHAIN_WINDOW_SHARE * 100)}% of the ${this.contextWindow.tokens}-token window: compacting it before the task.`);
+    this.compactAbort = new AbortController();
+    try {
+      const result = await this.compactChat({ auto: true, signal: this.compactAbort.signal });
+      if (!result.success && !this.compactAbort.signal.aborted) {
+        Logger.warn('AgentRunner', `[COMPACT] The task starts with the whole chain: ${result.error}`);
+      }
+    } finally {
+      this.compactAbort = null;
+    }
   }
 
   async persistState() {
@@ -718,6 +904,8 @@ export class AgentRunner {
       stepCount: this.stepCount,
       pauseReason: this.pauseReason,
       stateVersion: this.stateVersion,
+      lastCall: this.lastCall,
+      runStats: this.runStats,
       savedAt: Date.now()
     };
   }
@@ -748,6 +936,8 @@ export class AgentRunner {
         this.stepCount = Number(run.stepCount) || 0;
         this.pauseReason = run.pauseReason ?? null;
         this.stateVersion = Math.max(this.stateVersion, Number(run.stateVersion) || 0);
+        this.lastCall = run.lastCall && typeof run.lastCall.promptTokens === 'number' ? run.lastCall : null;
+        this.runStats = run.runStats ?? null;
         if (run !== kept) {
           Logger.info('AgentRunner', `[RUN_RESTORED] The worker restarted during the run on tab [${this.ownerTabId}]; its steps are kept and the run is marked interrupted.`);
           this.snapshots.save(this.runSnapshot(), true);

@@ -4,12 +4,14 @@
 
 The verification of this project has two layers, and a change is only accepted when BOTH pass.
 
-- Layer 1: the mock's self-test (`lib/mockOllama.selftest.mjs`). Node only, no browser, under a second. It runs first inside every `--mock` smoke run, so a broken mock is reported before Chromium starts.
-- Layer 2: the smoke run (`smoke.mjs`). It loads the built extension (`dist/`) into Chromium with puppeteer-core and drives whole tasks through it.
+- Layer 1: the unit tests (`npm test`). Plain Node, no browser, no model.
+- Layer 2: the real-model run (`smoke.mjs`). It loads the built extension (`dist/`) into Chromium with puppeteer-core, and a real model (LISA by default) drives whole tasks through it.
+
+There is no scripted mock model and no tamper run: every task is a real model taking real actions.
 
 The engine under test is the MCP tool loop (`src/background/mcp/`): the LLM calls tools, the MCP server executes them in the browser, results are fed back until `finish`.
 
-The harness never loads `dist/` itself. It copies `dist/` into a temp folder, leaves out the sourcemaps like the zip does, and adds one file, `driver.html` from this folder. The browser sees the files a user installs, and the test page never enters `dist/` or the shipped zip. Nothing of the harness (mock, driver, fixtures, screenshots) ships with the extension.
+The harness never loads `dist/` itself. It copies `dist/` into a temp folder, leaves out the sourcemaps like the zip does, and adds one file, `driver.html` from this folder. The browser sees the files a user installs, and the test page never enters `dist/` or the shipped zip. Nothing of the harness (driver, fixtures, screenshots) ships with the extension.
 
 The temp folder and a fresh Chromium profile are removed at the end, also on a failure and on Ctrl+C.
 
@@ -21,14 +23,11 @@ The temp folder and a fresh Chromium profile are removed at the end, also on a f
 
 ## Run
 
-The offline run needs no model and no Ollama. It is what CI runs.
-
 ```
 npm run test:e2e                      # builds dist/ first, then runs on LISA (needs LISA_API_KEY or LISA_API in .env)
 npm run test:e2e -- --held-out        # the held-out open-web tasks on LISA
 npm run test:e2e -- --provider=nvidia # the same open-web tasks on NVIDIA NIM (needs NVIDIA_API_KEY)
-npm run test:e2e:mock                 # builds dist/ first, then the offline run on the scripted mock
-node tests/e2e/smoke.mjs --mock       # the offline run on the dist/ you already built
+npm run test:e2e -- --sealed          # the sealed tasks: verdicts and numbers only
 ```
 
 The run against a real local Ollama needs the model to be pulled already.
@@ -42,24 +41,22 @@ The run prints every task with its steps, model calls and tokens, then a summary
 
 | Option | What it does |
 | --- | --- |
-| `--mock` | Uses the offline mock instead of Ollama, and runs the mock's self-test first. |
 | `--build` | Runs `npm run build` first, so `dist/` is fresh. |
-| `--task=a,b` | Runs only these tasks, for example `web-eiffel-tower,web-npm-react`, or `store-price` with `--mock`. |
+| `--task=a,b` | Runs only these tasks, for example `web-eiffel-tower,web-npm-react` |
 | `--provider=name` | The real model server: `lisa` (default), `nvidia` or `ollama`. The OpenAI-compatible profiles live in `lib/providers.mjs`. |
 | `--held-out` | Runs the held-out open-web tasks instead of the regular ones (see "The tasks"). |
 | `--sealed` | Runs the sealed open-web tasks and shows only their verdicts and numbers, never their steps, answers or model calls (see "The tasks"). |
 | `--repeat=k` | Runs each task k times (1 to 20). A real model is not deterministic, so the summary reports each task by its median and p90 of steps, model calls, prompt tokens and wall time, and how many runs succeeded. |
-| `--model=name` | The model name (default: `lisa-pro` on LISA, `nvidia/nemotron-3.5-super-vl-120b-a12b` on NVIDIA, `qwen3.8:27b-mlx` on Ollama, `mock-agent` with `--mock`). |
+| `--model=name` | The model name (default: `lisa-pro` on LISA, `nvidia/nemotron-3.5-super-vl-120b-a12b` on NVIDIA, `qwen3.8:27b-mlx` on Ollama). |
 | `--max-steps=n` | Saved into the settings (the MCP loop does not read a step cap yet). |
-| `--timeout=ms` | The time limit for one task (default 360000, or 60000 with `--mock`). |
+| `--timeout=ms` | The time limit for one task (default: the task's own, else 360000). |
 | `--headless` | Runs without a window. The suite is **headful by default**, because headless Chromium creates no side panel document at all; a headless run photographs the panel as a page instead, and says so in the report. |
-| `--prompt="..."` | One run of your own, on a real site, with a real model: the prompt is the only instruction the extension gets. Needs a URL to start on (`--start-url`), and cannot be combined with `--mock`. |
+| `--prompt="..."` | One run of your own, on a real site, with a real model: the prompt is the only instruction the extension gets. Needs a URL to start on (`--start-url`). |
 | `--start-url=https://...` | Where a `--prompt` run starts. What happens next, including which site it ends up on, is the extension's decision. |
 | `--out=file.json` | Saves the full report as JSON. |
 | `--panel-screenshots=dir` | Overrides the root folder of the screenshots (default: `screenshots/<run stamp>/` in this folder). |
-| `--dump-snapshots` | Writes what the content script sees on each fixture page to `tests/fixtures/snapshots/`, and needs no model. |
-| `--tamper=name` | Breaks the temp copy on purpose (see "Negative controls"). |
-| `--effort=level` | The effort every task starts with: `auto`, `off`, `low`, `medium` (default), `high` or `max`. It is the model's reasoning level, and every model call is checked for it on the wire (`think` on the mock, `enable_thinking` and `reasoning_budget` on NVIDIA Nemotron). |
+| `--dump-snapshots` | Writes what the content script sees on the store fixture page to `tests/fixtures/snapshots/`, and needs no model. |
+| `--effort=level` | The effort every task starts with: `auto`, `off`, `low`, `medium` (default), `high` or `max`. It is the model's reasoning level, and every model call is checked for it on the wire (`enable_thinking` and `reasoning_budget` on NVIDIA Nemotron). |
 
 ## One run of your own, on the real web
 
@@ -72,8 +69,7 @@ node tests/e2e/smoke.mjs \
 Nothing is scripted and no answer is predicted. The extension decides where to go, what to click, and
 when it is done, so this is the closest the harness gets to watching a person use ScoutFox. It is
 judged on what a user would notice: the run finished, the answer is not empty, the panel's final card
-matches how the run ended, and nothing threw on the way. Because the scripted expectations are gone,
-this mode needs a real model: `--mock` is refused.
+matches how the run ended, and nothing threw on the way. It always runs on a real model.
 
 ## The click lab: which scale a model points with
 
@@ -158,46 +154,51 @@ The summary ends with a table per task (runs that succeeded, and the median and 
 
 A task may list the sites it needs (`reachable`): the harness asks each first, and a site that does not answer skips the task with the reason, never a failure.
 
-Two small tasks start on a page of the fixture site (`tests/fixtures/site/store.html`) and run only offline on the scripted mock (`npm run test:e2e:mock`, CI).
-They are not use cases: they check that the built extension loads, a run reaches the page and the panel shows the result.
-The use cases are the open-web tasks above, on the real model.
+Three default tasks run on local pages that copy a real case; the model acts on them like on any site.
 
-| Task | Page | The engine must |
+| Task | Page | The question |
 | --- | --- | --- |
-| `store-price` | `store.html` | read the page and finish with the price exactly as the page shows it (`1.399,00 EUR`) |
-| `model-pick` | `store.html` | run on the model picked in the composer's model picker; the composer's effort menu offers the levels the model supports |
-| `credentials-json` | `credentials.html` | plan, read the certifications once (the read lists each link's full address under the text), save the ten records, mark the plan steps, and finish with `records_file`; the answer shows two records in a json code box (coloured, with Copy) and a link, never the whole file; the card is no box; the harness clicks the file chip, the preview must show every certificate, Copy must put the file on the clipboard, and the file saved by Download must hold every name, issue date and credential URL |
-| `stall-wander` | `credentials.html` | asked for an expiry date the page never shows, read element after element until the stall note comes, then finish "partial" |
-| `stall-recover` | `credentials.html` | read element after element until the stall note, then change course: read the page once, save the records, finish "done" |
-| `stall-out` | `credentials.html` | go on reading element after element after the stall note, until the second stall in a row ends the run with a last round that offers only `finish`; finish "partial" there |
-| `text-then-finish` | `credentials.html` | read the page, then answer in plain text; the run must ask once for `finish` with an outcome, and the model finishes "done" |
-| `bad-json` | `credentials.html` | finish with a hand-written JSON file that does not parse, get it refused with the reason, and finish again with valid JSON that the downloaded file holds |
-| `long-read` | `credentials.html` | read and save thirteen times: the requests must stay bounded once old results are shortened (the context compaction) |
+| `web-notebook-fix` | `notebook.html` | fix the failing cell of a notebook so it installs Ollama without sudo, run it and give the version |
+| `web-credentials-json` | `credentials.html` | a JSON file of the ten certifications with name, issue date and credential URL (the LinkedIn case); the file must hold every one, and an answer that pastes the whole file is printed as a note |
+| `web-chat-chain` | `credentials.html`, then `notebook.html` | how many certifications the page lists (10); after a Compact, in the same chat on a page without the fact: that number times 7, the result only (70) |
 
-The local fixture `credentials.html` also has a real-model task, `web-credentials-json`: the same JSON file of the ten certificates, on the real model.
+### A follow-up turn in the same chat (`followUp`)
+
+A task can carry a `followUp` (see `../mcp/tasks.mjs`): a second turn in the same tab and the same chat, started once the first turn has ended and been checked.
+It is how the chain of a chat is verified: a new request in a chat gets the earlier turns, or after a Compact their summary.
+
+`web-chat-chain` uses every part of it, in this order.
+
+1. Turn 1 runs on `credentials.html` and must answer 10.
+2. `compact: true`: in Chrome's real side panel, the context ring of the composer must show a share above 0%. The harness opens the ring's card with a real click, clicks "Compact chat" with a real click, and waits (up to 3 minutes, the summary is a real model call) for the "Chat compacted" divider in the timeline. It opens the divider's summary like a reader. The ring, the open card and the divider are shot as close-ups, light and dark.
+3. `navigate: 'notebook.html'`: the tab goes to a page that does not have the fact.
+4. Turn 2 sends "Take the number of certifications you gave me in your last answer, multiply it by 7, and reply with the result only." in the same tab and chat.
+5. Turn 2 must finish with outcome "done" and answer 70 (no other number than the 10 and the 7), make no `read_page`, `get_page_elements`, `find` or `take_screenshot` call (`noReads`), and its first model request must start with the chain header and hold the summary of the Compact (the call record keeps the first user message as `firstUserText`).
+6. The panel's end card of turn 2 must be "Done".
+
+A problem of the follow-up is reported with the task and fails the run like any other check.
 
 ## What a run checks
 
 A run fails when any of these is true.
 
-- A task does not end with the final entry it must (`finish`), or its answer is wrong (each task has a check in `lib/tasks.mjs`).
-- A model call went out without the effort the run was started with (`--effort`, Medium by default): `think` on the mock, `enable_thinking` and `reasoning_budget` on NVIDIA Nemotron.
-- The harness had to stop a run: the task timed out, the model got the same prompt 15 times in a row (the loop guard), or the run stood paused with no hold to answer.
+- A task does not end with the final entry it must (`finish`), or its answer is wrong (each task has a check in `../mcp/tasks.mjs`).
+- A model call went out without the effort the run was started with (`--effort`, Medium by default): `enable_thinking` and `reasoning_budget` on NVIDIA Nemotron.
+- The harness had to stop a run: the task timed out, or the run stood paused with no hold to answer.
 - The runner broadcast a `paused` state with no hold to answer and no user pause, or no `STATE_UPDATE` reached the harness at all.
 - The service worker or the driver page logs a console error or throws, or the worker has a CSP violation (watched through CDP Audits, because a worker reports it nowhere else).
 - A fixture page a task runs on shows a console error or a page error, or its content scripts are not alive (the MAIN-world net recorder flag, and an answered `GET_DOM_SNAPSHOT`).
 - The side panel, opened as a page, shows a console error, a page error or a CSP violation, its script did not run, or its model-list request failed.
 - The fox mark is not where it belongs: the header next to the name, or the middle of the panel above "What would you like to automate?", has no mark, has a mark that is not the fox, or shows one too small to be seen. The check reads the shape out of the rendered DOM, so it judges what a user sees, not what a source file says.
-- With `--mock` only: the mock refused a call (HTTP 400, 500 or 501), a reply of the mock starts with `MOCK-FAIL:`, the run logged an error entry, or the run's action sequence does not fit the task (`expectMock` in `lib/tasks.mjs`).
 
 ## The facts of a run
 
-`runFacts` in `lib/tasks.mjs` builds the facts from what the engine leaves behind, and the checks of a task read only these.
+`runFacts` in `../mcp/tasks.mjs` builds the facts from what the engine leaves behind, and the checks of a task read only these.
 
 - The final entry of the last turn (`finish`), with its answer.
 - The plan rows of the final state (`update_plan` writes them; each executed step advances them).
 - The model's tool calls (`agent_response` entries), each with the result attached (`execution_result`).
-- The model calls of the run (the record the mock or the proxy keeps; node `mcp`).
+- The model calls of the run (the record the key proxy keeps; node `mcp`).
 - What the engine sent to the page, counted inside the service worker by the harness: every `chrome.tabs.sendMessage` by its action name, and every `chrome.debugger.sendCommand` by its method. This is how the harness sees that a click was (or never was) sent to the page, which the history cannot show.
 - The history rows are read without their exact copies; the number of copies is printed and never a failure.
 
@@ -210,99 +211,12 @@ Every task saves its own folder under `screenshots/<run stamp>/` (gitignored; `-
 | `<task>-<model>-page-end.png` | The end state of the page the task ran on. |
 | `<task>-<model>-panel.png` | The real Chrome side panel (page left, panel right in `...-side-by-side.png`). |
 | `<task>-<model>-live-panel.png` | A task with a plan: the checklist while the run is live, or the plan card while manual approval waits. |
-| `<task>-<model>-model-menu.png` | The composer's model menu, opened from the model name, with the run's model checked (`model-pick` only). |
+| `<task>-<model>-context-ring-{light,dark}.png` | A task with `followUp.compact`: the composer with the context ring after the first turn. |
+| `<task>-<model>-context-card-{light,dark}.png` | The card the ring opens: the window, the bar of this chat, the note and "Compact chat". |
+| `<task>-<model>-compacted-{light,dark}.png` | The "Chat compacted" divider in the timeline, with its summary opened. |
+| `<task>-<model>-followup-*.png` | The page end, the panel and the side-by-side view after the follow-up turn. |
 
 The tall-open picture is the one that shows "what steps it took", the finish card shows "what the end result is".
-
-## The loop guard
-
-The mock counts identical requests in a row and writes the count into the record of the call. A run in which the model gets the same prompt 15 times in a row changes nothing and will not end by itself, so the harness stops it, and the run fails with the call number. The reply of the mock never depends on the count.
-
-## The mock
-
-`lib/mockOllama.mjs` is a tiny scripted agent behind the same HTTP calls the extension sends to Ollama: `POST /api/chat`, `POST /api/show`, `GET /api/tags`, `GET /api/version` and `OPTIONS`.
-
-It speaks the MCP tool-calling protocol: a request carries a `tools` array (the Ollama function format of `SCOUTFOX_TOOLS`), and the reply is one JSON object whose message holds `tool_calls` (name + arguments object), which is what `callOllamaWithTools` reads. A chat call WITHOUT tools gets HTTP 501 with the reason: nothing in the extension calls `/api/chat` without tools any more, so a protocol drift fails loudly.
-
-The script is stateless: it reads only the conversation of the request, the way a real model would.
-
-- A bot check in the page content: finish at once with the honest answer, never click.
-- A planning goal: `update_plan` with two steps (two steps auto-approve), then `read_page`, then `finish` with the facts.
-- A click goal: `get_page_elements`, then `click` the element whose label matches the goal (an "add" label beats a generic cart label), then `finish`.
-- A facts or summarize goal: `read_page`, then `finish` with the lines copied from the page text.
-- A notebook goal (`notebook-fix`): `scroll` the cells panel (the result must say it moved, and the observation must have measured it), `read_page` part 1, then part 2 (cell 14 and its permission error), `get_page_elements`, `click` into cell 14, `press_key` select_all, `type` the fix without an element id, `press_key` Shift+Enter, `read_page` part 2 for the output, `finish` with the version.
-- An order-list goal (`virtual-scroll`): `scroll` the windowed list and `read_page` what it draws, again, until the Zanzibar Spice Co. row is drawn, then `finish` with it.
-- A two-fact goal whose page has only one fact (`partial-answer`): `read_page`, then `finish` with the price as inline code, the missing battery life said plainly, and `outcome` "partial".
-  The card must be "Partly done" (class `partial`), and its body must show the price without the backticks.
-- A dead-button goal (`stuck-recovery`, and `stuck-recovery-manual` with manual plan approval): `get_page_elements`, then `click` the dead Download CSV button again and again, like a stubborn model.
-  It stops only when the loop says the click changed nothing: the repeat hint in a result first, then the reflection note as the user message right after the tool block.
-  Then it `finish`es honestly with `outcome` "blocked": the button did not work, and what the user can do next.
-  The panel card must then be "Could not finish" (class `blocked`), never the green "Done".
-  In manual mode it plans first, and the harness approves the plan card like a user.
-- A research goal (`research-then-answer`): `web_search`, then `fetch_url` on the docs page (the first result), then `fetch_url` on the result that is the install script, then `finish` with the archive name only that script names.
-  The docs page is HTML with leak-prone attributes: a `>` inside a quoted attribute (a Stimulus `click->menu#toggle` action) and a `<!-- -->` inside one (a Wikipedia `data-mw` value), each carrying the sentinel `MARKUP_SENTINEL` (`lib/twoSources.mjs`).
-  The mock answers `MOCK-FAIL` when the sentinel is in the fetched text (markup leaked) or the sentence right after those attributes is missing.
-  Both results must come in the untrusted envelope, and without the research tools on offer it answers `MOCK-FAIL`, never a guess.
-  Before the run the harness sets Settings > Research to SearXNG through the side panel's Settings tab, like a user, pointing at the fixture's search endpoint under `docs.lantern.test` (`RESEARCH_HOST` in `lib/twoSources.mjs`).
-  The fixture server serves `research/search` as `research/search.json`, with `__ORIGIN__` replaced by the origin asked.
-  The run also checks that the tab stayed on its page and that the panel rows read "Searched the web: ...", "Read Install the Lantern CLI - Lantern docs (docs.lantern.test)" and "Read install.sh (docs.lantern.test)", and that no search or fetch result holds the markup sentinel, and it shoots the Research section in light and dark.
-- A certifications goal (`credentials-json`): `update_plan` with three steps, `read_page`, `save_data` with the ten records, `update_plan {done: [1, 2]}`, then `finish` with `records_file: "certifications.json"`.
-  It answers `MOCK-FAIL` when the read has no "Links in this part:" block (no credential URL can be known), when the run state on the last message does not show the ten saved records, or when it does not show plan steps 1 and 2 done.
-- A wandering goal (`stall-wander`, `stall-recover`): `get_page_elements`, then `read_page` of one element after another, like a real run that read 74 elements and never finished.
-  It stops only on the stall note (`STALL_TEXT` in `src/background/mcp/progress.ts`); without it, it runs out of elements and answers `MOCK-FAIL`.
-  `stall-wander` then finishes "partial"; `stall-recover` reads the page once, saves the records and finishes "done".
-- A stubborn goal (`stall-out`): the same reads, and it goes on after the stall note; it finishes "partial" only in the last round after the second stall, which must offer only `finish`.
-- A broken-file goal (`bad-json`): `read_page`, then `finish` with a JSON file that has a trailing comma; the refusal must say "is not valid JSON", and the second finish sends valid JSON.
-- A long goal (`long-read`): `read_page` and `save_data`, thirteen times, then `finish`.
-- Every reply to a tool that asks for `reason` carries one: the script's own words, or `mock: <the script note>`.
-- The run state the client adds to the last message of a request (`[Run state] Goal: ...`) is taken off every tool result and note before a script reads them, and is read on its own (`runState`).
-- Anything it cannot find: a finish whose answer starts with `MOCK-FAIL:` and says what is missing. The run then ends without the data, and no check accepts it.
-
-Every reply is validated before it is sent: the tool name must be one the request offered, and the arguments must fit the tool's parameters schema (`validateToolArgs`). A violation is an HTTP 500 - a mock bug, named, not papered over.
-
-The self-test (`tests/mcp/mockOllama.selftest.mjs`) checks the protocol, the validator, and walks every task the way the client drives it, from the committed fixture snapshots, judged by the same checks as the smoke run. It also walks the tasks again with the page text or the element list removed: a run that lost what it needs must fail with `MOCK-FAIL`.
-
-## Negative controls
-
-`--tamper=name` changes only the temp copy, never `dist/` and never a source file. Use it to check that the smoke run can fail.
-
-| Tamper | What it does | The run must |
-| --- | --- | --- |
-| `no-content-script` | Deletes `content/content.js`, which the manifest lists. | Exit 1: Chromium refuses to load the extension, and the error names the missing file. |
-| `worker-error` | Adds a `console.error` at the top of `background/sw.js`. | Exit 1 on the worker error, although all tasks pass. |
-| `broken-panel` | Makes the side panel script throw when it loads. | Exit 1 on the side panel gate. |
-| `finish-says-partial` | Stores every finish row with outcome "partial", whatever the model said. | Exit 1 on an open-web task whose answer passes its check: "the model ended with outcome "partial", expected "done"". |
-| `custom-provider-unsaved` | Makes "Add provider" of the "Custom model API" dialog close it without saving. | Exit 1 on a custom-provider run (LISA): "provider setup: "Add provider" stored no custom provider "lisa"". |
-| `empty-page-text` | Makes the content script report no page text (the snapshot text and the full text `read_page` pages through). | Exit 1: the mock answers `MOCK-FAIL` (it cannot read a price from an empty page). |
-| `no-history-rows` | Makes the runner drop every history row (`recordEntry` pushes nothing). | Exit 1: the run is invisible (no timeline rows, no final entry). |
-| `zod-not-jitless` | Removes the statement that switches zod code generation off from `background/sw.js`. | Exit 1 on two `service worker CSP violation` lines, although all tasks pass. |
-| `broken-net-recorder` | Makes `content/net-recorder.js` (the MAIN-world content script) throw when it loads. | Exit 1 on every fixture page: the recorder flag is not set, and the page reports a page error. |
-| `no-link-targets` | Makes `read_page` drop the links block of its part. | Exit 1 on `credentials-json`: the mock answers `MOCK-FAIL` (no credential URL can be seen). |
-| `no-run-state` | Sends every request without the run state on its last message. | Exit 1 on `credentials-json`: the mock cannot see the saved records. |
-| `plan-marks-ignored` | Makes `update_plan {done}` mark nothing. | Exit 1 on `credentials-json`: the run state does not show the marked steps. |
-| `no-stall-guard` | Makes the progress tracker never report a stall. | Exit 1 on `stall-wander`, `stall-recover` and `stall-out`: the wandering model reads on until it gives up. |
-| `no-json-check` | Accepts a JSON file of `finish` without parsing it. | Exit 1 on `bad-json`: the broken file is never refused, and the downloaded file does not parse. |
-| `files-not-stored` | Drops the files from the finish row. | Exit 1 on `credentials-json`: the card offers no file to download. |
-| `no-text-nudge` | Ends a run on a plain-text answer at once, with no note asking for `finish`. | Exit 1 on `text-then-finish`: the run ends with no outcome. |
-| `no-code-box` | Turns the fence parser of the side panel off. | Exit 1 on `credentials-json`: the answer's json block is no code box. |
-| `chip-downloads` | A file chip downloads its file at once, with no preview. | Exit 1 on `credentials-json`: no preview opens. |
-| `answer-repeats-file` | Drops the prompt line that keeps an answer from pasting the file it hands over. | Exit 1 on `credentials-json`: the answer repeats all ten credential URLs. |
-| `no-compaction` | Sends every old tool result whole on every request. | Exit 1 on `long-read`: the requests keep growing. |
-| `bad-tool-schema` | Sets `read_page` `inputSchema.required` to null in the copy. | Exit 1: the extension must reject the tool itself, with an error naming the tool, instead of sending a schema a provider answers with HTTP 400. |
-| `no-fox-mark` | Takes the fox mark out of the panel header in the copy. | Exit 1 on the mark check ("the header has no fox mark"), although every task passes. |
-| `no-effort` | Makes the tool loop drop the effort the run was started with. | Exit 1: every model call went out with no reasoning field ("model call 1 went out with think=undefined, expected true for effort medium"). |
-| `stale-worker` | Gives the worker a different build stamp than the side panel, like a worker Chrome kept running after a rebuild. | Exit 1: the side panel gate reports that the panel shows its reload bar. |
-| `idle-after-restore` | Makes a restarted worker reset the restored run to `idle` whenever the runner meta exists. | Exit 1 on `worker-restart-midrun`: "after a mid-run worker restart the status is "idle", expected "stopped"". |
-| `clear-keeps-loop` | Makes New chat clear the thread without ending the run. | Exit 1 on `clear-midrun`: the model gets more calls after New chat, and the rows come back into the cleared thread. |
-| `no-press-key` | Takes `press_key` out of the tool list the model is offered. | Exit 1 on `editor-replace`: the mock's `press_key` reply names a tool the request did not offer (HTTP 500), and the editor keeps its old code. |
-| `type-needs-id` | Makes `type` refuse without an `element_id` again. | Exit 1 on `editor-replace`: the type into the focused editor fails, the mock answers `MOCK-FAIL`, and the page check finds the old code. |
-| `no-observation` | Drops the `Observation:` line from every action result. | Exit 1 on `editor-replace`: the mock answers `MOCK-FAIL` (the click was not observed), and `expectMock` finds no observation in the tool results the model got. |
-| `scroll-lies` | Makes `scroll` report the full step as moved without turning the wheel (the old always-"Scrolled" path). | Exit 1 on `notebook-fix` and `virtual-scroll`: the scroll result claims a move, the observation measured none, and the mock answers `MOCK-FAIL`. |
-| `read-repeats` | Makes `read_page` ignore `part` and always read part 1. | Exit 1 on `notebook-fix`: the mock asks for part 2, gets part 1, and answers `MOCK-FAIL`. |
-| `no-repeat-guard` | Turns the repeat guard off: no repeat hint, no reflection note. | Exit 1 on `stuck-recovery`: the mock clicks the dead button until it gives up and answers `MOCK-FAIL`, and `expectMock` finds no hint and no reflection. |
-| `finish-ignores-outcome` | Drops the `outcome` the finish tool named from the finish row, so the panel falls back to the old rule (Done unless a step failed). | Exit 1 on `stuck-recovery` and `partial-answer`: the honest "it did not work" and "only part of it" answers get the green "Done" card instead of "Could not finish" and "Partly done", and `expectMock` finds no finish outcome. |
-| `html-regex-tags` | Turns fetched HTML into text with the old regex reader, where a tag ends at the first `>` even inside a quoted attribute. | Exit 1 on `research-then-answer`: the mock answers `MOCK-FAIL` with "markup leaked into the fetched page text (attribute sentinel ...)", and the run check names the leaked fetch. |
-| `no-research` | Stops offering `web_search` and `fetch_url`, as if Settings > Research were off. | Exit 1 on `research-then-answer`: the mock answers `MOCK-FAIL` (the research tools are not offered), no research row appears, and the card says Failed. |
 
 ## Real mode and the Origin note
 
@@ -316,14 +230,13 @@ Branded Chrome ignores `--load-extension`. Use Chromium or Chrome for Testing, a
 
 - `smoke.mjs`: the harness (Layer 2).
 - `driver.html`: the empty extension page that sends the messages (`START_TASK`, `GET_AGENT_STATE`, and the answers to a hold), added to the copy of `dist/`.
-- `lib/tasks.mjs`: the tasks, their checks, the expectations, and `runFacts`, which builds the facts of a run.
-- `lib/mockOllama.mjs` and `lib/mockOllama.selftest.mjs`: the offline mock (Layer 1) and its self-test.
-- `lib/callRecord.mjs`: the record of a model call, shared by the proxy and the mock.
-- `lib/extensionCopy.mjs`: the copy of `dist/` and the tampers.
-- `lib/fixtureServer.mjs`: the static server for the fixture site.
-- `lib/ollamaProxy.mjs`: the Origin proxy for the real Ollama.
+- `panel-trigger.html` and `panel-trigger.js`: the harness page that opens Chrome's real side panel on a genuine gesture.
+- `../mcp/tasks.mjs`: the tasks, their checks, and `runFacts`, which builds the facts of a run.
+- `../mcp/callRecord.mjs`: the record of a model call, kept by the proxies (with the first user message, where the chain of a chat is).
+- `lib/extensionCopy.mjs`: the copy of `dist/` without its sourcemaps.
+- `lib/fixtureServer.mjs`: the static server for the local pages.
+- `lib/ollamaProxy.mjs`: the Origin proxy for a real local Ollama.
 - `lib/keyProxy.mjs`: the proxy in front of a real OpenAI-compatible server (LISA, NVIDIA) that adds the key, so the extension only holds a placeholder.
 - `lib/metrics.mjs`: the success rule of a run, and the median and p90 per task over repeated runs.
 - `lib/providers.mjs`: the real OpenAI-compatible servers `--provider` takes, with their URL, key variables and default model.
-- `lib/twoSources.mjs`: the Chromium host rules that map fake shop names onto the fixture server.
 - `screenshots/<run stamp>/`: the screenshots of the runs (gitignored).

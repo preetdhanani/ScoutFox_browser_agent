@@ -17,6 +17,8 @@ import {
 } from './cards.js';
 
 import { FOX_MARK } from './brand.js';
+import { contextCardHtml, contextWindowHint, meterView, ringSvg } from './contextMeter.js';
+import { parseTokenCount } from '../src/shared/tokens.ts';
 import { logEntryHtml, logMatchesFilter, parseLogData, treeStateKey } from './logView.js';
 
 import {
@@ -117,6 +119,18 @@ const expandedRows = new Set();       // "turn:index" of rows whose reasoning is
 // Same reason, for the answer audit <details> on a finish card: the key is the turn number as a
 // string. Without this a details block the user opened would snap shut on the next broadcast.
 const openAuditDetails = new Set();
+// And for the summary of a "Chat compacted" divider: the key is the row's index in the history.
+const openCompactSummaries = new Set();
+
+// The context meter of the composer (contextMeter.js). The runner sends its numbers with every
+// state; the panel keeps the last ones so the ring and the card can be drawn again on their own.
+let lastContextState = null;
+/** A task is running or paused: Compact is off, and the ring shows the last model call. */
+let lastContextBusy = false;
+/** A saved session from Recent tasks is shown: the meter does not count it, and Compact is off. */
+let contextReadOnly = false;
+/** This panel sent COMPACT_CHAT and waits for the answer. */
+let compactPending = false;
 
 /**
  * The pictures this panel has fetched, by id: the data URL, and the decoded <img> element itself.
@@ -270,6 +284,112 @@ function refreshEffortSupport() {
     if (ask !== effortSupportAsk || !res || !res.success || !res.support) return;
     effortSupport = res.support;
     renderEffort();
+  });
+}
+
+/** The provider and model the Settings field sets the window of, and their key in settings.contextWindow. */
+function contextFieldTarget() {
+  const provider = document.getElementById('providerSelect')?.value || currentSettings.provider;
+  const model = (selectedModel && selectedModel !== CUSTOM_MODEL_OPTION ? selectedModel : '') || currentSettings.providerConfigs?.[provider]?.model || currentSettings.model || '';
+  return { provider, model, key: `${provider}|${model}` };
+}
+
+/**
+ * The Settings field "Context window": the user's own value for the chosen model, and under it the
+ * window a run would use and where it comes from (the background resolves it, GET_CONTEXT_WINDOW).
+ * A late answer for a model that is no longer chosen is dropped.
+ */
+let contextFieldAsk = 0;
+function refreshContextWindowField() {
+  const input = document.getElementById('contextWindowInput');
+  const hint = document.getElementById('contextWindowHint');
+  if (!input || !hint) return;
+  const { provider, model, key } = contextFieldTarget();
+  const own = Number(currentSettings.contextWindow?.[key]) || 0;
+  if (document.activeElement !== input) input.value = own > 0 ? String(own) : '';
+  const ask = ++contextFieldAsk;
+  sendBgMessage({
+    action: 'GET_CONTEXT_WINDOW',
+    payload: {
+      provider,
+      model,
+      baseUrl: currentSettings.providerConfigs?.[provider]?.baseUrl || (provider === currentSettings.provider ? currentSettings.baseUrl : ''),
+      providerConfigs: currentSettings.providerConfigs,
+      customProviders: currentSettings.customProviders,
+      contextWindow: currentSettings.contextWindow,
+      ollamaNumCtx: currentSettings.ollamaNumCtx
+    }
+  }, (res) => {
+    if (ask !== contextFieldAsk) return;
+    const window = !chrome.runtime.lastError && res && res.success ? res.window : null;
+    hint.classList.remove('is-error');
+    hint.textContent = contextWindowHint(window, provider);
+  });
+}
+
+/** Saves the field: a token count for the chosen model, or no value of the user's when it is empty. */
+async function saveContextWindowField() {
+  const input = document.getElementById('contextWindowInput');
+  const hint = document.getElementById('contextWindowHint');
+  if (!input) return;
+  const { key } = contextFieldTarget();
+  const raw = String(input.value || '').trim();
+  const tokens = raw ? parseTokenCount(raw) : null;
+  if (raw && !tokens) {
+    if (hint) {
+      hint.textContent = `"${raw}" is not a token count. Use a number like 200000, 200K or 1M, or leave the field empty.`;
+      hint.classList.add('is-error');
+    }
+    return;
+  }
+  // null removes the user's value for this model (Storage.saveSettings merges contextWindow).
+  currentSettings = await Storage.saveSettings({ contextWindow: { [key]: tokens } });
+  input.value = tokens ? String(tokens) : '';
+  refreshContextWindowField();
+}
+
+/** The model the context card names: the run's while one is live, else the chosen one. */
+function contextModelName() {
+  if (lastContextBusy && runModelSnapshot && runModelSnapshot.model) return runModelSnapshot.model;
+  return selectedModel || currentSettings.model || '';
+}
+
+/** Draws the ring, and the card when it is open, from the last context state the runner sent. */
+function renderContextMeter() {
+  const view = meterView(lastContextState, { busy: lastContextBusy, readOnly: contextReadOnly, model: contextModelName(), pending: compactPending });
+  const btn = document.getElementById('btnContext');
+  const slot = document.getElementById('contextRing');
+  const menu = document.getElementById('contextMenu');
+  if (slot) slot.innerHTML = ringSvg(view);
+  if (btn) {
+    btn.setAttribute('aria-label', view.label);
+    btn.title = view.label;
+    btn.disabled = view.ringDisabled;
+  }
+  if (menu) {
+    if (view.ringDisabled && !menu.hidden) {
+      menu.hidden = true;
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+    }
+    if (!menu.hidden) menu.innerHTML = contextCardHtml(view);
+  }
+  return view;
+}
+
+/** The card's Compact: one COMPACT_CHAT, the card says "Compacting…" until the answer, and a failure is a toast. */
+function compactChatFromPanel() {
+  if (compactPending) return;
+  compactPending = true;
+  renderContextMeter();
+  sendBgMessage({ action: 'COMPACT_CHAT' }, (res) => {
+    compactPending = false;
+    const error = chrome.runtime.lastError ? chrome.runtime.lastError.message : (res && res.success === false ? res.error : null);
+    if (error || !res) {
+      const text = error || 'The chat could not be compacted.';
+      appendLocalLog('WARN', 'Sidepanel', `[COMPACT_FAILED] ${text}`);
+      showToast(text, 'error');
+    }
+    renderContextMeter();
   });
 }
 
@@ -839,8 +959,10 @@ async function fetchDynamicModels(forceRefresh = false) {
 }
 
 function updateModelBadge(modelName) {
-  // Every model change passes here, so the effort levels follow the model.
+  // Every model change passes here, so the effort levels and the context window field follow the model.
   refreshEffortSupport();
+  refreshContextWindowField();
+  renderContextMeter();
   const badge = document.getElementById('currentModelBadge');
   if (badge) {
     badge.textContent = modelName || 'Model';
@@ -1211,6 +1333,8 @@ function initEventListeners() {
   const effortMenu = document.getElementById('effortMenu');
   const modelBtn = document.getElementById('composerModel');
   const modelMenu = document.getElementById('modelMenu');
+  const contextBtn = document.getElementById('btnContext');
+  const contextMenu = document.getElementById('contextMenu');
 
   const setMenuOpen = (menu, btn, open) => {
     if (!menu || !btn) return;
@@ -1221,7 +1345,34 @@ function initEventListeners() {
     setMenuOpen(approvalMenu, approvalBtn, false);
     setMenuOpen(effortMenu, effortBtn, false);
     setMenuOpen(modelMenu, modelBtn, false);
+    setMenuOpen(contextMenu, contextBtn, false);
   };
+
+  // The context ring opens its card; the card's clicks stay inside it (the document click closes menus).
+  if (contextBtn && contextMenu) {
+    contextBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = contextMenu.hidden;
+      closeComposerMenus();
+      setMenuOpen(contextMenu, contextBtn, willOpen);
+      if (willOpen) renderContextMeter();
+    });
+    contextMenu.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const target = e.target && e.target.closest ? e.target.closest('[data-ctx]') : null;
+      if (!target || target.disabled) return;
+      const what = target.getAttribute('data-ctx');
+      if (what === 'compact') {
+        compactChatFromPanel();
+      } else if (what === 'settings') {
+        closeComposerMenus();
+        const nav = document.querySelector ? document.querySelector('.nav-btn[data-tab="settings"]') : null;
+        if (nav) nav.click();
+        const field = document.getElementById('contextWindowInput');
+        if (field) setTimeout(() => field.focus(), 50);
+      }
+    });
+  }
 
   if (approvalBtn && approvalMenu) {
     approvalBtn.addEventListener('click', (e) => {
@@ -1359,6 +1510,7 @@ function initEventListeners() {
           return;
         }
         currentSessionId = null;
+        contextReadOnly = false;
         // CLEAR_HISTORY resets the runner's version counter, so the next broadcast is lower
         // than the watermark this panel holds. Drop the watermark or that state is ignored.
         lastRenderedStateVersion = -1;
@@ -1389,6 +1541,18 @@ function initEventListeners() {
     });
     modelCustomInput.addEventListener('change', commitNow);
     modelCustomInput.addEventListener('blur', commitNow);
+  }
+
+  // The context window field: saved on change and on Enter; an empty field removes the user's value.
+  const contextWindowInput = document.getElementById('contextWindowInput');
+  if (contextWindowInput) {
+    contextWindowInput.addEventListener('change', () => { saveContextWindowField(); });
+    contextWindowInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        saveContextWindowField();
+      }
+    });
   }
 
   // Auto-save for all number inputs and toggles
@@ -1788,6 +1952,8 @@ async function loadSessionHistory() {
  */
 function receiveState(state) {
   if (!state) return;
+  // A state from the runner is the live chat of this tab again.
+  contextReadOnly = false;
   if (!currentSessionId && state.task && Array.isArray(state.history) && state.history.length > 0) {
     currentSessionId = `session_${Date.now()}`;
   }
@@ -1870,6 +2036,8 @@ async function loadSelectedSession(sessionId) {
   if (!target) return;
 
   currentSessionId = target.id;
+  // A saved chat is shown as it was: the meter does not count it, and it cannot be compacted.
+  contextReadOnly = true;
   const drawer = document.getElementById('historyDrawer');
   if (drawer) drawer.style.display = 'none';
   const toggle = document.getElementById('btnToggleHistory');
@@ -2018,6 +2186,12 @@ function renderState(state) {
     newChatBtn.disabled = isTaskActive;
     newChatBtn.title = isTaskActive ? 'Stop the task before starting a new chat' : 'New chat';
   }
+
+  // The context meter follows every state: the last model call while a run is live, the estimate
+  // of the next request between runs, and 0% for an empty chat.
+  lastContextState = state.context || null;
+  lastContextBusy = status === 'running' || status === 'paused';
+  renderContextMeter();
 
 
 
@@ -2233,9 +2407,23 @@ function buildTurns(history) {
   const turns = [];
   let cur = null;
   (history || []).forEach((item, idx) => {
+    if (item.type === 'chat_compacted') {
+      // A Compact is its own item between turns: it belongs to no run, has no steps, and the
+      // turn after it starts fresh.
+      turns.push({
+        compacted: true,
+        idx,
+        summary: String(item.summary || ''),
+        summarizedTurns: Number(item.summarizedTurns) || 0,
+        auto: !!item.auto,
+        timestamp: item.timestamp || null
+      });
+      cur = null;
+      return;
+    }
     if (item.type === 'user_goal') {
       cur = {
-        turn: item.turn || turns.length + 1,
+        turn: item.turn || turns.filter((t) => !t.compacted).length + 1,
         goal: item.prompt,
         entries: [],
         answer: null,
@@ -2248,7 +2436,7 @@ function buildTurns(history) {
       return;
     }
     if (!cur) {
-      cur = { turn: turns.length + 1, goal: null, entries: [], answer: null, audit: null, failed: false, timestamp: null, isNewRun: false };
+      cur = { turn: turns.filter((t) => !t.compacted).length + 1, goal: null, entries: [], answer: null, audit: null, failed: false, timestamp: null, isNewRun: false };
       turns.push(cur);
     }
     if (item.type === 'agent_response' && item.action) {
@@ -2933,8 +3121,25 @@ function renderPlanApprovalCard(pendingApproval) {
   </div>`;
 }
 
+/** The "Chat compacted" divider: its own item between turns, with the summary in a section the reader opens. */
+function renderCompactedItem(item) {
+  const key = String(item.idx);
+  const n = item.summarizedTurns;
+  const label = `Summary of ${n} earlier turn${n === 1 ? '' : 's'}`;
+  return `<div class="chat-compacted" data-compacted="${escapeHtml(key)}">
+      <div class="compact-divider"><span class="compact-tag">${item.auto ? 'Chat compacted automatically' : 'Chat compacted'}</span>${item.timestamp ? `<span class="compact-time">${escapeHtml(item.timestamp)}</span>` : ''}</div>
+      <details class="compact-summary" data-compact-key="${escapeHtml(key)}"${openCompactSummaries.has(key) ? ' open' : ''}>
+        <summary><span class="compact-chev">${ICONS.chevron}</span>${escapeHtml(label)}</summary>
+        <div class="compact-text">${escapeHtml(item.summary)}</div>
+      </details>
+    </div>`;
+}
+
 function renderTurns(history, status, currentPhase, pendingQuestion, pendingApproval = null, pendingConfirm = null, pendingChallengeHelp = null, pendingContinueBudget = null, findings = null, effortProfile = null, planSteps = null) {
-  const turns = buildTurns(history);
+  const items = buildTurns(history);
+  // The runs alone: a Compact divider is not a turn, so it is never the live turn, never gets the
+  // synthetic end card, and counts no steps.
+  const turns = items.filter((t) => !t.compacted);
   const busy = status === 'running' || status === 'paused';
   const isErrorEnded = status === 'error' || status === 'stopped';
   // While the plan card is up it IS the plan: the checklist under it would list the same steps
@@ -2942,7 +3147,9 @@ function renderTurns(history, status, currentPhase, pendingQuestion, pendingAppr
   const progressPlan = pendingApproval ? null : planSteps;
 
   if (turns.length === 0 && (pendingApproval || pendingConfirm || pendingChallengeHelp || pendingContinueBudget)) {
-    turns.push({ turn: 1, goal: null, entries: [], answer: null, audit: null, failed: false, timestamp: null, isNewRun: false });
+    const held = { turn: 1, goal: null, entries: [], answer: null, audit: null, failed: false, timestamp: null, isNewRun: false };
+    turns.push(held);
+    items.push(held);
   }
 
   // If the run ended with an error/stopped but no finish card was produced, add a synthetic one
@@ -2964,8 +3171,10 @@ function renderTurns(history, status, currentPhase, pendingQuestion, pendingAppr
     }
   }
 
-  return turns.map((turn, ti) => {
-    const isLast = ti === turns.length - 1;
+  const finalTurn = turns[turns.length - 1] || null;
+  return items.map((turn) => {
+    if (turn.compacted) return renderCompactedItem(turn);
+    const isLast = turn === finalTurn;
     const isLive = busy && isLast;
     const count = turn.entries.filter(e => e.kind === 'action').length;
     // "Did not finish" means no answer was produced — not merely that one action failed.
@@ -3307,6 +3516,12 @@ function initTimelineInteraction() {
   // kept in openAuditDetails because renderState rewrites the timeline on every broadcast.
   timeline.addEventListener('toggle', (e) => {
     const d = e.target;
+    if (d && d.matches && d.matches('details.compact-summary')) {
+      const key = d.getAttribute('data-compact-key');
+      if (d.open) openCompactSummaries.add(key);
+      else openCompactSummaries.delete(key);
+      return;
+    }
     if (!d || !d.matches || !d.matches('details.audit')) return;
     const key = d.getAttribute('data-audit-key');
     if (d.open) {
@@ -3987,7 +4202,7 @@ function escapeHtml(str) {
 // Exported only so tests/sidepanelAudit.test.js can call the pure renderers. The page itself
 // never imports this file; the export list does not change how it loads in the browser.
 export {
-  buildTurns, renderTurns, renderFinishCard, renderAuditDetails, renderPlanRows, normalizeAudit,
+  buildTurns, renderTurns, renderCompactedItem, renderContextMeter, renderFinishCard, renderAuditDetails, renderPlanRows, normalizeAudit,
   planCounts, pauseReasonText, escapeHtml, initTimelineInteraction, openAuditDetails, closedAuditDetails, describeAction, firstSentence, withoutEngineNotes,
   partialSubtitle, renderState, receiveState, loadSelectedSession, finishLandingTop, finishCardKey, noteFinishCard, scrollTimelineToLatest,
   formatMarkdownText, hasMarkdownBlocks, hasMarkdownTable, legacyBullets, splitTableRow, renderCodeBox, textKey, unfoldedCode,

@@ -252,7 +252,12 @@ export type HistoryEntry =
       audit?: any; evidence?: string; files?: Array<{ name: string; mime: string; content: string }> }
   | { type: 'partial_result'; answer: string; table: any; reason: EndReason;
       runStats?: RunStats; offer?: any; findings?: Finding[];
-      skippedSites?: Array<{ siteId: string; site: string; reason: string }> };
+      skippedSites?: Array<{ siteId: string; site: string; reason: string }> }
+  /**
+   * The chat was compacted (mcp/chatChain.ts): `summary` stands for every turn before this row,
+   * `summarizedTurns` is how many that is, `auto` says the run did it because the chain was too long.
+   */
+  | { type: 'chat_compacted'; summary: string; summarizedTurns: number; auto?: boolean; timestamp: string };
 
 // ---------- perception ----------
 export interface PageSig {

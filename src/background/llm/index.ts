@@ -21,11 +21,13 @@ import { getEffectiveContextWindow } from './models.ts';
 import { applyEffortPatch, effortPatch, effortSupportOf, geminiThinkingConfig, learnValuesFromError, nearestSupportedLevel, ollamaThink, openaiReasoningBody, refusedEffortField, registryDialect, rememberRefused, resolveEffortSupport } from './effort.ts';
 import type { EffortLevel, EffortPatch, EffortSupport } from './effort.ts';
 import { isChatProvider } from './types.ts';
-import type { ChatProvider, ChatTurn, CompletionOptions, LlmSettings } from './types.ts';
+import { usageOfMessage, usageOfOllama, usageOfOpenAI } from './usage.ts';
+import type { ChatProvider, ChatTurn, CompletionOptions, LlmSettings, TokenUsage } from './types.ts';
 
 export { fetchAvailableModels, getFallbackModels } from './models.ts';
 export { ProviderTimeoutError, isUserAbort, userAbortReason } from './deadline.ts';
-export type { ChatTurn, CompletionOptions, LlmSettings } from './types.ts';
+export { usageOfMessage, usageOfOllama, usageOfOpenAI } from './usage.ts';
+export type { ChatTurn, CompletionOptions, LlmSettings, TokenUsage } from './types.ts';
 
 // Tool calling support
 export interface ToolCall {
@@ -51,6 +53,8 @@ export interface ToolReply {
   reasoningDetails?: unknown[];
   /** The effort that went out on the wire, for the log: the dialect, the level and the fields, or null when nothing was sent. */
   effortSent?: { dialect: string; level: EffortLevel; source: string; fields: Record<string, unknown> } | null;
+  /** The tokens of the call as the provider reported them; absent when it reported none. */
+  usage?: TokenUsage;
 }
 
 /** Built-in providers that speak OpenAI's /chat/completions with native tool calls. */
@@ -138,6 +142,8 @@ export async function callProvider(provider: string, settings: LlmSettings, mess
   const startTime = Date.now();
   try {
     const reply = await call.invoke(toLangChainMessages(messages, systemPrompt), { signal: options.signal ?? undefined, callbacks: options.callbacks });
+    const usage = usageOfMessage(reply);
+    if (usage) options.onUsage?.(usage);
     const text = reply.text;
     if (chatProvider === 'gemini' && !text && !custom) throw new Error(GEMINI_EMPTY_TEXT);
     Logger.debug('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Output length: ${text.length} chars`);
@@ -318,8 +324,8 @@ async function callOllamaWithTools(
     }
   })) || [];
 
-  // Use dynamic context window: fetch from endpoint, fallback to stored setting, then to model-specific default
-  const numCtx = await getEffectiveContextWindow(settings);
+  // The context window of this model (llm/models.ts): the user's, the server's, the family table, then num_ctx.
+  const numCtx = (await getEffectiveContextWindow(settings)).tokens;
 
   const payload = {
     model: settings.model,
@@ -358,6 +364,7 @@ async function callOllamaWithTools(
   const data = await response.json();
   const message = data.message || {};
   const reasoning = typeof message.thinking === 'string' && message.thinking ? message.thinking : undefined;
+  const usage = usageOfOllama(data);
 
   if (message.tool_calls && message.tool_calls.length > 0) {
     return {
@@ -369,11 +376,12 @@ async function callOllamaWithTools(
         }
       })),
       reasoning,
-      effortSent: sent
+      effortSent: sent,
+      ...(usage ? { usage } : {})
     };
   }
 
-  return { text: message.content || '', reasoning, effortSent: sent };
+  return { text: message.content || '', reasoning, effortSent: sent, ...(usage ? { usage } : {}) };
 }
 
 /** The one effort value among the fields sent (reasoning_effort, reasoning.effort, output_config.effort), or ''. */
@@ -479,6 +487,7 @@ async function callOpenAICompatibleWithTools(
   // OpenRouter's reasoning_details must go back with the assistant turn in a tool loop (Claude and
   // encrypted reasoning need it); the client keeps it on the turn it records.
   const reasoningDetails = Array.isArray(message.reasoning_details) && message.reasoning_details.length ? message.reasoning_details : undefined;
+  const usage = usageOfOpenAI(data);
 
   if (message.tool_calls && message.tool_calls.length > 0) {
     return {
@@ -491,11 +500,12 @@ async function callOpenAICompatibleWithTools(
       })),
       reasoning,
       reasoningDetails,
-      effortSent: sent
+      effortSent: sent,
+      ...(usage ? { usage } : {})
     };
   }
 
-  return { text: message.content || '', reasoning, reasoningDetails, effortSent: sent };
+  return { text: message.content || '', reasoning, reasoningDetails, effortSent: sent, ...(usage ? { usage } : {}) };
 }
 
 /** Default /v1 bases of the built-in OpenAI-style providers. */
@@ -596,15 +606,16 @@ async function callWithPromptEngineering(
     content: `Available tools:\n${toolDescriptions}\n\nReply with a tool call in this format:\n\`\`\`json\n{"name": "tool_name", "arguments": {...}}\n\`\`\``
   });
 
-  const text = await callProvider(providerOf(settings), settings, turns, systemPrompt, { signal, thinkingConfig });
+  let usage: TokenUsage | undefined;
+  const text = await callProvider(providerOf(settings), settings, turns, systemPrompt, { signal, thinkingConfig, onUsage: (u) => { usage = u; } });
 
   const toolCall = parseToolCallFromText(text);
   if (toolCall) {
     // The loop keeps arguments as a JSON string (OpenAI's convention), like every other path.
-    return { tool_calls: [{ id: `call_${Date.now()}`, function: { name: toolCall.name, arguments: JSON.stringify(toolCall.arguments ?? {}) } }] };
+    return { tool_calls: [{ id: `call_${Date.now()}`, function: { name: toolCall.name, arguments: JSON.stringify(toolCall.arguments ?? {}) } }], ...(usage ? { usage } : {}) };
   }
 
-  return { text };
+  return { text, ...(usage ? { usage } : {}) };
 }
 
 /** The first fenced json tool call in a reply, or null. A call with no arguments is still a call. */

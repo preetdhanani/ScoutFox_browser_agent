@@ -35,7 +35,7 @@ test('DOMCompressor produces correct snapshot keys and elements list', () => {
   assert.equal(typeof snapshot.pageText, 'string');
 });
 
-test('empty-page-text tamper seam: overriding extractPageText is honored by getSnapshot', () => {
+test('overriding extractPageText is honored by getSnapshot', () => {
   const fakeDoc = {
     title: 'Tamper Page',
     documentElement: { scrollHeight: 500 },
@@ -51,11 +51,11 @@ test('empty-page-text tamper seam: overriding extractPageText is honored by getS
   };
 
   const compressor = new DOMCompressor();
-  // Simulate tamper script behavior (e.g. extensionCopy.mjs empty-page-text)
+  // A page script that replaces the text reader: the snapshot must use the replacement.
   compressor.extractPageText = () => '';
 
   const snapshot = withGlobals({ document: fakeDoc, window: fakeWin }, () => compressor.getSnapshot());
-  assert.equal(snapshot.pageText, '', 'tamper override of extractPageText must be reflected in snapshot');
+  assert.equal(snapshot.pageText, '', 'an override of extractPageText must be reflected in the snapshot');
 });
 
 test('collapseRepeatedRuns collapses repeated identical runs and leaves short runs alone', () => {

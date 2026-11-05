@@ -8,7 +8,7 @@
  *
  * It also records every /api/chat call (request size, format, think flag, and Ollama's own
  * prompt_eval_count and eval_count), which is how the smoke run counts model calls and tokens.
- * The record has the same shape as the one the offline mock keeps (see callRecord.mjs).
+ * The record has the same shape as the one the key proxy keeps (see callRecord.mjs).
  * The extension streams (ChatOllama always does). The proxy reads the whole NDJSON answer before it
  * forwards it, and does not change it: the record needs the last line, and a reply of a few hundred
  * bytes gains nothing from being passed on piece by piece.

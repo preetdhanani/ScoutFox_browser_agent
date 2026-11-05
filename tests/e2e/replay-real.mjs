@@ -18,7 +18,6 @@
  * Run:  node tests/e2e/replay-real.mjs                    replay the whole corpus
  *       node tests/e2e/replay-real.mjs --only=a,b         replay only these pages
  *       node tests/e2e/replay-real.mjs --update-baseline  store the current counts as the baseline
- *       node tests/e2e/replay-real.mjs --tamper=<name>    prove the assertions can fail (see lib/extensionCopy.mjs)
  *       node tests/e2e/replay-real.mjs --build            run npm run build first
  *
  * Needs the built extension (dist/) and Chromium at CHROMIUM_PATH. CI runs this nightly
@@ -35,7 +34,7 @@ import {
   loadManifest, loadExpectations, loadBaseline, readCorpusPage, stripScripts,
   evaluateExpectations, baselineProblems, auditCorpus, pageFilePaths
 } from './lib/realCorpus.mjs';
-import { prepareExtensionCopy, TAMPERS } from './lib/extensionCopy.mjs';
+import { prepareExtensionCopy } from './lib/extensionCopy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -171,9 +170,6 @@ async function fullTextOf(driver, tabId) {
 }
 
 async function main() {
-  if (args.tamper !== undefined && !TAMPERS[args.tamper]) {
-    throw new Error(`Unknown --tamper "${args.tamper}". Known: ${Object.keys(TAMPERS).join(', ')}`);
-  }
   const audit = auditCorpus(CORPUS_DIR, { requireBaseline: !UPDATE_BASELINE });
   if (audit.problems.length) {
     for (const p of audit.problems) console.error(`corpus: ${p.page ? `${p.page}: ` : ''}${p.problem}`);
@@ -194,10 +190,9 @@ async function main() {
   const corpus = await startCorpusServer(pages);
   cleanups.push(closeServer(corpus.server));
 
-  const copy = prepareExtensionCopy({ distDir: DIST, driverHtml: path.join(HERE, 'driver.html'), tamper: args.tamper });
+  const copy = prepareExtensionCopy({ distDir: DIST, driverHtml: path.join(HERE, 'driver.html') });
   tempDirs.add(copy.dir);
   cleanups.push(() => { copy.remove(); tempDirs.delete(copy.dir); });
-  if (args.tamper) console.log(`TAMPERED copy (${args.tamper}): ${TAMPERS[args.tamper].does}`);
 
   const profileDir = makeTempDir('scoutfox-replay-');
   const browser = await puppeteer.launch({

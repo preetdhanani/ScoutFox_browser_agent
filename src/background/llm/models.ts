@@ -11,6 +11,7 @@ import { baseUrlOf, customModelsUrl, endpointOriginOf, getApiKey, normalizeNvidi
 import { scrubKey } from './errors.ts';
 import { rememberAnthropicList, rememberGeminiList, rememberOpenRouterList } from './effort.ts';
 import { watchFetch } from './factory.ts';
+import { contextLengthOf } from '../../shared/tokens.ts';
 import type { CustomProvider } from '../../shared/storage.ts';
 import type { LlmSettings } from './types.ts';
 
@@ -29,7 +30,7 @@ export function agentRouterHeaders(apiKey: string): Record<string, string> {
 
 /** The parts of a model-list answer that this file reads: OpenAI-style `data`, and `models` for Gemini and AgentRouter. */
 interface ModelListPayload {
-  data?: Array<{ id: string }>;
+  data?: Array<{ id: string; [field: string]: unknown }>;
   models?: Array<string | { id?: string; name: string; supportedGenerationMethods?: string[] }>;
 }
 
@@ -104,6 +105,33 @@ export function getFallbackModels(provider: string): string[] {
 interface CustomModelList {
   models: string[];
   filteredCount: number;
+  /** The context window of each listed model that names one (see contextLengthOf). */
+  windows: Record<string, number>;
+}
+
+/**
+ * The context windows a `/models` list names, by model id. Only entries that name one are kept;
+ * the ids themselves stay in models_cache as they are.
+ */
+export function contextWindowsOf(entries: unknown): Record<string, number> {
+  const windows: Record<string, number> = {};
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const id = typeof (entry as any)?.id === 'string' ? (entry as any).id.trim() : '';
+    const n = contextLengthOf(entry);
+    if (id && n) windows[id] = n;
+  }
+  return windows;
+}
+
+/** Keeps the windows a model list named, for getEffectiveContextWindow. A list that names none writes nothing. */
+async function rememberContextWindows(provider: string, entries: unknown): Promise<void> {
+  const windows = contextWindowsOf(entries);
+  if (Object.keys(windows).length === 0) return;
+  try {
+    await Storage.saveCachedContextWindows(provider, windows);
+  } catch {
+    // A window that is not kept falls back to the default; the model list itself is unaffected.
+  }
 }
 
 async function fetchCustomProviderModels(custom: CustomProvider, apiKey: string, providerId: string, startTime: number): Promise<CustomModelList> {
@@ -156,7 +184,7 @@ async function fetchCustomProviderModels(custom: CustomProvider, apiKey: string,
   const filteredCount = raw.length - kept.length;
   const unique = [...new Set(kept)].sort();
   Logger.debug('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${unique.length} model(s) from ${custom.displayName || providerId}${filteredCount > 0 ? ` (${filteredCount} non-chat id(s) hidden)` : ''}`);
-  return { models: unique, filteredCount };
+  return { models: unique, filteredCount, windows: contextWindowsOf(data.data) };
 }
 
 /**
@@ -191,6 +219,7 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
       const listed = await fetchCustomProviderModels(custom, apiKey, provider, startTime);
       if (meta) meta.filteredCount = listed.filteredCount;
       models = listed.models;
+      if (Object.keys(listed.windows).length) await Storage.saveCachedContextWindows(provider, listed.windows).catch(() => {});
       if (models.length === 0) {
         // An endpoint that lists nothing (some gateways block GET /models) falls back to the list
         // the user saved, which may itself be empty: the picker then shows the honest empty state.
@@ -210,6 +239,7 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
       models = (data.data || []).map(m => m.id).sort();
       // The same list says which models can reason and with which efforts (llm/effort.ts).
       rememberOpenRouterList(settings, data.data || []);
+      await rememberContextWindows(provider, data.data);
       if (models.length === 0) {
         models = getFallbackModels('openrouter');
       }
@@ -234,6 +264,7 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
       const elapsed = Date.now() - startTime;
       if (res.ok) {
         const data: ModelListPayload = await res.json();
+        await rememberContextWindows(provider, data.data);
         // The old code trusted the payload here: an entry with neither id nor name would have been undefined.
         models = ((data.data || data.models || []) as Array<string | { id?: string; name?: string }>)
           .map(m => (typeof m === 'string' ? m : (m.id || m.name))).sort() as string[];
@@ -253,6 +284,7 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
       if (!res.ok) throw new Error(`API returned HTTP ${res.status}`);
 
       const data: ModelListPayload = await res.json();
+      await rememberContextWindows(provider, data.data);
       models = (data.data || []).map(m => m.id).sort();
       if (models.length === 0) models = getFallbackModels(provider);
       Logger.debug('ApiClients', `[MODEL_FETCH] 200 OK (${elapsed}ms) - Retrieved ${models.length} model(s) from OpenAI/Compatible endpoint`);
@@ -302,6 +334,7 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
       }
 
       const data: ModelListPayload = await res.json();
+      await rememberContextWindows(provider, data.data);
       models = (data.data || [])
         .map(m => (typeof m?.id === 'string' ? m.id.trim() : ''))
         .filter(id => Boolean(id) && !NON_CHAT_MODEL_PATTERN.test(id))
@@ -344,51 +377,52 @@ export async function fetchAvailableModels(settings: LlmSettings, forceRefresh =
   }
 }
 
+/** The windows /api/show reported, by "<baseUrl>|<model>". A model's window does not change while it is installed. */
+const shownWindows = new Map<string, number>();
+
+/** Forgets the windows /api/show reported (tests, and a model pulled again under the same name). */
+export function clearShownWindows(): void {
+  shownWindows.clear();
+}
+
 /**
- * Fetch the context window (num_ctx) for a specific model from the provider endpoint.
- * Currently supports Ollama via /api/show. Returns the context length in tokens,
- * or null if the endpoint doesn't report it.
+ * The context window an Ollama server reports for a model (/api/show, model_info), or null when it
+ * reports none or cannot be asked. A reported window is remembered for the life of the worker, so
+ * the per-call num_ctx does not cost a request every round.
  */
 export async function fetchModelContextWindow(settings: LlmSettings, model: string): Promise<number | null> {
   const provider = providerOf(settings);
-  const baseUrl = baseUrlOf(settings) || '';
-  
+  const baseUrl = (baseUrlOf(settings) || 'http://localhost:11434').replace(/\/$/, '');
+  if (provider !== 'ollama' || !model) return null;
+  const memo = shownWindows.get(`${baseUrl}|${model}`);
+  if (memo) return memo;
+
   try {
-    if (provider === 'ollama') {
-      const url = `${baseUrl.replace(/\/$/, '')}/api/show`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model })
-      });
-      
-      if (!res.ok) {
-        Logger.warn('ApiClients', `[MODEL_CTX] Ollama /api/show for ${model} returned HTTP ${res.status}`);
-        return null;
-      }
-      
-      const data = await res.json();
-      // Ollama's /api/show returns model info with model_info containing context_length
-      // e.g., { model_info: { "general.architecture": "qwen35", "general.context_length": 262144, ... } }
-      if (data.model_info && typeof data.model_info === 'object') {
-        // Try multiple possible keys for context length
-        const ctxKeys = [
-          'general.context_length',
-          'context_length',
-          'llama.context_length',
-          'general.context.window'
-        ];
-        
-        for (const key of ctxKeys) {
-          const val = data.model_info[key];
-          if (typeof val === 'number' && val > 0) {
-            Logger.debug('ApiClients', `[MODEL_CTX] Fetched context window for ${model}: ${val} tokens (key: ${key})`);
-            return val;
-          }
-        }
+    const res = await fetch(`${baseUrl}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model })
+    });
+    if (!res.ok) {
+      Logger.warn('ApiClients', `[MODEL_CTX] Ollama /api/show for ${model} returned HTTP ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    // { model_info: { "general.architecture": "qwen35", "qwen35.context_length": 262144, ... } }
+    const info = data?.model_info;
+    if (!info || typeof info !== 'object') return null;
+    const arch = typeof info['general.architecture'] === 'string' ? info['general.architecture'] : '';
+    const keys = [arch ? `${arch}.context_length` : '', 'general.context_length', 'context_length', 'llama.context_length']
+      .filter(Boolean)
+      .concat(Object.keys(info).filter((k) => k.endsWith('.context_length')));
+    for (const key of keys) {
+      const val = Number(info[key]);
+      if (Number.isFinite(val) && val > 0) {
+        shownWindows.set(`${baseUrl}|${model}`, val);
+        Logger.debug('ApiClients', `[MODEL_CTX] Context window of ${model}: ${val} tokens (${key})`);
+        return val;
       }
     }
-    // TODO: Add support for other providers (OpenAI, Anthropic, etc.) when they expose context window via API
     return null;
   } catch (err) {
     Logger.warn('ApiClients', `[MODEL_CTX] Failed to fetch context window for ${model}: ${(err as Error).message}`);
@@ -396,40 +430,61 @@ export async function fetchModelContextWindow(settings: LlmSettings, model: stri
   }
 }
 
-export async function getEffectiveContextWindow(settings: LlmSettings): Promise<number> {
-  const provider = providerOf(settings);
-  const model = settings.model || '';
-  const cacheKey = `${provider}|${model}`;
-  
-  // Check stored context window first
-  if (settings.contextWindow?.[cacheKey]) {
-    return settings.contextWindow[cacheKey];
-  }
-  
-  // Try to fetch from endpoint
-  const fetched = await fetchModelContextWindow(settings, model);
-  if (fetched && fetched > 0) {
-    return fetched;
-  }
-  
-  // Fallback: use stored ollamaNumCtx or default
-  const ollamaNumCtx = Number(settings.ollamaNumCtx) > 0 ? Number(settings.ollamaNumCtx) : DEFAULT_CONTEXT_WINDOW;
-  
-  // For Ollama, use the fetched value or a reasonable default based on model family
-  if (provider === 'ollama' && model) {
-    // Known model families and their typical context windows
-    if (model.includes('qwen3') || model.includes('qwen2.5')) return 262144;
-    if (model.includes('llama3.1') || model.includes('llama3.2')) return 131072;
-    if (model.includes('llama3')) return 8192;
-    if (model.includes('gemma2') || model.includes('gemma3')) return 8192;
-    if (model.includes('mistral') || model.includes('mixtral')) return 32768;
-    if (model.includes('phi3') || model.includes('phi4')) return 131072;
-    if (model.includes('deepseek')) return 131072;
-    if (model.includes('nemotron')) return 131072;
-  }
-  
-  return ollamaNumCtx;
+/** Where a context window comes from: the user's value, the provider, the Ollama family table, or the default. */
+export type ContextWindowSource = 'user' | 'provider' | 'estimate' | 'default';
+
+export interface ContextWindow {
+  tokens: number;
+  source: ContextWindowSource;
 }
 
-/** Default context window (tokens) when the endpoint does not report one. */
-export const DEFAULT_CONTEXT_WINDOW = 262144; // 256k tokens - safe for most modern models
+/** The key of a model's window in settings.contextWindow. */
+export function contextWindowKey(provider: string, model: string): string {
+  return `${provider}|${model}`;
+}
+
+/** The typical window of an Ollama model family, or null when the name says nothing. */
+function ollamaFamilyWindow(model: string): number | null {
+  if (model.includes('qwen3') || model.includes('qwen2.5')) return 262144;
+  if (model.includes('llama3.1') || model.includes('llama3.2')) return 131072;
+  if (model.includes('llama3')) return 8192;
+  if (model.includes('gemma2') || model.includes('gemma3')) return 8192;
+  if (model.includes('mistral') || model.includes('mixtral')) return 32768;
+  if (model.includes('phi3') || model.includes('phi4')) return 131072;
+  if (model.includes('deepseek')) return 131072;
+  if (model.includes('nemotron')) return 131072;
+  return null;
+}
+
+/**
+ * The context window of the chosen model, and where the number comes from, in this order:
+ *   1. the user's value, settings.contextWindow["provider|model"] (user);
+ *   2. the provider: Ollama's /api/show, or the window the model list named (models_ctx_cache;
+ *      the list is fetched by the model picker, never per call) (provider);
+ *   3. Ollama only: the family table (estimate);
+ *   4. Ollama: num_ctx of Settings (ollamaNumCtx), every other provider: 256K (default).
+ * Ollama's num_ctx is this same number, so what the meter shows is what Ollama is sent.
+ */
+export async function getEffectiveContextWindow(settings: LlmSettings): Promise<ContextWindow> {
+  const provider = providerOf(settings);
+  const model = settings.model || '';
+
+  const user = Number(settings.contextWindow?.[contextWindowKey(provider, model)]);
+  if (Number.isFinite(user) && user > 0) return { tokens: Math.round(user), source: 'user' };
+
+  if (provider === 'ollama') {
+    const shown = await fetchModelContextWindow(settings, model);
+    if (shown && shown > 0) return { tokens: shown, source: 'provider' };
+    const family = model ? ollamaFamilyWindow(model) : null;
+    if (family) return { tokens: family, source: 'estimate' };
+    const numCtx = Number(settings.ollamaNumCtx);
+    return { tokens: numCtx > 0 ? numCtx : DEFAULT_CONTEXT_WINDOW, source: 'default' };
+  }
+
+  const listed = Number((await Storage.getCachedContextWindows(provider).catch(() => null))?.[model]);
+  if (Number.isFinite(listed) && listed > 0) return { tokens: listed, source: 'provider' };
+  return { tokens: DEFAULT_CONTEXT_WINDOW, source: 'default' };
+}
+
+/** Default context window (tokens) when nothing names one. */
+export const DEFAULT_CONTEXT_WINDOW = 262144; // 256K

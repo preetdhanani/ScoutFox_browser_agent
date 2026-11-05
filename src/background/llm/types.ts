@@ -60,6 +60,14 @@ export interface CompletionOptions {
   thinkingConfig?: { thinkingBudget?: number; thinkingLevel?: 'LOW' | 'MEDIUM' | 'HIGH' };
   /** Forwarded into model.invoke for opt-in tracing, because there is no AsyncLocalStorage parent lookup. */
   callbacks?: Callbacks;
+  /** Called with the token usage of the call when the provider reports one (LangChain's usage_metadata). */
+  onUsage?: (usage: TokenUsage) => void;
+}
+
+/** The tokens one model call used, as the provider reported them. */
+export interface TokenUsage {
+  promptTokens: number;
+  outputTokens: number;
 }
 
 /**
