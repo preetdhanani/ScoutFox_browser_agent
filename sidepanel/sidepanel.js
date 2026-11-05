@@ -6,7 +6,7 @@
 
 // Must stay the first import: it sets zod's jitless flag before any module that bundles zod runs (see the file).
 import '../src/background/boot/zodJitless.ts';
-import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS } from '../src/shared/storage.ts';
+import { Storage, DEFAULT_SETTINGS, DEFAULT_PROVIDER_CONFIGS, CHAT_INDEX_KEY } from '../src/shared/storage.ts';
 import { extractReadableAnswer } from '../src/shared/answerText.ts';
 import { BUILD_STAMP, IS_BUILD } from '../src/shared/build.ts';
 import {
@@ -50,6 +50,7 @@ let myTabId = null;
 function sendBgMessage(msg, cb) {
   chrome.runtime.sendMessage({ ...msg, tabId: myTabId }, cb);
 }
+// The chat on screen: the runner's chatId (its Recent tasks entry), from the last state it sent.
 let currentSessionId = null;
 let currentActiveLogFilter = 'all';
 let rawLogsCache = [];
@@ -98,10 +99,6 @@ let portReconnectTimer = null;
 // False only for this panel instance's very first connect. Distinguishes opening the panel
 // from reconnecting after Chrome reclaimed the service worker.
 let hasConnectedBefore = false;
-// Terminal state is broadcast more than once for the same run; this keeps the write to one
-// per (run, history length) rather than one per broadcast.
-const savedSessionIds = new Set();
-
 // Out-of-order render guard. The live port and the GET_AGENT_STATE resync are two independent
 // async channels with no ordering guarantee, so a slow resync reply can arrive after a newer
 // live push and roll the UI backwards. stateVersion orders them — but it restarts near zero
@@ -127,8 +124,6 @@ const openCompactSummaries = new Set();
 let lastContextState = null;
 /** A task is running or paused: Compact is off, and the ring shows the last model call. */
 let lastContextBusy = false;
-/** A saved session from Recent tasks is shown: the meter does not count it, and Compact is off. */
-let contextReadOnly = false;
 /** This panel sent COMPACT_CHAT and waits for the answer. */
 let compactPending = false;
 
@@ -140,12 +135,32 @@ let compactPending = false;
  * an already-decoded element into the new subtree does not decode it again, so the element is
  * kept here and re-attached after each render.
  */
-const shotCache = new Map(); // imageId -> { dataUrl: string, img: HTMLImageElement }
+const shotCache = new Map(); // imageId -> { dataUrl: string, img: HTMLImageElement, thumb: HTMLImageElement }
+/** The ids being fetched now, so a picture shown in two places is asked for once. */
+const shotLoading = new Set();
 
 /** The ids whose bytes the background said it no longer has, so the panel stops asking. */
 const shotGone = new Set();
 // Turns whose notes the reader closed although they open by default (an unverified answer).
 const closedAuditDetails = new Set();
+
+/**
+ * Following the run: while this is on, every render, every picture that attaches and every thought
+ * the reader opens in the newest turn keep the timeline at its bottom. It is on by default, and on
+ * again at New chat, a new task, an opened chat, and when the reader scrolls back to the bottom. It
+ * goes off only when the reader scrolls up themself (a wheel, a touch, a key or the scrollbar), or
+ * when the panel lands on the top of a tall finish card; content that grows never turns it off.
+ */
+let followTimeline = true;
+/** How near the bottom counts as at the bottom, in px. */
+const FOLLOW_SLACK_PX = 80;
+/** When the reader last moved the timeline themself (a wheel up, a touch, a key), and whether they hold its scrollbar. */
+let readerScrollAt = 0;
+let readerOnScrollbar = false;
+/** How long after the reader's own gesture a scroll still counts as theirs, in ms. */
+const READER_SCROLL_MS = 600;
+/** The markup of the last render, to tell new content from a repeated broadcast. */
+let lastTimelineHtml = '';
 
 
 /**
@@ -356,7 +371,7 @@ function contextModelName() {
 
 /** Draws the ring, and the card when it is open, from the last context state the runner sent. */
 function renderContextMeter() {
-  const view = meterView(lastContextState, { busy: lastContextBusy, readOnly: contextReadOnly, model: contextModelName(), pending: compactPending });
+  const view = meterView(lastContextState, { busy: lastContextBusy, model: contextModelName(), pending: compactPending });
   const btn = document.getElementById('btnContext');
   const slot = document.getElementById('contextRing');
   const menu = document.getElementById('contextMenu');
@@ -364,15 +379,8 @@ function renderContextMeter() {
   if (btn) {
     btn.setAttribute('aria-label', view.label);
     btn.title = view.label;
-    btn.disabled = view.ringDisabled;
   }
-  if (menu) {
-    if (view.ringDisabled && !menu.hidden) {
-      menu.hidden = true;
-      if (btn) btn.setAttribute('aria-expanded', 'false');
-    }
-    if (!menu.hidden) menu.innerHTML = contextCardHtml(view);
-  }
+  if (menu && !menu.hidden) menu.innerHTML = contextCardHtml(view);
   return view;
 }
 
@@ -488,17 +496,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 /**
- * Keep the History button and list current when ANOTHER panel saves a session.
+ * Keep the History button and list current when the background saves a chat.
  *
- * Only the panel that submitted a task saves it, and that is often not the one on screen: when
- * a run moves to a new tab, the submitting panel stays behind, hidden on the old tab, and the
- * panel the user is looking at is a second document that loaded before the save. Reading the
- * list once at startup left it showing "(0)" next to the run it had just finished.
+ * The background writes every chat (while a run goes, and when it ends), never this panel, so the
+ * list follows the index in storage. Reading it once at startup left it showing "(0)" next to the
+ * run that had just finished.
  */
 function followSavedSessionChanges() {
   if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.onChanged) return;
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes.saved_sessions) return;
+    if (area !== 'local' || !changes[CHAT_INDEX_KEY]) return;
     loadSessionHistory().catch((err) => reportClientError('sidepanel:session-history-sync', err));
   });
 }
@@ -1510,10 +1517,9 @@ function initEventListeners() {
           return;
         }
         currentSessionId = null;
-        contextReadOnly = false;
         // CLEAR_HISTORY resets the runner's version counter, so the next broadcast is lower
         // than the watermark this panel holds. Drop the watermark or that state is ignored.
-        lastRenderedStateVersion = -1;
+        resetChatView();
         const input = document.getElementById('taskInput');
         if (input) {
           input.value = '';
@@ -1846,8 +1852,8 @@ async function startTaskInner(prompt) {
   // Auto-sync form state into Storage before launching task
   await autoSaveCurrentForm();
   runModelSnapshot = currentRunModel();
-
-  currentSessionId = `session_${Date.now()}`;
+  // A new task is watched from its first row on.
+  setFollowTimeline(true);
 
   appendLocalLog('INFO', 'Sidepanel', `[TASK_SUBMIT] Sending task to background worker: "${prompt}"`);
 
@@ -1946,116 +1952,64 @@ async function loadSessionHistory() {
 /**
  * Every engine state this panel gets, from the port or from a resync, goes through here.
  *
- * A panel that did not submit the run itself (opened while it was going, or after it ended)
- * has no session id for it, so it takes one here, before the first render: the id is part of
- * the finish card's identity, and taking it later would make the card land a second time.
+ * The state names the chat it belongs to (its Recent tasks entry): that id is part of the finish
+ * card's identity and marks the chat in the list. The background saves the chat; this panel never
+ * writes one.
  */
 function receiveState(state) {
   if (!state) return;
-  // A state from the runner is the live chat of this tab again.
-  contextReadOnly = false;
-  if (!currentSessionId && state.task && Array.isArray(state.history) && state.history.length > 0) {
-    currentSessionId = `session_${Date.now()}`;
-  }
-  // Read before the render, which forgets the run's model once the run has ended.
-  const runModel = runModelSnapshot || currentRunModel();
+  if (typeof state.chatId === 'string' && state.chatId) currentSessionId = state.chatId;
   renderState(state);
-  autoSaveActiveSession(state, runModel);
 }
 
 /**
- * What tells one run apart from another in the same tab: its own goal row (the run number, the
- * prompt and the time it was typed). Two panels that save the same run agree on it, which a
- * per-panel session id cannot do.
+ * What the panel forgets when the chat on screen is swapped (New chat, a chat opened from Recent
+ * tasks): the version watermark (CLEAR_HISTORY restarts the runner's counter), the groups the
+ * reader opened or closed (turn numbers start again), the finish card it landed on, and the
+ * scroll: the new chat is followed from its end.
  */
-function runKeyOf(task, history) {
-  const list = Array.isArray(history) ? history : [];
-  for (let i = list.length - 1; i >= 0; i--) {
-    const e = list[i];
-    if (e && e.type === 'user_goal') return `${e.turn}|${e.prompt}|${e.timestamp || ''}`;
-  }
-  return `task|${task || ''}`;
+function resetChatView() {
+  lastRenderedStateVersion = -1;
+  turnExpandOverride.clear();
+  expandedRows.clear();
+  seenFinishKey = null;
+  setFollowTimeline(true);
 }
 
 /**
- * The saved entry a run belongs to. The run's own entry if any panel saved it already (so a
- * second panel updates it instead of adding a copy), else this panel's id, unless that id names
- * a different run (a session the user opened from the list), which must not be overwritten.
+ * Opens a chat from Recent tasks as this tab's live chat. The background takes its history, plan
+ * and records (LOAD_CHAT) and sends the state, which renders it: the context ring, Compact and the
+ * next request all work on it, and a "resume" typed now goes on from where it stopped. Refused
+ * while a task runs (the panel says why).
  */
-function sessionIdForRun(sessions, runKey) {
-  const same = sessions.find((s) => s && runKeyOf(s.task, s.history) === runKey);
-  if (same) return { id: same.id, saved: same };
-  const own = sessions.find((s) => s && s.id === currentSessionId);
-  if (currentSessionId && !own) return { id: currentSessionId, saved: null };
-  return { id: `session_${Date.now()}`, saved: null };
-}
-
-/**
- * Persist a run once it reaches a terminal state.
- *
- * Only terminal states are saved, so a run is written once rather than on every one of the
- * ~7 state broadcasts per step. The panel still OPENS on a clean timeline (the worker clears
- * history on a fresh connect); this is what makes that previous run recoverable afterwards
- * instead of simply lost.
- */
-async function autoSaveActiveSession(state, runModel = currentRunModel()) {
-  if (!state) return;
-
-  const TERMINAL = ['idle', 'stopped', 'complete', 'completed', 'error'];
-  if (!TERMINAL.includes(state.status)) return;
-  if (!state.task) return;
-  if (!Array.isArray(state.history) || state.history.length === 0) return;
-  const runKey = runKeyOf(state.task, state.history);
-  const writeKey = runKey + ':' + state.history.length;
-  if (savedSessionIds.has(writeKey)) return;
-
-  savedSessionIds.add(writeKey);
-
-  try {
-    const { id, saved } = sessionIdForRun(await Storage.getSessions(), runKey);
-    // Already saved in full (by another panel, or before this panel was reopened): nothing new.
-    if (saved && Array.isArray(saved.history) && saved.history.length === state.history.length) return;
-    await Storage.saveSession({
-      id,
-      task: state.task,
-      timestamp: new Date().toLocaleString(),
-      model: runModel.model || '',
-      provider: runModel.provider || '',
-      history: state.history,
-      planSteps: state.planSteps || []
-    });
-    await loadSessionHistory();
-  } catch (err) {
-    reportClientError('sidepanel:session-save', err);
-  }
-}
-
 async function loadSelectedSession(sessionId) {
-  const sessions = await Storage.getSessions();
-  const target = sessions.find(s => s.id === sessionId);
-  if (!target) return;
-
-  currentSessionId = target.id;
-  // A saved chat is shown as it was: the meter does not count it, and it cannot be compacted.
-  contextReadOnly = true;
   const drawer = document.getElementById('historyDrawer');
   if (drawer) drawer.style.display = 'none';
   const toggle = document.getElementById('btnToggleHistory');
   if (toggle) toggle.setAttribute('aria-expanded', 'false');
-
-  renderState({
-    status: 'idle',
-    stepCount: target.history.length,
-    task: target.task,
-    history: target.history,
-    planSteps: target.planSteps || []
+  // Reset before the request: the state of the opened chat can reach the port before the answer.
+  const previous = currentSessionId;
+  resetChatView();
+  const res = await new Promise((resolve) => {
+    sendBgMessage({ action: 'LOAD_CHAT', payload: { sessionId } }, (answer) => {
+      resolve(chrome.runtime.lastError ? { success: false, error: chrome.runtime.lastError.message } : (answer || { success: false, error: 'The background worker gave no answer.' }));
+    });
   });
-
+  if (!res.success) {
+    currentSessionId = previous;
+    appendLocalLog('WARN', 'Sidepanel', `[LOAD_CHAT_REFUSED] ${res.error}`);
+    showToast(res.error || 'The chat could not be opened.', 'error');
+    return res;
+  }
+  currentSessionId = sessionId;
   await loadSessionHistory();
+  return res;
 }
 
 function renderEmptyState() {
   const timeline = document.getElementById('timeline');
+  lastTimelineHtml = '';
+  showJumpToLatest(false);
   if (timeline) {
     timeline.innerHTML = `
       <div class="empty-state" id="emptyState">
@@ -2244,49 +2198,133 @@ function renderState(state) {
       return;
     }
 
-    // Keep the scroll pinned to the bottom only if the user was already there, so
-    // expanding a row mid-run does not yank the view away from them.
-    const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
     const finishArrived = noteFinishCard(status, history);
-    timeline.innerHTML = renderTurns(history, status, currentPhase, pendingQuestion, pendingApproval, pendingConfirm, pendingChallengeHelp, pendingContinueBudget, findings, state.effortProfile, planSteps);
+    const html = renderTurns(history, status, currentPhase, pendingQuestion, pendingApproval, pendingConfirm, pendingChallengeHelp, pendingContinueBudget, findings, state.effortProfile, planSteps);
+    const changed = html !== lastTimelineHtml;
+    lastTimelineHtml = html;
+    timeline.innerHTML = html;
     attachShotSlots();
-    if (nearBottom) scrollTimelineToLatest(timeline, finishArrived);
+    // Following: the newest row stays in view however the content grew. A reader who scrolled up
+    // keeps their place, and the Jump button tells them that something new came in below.
+    if (followTimeline) {
+      if (scrollTimelineToLatest(timeline, finishArrived) === 'card-top') setFollowTimeline(false);
+    } else if (changed) {
+      showJumpToLatest(true);
+    }
+  }
+}
+
+/** Whether the timeline follows the run now (for the tests). */
+function isFollowingTimeline() {
+  return followTimeline;
+}
+
+/** Turns following on or off. On hides the Jump button: there is nothing below to jump to. */
+function setFollowTimeline(on) {
+  followTimeline = !!on;
+  if (followTimeline) showJumpToLatest(false);
+}
+
+/** Shows or hides the round "Jump to latest" button above the composer. */
+function showJumpToLatest(show) {
+  const btn = document.getElementById('btnJumpLatest');
+  if (btn) btn.hidden = !show;
+}
+
+/** The distance from the timeline's view to its bottom, in px. */
+function timelineGap(timeline) {
+  return (Number(timeline.scrollHeight) || 0) - (Number(timeline.scrollTop) || 0) - (Number(timeline.clientHeight) || 0);
+}
+
+/** Puts the newest row in view while following is on. */
+function keepTimelineAtBottom() {
+  const timeline = document.getElementById('timeline');
+  if (timeline && followTimeline) timeline.scrollTop = timeline.scrollHeight;
+}
+
+/**
+ * Following goes with the reader's scrolling: back within FOLLOW_SLACK_PX of the bottom turns it
+ * on, and a scroll away from the bottom turns it off only when the reader moved the timeline
+ * themself. Content that grows moves nothing (no scroll event), and keys typed into the composer
+ * never reach the timeline, so neither can turn it off.
+ */
+function initTimelineFollow(timeline) {
+  const markReader = () => { readerScrollAt = Date.now(); };
+  timeline.addEventListener('wheel', (e) => { if ((e.deltaY || 0) < 0) markReader(); }, { passive: true });
+  timeline.addEventListener('touchmove', markReader, { passive: true });
+  timeline.addEventListener('keydown', (e) => {
+    if (['ArrowUp', 'PageUp', 'Home'].includes(e.key) || (e.key === ' ' && e.shiftKey)) markReader();
+  });
+  // A press in the scrollbar's strip (right of the content box) is the reader dragging it.
+  timeline.addEventListener('pointerdown', (e) => {
+    if (typeof e.offsetX === 'number' && e.offsetX >= timeline.clientWidth) readerOnScrollbar = true;
+  });
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('pointerup', () => { readerOnScrollbar = false; });
+  }
+  timeline.addEventListener('scroll', () => {
+    if (timelineGap(timeline) <= FOLLOW_SLACK_PX) {
+      setFollowTimeline(true);
+      return;
+    }
+    if (readerOnScrollbar || Date.now() - readerScrollAt < READER_SCROLL_MS) setFollowTimeline(false);
+  }, { passive: true });
+  const jump = document.getElementById('btnJumpLatest');
+  if (jump) {
+    jump.addEventListener('click', () => {
+      setFollowTimeline(true);
+      timeline.scrollTop = timeline.scrollHeight;
+    });
   }
 }
 
 /**
- * Puts the pictures into the slots the render just created.
+ * Puts the pictures into the slots the render just created: the picture slots of the rows and of a
+ * group's "Captured page" section, and the thumbnails in the heads of the groups.
  *
- * A picture that is cached is moved in from its element, which decodes nothing. A picture that is
- * not cached yet is fetched once, decoded off-screen, and only then attached, so it never appears
- * half-drawn. A picture the background no longer has (the registry keeps the last few, and a
- * reloaded session has none) says so in a muted line, exactly like a session reloaded after the
- * bytes were dropped: honest, and never a broken <img>.
+ * A picture that is cached is moved in from its element, which decodes nothing. Each picture has
+ * two elements, the picture and its thumbnail, so a head and a section that show the same picture
+ * never take one element from each other. A picture that is not cached yet is fetched once, decoded
+ * off-screen, and then attached to every slot that shows it, so it never appears half-drawn. A
+ * picture the background no longer has says so in a muted line (and its thumbnail is left out),
+ * never a broken <img>.
  */
 function attachShotSlots() {
-  const slots = document.querySelectorAll('#timeline .act-shot-slot');
+  const slots = document.querySelectorAll('#timeline .act-shot-slot, #timeline .act-head-thumb');
   for (const slot of slots) {
-    const imageId = slot.getAttribute('data-shot') || '';
+    const thumb = slot.classList.contains('act-head-thumb');
+    const imageId = slot.getAttribute(thumb ? 'data-thumb' : 'data-shot') || '';
     if (!imageId) continue;
     const cached = shotCache.get(imageId);
     if (cached) {
-      attachShotPicture(slot, cached.img, cached.dataUrl);
+      if (thumb) attachShotThumb(slot, cached.thumb);
+      else attachShotPicture(slot, cached.img, cached.dataUrl);
       continue;
     }
     if (shotGone.has(imageId)) {
-      slot.innerHTML = '<span class="act-shot-gone">picture no longer kept</span>';
+      markShotGone(slot, imageId);
       continue;
     }
-    void loadShotPicture(imageId, slot);
+    void loadShotPicture(imageId);
   }
+}
+
+/** The muted line of a picture that is not there (or the removal of its thumbnail). */
+function markShotGone(slot, imageId) {
+  if (slot.classList.contains('act-head-thumb')) {
+    slot.remove();
+    return;
+  }
+  const why = shotGone.has(`${imageId}#undecodable`) ? 'Picture could not be shown' : 'Picture no longer kept';
+  slot.innerHTML = `<span class="act-shot-gone">${why}</span>`;
 }
 
 /** Puts one decoded picture (or its placeholder) into one slot. */
 function attachShotPicture(slot, img, dataUrl) {
   const width = Number(slot.getAttribute('data-w')) || img.naturalWidth || 4;
   const height = Number(slot.getAttribute('data-h')) || img.naturalHeight || 3;
-  // The box keeps the picture's shape from the stored size, so the layout does not jump when the
-  // bytes arrive. A ratio that would collapse is left to the image's own size.
+  // The markup reserved the picture's shape from the stored size; a slot without one gets it
+  // here, from the picture itself, so the layout does not jump again.
   if (width > 0 && height > 0) slot.style.aspectRatio = `${width} / ${height}`;
   slot.innerHTML = '';
   img.width = width;
@@ -2295,44 +2333,59 @@ function attachShotPicture(slot, img, dataUrl) {
   img.className = 'act-shot-img';
   img.setAttribute('data-src', dataUrl);
   slot.appendChild(img);
+  keepTimelineAtBottom();
 }
 
-/** Fetches one picture by id, decodes it, and hands it to the slot. */
-async function loadShotPicture(imageId, slot) {
-  const dataUrlFor = (data, mediaType) => (String(data).startsWith('data:')
-    ? String(data)
-    : `data:${mediaType || 'image/jpeg'};base64,${data}`);
-  const answer = await new Promise((resolve) => {
-    let done = false;
-    const finish = (value) => { if (!done) { done = true; resolve(value); } };
-    try {
-      sendBgMessage({ action: 'GET_SCREENSHOT', payload: { imageId } }, (resp) => finish(chrome.runtime.lastError ? null : resp));
-    } catch (_) {
-      finish(null);
-    }
-    setTimeout(() => finish(null), 3000);
-  });
-  if (!answer || !answer.success || !answer.data) {
-    shotGone.add(imageId);
-    if (slot.isConnected) slot.innerHTML = '<span class="act-shot-gone">picture no longer kept</span>';
-    return;
-  }
-  const dataUrl = dataUrlFor(answer.data, answer.mediaType);
-  const img = new Image();
-  img.src = dataUrl;
+/** Puts the thumbnail element of a picture into a group's head. Decorative: the head's label names it. */
+function attachShotThumb(slot, thumb) {
+  slot.innerHTML = '';
+  thumb.alt = '';
+  thumb.className = 'act-head-thumb-img';
+  slot.appendChild(thumb);
+}
+
+/** Fetches one picture by id, decodes it, and attaches it to every slot that shows it. */
+async function loadShotPicture(imageId) {
+  if (shotLoading.has(imageId)) return;
+  shotLoading.add(imageId);
   try {
-    await img.decode();
-  } catch (_) {
-    // The bytes came back but they are not a picture the browser can decode. That is not the
-    // same as "the session dropped it", and saying so would be a wrong explanation.
-    shotGone.add(imageId);
-    if (slot.isConnected) slot.innerHTML = '<span class="act-shot-gone">picture could not be shown</span>';
-    return;
+    const dataUrlFor = (data, mediaType) => (String(data).startsWith('data:')
+      ? String(data)
+      : `data:${mediaType || 'image/jpeg'};base64,${data}`);
+    const answer = await new Promise((resolve) => {
+      let done = false;
+      const finish = (value) => { if (!done) { done = true; resolve(value); } };
+      try {
+        sendBgMessage({ action: 'GET_SCREENSHOT', payload: { imageId } }, (resp) => finish(chrome.runtime.lastError ? null : resp));
+      } catch (_) {
+        finish(null);
+      }
+      setTimeout(() => finish(null), 3000);
+    });
+    if (!answer || !answer.success || !answer.data) {
+      shotGone.add(imageId);
+    } else {
+      const dataUrl = dataUrlFor(answer.data, answer.mediaType);
+      const img = new Image();
+      img.src = dataUrl;
+      try {
+        await img.decode();
+        // The thumbnail is a second element of the same decoded bytes, made once here.
+        const thumb = img.cloneNode();
+        shotCache.set(imageId, { dataUrl, img, thumb });
+      } catch (_) {
+        // The bytes came back but they are not a picture the browser can decode. That is not the
+        // same as "the session dropped it", and saying so would be a wrong explanation.
+        shotGone.add(imageId);
+        shotGone.add(`${imageId}#undecodable`);
+      }
+    }
+  } finally {
+    shotLoading.delete(imageId);
   }
-  shotCache.set(imageId, { dataUrl, img });
-  // The slot may be gone by now: the timeline re-rendered while the picture was loading. The
-  // cache keeps it, and the next render attaches it.
-  if (slot.isConnected) attachShotPicture(slot, img, dataUrl);
+  // The timeline may have been rendered again while the picture was loading: its slots now are
+  // the ones that get it.
+  attachShotSlots();
 }
 
 /**
@@ -2381,16 +2434,22 @@ function noteFinishCard(status, history) {
   return true;
 }
 
-/** The scroll step of renderState, for a reader who was at the bottom. Today: follow the bottom. */
+/**
+ * The scroll step of renderState while following: the bottom, or the top of a finish card that
+ * just arrived and is taller than the view. Returns 'card-top' for that landing (following then
+ * stops, so the reader is not thrown past the card's start), else 'bottom'.
+ */
 function scrollTimelineToLatest(timeline, finishArrived) {
   const lastTurn = timeline.lastElementChild;
   const card = finishArrived && lastTurn && lastTurn.querySelector ? lastTurn.querySelector('.finish-card') : null;
   if (!card) {
     timeline.scrollTop = timeline.scrollHeight;
-    return;
+    return 'bottom';
   }
   const cardTop = card.getBoundingClientRect().top - timeline.getBoundingClientRect().top + timeline.scrollTop;
-  timeline.scrollTop = finishLandingTop({ cardTop, viewHeight: timeline.clientHeight, scrollHeight: timeline.scrollHeight });
+  const landing = finishLandingTop({ cardTop, viewHeight: timeline.clientHeight, scrollHeight: timeline.scrollHeight });
+  timeline.scrollTop = landing;
+  return landing >= timeline.scrollHeight ? 'bottom' : 'card-top';
 }
 
 /**
@@ -2995,15 +3054,21 @@ function renderFinishCard(turn, findings = null) {
 const PARTIAL_TITLE = {
   stopped: 'Stopped by you',
   max_steps: 'Stopped at the step limit',
-  interrupted: 'Interrupted'
+  interrupted: 'Interrupted',
+  closed: 'Interrupted'
 };
+/** The reasons of a run that was cut off before it finished: its card offers Resume. */
+const RESUMABLE_REASONS = ['stopped', 'interrupted', 'closed'];
+/** What the Resume button sends, exactly as if the user had typed it. */
+const RESUME_PROMPT = 'Resume the unfinished task.';
 const PARTIAL_SUBTITLE = {
   stopped: 'The run was stopped before it finished.',
   max_steps: 'The run used all its steps before it finished.',
   partial: 'A site could not be read, so not every source was checked.',
   stopped_early: 'The run stopped before every planned site was checked.',
   model_unusable: 'The model replies could not be used, so the run stopped early.',
-  interrupted: 'Chrome restarted the background worker, so the run could not go on.'
+  interrupted: 'Chrome restarted the background worker, so the run could not go on.',
+  closed: 'The run was cut off when the browser or panel closed.'
 };
 const PARTIAL_SUBTITLE_FALLBACK = 'The run ended before it finished.';
 // A first paragraph longer than this, or with a line break, is an answer, not a reason line.
@@ -3036,7 +3101,11 @@ function renderPartialCard(turn, findings = null) {
   const classes = ['finish-card', 'partial', 'has-sub'];
   if (audit && audit.verdict === 'unverified') classes.push('unverified');
   const details = audit ? renderAuditDetails(audit, turn.turn, audit.verdict === 'verified' ? 'verified' : 'attention') : '';
-  return `<div class="${classes.join(' ')}"><div class="finish-title">${ICONS.warning} ${title}</div><div class="finish-subs"><div class="finish-sub">${subtitle}</div></div>${details}${body}${findingsHtml}</div>`;
+  // The newest turn of a chat that rests can go on: Resume sends the same request as typing it.
+  const resume = turn.resumable && RESUMABLE_REASONS.includes(reasonCode)
+    ? `<div class="finish-actions"><button type="button" class="btn btn-secondary btn-xs finish-resume" data-resume="1">Resume</button></div>`
+    : '';
+  return `<div class="${classes.join(' ')}"><div class="finish-title">${ICONS.warning} ${title}</div><div class="finish-subs"><div class="finish-sub">${subtitle}</div></div>${details}${body}${findingsHtml}${resume}</div>`;
 }
 
 // What the engine writes into an annotated answer (annotateAnswer in agent/answerAudit.ts): one warning line on top, and a
@@ -3180,6 +3249,12 @@ function renderTurns(history, status, currentPhase, pendingQuestion, pendingAppr
     // "Did not finish" means no answer was produced — not merely that one action failed.
     const incomplete = !isLive && !turn.answer && turn.entries.length > 0;
     const open = isTurnExpanded(turn, isLive, incomplete);
+    // The page as the agent last saw it in this turn: the newest picture of its steps. A finished
+    // group shows it at the top of its body ("Captured page") instead of under its row; a collapsed
+    // group shows it small at the end of its head. While the turn runs it follows the newest one.
+    const captured = lastShotOf(turn);
+    const capturedGone = !!(captured && shotGone.has(captured.imageId));
+    const capturedSection = !!(captured && !isLive);
 
     // Header doubles as the progress indicator.
     let headline;
@@ -3218,8 +3293,8 @@ function renderTurns(history, status, currentPhase, pendingQuestion, pendingAppr
       // A step that took a picture gets a slot for it. The slot holds no <img> in the rendered
       // HTML: after the innerHTML write, the already-decoded element is moved in (see
       // attachShotSlots), so a re-render costs no decode and the picture does not flicker.
-      const shot = e.outcome && e.outcome.imageId
-        ? `<div class="act-shot-slot" data-shot="${escapeHtml(String(e.outcome.imageId))}" data-w="${escapeHtml(String(e.outcome.imageWidth || 0))}" data-h="${escapeHtml(String(e.outcome.imageHeight || 0))}"></div>`
+      const shot = e.outcome && e.outcome.imageId && !(capturedSection && e.outcome.imageId === captured.imageId)
+        ? shotSlotHtml(e.outcome.imageId, e.outcome.imageWidth, e.outcome.imageHeight)
         : '';
       return `<div class="act-item">
           <div class="act-row${bad ? ' bad' : ''}${refused ? ' refused' : ''}${e.thought ? ' has-why' : ''}" data-row="${key}" ${e.thought ? 'role="button" tabindex="0"' : ''}>
@@ -3288,15 +3363,46 @@ function renderTurns(history, status, currentPhase, pendingQuestion, pendingAppr
       ${challengePrompt ? challengePrompt : ''}
       ${budgetPrompt ? budgetPrompt : ''}
       ${count || turn.entries.length || planDetail ? `<div class="act-group${open ? ' open' : ''}">
-        <button class="act-head" data-turn="${turn.turn}" aria-expanded="${open}">
+        <button class="act-head" data-turn="${turn.turn}" aria-expanded="${open}"${captured && !capturedGone ? ` aria-label="${escapeHtml(`${headline}, with a captured page`)}"` : ''}>
           <span class="act-chev">${ICONS.chevron}</span>
           <span class="act-head-text">${headline}</span>
+          ${captured && !capturedGone ? `<span class="act-head-thumb" data-thumb="${escapeHtml(String(captured.imageId))}" aria-hidden="true"></span>` : ''}
         </button>
-        <div class="act-body" ${open ? '' : 'hidden'}>${planDetail}${rows}${phase}${answerPrompt}</div>
+        <div class="act-body" ${open ? '' : 'hidden'}>${capturedSection ? capturedSectionHtml(captured, capturedGone) : ''}${planDetail}${rows}${phase}${answerPrompt}</div>
       </div>` : ''}
-      ${turn.answer ? renderFinishCard(turn, isLast ? findings : null) : ''}
+      ${turn.answer ? renderFinishCard(Object.assign(turn, { resumable: isLast && !busy }), isLast ? findings : null) : ''}
     </div>`;
   }).join('');
+}
+
+/** The newest picture a turn's steps took ({ imageId, width, height }), or null. */
+function lastShotOf(turn) {
+  for (let i = turn.entries.length - 1; i >= 0; i--) {
+    const o = turn.entries[i].outcome;
+    if (o && o.imageId) return { imageId: String(o.imageId), width: Number(o.imageWidth) || 0, height: Number(o.imageHeight) || 0 };
+  }
+  return null;
+}
+
+/**
+ * The slot of one picture. It holds no <img> in the rendered HTML: after the innerHTML write, the
+ * already-decoded element is moved in (attachShotSlots), so a re-render costs no decode and the
+ * picture does not flicker. Its shape is reserved from the stored size before the bytes arrive, so
+ * nothing below it moves when they do (and a reader following the run stays at the bottom).
+ */
+function shotSlotHtml(imageId, width, height, extraClass = '') {
+  const w = Number(width) || 0;
+  const h = Number(height) || 0;
+  const ratio = w > 0 && h > 0 ? ` style="aspect-ratio: ${w} / ${h}"` : '';
+  return `<div class="act-shot-slot${extraClass ? ` ${extraClass}` : ''}" data-shot="${escapeHtml(String(imageId))}" data-w="${escapeHtml(String(w))}" data-h="${escapeHtml(String(h))}"${ratio}></div>`;
+}
+
+/** The "Captured page" section at the top of a finished group's body: the turn's last picture at full width. */
+function capturedSectionHtml(captured, gone) {
+  const picture = gone
+    ? '<span class="act-shot-gone">Picture no longer kept</span>'
+    : shotSlotHtml(captured.imageId, captured.width, captured.height, 'act-captured-slot');
+  return `<div class="act-captured"><div class="act-captured-label">Captured page</div>${picture}</div>`;
 }
 
 /**
@@ -3306,6 +3412,13 @@ function renderTurns(history, status, currentPhase, pendingQuestion, pendingAppr
 function initTimelineInteraction() {
   const timeline = document.getElementById('timeline');
   if (!timeline) return;
+  initTimelineFollow(timeline);
+
+  /** Something the reader opened in the newest turn keeps the bottom in view while following. */
+  const keepIfLast = (el) => {
+    const turnEl = el.closest('.turn');
+    if (turnEl && turnEl === timeline.lastElementChild) keepTimelineAtBottom();
+  };
 
   const toggle = (target) => {
     const head = target.closest('.act-head');
@@ -3318,6 +3431,7 @@ function initTimelineInteraction() {
       head.setAttribute('aria-expanded', String(nowOpen));
       const body = group.querySelector('.act-body');
       if (body) body.hidden = !nowOpen;
+      if (nowOpen) keepIfLast(head);
       return true;
     }
     const row = target.closest('.act-row.has-why');
@@ -3328,6 +3442,7 @@ function initTimelineInteraction() {
       const show = why.hidden;
       why.hidden = !show;
       if (show) expandedRows.add(key); else expandedRows.delete(key);
+      if (show) keepIfLast(row);
       return true;
     }
     return false;
@@ -3354,6 +3469,15 @@ function initTimelineInteraction() {
   };
 
   timeline.addEventListener('click', (e) => {
+    // Resume on an Interrupted or Stopped card: the same request as typing it in the composer.
+    const resumeBtn = e.target.closest('[data-resume]');
+    if (resumeBtn) {
+      const input = document.getElementById('taskInput');
+      if (input) input.value = RESUME_PROMPT;
+      startTask();
+      return;
+    }
+
     const sendBtn = e.target.closest('.ask-user-send');
     if (sendBtn) { sendAnswer(sendBtn.closest('.ask-user-prompt')); return; }
 
@@ -4206,7 +4330,8 @@ export {
   planCounts, pauseReasonText, escapeHtml, initTimelineInteraction, openAuditDetails, closedAuditDetails, describeAction, firstSentence, withoutEngineNotes,
   partialSubtitle, renderState, receiveState, loadSelectedSession, finishLandingTop, finishCardKey, noteFinishCard, scrollTimelineToLatest,
   formatMarkdownText, hasMarkdownBlocks, hasMarkdownTable, legacyBullets, splitTableRow, renderCodeBox, textKey, unfoldedCode,
-  attachShotSlots, attachShotPicture, shotCache, shotGone,
+  attachShotSlots, attachShotPicture, shotCache, shotGone, lastShotOf, capturedSectionHtml, RESUME_PROMPT,
+  setFollowTimeline, isFollowingTimeline,
   loadSettings, autoSaveCurrentForm, openComboboxMenu, closeComboboxMenu, updateSelectedModel,
   pickComboboxModel, initEventListeners
 };

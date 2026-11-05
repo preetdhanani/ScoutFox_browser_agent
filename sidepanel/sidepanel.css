@@ -773,6 +773,13 @@ a:hover { color: var(--text-main); }
 
 .finish-title svg { flex: none; width: 14px; height: 14px; color: var(--success); }
 
+/* Resume on an Interrupted or Stopped card: the run goes on in the same chat. */
+.finish-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 /* Some sources unchecked, or the run ended before it finished: amber icon and words. */
 .finish-card.partial .finish-title,
 .finish-card.partial .finish-title svg { color: var(--warning); }
@@ -1091,6 +1098,34 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
 .file-preview-body .code-pre { padding: 0; }
 
 /* Input Panel */
+/* "Jump to latest": a round button that floats over the bottom of the timeline, above the
+   composer, while the reader is scrolled up and new rows came in below. */
+.jump-latest-anchor {
+  position: relative;
+  height: 0;
+  z-index: 5;
+}
+.jump-latest {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--card);
+  color: var(--text-main);
+  box-shadow: var(--shadow-soft);
+  cursor: pointer;
+}
+.jump-latest[hidden] { display: none; }
+.jump-latest:hover { background: var(--surface); }
+.jump-latest:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .input-panel {
   position: relative;
   padding: 10px 12px 12px;
@@ -2190,6 +2225,28 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
 
 .act-head-text { font-variant-numeric: tabular-nums; }
 
+/* The captured page, small, at the end of a collapsed group's head: the page as the agent last saw
+   it in that turn. An open group shows it in its body instead, so the thumbnail steps aside. */
+.act-head-thumb {
+  flex: none;
+  margin-left: auto;
+  width: 44px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.act-group.open .act-head-thumb { display: none; }
+.act-head-thumb-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
+}
+
+
 /* An author `display` beats the UA stylesheet's [hidden] { display: none }, so without this
    the collapse toggles the attribute and nothing visibly happens. */
 .act-body[hidden],
@@ -2292,6 +2349,27 @@ ol > .md-li > .md-mark { min-width: 1.4em; }
   color: var(--text-faint);
   font-style: italic;
 }
+
+/* The captured page at the top of an opened, finished group: the turn's last picture, full width. */
+.act-captured {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 4px 8px;
+}
+.act-captured-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-faint);
+}
+.act-captured .act-shot-slot {
+  margin: 0;
+  max-width: 100%;
+  max-height: 220px;
+}
+.act-captured .act-shot-img { max-height: 220px; }
+.act-captured .act-shot-gone { padding: 0; }
 
 /* --- reasoning, revealed per row --- */
 .act-why {

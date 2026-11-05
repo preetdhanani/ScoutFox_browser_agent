@@ -154,13 +154,14 @@ The summary ends with a table per task (runs that succeeded, and the median and 
 
 A task may list the sites it needs (`reachable`): the harness asks each first, and a site that does not answer skips the task with the reason, never a failure.
 
-Three default tasks run on local pages that copy a real case; the model acts on them like on any site.
+Four default tasks run on local pages that copy a real case; the model acts on them like on any site.
 
 | Task | Page | The question |
 | --- | --- | --- |
 | `web-notebook-fix` | `notebook.html` | fix the failing cell of a notebook so it installs Ollama without sudo, run it and give the version |
 | `web-credentials-json` | `credentials.html` | a JSON file of the ten certifications with name, issue date and credential URL (the LinkedIn case); the file must hold every one, and an answer that pastes the whole file is printed as a note |
 | `web-chat-chain` | `credentials.html`, then `notebook.html` | how many certifications the page lists (10); after a Compact, in the same chat on a page without the fact: that number times 7, the result only (70) |
+| `web-resume-chat` | `credentials.html` | the JSON file task, stopped by the user after its first `save_data`; after New chat the chat is reopened from Recent tasks and "resume" is typed: the resumed run must hand over the file of all ten certificates |
 
 ### A follow-up turn in the same chat (`followUp`)
 
@@ -176,7 +177,21 @@ It is how the chain of a chat is verified: a new request in a chat gets the earl
 5. Turn 2 must finish with outcome "done" and answer 70 (no other number than the 10 and the 7), make no `read_page`, `get_page_elements`, `find` or `take_screenshot` call (`noReads`), and its first model request must start with the chain header and hold the summary of the Compact (the call record keeps the first user message as `firstUserText`).
 6. The panel's end card of turn 2 must be "Done".
 
+`web-resume-chat` is the chat Prit reopened (2026-11-05), done the way a user does it, in this order.
+
+1. Turn 1 runs the certifications file task on `credentials.html` (`CREDENTIALS_PROMPT`). Before it starts, the tab gets its session (a `GET_AGENT_STATE`, as the toolbar button gives one) and Chrome's real side panel is opened: Chrome shows the panel only on a tab with a session.
+2. `stopAfterSteps: 2`: once the turn has made two steps or its first `save_data` call, the harness clicks the panel's Stop button with a real click. Turn 1 must end with the "stopped" `partial_result` row and the "Stopped by you" card. A turn 1 that finished before the Stop landed makes the run inconclusive (a problem), never a pass.
+3. `newChat: true`: a real click on New chat; the timeline must go back to the start screen.
+4. `reopen: true`: a real click on Recent tasks, then on the entry of the stopped chat; the timeline must show its goal again. The reopened panel is shot in light and dark.
+5. `typed: true`: "resume" is typed into the composer with key events and sent with a real click on Send (the panel's own `START_TASK`).
+6. `holdsStoppedTurn: true`, the deterministic check: the first request of the resume must start with the chain and hold the stopped turn's goal, every step of its plan (when it made one) and the tool of each of its steps (`resumeRequestProblems`). Before the fix the request held only "TASK: resume".
+7. The resume must finish "done" with a JSON file of all ten certificates, and its card must be "Done".
+8. While both turns run, the harness reads the panel after each new step row: the timeline must show its bottom (following the run).
+9. After the run, the newest action group with a captured page is shot collapsed (the thumbnail in its head, whose label must name the captured page) and opened (the "Captured page" section), light and dark. A chat in which no step took a picture has nothing to show: that is printed as a note, never a failure, since whether a step takes a picture is the model's choice.
+
 A problem of the follow-up is reported with the task and fails the run like any other check.
+
+Saved chats (Recent tasks) are kept in the extension's local storage, each under its own key with a small index; a chat keeps the records of its last run (at most 500 records and 200 KB), and deleting a chat from Recent tasks deletes them with it.
 
 ## What a run checks
 
@@ -215,6 +230,9 @@ Every task saves its own folder under `screenshots/<run stamp>/` (gitignored; `-
 | `<task>-<model>-context-card-{light,dark}.png` | The card the ring opens: the window, the bar of this chat, the note and "Compact chat". |
 | `<task>-<model>-compacted-{light,dark}.png` | The "Chat compacted" divider in the timeline, with its summary opened. |
 | `<task>-<model>-followup-*.png` | The page end, the panel and the side-by-side view after the follow-up turn. |
+| `<task>-<model>-reopened-{light,dark}.png` | A task with `followUp.reopen`: the panel right after the chat was opened from Recent tasks (its Stopped card with Resume). |
+| `<task>-<model>-group-collapsed-{light,dark}.png` | The newest action group with a captured page, collapsed: the thumbnail at the end of its head. |
+| `<task>-<model>-group-open-{light,dark}.png` | The same group opened: "Captured page" at the top of its body. |
 
 The tall-open picture is the one that shows "what steps it took", the finish card shows "what the end result is".
 

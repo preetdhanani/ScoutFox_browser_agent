@@ -66,12 +66,15 @@ test('an element click still says which element it clicked', () => {
   assert.match(describeAction({ action: 'click', element_id: 4 }, { label: 'Buy now' }).text, /Clicked .*Buy now/);
 });
 
-test('the row of a picture gets a slot with its id and its size, and no img of its own', () => {
-  const html = renderTurns(historyWithShot(), 'idle', '', null, null, null, null, null, null, null);
+test('the row of a picture gets a slot with its id, its size and its shape, and no img of its own', () => {
+  // A live turn keeps its pictures under their rows (a finished one moves the last to "Captured page").
+  const html = renderTurns(historyWithShot().slice(0, -1), 'running', '', null, null, null, null, null, null, null);
   assert.match(html, /class="act-shot-slot"/);
   assert.match(html, /data-shot="shot-abc-1"/);
   assert.match(html, /data-w="1568"/);
   assert.match(html, /data-h="892"/);
+  // The shape is reserved in the markup, before the bytes arrive: nothing below moves when they do.
+  assert.match(html, /class="act-shot-slot"[^>]*style="aspect-ratio: 1568 \/ 892"/);
   // The <img> is moved in after the render, so the rendered HTML has a slot and nothing in it.
   const slot = /<div class="act-shot-slot"[^>]*>(.*?)<\/div>/.exec(html);
   assert.ok(slot, 'the slot is in the rendered HTML');
@@ -93,8 +96,12 @@ test('a picture that is no longer held shows the honest line, not a broken image
   // The session dropped it (a long run keeps the last few), so the panel must say so.
   shotGone.add('shot-gone-1');
   const html = renderTurns(historyWithShot('shot-gone-1'), 'idle', '', null, null, null, null, null, null, null);
-  // The slot is still rendered: the row happened, and the picture is the part that is gone.
-  assert.match(html, /data-shot="shot-gone-1"/);
+  // The finished group's "Captured page" says so, and its head has no thumbnail to show.
+  assert.match(html, /<div class="act-captured"><div class="act-captured-label">Captured page<\/div><span class="act-shot-gone">Picture no longer kept<\/span><\/div>/);
+  assert.doesNotMatch(html, /act-head-thumb/);
+  assert.doesNotMatch(html, /with a captured page/);
+  // A live turn still renders the row's slot: the row happened, and the picture is the part that is gone.
+  assert.match(renderTurns(historyWithShot('shot-gone-1').slice(0, -1), 'running', '', null, null, null, null, null, null, null), /data-shot="shot-gone-1"/);
   // And the stylesheet has a rule for the message, so it reads as a state, not as an error.
   assert.match(CSS, /\.act-shot-gone\s*\{[^}]*color:\s*var\(--text-faint\)/);
 });

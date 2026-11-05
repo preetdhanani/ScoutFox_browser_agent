@@ -81,7 +81,7 @@ import { startOllamaProxy } from './lib/ollamaProxy.mjs';
 import { PLACEHOLDER_KEY, startKeyProxy } from './lib/keyProxy.mjs';
 import { DEFAULT_PROVIDER, REAL_PROVIDER_NAMES, providerSettings, proxiedBaseUrl, resolveProvider } from './lib/providers.mjs';
 import { missingManifestFiles, prepareExtensionCopy } from './lib/extensionCopy.mjs';
-import { pageReadSteps, runFacts, TASKS } from '../mcp/tasks.mjs';
+import { lastTurn, pageReadSteps, runFacts, resumeRequestProblems, stopPointReached, TASKS } from '../mcp/tasks.mjs';
 import { aggregate, aggregateLines, callsForReport, expectedFinishOutcome, runVerdict } from './lib/metrics.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -967,6 +967,17 @@ async function panelViaCdp(panel) {
     const text = event.exceptionDetails?.exception?.description || event.exceptionDetails?.text || 'unknown exception';
     if (!errors.includes(text)) errors.push(text);
   });
+  const surfaceClick = async (selector) => {
+    const box = await panel.send('Runtime.evaluate', {
+      expression: `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`,
+      returnByValue: true
+    });
+    const at = box.result?.value;
+    if (!at) throw new Error(`no element matches ${selector} on the panel`);
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+      await panel.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: type === 'mouseMoved' ? 0 : 1 });
+    }
+  };
   const text = (selector) =>
     panel.send('Runtime.evaluate', { expression: `document.querySelector(${JSON.stringify(selector)})?.innerText || ''` })
       .then((r) => r.result?.value || '')
@@ -976,15 +987,13 @@ async function panelViaCdp(panel) {
     waitForText: (selector, ms) => pollUntil(() => text(selector), ms),
     errors: () => errors.slice(),
     /** A real mouse click (CDP Input) in the middle of the first element the selector matches: a user's click, not element.click(). */
-    click: async (selector) => {
-      const box = await panel.send('Runtime.evaluate', {
-        expression: `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`,
-        returnByValue: true
-      });
-      const at = box.result?.value;
-      if (!at) throw new Error(`no element matches ${selector} on the panel`);
-      for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
-        await panel.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: type === 'mouseMoved' ? 0 : 1 });
+    click: (selector) => surfaceClick(selector),
+    /** Real typing: a click into the field, then one key event per character (CDP Input), like a user's keyboard. */
+    type: async (selector, text) => {
+      await surfaceClick(selector);
+      for (const ch of String(text)) {
+        await panel.send('Input.dispatchKeyEvent', { type: 'keyDown', text: ch, unmodifiedText: ch, key: ch });
+        await panel.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ch });
       }
     },
     evaluate: async (fn, ...args) => {
@@ -1102,6 +1111,7 @@ async function panelSurface(ctx, tabId) {
     text,
     waitForText: (selector, ms) => pollUntil(() => text(selector), ms),
     click: (selector) => page.click(selector),
+    type: (selector, value) => page.type(selector, value),
     evaluate: (fn, ...args) => page.evaluate(fn, ...args),
     screenshot: async (file) => {
       await page.setViewport({ width: 400, height: 900 }); // no Chrome around to size the fallback
@@ -1593,8 +1603,15 @@ const goalsIn = (state) => ((state && state.history) || []).filter((h) => h.type
  *
  * @param {object} task  the task: its answers to questions are used for the holds
  * @param {{name: string, dir: string, list: object[]} | null} shot  where the mid-run panel screenshot goes, or null
+ * @param {object} [opts]
+ * @param {() => Promise<void>} [opts.start]  starts the run instead of a START_TASK from the harness (a prompt
+ *        typed into the panel's composer and sent with its Send button)
+ * @param {number} [opts.stopAfterSteps]  the run is stopped with opts.stopPanel's Stop button once it has
+ *        made this many steps or its first save_data call (stopPointReached), like a user's click
+ * @param {object} [opts.panel]  an open panel surface of the tab: the Stop is clicked there, and after
+ *        each new step row the harness reads whether the timeline still shows its bottom
  */
-async function driveTask(ctx, llm, task, tabId, hosts, shot) {
+async function driveTask(ctx, llm, task, tabId, hosts, shot, opts = {}) {
   // Listen like a side panel attached to that tab would: same port name, same messages.
   await ctx.driver.evaluate((id) => {
     window.__logs = [];
@@ -1623,18 +1640,23 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot) {
   const firstCall = llm.calls.length;
   const tallyBefore = await readTally(ctx);
   const startedAt = Date.now();
-  // The panel's own choice: autonomous, no manual plan approval.
-  const started = await ctx.driver.evaluate((id, prompt, effort) => chrome.runtime.sendMessage({
-    action: 'START_TASK', tabId: id, payload: { prompt, effort, autoApprove: true }
-  }), tabId, task.prompt, EFFORT);
-  if (!started || !started.success) throw new Error(`START_TASK was rejected: ${JSON.stringify(started)}`);
+  if (opts.start) {
+    await opts.start();
+  } else {
+    // The panel's own choice: autonomous, no manual plan approval.
+    const started = await ctx.driver.evaluate((id, prompt, effort) => chrome.runtime.sendMessage({
+      action: 'START_TASK', tabId: id, payload: { prompt, effort, autoApprove: true }
+    }), tabId, task.prompt, EFFORT);
+    if (!started || !started.success) throw new Error(`START_TASK was rejected: ${JSON.stringify(started)}`);
+  }
 
   // START_TASK answers before the engine flips to "running", so the end of the run is the first
   // status that is neither "running" nor "paused" AFTER the run started ("paused" is a hold: a confirmation,
   // a question, a challenge, a budget question). A fast run can begin and end between
   // two polls, so "started" is also read from the history: the turn's user_goal entry is written right after
   // the status becomes "running", and this run's is the one after the goalsBefore entries the tab already had.
-  const run = { startedAt, decisions: [], problems: [], armed: { plan: true, confirm: true, question: true, challenge: true, budget: true }, stopped: null };
+  const run = { startedAt, decisions: [], problems: [], armed: { plan: true, confirm: true, question: true, challenge: true, budget: true }, stopped: null, userStop: false, follow: { checked: 0, misses: [] } };
+  let rowsSeen = 0;
   let state = null;
   let seenRunning = false;
   let liveShotTaken = false;
@@ -1650,6 +1672,36 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot) {
     if (shot && shot.dir && !liveShotTaken && ((state.planSteps || []).length || state.pendingApproval)) {
       liveShotTaken = true;
       shot.list.push(...await panelScreenshots(ctx, tabId, `${shot.name}-live`, shot.dir));
+    }
+    // The rows of this run only: a tab that ran a task before keeps its earlier turns in the history.
+    const turnRows = goalsIn(state) > goalsBefore ? lastTurn(state.history || []) : [];
+    // The user's Stop: a real click on the panel's Stop button once the run reached the stop point.
+    if (opts.stopAfterSteps && opts.panel && !run.userStop && running && stopPointReached(turnRows, opts.stopAfterSteps)) {
+      run.userStop = true;
+      const steps = turnRows.filter((r) => r.type === 'agent_response' && r.action).map((r) => r.action.action);
+      try {
+        // A hung click must not hold the run: the panel answers a click at once or not at all.
+        await Promise.race([opts.panel.click('#btnStop'), sleep(10000).then(() => { throw new Error('the click did not return within 10 s'); })]);
+        run.decisions.push({ atMs: Date.now() - startedAt, hold: 'stop', decision: 'click Stop in the panel', detail: `after ${steps.length} step(s): ${steps.join(', ')}` });
+      } catch (err) {
+        run.problems.push(`the Stop button of the side panel could not be clicked: ${oneLine(err.message, 160)}`);
+      }
+    }
+    // Following the run: after each new step row the panel must show the bottom of the timeline.
+    // The panel renders on the broadcast and a picture attaches a moment later, so it is read
+    // after a short settle. A reader who never scrolled must never be left above the newest row.
+    const stepRows = turnRows.filter((r) => r.type === 'agent_response' || r.type === 'execution_result').length;
+    if (opts.panel && running && stepRows > rowsSeen) {
+      rowsSeen = stepRows;
+      await sleep(700);
+      const at = await opts.panel.evaluate(() => {
+        const t = document.getElementById('timeline');
+        return t ? { gap: Math.round(t.scrollHeight - t.scrollTop - t.clientHeight), rows: document.querySelectorAll('#timeline .act-row').length } : null;
+      }).catch(() => null);
+      if (at) {
+        run.follow.checked += 1;
+        if (at.gap > 4) run.follow.misses.push(`after step row ${stepRows} the timeline was ${at.gap} px above its bottom`);
+      }
     }
     if (running) {
       seenRunning = true;
@@ -1808,9 +1860,9 @@ async function compactThroughPanel(ctx, tabId, shotDir, shotName) {
  * second prompt is sent like the first. Its own checks: the answer, the outcome, no page reads when
  * noReads is set, the summary in the first request after a Compact, and the panel's end card.
  */
-async function runFollowUp(ctx, fixtures, llm, task, tabId, page, hosts, shotDir, shotName, screenshots) {
+async function runFollowUp(ctx, fixtures, llm, task, tabId, page, hosts, shotDir, shotName, screenshots, firstFacts = null) {
   const fu = task.followUp;
-  const out = { prompt: fu.prompt, problems: [], compact: null, answer: null, answerCorrect: false, facts: null, calls: [], wallMs: 0 };
+  const out = { prompt: fu.prompt, problems: [], compact: null, answer: null, answerCorrect: false, facts: null, calls: [], wallMs: 0, firstRequest: '', follow: null };
   if (fu.compact) {
     out.compact = await compactThroughPanel(ctx, tabId, shotDir, shotName);
     out.problems.push(...out.compact.problems);
@@ -1821,7 +1873,32 @@ async function runFollowUp(ctx, fixtures, llm, task, tabId, page, hosts, shotDir
     await page.bringToFront();
   }
   const name = `${shotName}-followup`;
-  const turn = await driveTask(ctx, llm, { prompt: fu.prompt, answers: fu.answers || [], timeoutMs: fu.timeoutMs || task.timeoutMs }, tabId, hosts, { name, dir: shotDir, list: screenshots });
+  // New chat, then the saved chat of the first turn opened again from Recent tasks (real clicks).
+  if (fu.newChat || fu.reopen) {
+    const reopened = await reopenThroughPanel(ctx, tabId, task.prompt, fu, shotDir, shotName);
+    out.problems.push(...reopened.problems);
+    screenshots.push(...reopened.screenshots);
+  }
+  // A typed prompt goes in through the panel's composer and its Send button; that panel stays
+  // open for the run, so the harness can read whether its timeline follows the run.
+  const typedPanel = fu.typed ? await panelSurface(ctx, tabId) : null;
+  let turn;
+  try {
+    const start = typedPanel ? async () => {
+      await typedPanel.type('#taskInput', fu.prompt);
+      const typed = await typedPanel.evaluate(() => document.getElementById('taskInput')?.value || '');
+      if (typed !== fu.prompt) throw new Error(`the composer holds ${JSON.stringify(typed)} after typing ${JSON.stringify(fu.prompt)}`);
+      await typedPanel.click('#btnStartTask');
+    } : undefined;
+    turn = await driveTask(ctx, llm, { prompt: fu.prompt, answers: fu.answers || [], timeoutMs: fu.timeoutMs || task.timeoutMs }, tabId, hosts, { name, dir: shotDir, list: screenshots }, typedPanel ? { start, panel: typedPanel } : {});
+  } finally {
+    if (typedPanel) {
+      ctx.panel.pageErrors.push(...typedPanel.errors());
+      await typedPanel.close();
+    }
+  }
+  out.follow = turn.run.follow;
+  out.problems.push(...turn.run.follow.misses.map((m) => `follow-up, following the run: ${m}`));
   const f = turn.facts;
   out.facts = f;
   out.calls = turn.calls;
@@ -1836,6 +1913,12 @@ async function runFollowUp(ctx, fixtures, llm, task, tabId, page, hosts, shotDir
   if (fu.noReads) {
     const reads = pageReadSteps(f);
     if (reads.length) out.problems.push(`the follow-up read or looked at the page (${reads.map((s) => s.action.action).join(', ')}); its answer must come from the chat`);
+  }
+  out.firstRequest = String((turn.calls[0] && turn.calls[0].firstUserText) || '');
+  // The deterministic check of a resume: the request the model got holds what the stopped turn left.
+  if (fu.holdsStoppedTurn) {
+    if (!turn.calls.length) out.problems.push('the resume made no model call');
+    else out.problems.push(...resumeRequestProblems(firstFacts || { plan: [], steps: [] }, task.prompt, out.firstRequest));
   }
   if (fu.compact && out.compact && out.compact.summary) {
     const first = turn.calls[0];
@@ -1852,6 +1935,144 @@ async function runFollowUp(ctx, fixtures, llm, task, tabId, page, hosts, shotDir
   screenshots.push(pageEnd);
   screenshots.push(...await panelScreenshots(ctx, tabId, name, shotDir, pageEnd));
   out.problems.push(...(await readPanelCard(ctx, tabId, { title: 'Done' })).map((p) => `follow-up: ${p}`));
+  if (fu.reopen) {
+    const group = await shootCapturedGroup(ctx, tabId, shotDir, shotName);
+    out.problems.push(...group.problems);
+    out.notes = group.notes;
+    screenshots.push(...group.screenshots);
+  }
+  return out;
+}
+
+/** Close-ups of one panel element in light and dark; returns the files and the problems. */
+async function closeUpsOf(panel, selector, file, out) {
+  for (const scheme of ['light', 'dark']) {
+    await panel.setColorScheme(scheme);
+    await sleep(400); // the theme transition, so the shot shows the settled colours
+    const path_ = `${file}-${scheme}.png`;
+    try {
+      await panel.shootElement(selector, path_);
+      out.screenshots.push(path_);
+    } catch (err) {
+      out.problems.push(`the close-up ${path.basename(file)} (${scheme}) could not be taken: ${oneLine(err.message, 160)}`);
+    }
+  }
+  await panel.setColorScheme('light');
+}
+
+/**
+ * What a user does to reopen a chat: New chat in the panel's header (the timeline goes back to the
+ * start screen), then Recent tasks, then the saved chat of the first turn. The reopened chat must
+ * show that turn again. The reopened panel is shot in light and dark.
+ */
+async function reopenThroughPanel(ctx, tabId, firstPrompt, fu, shotDir, shotName) {
+  const out = { problems: [], screenshots: [] };
+  fs.mkdirSync(shotDir, { recursive: true });
+  const panel = await panelSurface(ctx, tabId);
+  try {
+    if (fu.newChat) {
+      await panel.click('#btnNewChat');
+      const empty = await pollUntil(() => panel.evaluate(() => (document.getElementById('emptyState') ? 'empty' : '')), 6000);
+      if (!empty) out.problems.push('a click on New chat did not bring the start screen back');
+    }
+    if (fu.reopen) {
+      await panel.click('#btnToggleHistory');
+      // The saved chat may still be on its way to storage: the list is read until it shows up.
+      const id = await pollUntil(() => panel.evaluate((prompt) => {
+        const items = [...document.querySelectorAll('#historySessionsList .history-session-item')];
+        const hit = items.find((el) => (el.querySelector('.history-item-title')?.textContent || '').trim() === prompt);
+        return hit ? hit.getAttribute('data-id') : '';
+      }, firstPrompt), 10000);
+      if (!id) {
+        const listed = await panel.evaluate(() => document.getElementById('historySessionsList')?.innerText || '').catch(() => '');
+        out.problems.push(`Recent tasks does not list the stopped chat (it shows ${JSON.stringify(oneLine(listed, 200))})`);
+        return out;
+      }
+      await panel.click(`#historySessionsList .history-session-item[data-id="${id}"]`);
+      const shown = await pollUntil(() => panel.evaluate((prompt) => {
+        const goals = [...document.querySelectorAll('#timeline .user-goal-card')].map((el) => el.textContent || '');
+        return goals.some((g) => g.includes(prompt)) ? 'shown' : '';
+      }, firstPrompt), 6000);
+      if (!shown) out.problems.push('the reopened chat does not show the goal of the stopped turn');
+      await sleep(800);
+      for (const scheme of ['light', 'dark']) {
+        await panel.setColorScheme(scheme);
+        await sleep(400);
+        const file = path.join(shotDir, `${shotName}-reopened-${scheme}.png`);
+        await panel.screenshot(file);
+        out.screenshots.push(file);
+      }
+      await panel.setColorScheme('light');
+    }
+  } finally {
+    ctx.panel.pageErrors.push(...panel.errors());
+    await panel.close();
+  }
+  return out;
+}
+
+/**
+ * The captured page of an action group, as the user meets it: the collapsed group's head shows a
+ * thumbnail of the last picture the turn took, and the opened group shows it at the top under
+ * "Captured page". The newest turn with a picture is used; a run that took no picture has nothing
+ * to show, which is a note in the problems only when no turn had one.
+ */
+async function shootCapturedGroup(ctx, tabId, shotDir, shotName) {
+  const out = { problems: [], screenshots: [], notes: [] };
+  // A captured page needs a picture: the model decides whether a step takes one. A chat with none
+  // has nothing to show, which is a note about the run, not a fault of the panel.
+  const state = await ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE', tabId: id }), tabId);
+  if (!((state && state.history) || []).some((row) => row && row.imageId)) {
+    out.notes.push('no step of the chat took a picture, so no action group has a captured page to show');
+    return out;
+  }
+  const panel = await panelSurface(ctx, tabId);
+  try {
+    // The newest group whose turn took a picture: the thumbnail is in the head of a collapsed one,
+    // the section in the body of an open one.
+    const index = await panel.evaluate(() => {
+      const kids = [...document.getElementById('timeline').children];
+      for (let i = kids.length - 1; i >= 0; i--) {
+        if (kids[i].querySelector('.act-group .act-head-thumb, .act-group .act-captured')) return i + 1;
+      }
+      return 0;
+    });
+    if (!index) {
+      out.problems.push('no action group shows a captured page (no thumbnail, no "Captured page" section)');
+      return out;
+    }
+    const group = `#timeline > :nth-child(${index}) .act-group`;
+    const isOpen = () => panel.evaluate((sel) => document.querySelector(sel)?.classList.contains('open') === true, group);
+    if (await isOpen()) await panel.click(`${group} .act-head`);
+    await sleep(500);
+    const head = await panel.evaluate((sel) => {
+      const h = document.querySelector(`${sel} .act-head`);
+      const img = h && h.querySelector('.act-head-thumb img');
+      return h ? { label: h.getAttribute('aria-label') || '', thumb: !!img, loaded: !!(img && img.complete && img.naturalWidth > 0) } : null;
+    }, group);
+    if (!head || !head.thumb) out.problems.push('the collapsed action group shows no thumbnail of the captured page');
+    else if (!head.loaded) out.problems.push('the thumbnail of the collapsed action group has no picture in it');
+    if (head && !/with a captured page/.test(head.label)) out.problems.push(`the collapsed group's head is labelled ${JSON.stringify(head.label)}, expected it to name the captured page`);
+    await closeUpsOf(panel, `${group}`, path.join(shotDir, `${shotName}-group-collapsed`), out);
+    await panel.click(`${group} .act-head`);
+    await sleep(600);
+    const section = await panel.evaluate((sel) => {
+      const c = document.querySelector(`${sel} .act-captured`);
+      const img = c && c.querySelector('img');
+      return c ? { text: c.textContent || '', loaded: !!(img && img.complete && img.naturalWidth > 0), pictures: document.querySelectorAll(`${sel} .act-body img`).length } : null;
+    }, group);
+    if (!section) out.problems.push('the opened action group has no "Captured page" section');
+    else {
+      if (!/Captured page/.test(section.text)) out.problems.push(`the opened group's section reads ${JSON.stringify(oneLine(section.text, 80))}, expected "Captured page"`);
+      if (!section.loaded && !/no longer kept/i.test(section.text)) out.problems.push('the "Captured page" section shows no picture and does not say it is gone');
+    }
+    await closeUpsOf(panel, `${group}`, path.join(shotDir, `${shotName}-group-open`), out);
+  } catch (err) {
+    out.problems.push(`the captured page of the action group could not be checked: ${oneLine(err.message, 200)}`);
+  } finally {
+    ctx.panel.pageErrors.push(...panel.errors());
+    await panel.close();
+  }
   return out;
 }
 
@@ -1881,8 +2102,36 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   const shotDir = REPEAT > 1 ? path.join(shotRoot, `run-${attempt}`) : shotRoot;
   const screenshots = [];
 
-  const { state, run, timedOut, wallMs, logs, replies, states, stateStatuses, calls, facts } =
-    await driveTask(ctx, llm, task, tabId, hosts, { name: shotName, dir: shotDir, list: screenshots });
+  // A task whose first turn the user stops (followUp.stopAfterSteps): the real panel is open from the
+  // start, so the Stop is a click in it, and the harness reads from it whether the timeline follows the run.
+  const stopAfterSteps = task.followUp && task.followUp.stopAfterSteps;
+  // The tab gets its session first, as the toolbar button gives it to a user: Chrome shows the panel
+  // only on a tab with a session (background.ts onActivated), so without one the panel never opens.
+  if (stopAfterSteps) await ctx.driver.evaluate((id) => chrome.runtime.sendMessage({ action: 'GET_AGENT_STATE', tabId: id }), tabId);
+  const livePanel = stopAfterSteps ? await panelSurface(ctx, tabId) : null;
+  // Only Chrome's real panel can be clicked while the task's tab is in front: the fallback is a tab
+  // of its own in the background, where a click never lands.
+  if (livePanel && !livePanel.real) {
+    await livePanel.close();
+    throw new Error(`the side panel for the Stop click is not Chrome's real panel (${livePanel.reason})`);
+  }
+  let driven;
+  try {
+    driven = await driveTask(ctx, llm, task, tabId, hosts, { name: shotName, dir: shotDir, list: screenshots }, livePanel ? { panel: livePanel, stopAfterSteps } : {});
+  } finally {
+    if (livePanel) {
+      ctx.panel.pageErrors.push(...livePanel.errors());
+      await livePanel.close();
+    }
+  }
+  const { state, run, timedOut, wallMs, logs, replies, states, stateStatuses, calls, facts } = driven;
+  // The Stop must land while the run goes: a first turn that finished on its own tested no resume.
+  const stopProblems = [];
+  if (stopAfterSteps) {
+    if (!run.userStop) stopProblems.push('inconclusive: the first turn never reached the stop point, so the Stop was never clicked');
+    else if (facts.outcome !== 'partial_result') stopProblems.push(`inconclusive: the first turn ended with ${facts.outcome || 'no final entry'} before the Stop landed, so there was nothing to resume`);
+  }
+  const followProblems = run.follow.misses.map((m) => `following the run: ${m}`);
   const answer = facts.answer;
   // Before the tab closes: closing it ends its session, and the panel would show nothing.
   // The page end state is taken first so the pair belongs to the same moment.
@@ -1906,8 +2155,8 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   // The title the card deserves follows from how the run ended. A task may add its own checks on
   // what the card says (expectCard.body, expectCard.noBody) and may override the title.
   const expectCard = {
-    // A run the harness stopped (a timeout) without a final entry ends like a user's Stop.
-    title: run.stopped && (!facts.outcome || facts.outcome === 'partial_result') && !facts.failed
+    // A run the harness stopped (a timeout, or the user's Stop click) without a final entry ends like a user's Stop.
+    title: (run.stopped || run.userStop) && (!facts.outcome || facts.outcome === 'partial_result') && !facts.failed
       ? 'Stopped by you'
       : task.expectOutcome && task.expectOutcome !== 'finish'
       ? 'Failed'
@@ -1934,7 +2183,7 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
     ? await Promise.race([task.expectPage(page), sleep(10000).then(() => ['the page did not answer the page check within 10 s'])]).catch((err) => [`the page check failed: ${oneLine(err.message, 200)}`])
     : [];
   // A second turn in the same tab and chat (task.followUp): the chain, after a Compact through the panel.
-  const followUp = task.followUp ? await runFollowUp(ctx, fixtures, llm, task, tabId, page, hosts, shotDir, shotName, screenshots) : null;
+  const followUp = task.followUp && !stopProblems.length ? await runFollowUp(ctx, fixtures, llm, task, tabId, page, hosts, shotDir, shotName, screenshots, facts) : null;
   // Chromium's own error page (a host that does not resolve) never gets content scripts, so there is nothing to probe there.
   if (page.url() !== probes[probes.length - 1].url && !page.url().startsWith('chrome-error://')) probes.push(await probePage(ctx, page, tabId));
   await sleep(300); // late page errors
@@ -1958,7 +2207,8 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
     answer,
     answerCorrect: answer ? !!task.check(facts) : false,
     notes: answer && task.warn ? task.warn(facts) : [],
-    expectProblems: [...cardProblems, ...badgeProblems, ...restartProblems, ...logProblems, ...effortProblems, ...pageProblems, ...(followUp ? followUp.problems : [])],
+    expectProblems: [...stopProblems, ...followProblems, ...cardProblems, ...badgeProblems, ...restartProblems, ...logProblems, ...effortProblems, ...pageProblems, ...(followUp ? followUp.problems : [])],
+    follow: run.follow,
     followUp: followUp ? {
       prompt: followUp.prompt,
       answer: followUp.answer,
@@ -1971,6 +2221,9 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
       finishOutcome: followUp.facts ? followUp.facts.finishOutcome : null,
       modelCalls: followUp.calls.length,
       wallMs: followUp.wallMs,
+      firstRequest: followUp.firstRequest,
+      follow: followUp.follow,
+      notes: followUp.notes || [],
       calls: callsForReport(followUp.calls)
     } : null,
     holdProblems: run.problems,
@@ -2017,6 +2270,7 @@ function printReport(r) {
   for (const note of r.notes || []) console.log(`note:       ${note}`);
   if (r.answer) console.log(`answer:     ${oneLine(r.answer, 400)}`);
   for (const p of r.expectProblems) console.log(`run check:  ${oneLine(p, 300)}`);
+  if (r.follow && r.follow.checked) console.log(`following:  ${r.follow.checked} check(s) of the panel's timeline after a new step row, ${r.follow.misses.length} miss(es)`);
   for (const p of r.holdProblems) console.log(`hold:       ${oneLine(p, 300)}`);
   console.log(`states:     ${r.stateUpdates.count} state update(s) reached the panel port: ${countsText(r.stateUpdates.byStatus)}`);
   for (const e of r.errors) console.log(`error:      ${oneLine(e, 300)}`);
@@ -2055,6 +2309,9 @@ function printReport(r) {
     if (fu.summary !== null) console.log(`  summary of the Compact: ${oneLine(fu.summary || 'none', 300)}`);
     console.log(`  outcome ${fu.outcome || 'none'} (${fu.finishOutcome || 'no outcome'}); answer check: ${fu.answerCorrect ? 'PASS' : 'FAIL'}; ${fu.steps.length} step(s), ${fu.modelCalls} model call(s), ${(fu.wallMs / 1000).toFixed(1)} s`);
     if (fu.answer) console.log(`  answer: ${oneLine(fu.answer, 300)}`);
+    if (fu.firstRequest) console.log(`  first request: ${oneLine(fu.firstRequest, 600)}`);
+    if (fu.follow) console.log(`  following the run: ${fu.follow.checked} check(s), ${fu.follow.misses.length} miss(es)`);
+    for (const note of fu.notes || []) console.log(`  note: ${note}`);
     for (const s of fu.steps.slice(0, 8)) console.log(`  #${s.step} ${s.action ? oneLine(s.action, 130) : oneLine(s.raw, 100)}${s.result ? ` -> ${oneLine(s.result, 100)}` : ''}`);
   }
   for (const s of r.screenshots) console.log(`panel screenshot: ${s}`);

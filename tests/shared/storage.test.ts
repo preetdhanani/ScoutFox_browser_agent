@@ -110,23 +110,6 @@ test('Storage - Model Caching per provider cacheKey', async () => {
   assert.deepEqual(retrieved, modelsList);
 });
 
-test('Storage - Multi-Session History Management', async () => {
-  const session1 = { id: 's1', task: 'Task 1', timestamp: '10:00 AM', history: [{ type: 'user_goal', prompt: 'Task 1' }] };
-  const session2 = { id: 's2', task: 'Task 2', timestamp: '10:05 AM', history: [{ type: 'user_goal', prompt: 'Task 2' }] };
-
-  await Storage.saveSession(session1);
-  await Storage.saveSession(session2);
-
-  let sessions = await Storage.getSessions();
-  assert.equal(sessions.length, 2);
-  assert.equal(sessions[0].id, 's2'); // Unshifted newest first
-
-  await Storage.deleteSession('s1');
-  sessions = await Storage.getSessions();
-  assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].id, 's2');
-});
-
 test('Storage - one-time migration for nvidia default timeout', async () => {
   mockStorageData['agent_settings'] = {
     provider: 'nvidia',

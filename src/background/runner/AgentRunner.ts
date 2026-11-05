@@ -1,12 +1,13 @@
 // src/background/runner/AgentRunner.ts
 // Runner that drives the ScoutFox MCP tool loop (replaces LangGraph).
 // Single runner per tab. Client calls LLM with tools, server executes in browser.
-import { Storage, type Settings } from '../../shared/storage.ts';
+import { Storage, type SavedSession, type Settings } from '../../shared/storage.ts';
 import { Logger } from '../../shared/logger.ts';
 import { BUILD_STAMP } from '../../shared/build.ts';
 import { SessionActionJournal } from './actionJournal.ts';
 import { SessionRunnerMeta } from './runnerMeta.ts';
-import { RunSnapshotStore, restoredRun, runSnapshotKey, type RunSnapshot } from './runSnapshot.ts';
+import { CLOSED_TEXT, RunSnapshotStore, fitSnapshot, restoredRun, runSnapshotKey, withRunData, type RunSnapshot } from './runSnapshot.ts';
+import { CHAT_MAX_CHARS, ChatSaver } from './chatSaver.ts';
 import { runtimeRegistry, type RunRuntime } from './runtimeRegistry.ts';
 import { generateCompletion } from '../llm/index.ts';
 import { inputDispatcher } from '../browser/input.ts';
@@ -94,6 +95,22 @@ export class AgentRunner {
   private compactAbort: AbortController | null = null;
   /** Orders the refreshes of the window: only the newest one is kept. */
   private contextRefreshes = 0;
+
+  /**
+   * The chat this thread is: its Recent tasks entry. New chat makes a new one, LOAD_CHAT takes a
+   * saved one, and every save goes to it, so a reopened and resumed chat stays one entry.
+   */
+  public chatId: string = AgentRunner.newChatId();
+  /** The chat's title in Recent tasks: the goal of its first turn. */
+  private chatTitle = '';
+  /** The provider and model of the chat's last run, for its Recent tasks line. */
+  private runModel: { provider: string; model: string } | null = null;
+  /** The save_data records of the run that is going (the client mirrors them, noteRunData). */
+  private runRecords: Array<Record<string, unknown>> = [];
+  /** The page the run that is going was on last (noteRunData). */
+  private runPageUrl = '';
+  /** Writes the chat into Recent tasks: throttled while a run goes, at once when it rests. */
+  private chatSaver = new ChatSaver();
 
   public scoutFoxGroupIds = new Map<number, number>();
   public networkBuffers = new NetworkBuffers(100);
@@ -353,6 +370,16 @@ export class AgentRunner {
     void this.detachIfDone();
   }
 
+  /**
+   * What the run has collected, mirrored by the client after each step: the save_data records and
+   * the page it is on. Kept in the snapshot and in the saved chat, and written onto the turn's
+   * closing row when the run ends (withRunData), so a reopened chat can go on from them.
+   */
+  noteRunData(data: { records?: Array<Record<string, unknown>>; pageUrl?: string }): void {
+    if (Array.isArray(data.records)) this.runRecords = data.records.slice();
+    if (typeof data.pageUrl === 'string' && data.pageUrl) this.runPageUrl = data.pageUrl;
+  }
+
   /** The plan checklist of the current run (update_plan), replacing any previous one. */
   setPlanSteps(steps: Array<{ text: string; status: string }>): void {
     this.dirty = true;
@@ -409,6 +436,8 @@ export class AgentRunner {
       this.dirty = true;
       this.activeTabId = tabId;
       this.currentTask = userPrompt.trim();
+      // A chat is named after its first goal; a later turn (a follow-up, a resume) keeps that name.
+      if (!this.chatTitle || !this.history.some((row) => row.type === 'user_goal')) this.chatTitle = this.currentTask;
       Logger.event('agent', 'AgentRunner', `Started the task "${this.currentTask}" on tab [${tabId}]`, { task: this.currentTask, tabId, autoApprovePlan: autoApprove !== false });
 
       await this.ensureScoutFoxGroup(tabId);
@@ -450,6 +479,9 @@ export class AgentRunner {
       // The effort is the model's reasoning level (llm/effort.ts). A start without one (a caller
       // other than the composer) takes the default of Settings.
       const settings = await Storage.getSettings();
+      this.runModel = { provider: String(settings.provider || ''), model: String(settings.providerConfigs?.[settings.provider]?.model || settings.model || '') };
+      this.runRecords = [];
+      this.runPageUrl = '';
       const level = normalizeEffort(requestedEffort ?? settings.effortDefault);
       this.effort = { requested: level, level, suggestedBy: requestedEffort ? 'user' : 'default' };
       // The meter shows this task's own calls from its first one on; its token counts start at zero.
@@ -565,7 +597,9 @@ export class AgentRunner {
     this.runtime.control.abortStep('user_stop');
     this.mcpClient?.stop();
     this.dirty = true;
-    if (row) this.history.push(row);
+    // The closing row keeps what the run collected, so the chat can go on from it later.
+    if (row) this.history.push(withRunData(row, { records: this.runRecords, planSteps: this.planSteps, pageUrl: this.runPageUrl }));
+    this.runRecords = [];
     this.status = status;
     this.pauseReason = null;
     this.pendingApproval = null;
@@ -622,6 +656,14 @@ export class AgentRunner {
     this.chatGeneration += 1;
     this.lastCall = null;
     this.runStats = null;
+    // The chat that ends here was saved by the endRun above (or by its last resting state); the
+    // new chat has its own id, so nothing more is written to the old entry.
+    void this.chatSaver.flush();
+    this.chatId = AgentRunner.newChatId();
+    this.chatTitle = '';
+    this.runModel = null;
+    this.runRecords = [];
+    this.runPageUrl = '';
     this.history = [];
     this.currentTask = '';
     this.planSteps = [];
@@ -660,8 +702,69 @@ export class AgentRunner {
       effortProfile: this.effortProfile,
       runStats: this.runStats,
       findings: this.findings,
+      chatId: this.chatId,
       context: this.contextState()
     };
+  }
+
+  /** A new chat id: unique across tabs and worker restarts. */
+  static newChatId(): string {
+    const rand = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : Math.floor(Math.random() * 1e9).toString(36);
+    return `chat_${Date.now()}_${rand}`;
+  }
+
+  /**
+   * Opens a saved chat from Recent tasks as this tab's live chat (LOAD_CHAT). Its history, plan
+   * and title become the runner's own, so the context ring, Compact and the chain of the next
+   * request work on it, and every later save goes back to the same entry. A chat that was saved
+   * while its run went and never saved again was cut off (the browser or the panel closed): it
+   * gets the closing row of an interrupted run, with the records and plan it had.
+   *
+   * Refused while a task runs, waits or is being started, and while a Compact is written. The
+   * background refuses a chat another tab holds before it gets here.
+   */
+  async loadChat(chatId: string): Promise<{ success: boolean; error?: string }> {
+    await this.restorePromise;
+    const busy = () => this.status === 'running' || this.status === 'paused' || this.taskClaimed || this.compacting;
+    if (busy()) return { success: false, error: 'Stop the task before you open another chat.' };
+    const saved = await Storage.getChat(String(chatId || ''));
+    if (!saved || !Array.isArray(saved.history)) return { success: false, error: 'That chat is no longer saved.' };
+    if (busy()) return { success: false, error: 'Stop the task before you open another chat.' };
+
+    // Whatever belonged to the chat on screen goes: a Compact in flight, a client, the holds.
+    this.chatGeneration += 1;
+    this.mcpClient = null;
+    this.pendingQuestion = null;
+    this.pendingApproval = null;
+    this.pendingConfirm = null;
+    this.pendingChallengeHelp = null;
+    this.pendingContinueBudget = null;
+    this.findings = [];
+    this.lastCall = null;
+    this.runStats = null;
+    this.runtime.typedTexts = [];
+    this.runtime.navigatedFrom = null;
+
+    const planSteps = Array.isArray(saved.planSteps) ? (saved.planSteps as Array<{ text: string; status: string }>) : [];
+    let history = saved.history as HistoryEntry[];
+    if (saved.status === 'running' || saved.status === 'paused') {
+      history = [...history, withRunData(partialResultEntry(CLOSED_TEXT, 'closed'), { records: saved.records, planSteps, pageUrl: saved.pageUrl })];
+    }
+    this.chatId = saved.id;
+    this.chatTitle = saved.task || '';
+    this.runModel = saved.model || saved.provider ? { provider: saved.provider || '', model: saved.model || '' } : null;
+    this.runRecords = [];
+    this.runPageUrl = '';
+    this.history = fitSnapshot({ ...this.runSnapshot(), history }).history;
+    this.planSteps = planSteps;
+    this.currentTask = saved.task || '';
+    this.status = 'idle';
+    this.pauseReason = null;
+    this.stepCount = this.history.reduce((n, h) => (h.type === 'agent_response' ? n + 1 : n), 0);
+    this.dirty = true;
+    Logger.event('agent', 'AgentRunner', `Opened the saved chat "${this.chatTitle}" on tab [${this.ownerTabId}]`, { chatId: this.chatId, rows: this.history.length, cutOff: saved.status === 'running' || saved.status === 'paused' });
+    this.notifyStateChange();
+    return { success: true };
   }
 
   /** The context meter's numbers (see ContextState). */
@@ -890,6 +993,9 @@ export class AgentRunner {
     // paused, waiting on the user) goes out at once: that is when the worker may be stopped next.
     const resting = this.status !== 'running' || this.pendingApproval !== null;
     this.snapshots.save(this.runSnapshot(), resting);
+    // The chat in Recent tasks: written by the runner alone, once every few seconds while the run
+    // goes (a closed browser keeps it up to its last steps) and at once when the run rests.
+    this.chatSaver.save(() => this.savedChat(), resting);
     if (this.onStateChangeCb) {
       this.onStateChangeCb({ ...this.getState(), ...extra });
     }
@@ -906,6 +1012,35 @@ export class AgentRunner {
       stateVersion: this.stateVersion,
       lastCall: this.lastCall,
       runStats: this.runStats,
+      chatId: this.chatId,
+      chatTitle: this.chatTitle,
+      runModel: this.runModel,
+      records: this.runRecords,
+      pageUrl: this.runPageUrl,
+      savedAt: Date.now()
+    };
+  }
+
+  /**
+   * The chat as Recent tasks keeps it, or null while it has no turn. The history goes through the
+   * same fitting as the snapshot (slim rows, the oldest turns first); the records of a run that is
+   * still going ride along, an ended run has them on its closing row.
+   */
+  private savedChat(): SavedSession | null {
+    if (!this.history.some((row) => row.type === 'user_goal')) return null;
+    const live = this.status === 'running' || this.status === 'paused';
+    const fitted = fitSnapshot({ ...this.runSnapshot(), records: [] }, CHAT_MAX_CHARS);
+    return {
+      id: this.chatId,
+      task: this.chatTitle || this.currentTask,
+      timestamp: new Date().toLocaleString(),
+      model: this.runModel?.model || '',
+      provider: this.runModel?.provider || '',
+      history: fitted.history,
+      planSteps: this.planSteps,
+      status: this.status,
+      ...(live && this.runRecords.length ? { records: this.runRecords.slice() } : {}),
+      ...(live && this.runPageUrl ? { pageUrl: this.runPageUrl } : {}),
       savedAt: Date.now()
     };
   }
@@ -938,9 +1073,16 @@ export class AgentRunner {
         this.stateVersion = Math.max(this.stateVersion, Number(run.stateVersion) || 0);
         this.lastCall = run.lastCall && typeof run.lastCall.promptTokens === 'number' ? run.lastCall : null;
         this.runStats = run.runStats ?? null;
+        if (typeof run.chatId === 'string' && run.chatId) this.chatId = run.chatId;
+        this.chatTitle = typeof run.chatTitle === 'string' ? run.chatTitle : '';
+        this.runModel = run.runModel ?? null;
+        this.runRecords = Array.isArray(run.records) ? run.records : [];
+        this.runPageUrl = typeof run.pageUrl === 'string' ? run.pageUrl : '';
         if (run !== kept) {
           Logger.info('AgentRunner', `[RUN_RESTORED] The worker restarted during the run on tab [${this.ownerTabId}]; its steps are kept and the run is marked interrupted.`);
           this.snapshots.save(this.runSnapshot(), true);
+          // Recent tasks gets the interrupted row too, so the chat opens the way the panel shows it.
+          this.chatSaver.save(() => this.savedChat(), true);
         }
       }
     } catch {

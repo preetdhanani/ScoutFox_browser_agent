@@ -26,6 +26,16 @@ export interface RunSnapshot {
   lastCall?: { promptTokens: number; outputTokens: number; estimated: boolean } | null;
   /** The task's counts (model calls, tokens in and out); absent in older snapshots. */
   runStats?: RunStats | null;
+  /** The chat this thread is (the Recent tasks entry it saves to); absent in older snapshots. */
+  chatId?: string;
+  /** The title of that chat in Recent tasks: its first goal. */
+  chatTitle?: string;
+  /** The provider and model the chat's last run used, for its Recent tasks line. */
+  runModel?: { provider: string; model: string } | null;
+  /** The save_data records of the run that is going (they move onto its closing row when it ends). */
+  records?: Array<Record<string, unknown>>;
+  /** The page the run that is going was on last. */
+  pageUrl?: string;
   savedAt: number;
 }
 
@@ -38,15 +48,43 @@ export const RUN_SNAPSHOT_DEBOUNCE_MS = 250;
 /** The row a run gets when the worker died under it. */
 export const INTERRUPTED_TEXT = 'Chrome restarted ScoutFox\'s background worker, so the run could not go on. The steps so far are kept; start the task again to continue.';
 
+/** The row a saved chat gets when its run was cut off by a closed browser or panel (it was never saved as ended). */
+export const CLOSED_TEXT = 'The run was cut off when the browser or panel closed. The steps so far are kept; resume the task to continue.';
+
+/**
+ * What a turn's closing row keeps of its run, so the chat can go on from it later: the save_data
+ * records (on any closing row), and for a turn that ended unfinished its plan and its last page.
+ */
+export function withRunData(row: HistoryEntry, data: { records?: Array<Record<string, unknown>>; planSteps?: Array<{ text: string; status: string }>; pageUrl?: string }): HistoryEntry {
+  if (row.type !== 'finish' && row.type !== 'partial_result') return row;
+  const out: any = { ...row };
+  if (data.records && data.records.length) out.records = data.records.slice();
+  if (row.type === 'partial_result') {
+    if (data.planSteps && data.planSteps.length) out.plan = data.planSteps.map((s) => ({ text: String(s.text), status: String(s.status) }));
+    if (data.pageUrl) out.pageUrl = data.pageUrl;
+  }
+  return out;
+}
+
+/** The index of the last closing row (finish or partial_result), or -1. */
+function lastClosingIndex(history: HistoryEntry[]): number {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const t = history[i]?.type;
+    if (t === 'finish' || t === 'partial_result') return i;
+  }
+  return -1;
+}
+
 /** The storage key of one thread's run. */
 export function runSnapshotKey(threadId: string | number): string {
   return `sf:run:${threadId}`;
 }
 
-/** A history row without the parts that can be large: the raw tool call and long tables. */
-function slimRow(row: HistoryEntry): HistoryEntry {
+/** A history row without the parts that can be large: the raw tool call, long tables, and records (kept apart, see fitSnapshot). */
+function slimRow(row: HistoryEntry, keepRecords = false): HistoryEntry {
   const out: any = { ...row };
   delete out.rawResponse;
+  if (!keepRecords) delete out.records;
   if (out.table && Array.isArray(out.table.rows) && out.table.rows.length > 50) {
     out.table = { ...out.table, rows: out.table.rows.slice(0, 50) };
   }
@@ -59,7 +97,10 @@ function slimRow(row: HistoryEntry): HistoryEntry {
  * whatever is cut: its summary is what the chain of the next request starts from.
  */
 export function fitSnapshot(snapshot: RunSnapshot, maxChars = RUN_SNAPSHOT_MAX_CHARS): RunSnapshot {
-  let history = snapshot.history.map(slimRow);
+  // Only the last closing row keeps its records: they are what a resume of that turn goes on from,
+  // and the turns before it handed theirs over in their files. That holds a chat to one run's cap.
+  const closing = lastClosingIndex(snapshot.history);
+  let history = snapshot.history.map((row, i) => slimRow(row, i === closing));
   let compacted: HistoryEntry | null = null;
   for (let i = history.length - 1; i >= 0 && !compacted; i--) if (history[i].type === 'chat_compacted') compacted = history[i];
   /** The rows from `at` on, with the last compacted row in front when the cut took it. */
@@ -94,12 +135,14 @@ export function fitSnapshot(snapshot: RunSnapshot, maxChars = RUN_SNAPSHOT_MAX_C
  */
 export function restoredRun(snapshot: RunSnapshot): RunSnapshot {
   if (snapshot.status !== 'running' && snapshot.status !== 'paused') return snapshot;
-  const finalRow: HistoryEntry = { type: 'partial_result', answer: INTERRUPTED_TEXT, table: null, reason: 'interrupted' };
+  const finalRow = withRunData({ type: 'partial_result', answer: INTERRUPTED_TEXT, table: null, reason: 'interrupted' },
+    { records: snapshot.records, planSteps: snapshot.planSteps, pageUrl: snapshot.pageUrl });
   return {
     ...snapshot,
     status: 'stopped',
     pauseReason: null,
     history: [...snapshot.history, finalRow],
+    records: [],
     // The added row is a new state: the panel's watermark must see a higher version.
     stateVersion: snapshot.stateVersion + 1
   };

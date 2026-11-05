@@ -13,8 +13,15 @@ import { wrapUntrusted } from './untrusted.ts';
 import { estimateTextTokens } from '../../shared/tokens.ts';
 import type { HistoryEntry } from '../types.ts';
 
-/** The line the chain starts with, at the top of the first user message of a task. */
-export const CHAIN_HEADER = 'EARLIER IN THIS CHAT (for context; the task below is the current one):';
+/** What the model is told to do with an unfinished turn when the user asks to go on. */
+export const CHAIN_RESUME_RULE = 'If the user asks to resume or continue, carry on the last unfinished task from where it stopped; do not start it over.';
+
+/** The lines the chain starts with, at the top of the first user message of a task. */
+export const CHAIN_HEADER = `EARLIER IN THIS CHAT (for context; the task below is the current one):\n${CHAIN_RESUME_RULE}`;
+
+/** How many of an unfinished turn's last steps the chain carries, and how much of each result. */
+export const CHAIN_RESUME_STEPS = 6;
+export const CHAIN_STEP_RESULT_CHARS = 160;
 
 /** Who the envelope names as the source of the answers and the summary. */
 export const CHAIN_SOURCE = 'earlier answers of this chat';
@@ -37,6 +44,16 @@ export interface ChainTurn {
   outcome: ChainOutcome;
   answer: string;
   files: Array<{ name: string; content: string }>;
+  /** Set for a turn that ended unfinished (a Stop, an interruption, a partial result): what is needed to go on. */
+  resume?: ResumePoint;
+}
+
+/** Where an unfinished turn stopped (from its closing row and its last steps). */
+export interface ResumePoint {
+  plan: Array<{ text: string; status: string }>;
+  records: Array<Record<string, unknown>>;
+  pageUrl: string;
+  steps: string[];
 }
 
 export interface ChainSummary {
@@ -66,6 +83,50 @@ export function lastSummary(history: HistoryEntry[]): ChainSummary | null {
   return { summary: String(row.summary || ''), summarizedTurns: Number(row.summarizedTurns) || 0 };
 }
 
+/** The fields of a set of records in the order they first appear. */
+function fieldsOf(records: Array<Record<string, unknown>>): string[] {
+  const fields: string[] = [];
+  for (const r of records) for (const k of Object.keys(r || {})) if (!fields.includes(k)) fields.push(k);
+  return fields;
+}
+
+/** One step as the chain says it: the tool with its main argument, and the start of its result. */
+function stepLine(action: Record<string, any>, result: HistoryEntry | null): string {
+  const { action: name, ...args } = action || {};
+  const shown = Object.entries(args).filter(([k, v]) => v !== undefined && v !== null && v !== '' && k !== 'reason');
+  const argText = shown.length ? ` ${cut(shown.map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', '), 120)}` : '';
+  let outcome = '(no result)';
+  if (result && result.type === 'execution_result') {
+    outcome = result.success === false ? `failed: ${cut(String(result.error || result.message || ''), CHAIN_STEP_RESULT_CHARS)}` : `ok: ${cut(String(result.message || ''), CHAIN_STEP_RESULT_CHARS)}`;
+  }
+  return `- ${name || 'step'}${argText} -> ${outcome.replace(/\s+/g, ' ').trim()}`;
+}
+
+/** The last steps of a turn's rows, oldest first. */
+function lastSteps(rows: HistoryEntry[], max = CHAIN_RESUME_STEPS): string[] {
+  const lines: string[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (row.type !== 'agent_response' || !row.action) continue;
+    const result = rows.slice(i + 1).find((r) => r.type === 'execution_result' && r.step === row.step) || null;
+    lines.push(stepLine(row.action as Record<string, any>, result));
+  }
+  return lines.slice(-max);
+}
+
+/** The resume point of a turn that ended unfinished, or undefined for a turn that ended. */
+function resumeOf(rows: HistoryEntry[]): ResumePoint | undefined {
+  const final = [...rows].reverse().find((r) => r.type === 'finish' || r.type === 'partial_result' || r.type === 'error');
+  if (final && final.type !== 'partial_result') return undefined;
+  const closing = final && final.type === 'partial_result' ? final : null;
+  return {
+    plan: Array.isArray(closing?.plan) ? closing!.plan.map((s) => ({ text: String(s.text), status: String(s.status) })) : [],
+    records: Array.isArray(closing?.records) ? closing!.records : [],
+    pageUrl: String(closing?.pageUrl || ''),
+    steps: lastSteps(rows)
+  };
+}
+
 /** How one turn ended, from its rows (the user_goal row first). */
 function endOf(rows: HistoryEntry[]): { outcome: ChainOutcome; answer: string; files: ChainTurn['files'] } {
   const final = [...rows].reverse().find((r) => r.type === 'finish' || r.type === 'partial_result');
@@ -75,7 +136,7 @@ function endOf(rows: HistoryEntry[]): { outcome: ChainOutcome; answer: string; f
     return { outcome, answer: String(final.answer || ''), files };
   }
   if (final && final.type === 'partial_result') {
-    const stopped = final.reason === 'stopped' || final.reason === 'interrupted';
+    const stopped = final.reason === 'stopped' || final.reason === 'interrupted' || final.reason === 'closed';
     return { outcome: stopped ? 'stopped' : 'partly done', answer: String(final.answer || ''), files: [] };
   }
   const error = [...rows].reverse().find((r) => r.type === 'error');
@@ -92,7 +153,8 @@ export function chainTurns(history: HistoryEntry[]): ChainTurn[] {
   const close = () => {
     if (!rows) return;
     const goal = rows[0] as Extract<HistoryEntry, { type: 'user_goal' }>;
-    turns.push({ turn: Number(goal.turn) || turns.length + 1, goal: String(goal.prompt || ''), ...endOf(rows) });
+    const resume = resumeOf(rows);
+    turns.push({ turn: Number(goal.turn) || turns.length + 1, goal: String(goal.prompt || ''), ...endOf(rows), ...(resume ? { resume } : {}) });
     rows = null;
   };
   for (const row of list.slice(from)) {
@@ -107,13 +169,29 @@ export function chainTurns(history: HistoryEntry[]): ChainTurn[] {
   return turns;
 }
 
+/** Where an unfinished turn stopped, as the chain says it: the plan with marks, the saved records, the last page and steps. */
+export function resumeText(r: ResumePoint): string {
+  const lines = ['Where it stopped:'];
+  lines.push(r.plan.length
+    ? `Plan:\n${r.plan.slice(0, 20).map((st, i) => `${i + 1} [${st.status === 'completed' ? 'done' : ' '}] ${st.text}`).join('\n')}`
+    : 'Plan: none');
+  const fields = fieldsOf(r.records);
+  lines.push(r.records.length
+    ? `Saved records: ${r.records.length} (fields: ${fields.join(', ')})`
+    : 'Saved records: none');
+  if (r.pageUrl) lines.push(`Last page: ${r.pageUrl}`);
+  if (r.steps.length) lines.push(`Last steps:\n${r.steps.join('\n')}`);
+  return lines.join('\n');
+}
+
 /** One turn as the chain says it: the goal in the user's words, then the answer and the files as data. */
 export function turnText(t: ChainTurn): string {
   const parts: string[] = [];
   if (t.answer.trim()) parts.push(`Answer: ${cut(t.answer, CHAIN_ANSWER_CHARS)}`);
   for (const f of t.files) parts.push(`File ${f.name}:\n${cut(f.content, CHAIN_FILE_CHARS)}`);
+  if (t.resume) parts.push(resumeText(t.resume));
   const said = parts.length ? `\n${wrapUntrusted(CHAIN_SOURCE, parts.join('\n\n'))}` : '\n(no answer)';
-  return `Turn ${t.turn} (${t.outcome})\nYou asked: ${cut(t.goal, CHAIN_ANSWER_CHARS)}${said}`;
+  return `Turn ${t.turn} (${t.outcome}${t.resume ? ', unfinished' : ''})\nYou asked: ${cut(t.goal, CHAIN_ANSWER_CHARS)}${said}`;
 }
 
 /** The summary as the chain says it. */
@@ -164,6 +242,18 @@ export function compactionInput(history: HistoryEntry[], maxChars: number): stri
     text = [...head, ...turns].join('\n\n');
   }
   return text.length > maxChars ? cut(text, maxChars) : text;
+}
+
+/**
+ * The records an unfinished last turn left, with its number, or null. A new run takes them back into
+ * its store (save_data goes on counting, records_file writes the whole file) only when the turn
+ * right before it ended unfinished: after a finished turn a follow-up starts with none.
+ */
+export function restorableRecords(history: HistoryEntry[]): { turn: number; records: Array<Record<string, unknown>> } | null {
+  const turns = chainTurns(history || []);
+  const last = turns[turns.length - 1];
+  if (!last || !last.resume || !last.resume.records.length) return null;
+  return { turn: last.turn, records: last.resume.records.map((r) => ({ ...r })) };
 }
 
 /** The number of the next turn: one above the highest turn the chat has, so a trimmed history never repeats one. */

@@ -52,7 +52,7 @@ export type KeyModifier = 'ctrl' | 'shift' | 'alt' | 'meta';
 export type EndReason =
   | 'all_subgoals_done' | 'goal_achieved' | 'partial' | 'unverified' | 'stopped_early'
   | 'no_subgoal_completed' | 'max_steps' | 'model_unusable' | 'dom_error'
-  | 'plan_rejected' | 'stopped' | 'interrupted' | 'error';
+  | 'plan_rejected' | 'stopped' | 'interrupted' | 'closed' | 'error';
 
 // Orchestrator / worker node names (kept as type unions only)
 export type OrchestratorNode =
@@ -249,10 +249,14 @@ export type HistoryEntry =
       findings: number; stepsUsed: number }
   | { type: 'finish'; answer: string; outcome?: 'done' | 'partial' | 'blocked'; unconfirmed?: true; partial?: true; table?: any;
       runStats?: RunStats; offer?: any; stoppedEarly?: string; findings?: Finding[];
-      audit?: any; evidence?: string; files?: Array<{ name: string; mime: string; content: string }> }
+      audit?: any; evidence?: string; files?: Array<{ name: string; mime: string; content: string }>;
+      /** The run's save_data records, kept so the chat can go on from them (runSnapshot.withRunData). */
+      records?: Array<Record<string, unknown>> }
   | { type: 'partial_result'; answer: string; table: any; reason: EndReason;
       runStats?: RunStats; offer?: any; findings?: Finding[];
-      skippedSites?: Array<{ siteId: string; site: string; reason: string }> }
+      skippedSites?: Array<{ siteId: string; site: string; reason: string }>;
+      /** What an unfinished turn leaves for a resume: its records, its plan with marks, its last page. */
+      records?: Array<Record<string, unknown>>; plan?: Array<{ text: string; status: string }>; pageUrl?: string }
   /**
    * The chat was compacted (mcp/chatChain.ts): `summary` stands for every turn before this row,
    * `summarizedTurns` is how many that is, `auto` says the run did it because the chain was too long.

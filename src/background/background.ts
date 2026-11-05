@@ -870,7 +870,8 @@ function routeMessage(
     'CONTINUE_BUDGET',
     'CLEAR_HISTORY',
     'GET_SCREENSHOT',
-    'COMPACT_CHAT'
+    'COMPACT_CHAT',
+    'LOAD_CHAT'
   ]);
 
   if (TAB_ACTIONS.has(action)) {
@@ -988,6 +989,19 @@ function routeMessage(
     if (action === 'CLEAR_HISTORY') {
       runner.clearHistory();
       sendResponse({ success: true });
+      return true;
+    }
+
+    if (action === 'LOAD_CHAT') {
+      // A chat from Recent tasks becomes this tab's live chat. Two tabs never hold one chat: both
+      // would save it, and the later save would wipe the other's turns.
+      const chatId = String(payload?.sessionId || '');
+      const holder = [...new Set(sessions.values())].find((other) => other !== session && other.engine.chatId === chatId && other.engine.history.length > 0);
+      if (holder) {
+        sendResponse({ success: false, error: 'This chat is open in another tab. Start a new chat there first, or keep working on it in that tab.' });
+        return true;
+      }
+      runner.loadChat(chatId).then(sendResponse, (err) => sendResponse({ success: false, error: errorText(err) }));
       return true;
     }
   }

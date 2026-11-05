@@ -52,24 +52,22 @@ export function levelOf(pct) {
 /**
  * What the ring and the card show, from the runner's context state.
  *
- * @param {object|null} context  getState().context, or null (an older worker, a saved session)
- * @param {{busy?: boolean, readOnly?: boolean, model?: string, pending?: boolean}} options
- *   busy: a task is running or paused; readOnly: a saved session from Recent tasks is shown;
- *   pending: this panel sent COMPACT_CHAT and waits for the answer
+ * @param {object|null} context  getState().context, or null (an older worker)
+ * @param {{busy?: boolean, model?: string, pending?: boolean}} options
+ *   busy: a task is running or paused; pending: this panel sent COMPACT_CHAT and waits for the answer
  */
-export function meterView(context, { busy = false, readOnly = false, model = '', pending = false } = {}) {
+export function meterView(context, { busy = false, model = '', pending = false } = {}) {
   const c = context || {};
   const windowTokens = Number(c.window) > 0 ? Number(c.window) : 262144;
-  const used = readOnly ? 0 : Math.max(0, Number(c.used) || 0);
+  const used = Math.max(0, Number(c.used) || 0);
   const pct = percentOf(used, windowTokens);
   const level = levelOf(pct);
   const windowText = formatTokens(windowTokens);
   const sourceText = WINDOW_SOURCE_TEXT[c.windowSource] || WINDOW_SOURCE_TEXT.default;
-  const compacting = !readOnly && (!!c.compacting || pending);
+  const compacting = !!c.compacting || pending;
   const hasEarlierTurn = !!c.hasEarlierTurn;
   let compactOff = '';
-  if (readOnly) compactOff = 'A saved chat cannot be compacted. Start a new chat or open the live one.';
-  else if (compacting) compactOff = 'The chat is being compacted.';
+  if (compacting) compactOff = 'The chat is being compacted.';
   else if (busy) compactOff = 'Stop the task before you compact the chat.';
   else if (!hasEarlierTurn) compactOff = 'There is no earlier turn to compact.';
   return {
@@ -81,15 +79,12 @@ export function meterView(context, { busy = false, readOnly = false, model = '',
     windowText,
     sourceText,
     model: String(model || ''),
-    estimated: !readOnly && !!c.estimated && used > 0,
+    estimated: !!c.estimated && used > 0,
     summarizedTurns: Number(c.summarizedTurns) || 0,
     compacting,
     canCompact: !compactOff,
     compactTitle: compactOff || 'Summarize this chat, so later requests start from the summary',
-    ringDisabled: readOnly,
-    label: readOnly
-      ? 'Context: not counted for a saved chat'
-      : `Context: ${percentText(pct)} of ${windowText} used`
+    label: `Context: ${percentText(pct)} of ${windowText} used`
   };
 }
 

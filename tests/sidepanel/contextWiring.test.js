@@ -6,8 +6,8 @@
  *   1. Every state from the runner redraws the ring and its label, and an open card follows it.
  *   2. Clicking the ring opens the card; the card's Compact sends COMPACT_CHAT once, and a refused
  *      Compact is shown as an error toast with the runner's reason.
- *   3. A saved chat opened from Recent tasks is read-only for the meter: the ring is off and does
- *      not count it, and the next live state gives the meter back.
+ *   3. A saved chat opened from Recent tasks is the live chat (LOAD_CHAT): the ring counts it like
+ *      any chat, and Compact works on it.
  *   4. The Settings field saves a window for the chosen model, refuses what is not a count, and an
  *      emptied field removes the user's value.
  */
@@ -90,13 +90,13 @@ test('a refused Compact is an error toast with the reason', async () => {
   }
 });
 
-test('a saved chat from Recent tasks is read-only for the meter, and a live state gives it back', async () => {
-  storage.data.saved_sessions = [{ id: 'session_saved', task: 'Old', history: [{ type: 'user_goal', turn: 1, prompt: 'Old', timestamp: '', isNewRun: true }, { type: 'finish', answer: 'x' }], planSteps: [] }];
-  await loadSelectedSession('session_saved');
-  assert.equal(getEl('btnContext').disabled, true, 'the ring is off');
-  assert.equal(getEl('btnContext').getAttribute('aria-label'), 'Context: not counted for a saved chat');
-  receiveState(stateWith({ used: 31_200 }));
-  assert.equal(getEl('btnContext').disabled, false);
+test('a chat opened from Recent tasks is the live chat: the panel asks the runner for it, and the ring counts it', async () => {
+  sent.length = 0;
+  await loadSelectedSession('chat_saved');
+  assert.ok(sent.some((m) => m.action === 'LOAD_CHAT' && m.payload.sessionId === 'chat_saved'), 'the runner takes the chat');
+  // The runner sends the opened chat's state, with its context, like any live state.
+  receiveState({ ...stateWith({ used: 31_200 }), chatId: 'chat_saved' });
+  assert.equal(getEl('btnContext').disabled, false, 'the ring is on for an opened chat');
   assert.equal(getEl('btnContext').getAttribute('aria-label'), 'Context: 12% of 256K used');
 });
 

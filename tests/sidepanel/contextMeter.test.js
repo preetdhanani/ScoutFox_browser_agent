@@ -79,7 +79,7 @@ test('the card: model, window and its source, the bar with the numbers, the note
   assert.match(contextCardHtml(meterView(ctx(), { model: '<b>x</b>' })), /&lt;b&gt;x&lt;\/b&gt;/, 'the model name is escaped');
 });
 
-test('Compact is off while a task runs, with no earlier turn, while compacting, and for a saved chat', () => {
+test('Compact is off while a task runs, with no earlier turn, and while compacting', () => {
   const off = (view) => /data-ctx="compact" disabled/.test(contextCardHtml(view));
   assert.equal(off(meterView(ctx())), false);
   assert.equal(off(meterView(ctx(), { busy: true })), true);
@@ -88,10 +88,6 @@ test('Compact is off while a task runs, with no earlier turn, while compacting, 
   assert.equal(off(meterView(ctx({ compacting: true }))), true);
   assert.match(contextCardHtml(meterView(ctx({ compacting: true }))), /Compacting…/);
   assert.equal(off(meterView(ctx(), { pending: true })), true, 'off while this panel waits for the answer');
-  const saved = meterView(ctx(), { readOnly: true });
-  assert.equal(off(saved), true);
-  assert.equal(saved.ringDisabled, true, 'the ring is off for a saved chat');
-  assert.equal(saved.used, 0, 'a saved chat is not counted');
 });
 
 test('the Settings line says the window, where it comes from, and that it is num_ctx for Ollama', () => {

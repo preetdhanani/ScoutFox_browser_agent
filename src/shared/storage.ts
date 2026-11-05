@@ -131,14 +131,98 @@ export function normalizeResearch(raw: unknown): ResearchSettings {
 /** Whether the agent captures images of pages it opens. Always on: every new page load gets a screenshot for clarity. */
 export const screenshotsAlwaysOn = true;
 
-/** A session as the side panel saves it into the history drawer. */
+/**
+ * A chat as Recent tasks keeps it. The background writes it (AgentRunner, the single writer) while
+ * a run goes and when it ends; the panel only lists, opens and deletes chats.
+ *   status    the run status when it was saved: a chat saved "running" or "paused" and never
+ *             saved again was cut off (the browser or the panel closed) and opens as interrupted
+ *   records   the save_data records of a run that had not ended when it was saved; an ended run
+ *             keeps them on its closing row instead
+ */
 export interface SavedSession {
   id: string;
   task?: string;
   timestamp?: string;
   model?: string;
+  provider?: string;
   history?: unknown[];
   planSteps?: unknown[];
+  status?: string;
+  records?: Array<Record<string, unknown>>;
+  /** The page a run that had not ended was on last. */
+  pageUrl?: string;
+  savedAt?: number;
+}
+
+/** What the list of Recent tasks shows of a chat: everything but its rows. */
+export type SavedSessionSummary = Omit<SavedSession, 'history' | 'planSteps' | 'records' | 'pageUrl'>;
+
+/** The storage key of one saved chat. Each chat is its own key, so a save writes one chat, not all of them. */
+export function chatKey(id: string): string {
+  return `sf:chat:${id}`;
+}
+
+/** The key of the list of saved chats (newest first), and the key of the list before chats had their own keys. */
+export const CHAT_INDEX_KEY = 'sf:chats';
+export const LEGACY_SESSIONS_KEY = 'saved_sessions';
+
+/** How many chats Recent tasks keeps. */
+export const MAX_SAVED_CHATS = 50;
+
+/** The summary of a chat for the index. */
+function chatSummary(chat: SavedSession): SavedSessionSummary {
+  const { history: _h, planSteps: _p, records: _r, pageUrl: _u, ...rest } = chat;
+  return rest;
+}
+
+function localArea(): chrome.storage.LocalStorageArea | null {
+  return typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local ? chrome.storage.local : null;
+}
+
+function localGet<T = Record<string, unknown>>(keys: string[]): Promise<T> {
+  const area = localArea();
+  if (!area) return Promise.resolve({} as T);
+  return new Promise((resolve) => area.get(keys, (res: any) => resolve((res || {}) as T)));
+}
+
+function localSet(items: Record<string, unknown>): Promise<void> {
+  const area = localArea();
+  if (!area) return Promise.resolve();
+  return new Promise((resolve) => area.set(items, () => resolve()));
+}
+
+function localRemove(keys: string[]): Promise<void> {
+  const area = localArea();
+  if (!area || !keys.length) return Promise.resolve();
+  return new Promise((resolve) => area.remove(keys, () => resolve()));
+}
+
+/**
+ * The index of saved chats. A list from before chats had their own keys (saved_sessions, one
+ * array of whole chats) is read once and moved: each chat to its own key, the index written, the
+ * old array removed.
+ */
+async function chatIndex(): Promise<SavedSessionSummary[]> {
+  const res = await localGet<Record<string, unknown>>([CHAT_INDEX_KEY, LEGACY_SESSIONS_KEY]);
+  const index = Array.isArray(res[CHAT_INDEX_KEY]) ? (res[CHAT_INDEX_KEY] as SavedSessionSummary[]) : null;
+  const legacy = Array.isArray(res[LEGACY_SESSIONS_KEY]) ? (res[LEGACY_SESSIONS_KEY] as SavedSession[]) : null;
+  if (!legacy) return index || [];
+  const moved = legacy.filter((s) => s && typeof s.id === 'string').slice(0, MAX_SAVED_CHATS);
+  const known = new Set((index || []).map((s) => s.id));
+  const merged = [...(index || []), ...moved.filter((s) => !known.has(s.id)).map(chatSummary)].slice(0, MAX_SAVED_CHATS);
+  const items: Record<string, unknown> = { [CHAT_INDEX_KEY]: merged };
+  for (const chat of moved) if (!known.has(chat.id)) items[chatKey(chat.id)] = chat;
+  await localSet(items);
+  await localRemove([LEGACY_SESSIONS_KEY]);
+  return merged;
+}
+
+/** Index writes of this context, one after the other: two saves never read the same old index. */
+let chatWrites: Promise<unknown> = Promise.resolve();
+function serialized<T>(work: () => Promise<T>): Promise<T> {
+  const next = chatWrites.then(work, work);
+  chatWrites = next.catch(() => {});
+  return next;
 }
 
 interface ModelsCacheEntry {
@@ -637,58 +721,45 @@ export const Storage = {
     return this.getSettings();
   },
 
-  /**
-   * Get saved session history list
-   */
-  async getSessions(): Promise<SavedSession[]> {
-    return new Promise((resolve) => {
-      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
-        resolve([]);
-        return;
-      }
-      chrome.storage.local.get<{ saved_sessions?: SavedSession[] }>(['saved_sessions'], (res) => {
-        resolve(res.saved_sessions || []);
-      });
-    });
+  /** The saved chats as Recent tasks lists them (newest first), without their rows. */
+  async getSessions(): Promise<SavedSessionSummary[]> {
+    return serialized(() => chatIndex());
+  },
+
+  /** One saved chat with its rows, or null when it is not kept (any more). */
+  async getChat(id: string): Promise<SavedSession | null> {
+    if (!id) return null;
+    await serialized(() => chatIndex());
+    const res = await localGet<Record<string, unknown>>([chatKey(id)]);
+    const chat = res[chatKey(id)] as SavedSession | undefined;
+    return chat && typeof chat === 'object' && chat.id === id ? chat : null;
   },
 
   /**
-   * Save a completed session into history
+   * Saves a chat under its own key and puts it at the top of the index. The oldest chats past
+   * MAX_SAVED_CHATS are removed with their keys.
    */
-  async saveSession(sessionObj: SavedSession): Promise<SavedSession[]> {
-    const sessions = await this.getSessions();
-    const existingIndex = sessions.findIndex(s => s.id === sessionObj.id);
-
-    if (existingIndex >= 0) {
-      sessions[existingIndex] = sessionObj;
-    } else {
-      sessions.unshift(sessionObj);
-    }
-
-    const trimmed = sessions.slice(0, 50);
-
-    return new Promise((resolve) => {
-      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
-        resolve(trimmed);
-        return;
-      }
-      chrome.storage.local.set({ saved_sessions: trimmed }, () => resolve(trimmed));
+  async saveChat(chat: SavedSession): Promise<void> {
+    if (!chat || typeof chat.id !== 'string' || !chat.id) return;
+    await serialized(async () => {
+      const index = await chatIndex();
+      const rest = index.filter((s) => s.id !== chat.id);
+      const next = [chatSummary(chat), ...rest];
+      const kept = next.slice(0, MAX_SAVED_CHATS);
+      const dropped = next.slice(MAX_SAVED_CHATS).map((s) => chatKey(s.id));
+      await localSet({ [chatKey(chat.id)]: chat, [CHAT_INDEX_KEY]: kept });
+      await localRemove(dropped);
     });
   },
 
-  /**
-   * Delete a saved session by ID
-   */
-  async deleteSession(sessionId: string): Promise<SavedSession[]> {
-    const sessions = await this.getSessions();
-    const updated = sessions.filter(s => s.id !== sessionId);
-
-    return new Promise((resolve) => {
-      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
-        resolve(updated);
-        return;
-      }
-      chrome.storage.local.set({ saved_sessions: updated }, () => resolve(updated));
+  /** Deletes a saved chat: its rows (and the records they keep) and its index entry. */
+  async deleteSession(sessionId: string): Promise<SavedSessionSummary[]> {
+    return serialized(async () => {
+      const index = await chatIndex();
+      const updated = index.filter((s) => s.id !== sessionId);
+      await localSet({ [CHAT_INDEX_KEY]: updated });
+      await localRemove([chatKey(sessionId)]);
+      return updated;
     });
   }
 };

@@ -52,6 +52,7 @@ function makeRecorder(options: { autoApprovePlan?: boolean } = {}) {
   const planSteps: Array<{ text: string; status: string }> = [];
   const statuses: Array<{ status: RunStatus; pauseReason?: string | null }> = [];
   const approvals: any[] = [];
+  const runData: Array<{ records?: Array<Record<string, unknown>>; pageUrl?: string; at: number }> = [];
   let pending: any = null;
 
   const recorder: RunRecorder = {
@@ -63,9 +64,10 @@ function makeRecorder(options: { autoApprovePlan?: boolean } = {}) {
     setPlanSteps: (steps) => { planSteps.length = 0; planSteps.push(...steps); },
     setPendingApproval: (value) => { pending = value; approvals.push(value); },
     resolvePendingApproval: (status, pauseReason) => { statuses.push({ status, pauseReason }); pending = null; },
-    endRun: (status, row) => { if (row) history.push(row); statuses.push({ status }); pending = null; return true; }
+    endRun: (status, row) => { if (row) history.push(row); statuses.push({ status }); pending = null; return true; },
+    noteRunData: (data) => { runData.push({ ...JSON.parse(JSON.stringify(data)), at: history.length }); }
   };
-  return { recorder, history, planSteps, statuses, approvals, pending: () => pending };
+  return { recorder, history, planSteps, statuses, approvals, runData, pending: () => pending };
 }
 
 /** A runtime with the parts the client reads. */
@@ -911,6 +913,53 @@ test('a follow-up task carries the earlier turns of its chat at the top of its f
   assert.ok(text.indexOf('EARLIER IN THIS CHAT') < text.indexOf('TASK: Multiply that by 7.'), 'the task comes after the chain');
   assert.equal(messages[0].role, 'system');
   assert.equal(messages.filter((m) => typeof m.content === 'string' && m.content.includes('EARLIER IN THIS CHAT')).length, 1, 'the chain is in the task message, not a message of its own');
+});
+
+test('a run after an unfinished turn takes its records back: save_data goes on counting, records_file writes them all', async (t) => {
+  const kept = [{ name: 'A', url: 'https://a.example' }, { name: 'B', url: 'https://b.example' }];
+  const { client, rec, requests } = withClient(t, {
+    replies: [
+      toolCall('save_data', { records: [{ name: 'C', url: 'https://c.example' }] }),
+      toolCall('finish', { outcome: 'done', answer: 'Here is the file.', records_file: 'certs.json' })
+    ]
+  });
+  rec.history.push(
+    { type: 'user_goal', turn: 1, prompt: 'Make me a JSON file of the certifications.', timestamp: '', isNewRun: true },
+    { type: 'partial_result', answer: 'The run was stopped before it finished.', table: null, reason: 'stopped', records: kept, plan: [{ text: 'Save them', status: 'in_progress' }] }
+  );
+  await client.startTask('resume');
+  const state = String((requests[0].body.messages as any[]).at(-1).content);
+  assert.match(state, /Collected: 2 records \(fields: name, url\); restored from turn 1/, 'the run state names where they came from');
+  const saved = (requests[1].body.messages as any[]).find((m) => m.role === 'tool');
+  assert.match(String(saved.content), /Saved 1 new record \(3 in total\)/, 'save_data goes on counting');
+  const finish = rowsOfType(rec.history, 'finish')[0];
+  assert.deepEqual(JSON.parse(finish.files[0].content).map((r: any) => r.name), ['A', 'B', 'C'], 'the file holds the whole set');
+  assert.deepEqual(rec.runData[0].records, kept, 'the runner learns the restored records at once');
+  assert.equal(rec.runData[0].at, 2, 'before the new turn\'s first row');
+});
+
+test('a follow-up after a finished turn starts with no records', async (t) => {
+  const { client, rec, requests } = withClient(t, { replies: [toolCall('finish', { outcome: 'done', answer: 'ok' })] });
+  rec.history.push(
+    { type: 'user_goal', turn: 1, prompt: 'Make me a JSON file of the certifications.', timestamp: '', isNewRun: true },
+    { type: 'finish', answer: 'Here.', outcome: 'done', records: [{ name: 'A' }] }
+  );
+  await client.startTask('What is the weather?');
+  const state = String((requests[0].body.messages as any[]).at(-1).content);
+  assert.match(state, /Collected: nothing saved with save_data yet/);
+  assert.doesNotMatch(state, /restored from/);
+});
+
+test('the runner learns the records of save_data at once, and the page after each step', async (t) => {
+  const { client, rec } = withClient(t, {
+    replies: [toolCall('save_data', { records: [{ name: 'A' }] }), toolCall('finish', { outcome: 'done', answer: 'ok' })]
+  });
+  await client.startTask('Save it');
+  // Before the step's result row: a Stop that lands right after save_data still closes the turn with the records.
+  const resultAt = rec.history.findIndex((r: any) => r.type === 'execution_result' && /Saved 1 new record/.test(r.message || ''));
+  assert.ok(resultAt > 0);
+  assert.ok(rec.runData.some((d) => Array.isArray(d.records) && d.records.length === 1 && d.at <= resultAt), 'the save is mirrored at once');
+  assert.ok(rec.runData.some((d) => typeof d.pageUrl === 'string' && d.pageUrl.length > 0), 'the page is mirrored');
 });
 
 test('a first task has no chain, and the turn after a trimmed history is one above the highest', async (t) => {

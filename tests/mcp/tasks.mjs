@@ -1,9 +1,9 @@
 /**
  * The smoke tasks: the real-model e2e tasks, where a real model (LISA by default) acts in a real
  * Chromium through the built extension. The open-web ones start on a neutral page and give only a
- * question, and the model picks and opens every real website itself. Three run on local fixture pages
- * (tests/fixtures/site/notebook.html and credentials.html) that only a real model can do justice; one
- * of them (web-chat-chain) has a second turn in the same chat.
+ * question, and the model picks and opens every real website itself. Four run on local fixture pages
+ * (tests/fixtures/site/notebook.html and credentials.html) that only a real model can do justice; two
+ * of them (web-chat-chain, web-resume-chat) have a second turn in the same chat.
  * Every task has a `check` that reads the facts of the run (the final answer first) and says whether
  * the run was right, so a run that "finishes" with a wrong answer is not a pass.
  *
@@ -31,7 +31,7 @@
  *   restartWorker  true = after the run the harness stops the service worker, wakes a new one, and
  *               the real side panel must still show the finished run
  *   web         true = a real-model task: an open-web task (a neutral start page and only a question), or
- *               a local fixture task (web-notebook-fix, web-credentials-json, web-chat-chain). The default set of a run
+ *               a local fixture task (web-notebook-fix, web-credentials-json, web-chat-chain, web-resume-chat). The default set of a run
  *   heldOut     true = a held-out open-web task: run only with --held-out, never tuned against
  *   sealed      true = a sealed open-web task: run only with --sealed, which shows its verdict and numbers
  *               but never its trace (see the sealed tasks below)
@@ -58,6 +58,18 @@
  *                 check     (run) => boolean, on the facts of the second turn (runFacts)
  *                 noReads   true = the second turn may not read or look at the page (read_page,
  *                           get_page_elements, find, take_screenshot): its answer must come from the chat
+ *                 stopAfterSteps  n = the FIRST turn is stopped with a real click on the side panel's Stop
+ *                           button once it has made n steps or its first save_data call, like a user
+ *                           who stops a run. A first turn that finished before the Stop landed makes
+ *                           the run inconclusive (a problem), never a pass
+ *                 newChat   true = before the second turn the harness clicks New chat in the panel
+ *                 reopen    true = then it opens Recent tasks and the saved chat of the first turn
+ *                           with real clicks (the chat Prit reopened)
+ *                 typed     true = the second prompt is typed into the panel's composer and sent with
+ *                           the Send button, like a user, instead of a START_TASK from the harness
+ *                 holdsStoppedTurn  true = the second turn's first request must hold what the stopped
+ *                           first turn left: its goal, its plan steps and its steps (resumeRequestProblems,
+ *                           the deterministic check of a resume)
  */
 
 /**
@@ -165,6 +177,35 @@ export const pageReadSteps = (run) => run.steps.filter((s) => s.action && PAGE_R
 /** The chain task (web-chat-chain): the first turn asks for a count, the second derives a number from that answer. */
 export const CHAIN_FIRST_PROMPT = 'How many certifications does this page list? Answer with the number in one short sentence.';
 export const CHAIN_FOLLOW_UP_PROMPT = 'Take the number of certifications you gave me in your last answer, multiply it by 7, and reply with the result only.';
+
+/**
+ * The problems of a resume request (web-resume-chat): its first user message must hold what the
+ * stopped turn left to go on from: the chain, the stopped turn's goal, every step of its plan (when
+ * it made one), and the tool of each of its steps. Without them the model has nothing to resume.
+ *
+ * @param {{plan: Array<{text: string}>, steps: Array<{action: {action: string} | null}>}} stopped  the facts of the stopped turn
+ * @param {string} goal  the stopped turn's prompt
+ * @param {string} firstUserText  the first user message of the resume's first request
+ */
+export function resumeRequestProblems(stopped, goal, firstUserText) {
+  const sent = String(firstUserText || '');
+  if (!sent.startsWith('EARLIER IN THIS CHAT')) return [`the first request of the resume carries no chain of the chat: ${JSON.stringify(sent.slice(0, 120))}`];
+  const problems = [];
+  if (!sent.includes(String(goal || '').trim())) problems.push('the first request of the resume does not hold the goal of the stopped turn');
+  const plan = ((stopped && stopped.plan) || []).map((s) => String((s && s.text) || '').trim()).filter(Boolean);
+  const missingPlan = plan.filter((text) => !sent.includes(text));
+  if (missingPlan.length) problems.push(`the first request of the resume does not hold ${missingPlan.length} of the ${plan.length} plan step(s) of the stopped turn (first missing: ${JSON.stringify(missingPlan[0].slice(0, 120))})`);
+  const tools = [...new Set(((stopped && stopped.steps) || []).map((s) => s.action && s.action.action).filter(Boolean))];
+  const missingTools = tools.filter((tool) => !new RegExp(`^- ${tool}\\b`, 'm').test(sent));
+  if (missingTools.length) problems.push(`the first request of the resume does not list the stopped turn's steps (${missingTools.join(', ')} missing)`);
+  return problems;
+}
+
+/** The steps of a turn as the stop of web-resume-chat counts them: action rows, and whether save_data was called. */
+export function stopPointReached(rows, afterSteps) {
+  const actions = (rows || []).filter((r) => r && r.type === 'agent_response' && r.action);
+  return actions.length >= afterSteps || actions.some((r) => r.action.action === 'save_data');
+}
 
 /** The research steps of a run (web_search and fetch_url), as the panel renders them. */
 export const researchSteps = (run) => run.steps.filter((s) => s.action && (s.action.action === 'web_search' || s.action.action === 'fetch_url'));
@@ -323,6 +364,33 @@ export const TASKS = {
       timeoutMs: 4 * 60 * 1000,
       // 70, and no other number than the 10 and the 7 it comes from.
       check: (run) => /\b70\b/.test(run.answer || '') && !/\d/.test(String(run.answer || '').replace(/\b(?:70|10|7)\b/g, ''))
+    }
+  },
+  'web-resume-chat': {
+    // The chat Prit reopened (2026-11-05): a run that was cut off, opened again from Recent tasks,
+    // and "resume" typed in the composer. Turn 1 is the certifications file task on
+    // credentials.html; the harness clicks Stop in the real side panel after its first save_data
+    // or its second step. Then it clicks New chat, opens that chat from Recent tasks with real
+    // clicks, types "resume" and sends it like a user. The resumed run must finish "done" with a
+    // JSON file of all ten certificates, and its first request must hold what the stopped turn left
+    // (its goal, plan and steps): without it the model has nothing to resume.
+    page: 'credentials.html',
+    web: true,
+    prompt: CREDENTIALS_PROMPT,
+    // Turn 1 ends with the Stop: a partial_result "stopped" row, no finish.
+    expectOutcome: 'partial_result',
+    expectFinishOutcome: null,
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => run.outcome === 'partial_result' && run.rows.some((r) => r.type === 'partial_result' && r.reason === 'stopped'),
+    followUp: {
+      stopAfterSteps: 2,
+      newChat: true,
+      reopen: true,
+      typed: true,
+      holdsStoppedTurn: true,
+      prompt: 'resume',
+      timeoutMs: 6 * 60 * 1000,
+      check: (run) => run.files.some((f) => /\.json$/i.test(f.name) && credentialsFileProblems(f.content).length === 0)
     }
   },
   'web-research-archive': {

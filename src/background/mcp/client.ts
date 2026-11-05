@@ -31,7 +31,7 @@ import {
   summarizeToolResult,
   userGoalEntry
 } from './historyEntries.ts';
-import { chainBlock, nextTurnNumber } from './chatChain.ts';
+import { chainBlock, nextTurnNumber, restorableRecords } from './chatChain.ts';
 import { estimatePromptTokens, estimateTextTokens } from '../../shared/tokens.ts';
 import type { ContentBlock } from '../llm/types.ts';
 import type { RunRuntime } from '../runner/runtimeRegistry.ts';
@@ -78,6 +78,8 @@ export interface RunRecorder {
   endRun(status: 'idle' | 'stopped' | 'error', row: HistoryEntry | null): boolean;
   /** The tokens of the model call that just returned, for the context meter (AgentRunner.noteUsage). */
   noteUsage?(usage: CallUsage): void;
+  /** What the run has collected (its save_data records, its page), mirrored after each step (AgentRunner.noteRunData). */
+  noteRunData?(data: { records?: Array<Record<string, unknown>>; pageUrl?: string }): void;
 }
 
 /** The tokens of one model call as the context meter reads them. `estimated`: the provider reported no (or too little) usage. */
@@ -503,13 +505,15 @@ export function recordFields(records: Array<Record<string, unknown>>): { fields:
 }
 
 /** The run state text (see withRunState): the goal, the plan with its marks, what was saved, the steps. */
-export function formatRunState({ task, planSteps, records, step, maxSteps, sinceProgress }: {
+export function formatRunState({ task, planSteps, records, step, maxSteps, sinceProgress, restoredFrom = null }: {
   task: string;
   planSteps: Array<{ text: string; status: string }>;
   records: Array<Record<string, unknown>>;
   step: number;
   maxSteps: number;
   sinceProgress: number;
+  /** The turn whose records this run took back (an unfinished turn it goes on from), or null. */
+  restoredFrom?: number | null;
 }): string {
   const plan = planSteps.length
     ? planSteps.map((st, i) => `${i + 1} [${st.status === 'completed' ? 'done' : ' '}] ${st.text}`).join('; ')
@@ -518,11 +522,12 @@ export function formatRunState({ task, planSteps, records, step, maxSteps, since
   const collected = records.length
     ? `${records.length} record${records.length === 1 ? '' : 's'} (fields: ${fields.join(', ')}${empty.length ? `; empty: ${empty.map(([f, n]) => `${f} in ${n}`).join(', ')}` : ''})`
     : 'nothing saved with save_data yet';
+  const restored = restoredFrom !== null && records.length ? `; restored from turn ${restoredFrom}` : '';
   const goal = task.length > 300 ? `${task.slice(0, 299)}…` : task;
   return [
     `${RUN_STATE_PREFIX} Goal: ${goal}`,
     `Plan: ${plan}`,
-    `Collected: ${collected}`,
+    `Collected: ${collected}${restored}`,
     `Steps: ${step} of ${maxSteps}. Steps since the last progress: ${sinceProgress}.`
   ].join('\n');
 }
@@ -700,8 +705,10 @@ export class ScoutFoxMCPClient {
   private progress = new ProgressTracker();
   /** The task as the user wrote it, for the run state. */
   private task = '';
-  /** The records saved with save_data this run. */
+  /** The records saved with save_data this run (with those of the unfinished turn it goes on from). */
   private records: Array<Record<string, unknown>> = [];
+  /** The turn whose records this run took back, or null (restorableRecords). */
+  private restoredFrom: number | null = null;
   /** The step keys of the results the last request shortened (compactToolResults). */
   private compactedKeys = new Set<string>();
   /** Why the next round offers only finish: the step limit, or a second stall in a row. */
@@ -747,7 +754,12 @@ export class ScoutFoxMCPClient {
     this.modelCalls = 0;
     this.progress.reset();
     this.task = String(userPrompt || '').trim();
-    this.records = [];
+    // A run right after a turn that ended unfinished takes that turn's records back, so save_data
+    // goes on counting and records_file writes the whole file. After a finished turn it starts empty.
+    const restored = restorableRecords(this.runner.history);
+    this.records = restored ? restored.records : [];
+    this.restoredFrom = restored ? restored.turn : null;
+    if (restored) this.runner.noteRunData?.({ records: this.records });
     this.compactedKeys.clear();
     this.finishOnly = null;
     this.stalledOut = false;
@@ -776,6 +788,7 @@ export class ScoutFoxMCPClient {
     this.currentPageUrl = info?.url || '';
 
     const previewText = await this.server.pagePreview();
+    this.runner.noteRunData?.({ pageUrl: this.currentPageUrl });
 
     const settings = await Storage.getSettings();
     this.systemInstructions = (settings.systemInstructions || '').trim();
@@ -1090,7 +1103,8 @@ export class ScoutFoxMCPClient {
       records: this.records,
       step: this.step,
       maxSteps: this.maxStepsSeen,
-      sinceProgress: this.progress.stepsSinceProgress
+      sinceProgress: this.progress.stepsSinceProgress,
+      restoredFrom: this.restoredFrom
     });
   }
 
@@ -1206,6 +1220,8 @@ export class ScoutFoxMCPClient {
     }
 
     const result = name === 'save_data' ? this.saveData(args) : await this.callTool(name, args);
+    // The records go to the runner at once: a Stop that lands now still closes the turn with them.
+    if (name === 'save_data') this.runner.noteRunData?.({ records: this.records });
     // Paused or stopped mid-tool: the runner already broadcast it. The action may have happened,
     // so its result still goes into the history, and the loop leaves after this block.
     if (!this.isRunning) return { done: false, interrupted: true, content: result.text || NOT_RUN_TEXT, image: result.image };
@@ -1234,6 +1250,7 @@ export class ScoutFoxMCPClient {
     // and enough such steps ask the model once to reflect (runLoop adds that note). The same record
     // counts the steps that did not move the task toward a stall.
     const pageUrl = tabId ? (await this.runtime.browser.tabInfo(tabId).catch(() => null))?.url || '' : '';
+    this.runner.noteRunData?.({ records: this.records, pageUrl });
     const guard = this.progress.record(name, args, resultText, {
       url: pageUrl,
       taskProgress: name === 'save_data' && result.saved !== undefined && result.saved > 0,
