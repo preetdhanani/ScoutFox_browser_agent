@@ -76,7 +76,9 @@
  *               when one does not answer, so an offline machine or a site outage never reads as an agent bug
  */
 
-import { REFLECTION_TEXT, REPEAT_HINT_PREFIX } from '../../src/background/mcp/progress.ts';
+import { REFLECTION_TEXT, REPEAT_HINT_PREFIX, STALL_AT, STALL_END_TEXT, STALL_TEXT } from '../../src/background/mcp/progress.ts';
+import { LINKS_HEADING } from '../../src/content/pageLinks.ts';
+import { TEXT_ANSWER_TEXT } from '../../src/background/mcp/client.ts';
 import { UNTRUSTED_PREFIX } from '../../src/background/mcp/untrusted.ts';
 import { DOCS_PROSE, LESSON_FACT, MARKUP_SENTINEL } from '../e2e/lib/twoSources.mjs';
 
@@ -122,7 +124,7 @@ export function runFacts({ history, planSteps, calls, tally, pageClicked = null 
 
   const steps = [];
   for (const item of turn) {
-    if (item.type === 'agent_response') steps.push({ step: item.step, mode: item.mode || null, action: item.action || null, raw: item.rawResponse });
+    if (item.type === 'agent_response') steps.push({ step: item.step, mode: item.mode || null, action: item.action || null, raw: item.rawResponse, thought: item.thought || '' });
     if (item.type === 'execution_result') {
       const mine = [...steps].reverse().find((s) => s.step === item.step);
       if (mine && !mine.result) mine.result = item.success ? `ok: ${item.message || ''}${item.effect ? ` (effect ${item.effect})` : ''}` : `FAILED: ${item.error || ''}`;
@@ -145,6 +147,8 @@ export function runFacts({ history, planSteps, calls, tally, pageClicked = null 
     // How the run went, as the finish said it (done, partial, blocked); null for a plain-text reply.
     finishOutcome: final && final.type === 'finish' && typeof final.outcome === 'string' ? final.outcome : null,
     answer: final ? final.answer : null,
+    // The files the finish handed over (records_file, files): { name, mime, content }.
+    files: final && Array.isArray(final.files) ? final.files : [],
     unconfirmed: !!(final && final.unconfirmed),
     failed,
     siteEnds: turn.filter((h) => h.type === 'site_end').map((h) => ({ siteId: h.siteId, site: h.site, status: h.status, reason: h.reason, findings: h.findings, stepsUsed: h.stepsUsed })),
@@ -153,6 +157,10 @@ export function runFacts({ history, planSteps, calls, tally, pageClicked = null 
     executions: turn.filter((h) => h.type === 'execution_result').length,
     errors: turn.filter((h) => h.type === 'error').map((h) => h.content),
     calls: { total: modelCalls.length, byNode },
+    // The size of each request in order, as the mock or the proxy measured it (bytes of the body).
+    requestSizes: modelCalls.map((call) => Number(call.requestBytes) || 0),
+    // The run state each request ended with ("[Run state] Goal: ..."), in order; null where none.
+    runStates: modelCalls.map((call) => (typeof call.runState === 'string' ? call.runState : null)),
     toolResults: modelCalls.flatMap((call) => (Array.isArray(call.toolResults) ? call.toolResults : [])),
     loopNotes: modelCalls.flatMap((call) => (Array.isArray(call.loopNotes) ? call.loopNotes : [])),
     pageMessages: tally ? tally.messages : null,
@@ -267,6 +275,108 @@ export function researchProblems(run) {
   const docs = fetches.find((r) => /^Fetched \S+\/docs\.html /.test(r));
   if (!docs) problems.push('the docs page was not fetched');
   else if (!docs.includes(DOCS_PROSE)) problems.push(`the docs page text lost its prose ("${DOCS_PROSE}")`);
+  return problems;
+}
+
+/** The certifications task: a JSON file whose URLs are only in the links' targets, never in the page text. */
+export const CREDENTIALS_PROMPT = 'Make me a JSON file of the certifications on this page: for each certificate its name, issue date and credential URL.';
+
+/** The ten credentials of tests/fixtures/site/credentials.html, as a right file holds them. */
+export const CREDENTIALS = [
+  ['Implement advanced multi-agent orchestration', 'Oct 2026', 'https://verify.skilljar.example/c/7xq2m4kd9p'],
+  ['Design advanced prompting strategies', 'Sep 2026', 'https://verify.skilljar.example/c/3hd8s1zu4w'],
+  ['Design stateful agentic loops', 'Sep 2026', 'https://verify.skilljar.example/c/9ar5t2ve6n'],
+  ['Build enterprise-grade tool ecosystems', 'Aug 2026', 'https://verify.skilljar.example/c/1kp7w3qb8m'],
+  ['Implement CI/CD pipelines for agents', 'Jul 2026', 'https://learn.deeplearning.example/accomplishments/5b0c2e7a-91d4-4f6e-8a3b-2c9d71e04f58?usp=sharing&utm_source=profile&utm_medium=share'],
+  ['Monitoring Production Agents', 'Jun 2026', 'https://learn.deeplearning.example/accomplishments/e4a91f30-6c2b-47d8-b5e1-0f3a8c6d2b19'],
+  ['Introduction to Deep Agents', 'May 2026', 'https://academy.langchain.example/certificates/zq4rl8ce2x'],
+  ['AZ-400: Development for Enterprise DevOps', 'Mar 2026', 'https://learn.microsoft.example/api/credentials/share/en-us/someone/A1B2C3D4E5F6'],
+  ['AZ-204: Developing Solutions for Microsoft Azure', 'Jan 2026', 'https://learn.microsoft.example/api/credentials/share/en-us/someone/F6E5D4C3B2A1'],
+  ['Kubernetes Application Developer', 'Nov 2025', 'https://www.credly.example/badges/0d6e3c8b-2a41-4f9e-9b7c-5e1a3d2f8c40/public_url']
+];
+
+/**
+ * The problems of a JSON text that should list the ten credentials: it must parse, be a list, and
+ * hold every credential's name, issue date (the month and year, with or without "Issued") and its
+ * exact URL. Used on the finish row's file and on the file the harness downloaded from the panel.
+ */
+export function credentialsFileProblems(text) {
+  let data;
+  try {
+    data = JSON.parse(String(text));
+  } catch (err) {
+    return [`the file is not valid JSON: ${err.message}`];
+  }
+  const list = Array.isArray(data) ? data : Array.isArray(data?.certifications) ? data.certifications : null;
+  if (!list) return ['the file holds no list of certifications'];
+  const problems = [];
+  for (const [name, issued, url] of CREDENTIALS) {
+    const row = list.find((r) => r && typeof r === 'object' && Object.values(r).some((v) => String(v).trim() === name));
+    if (!row) { problems.push(`no record for "${name}"`); continue; }
+    const values = Object.values(row).map((v) => String(v));
+    if (!values.some((v) => v.includes(issued))) problems.push(`"${name}" has no issue date ${issued}`);
+    if (!values.some((v) => v.trim() === url)) problems.push(`"${name}" has no credential URL ${url}`);
+  }
+  return problems;
+}
+
+/** The problems of a run that should have planned, read the links, saved, marked and written certifications.json. */
+/**
+ * The file is attached and the panel previews it, so the answer must not paste it again
+ * (ATTACHED_FILE_RULE): at most two of the credential URLs may be in the answer.
+ */
+export function answerRepeatProblems(answer) {
+  const repeated = CREDENTIALS.filter(([, , url]) => String(answer || '').includes(url)).length;
+  return repeated > 2 ? [`the answer repeats ${repeated} of the ${CREDENTIALS.length} credential URLs; the file is attached, so it should show at most two`] : [];
+}
+
+export function credentialsRunProblems(run) {
+  const problems = [...answerRepeatProblems(run.answer)];
+  const file = run.files.find((f) => f.name === 'certifications.json');
+  if (!file) problems.push(`the finish handed over no certifications.json (files: ${run.files.map((f) => f.name).join(', ') || 'none'})`);
+  else problems.push(...credentialsFileProblems(file.content).map((p) => `certifications.json: ${p}`));
+  const read = (run.toolResults || []).find((r) => r.includes(LINKS_HEADING));
+  if (!read) problems.push(`no read the model got lists the links ("${LINKS_HEADING}")`);
+  else for (const [, , url] of CREDENTIALS) if (!read.includes(url)) problems.push(`the links block of the read lacks ${url}`);
+  const silent = run.steps.filter((s) => s.action && s.action.action !== 'finish' && !s.thought.trim());
+  if (silent.length) problems.push(`${silent.length} step(s) carry no reason: ${silent.map((s) => s.action.action).join(', ')}`);
+  if (!run.plan.length || run.plan.some((st) => st.status !== 'completed')) problems.push(`the plan does not end with every step done: ${JSON.stringify(run.plan)}`);
+  return problems;
+}
+
+/** The task of a field the page never shows: a model that reads element after element must be stopped by the stall note. */
+export const WANDER_PROMPT = 'For each certification on this page, tell me the date its credential expires.';
+
+/** The most steps a stall run may take: the stall comes after STALL_AT steps, the finish soon after. */
+export const STALL_STEP_BUDGET = STALL_AT + 4;
+
+/** The problems of a run that must have stalled once, and been told so exactly once. */
+export function stallProblems(run, outcome) {
+  const problems = [];
+  const notes = (run.loopNotes || []).filter((n) => n === STALL_TEXT);
+  if (notes.length !== 1) problems.push(`the stall note reached the model ${notes.length} time(s), expected exactly once`);
+  if (run.steps.length > STALL_STEP_BUDGET) problems.push(`the run took ${run.steps.length} steps, more than its budget of ${STALL_STEP_BUDGET}`);
+  if (run.finishOutcome !== outcome) problems.push(`the finish outcome is ${JSON.stringify(run.finishOutcome)}, expected "${outcome}"`);
+  return problems;
+}
+
+/** The long-read task: many rounds of reads, so the request size shows whether old results are shortened. */
+export const LONG_READ_PROMPT = 'Check the certifications on this page twelve times and save each check.';
+
+/**
+ * The problems of a long run's request sizes. Without the compaction every request is bigger than
+ * the one before (each read brings the whole page back); with it, the requests after the first
+ * compaction stay about as big as the largest one before it.
+ */
+export function compactionProblems(run) {
+  const sizes = run.requestSizes || [];
+  if (sizes.length < 20) return [`the run made ${sizes.length} model calls, too few to show the compaction (20 or more)`];
+  const before = Math.max(...sizes.slice(0, 13));
+  const after = Math.max(...sizes.slice(13));
+  const shrank = sizes.some((n, i) => i > 0 && n < sizes[i - 1]);
+  const problems = [];
+  if (!shrank) problems.push(`no request was smaller than the one before it (sizes ${sizes.join(', ')}): old results were never shortened`);
+  if (after > before * 1.25) problems.push(`the requests grew to ${after} bytes after round 13, more than 1.25 times the largest before it (${before}): the context is not bounded`);
   return problems;
 }
 
@@ -505,6 +615,110 @@ export const TASKS = {
       ...(run.finishOutcome === 'partial' ? [] : [`the finish outcome is ${JSON.stringify(run.finishOutcome)}, expected "partial" (the battery is not on the page)`])
     ]
   },
+  'credentials-json': {
+    // The case of a real run that read 74 elements and never finished: a JSON file of the
+    // certifications with their credential URLs. The URLs are only in the links' targets, so the
+    // read must list them; the run plans, saves the records, marks its steps, and the finish
+    // writes them to certifications.json, which the user downloads from the card.
+    page: 'credentials.html',
+    prompt: CREDENTIALS_PROMPT,
+    mockOnly: true,
+    cardShots: true,
+    expectCard: { title: 'Done' },
+    expectPanelRows: [/^Saved 10 new records \(10 in total\)/],
+    expectDownload: { name: 'certifications.json', problems: credentialsFileProblems, previewHas: CREDENTIALS.map(([name]) => name) },
+    // The answer reads as a reply: a json code box with Copy, coloured keys, and a link that opens in a new tab.
+    expectAnswerBox: { lang: 'json', json: true, link: true },
+    check: (run) => /certifications\.json/.test(run.answer || ''),
+    expectMock: (run) => [...expectActions(run, ['read_page', 'save_data', 'finish']), ...credentialsRunProblems(run)]
+  },
+  'stall-wander': {
+    // The same page, asked for a field it never shows. The scripted model reads element after
+    // element like the real run did; only the stall note stops it, and it ends honestly.
+    page: 'credentials.html',
+    prompt: WANDER_PROMPT,
+    mockOnly: true,
+    cardShots: true,
+    expectCard: { title: 'Partly done', classes: ['partial'] },
+    check: (run) => /does not show when any credential expires/.test(run.answer || ''),
+    expectMock: (run) => stallProblems(run, 'partial')
+  },
+  'stall-out': {
+    // A model that does not listen: it goes on reading after the stall note. The second stall in
+    // a row ends the run with a last round that offers only finish, and the card is honest.
+    page: 'credentials.html',
+    prompt: 'For each certification on this page, tell me the name of the person who signed it.',
+    mockOnly: true,
+    maxRounds: 24,
+    cardShots: true,
+    expectCard: { title: 'Partly done', classes: ['partial'] },
+    check: (run) => /does not say who signed/.test(run.answer || ''),
+    expectMock: (run) => {
+      const problems = [];
+      const first = (run.loopNotes || []).filter((n) => n === STALL_TEXT).length;
+      const end = (run.loopNotes || []).filter((n) => n === STALL_END_TEXT).length;
+      if (first !== 1) problems.push(`the stall note reached the model ${first} time(s), expected exactly once`);
+      if (end !== 1) problems.push(`the run-ending stall note reached the model ${end} time(s), expected exactly once`);
+      if (run.steps.length > STALL_AT * 2 + 2) problems.push(`the run took ${run.steps.length} steps, more than ${STALL_AT * 2 + 2}`);
+      if (run.finishOutcome !== 'partial') problems.push(`the finish outcome is ${JSON.stringify(run.finishOutcome)}, expected "partial"`);
+      return problems;
+    }
+  },
+  'stall-recover': {
+    // The stall note is a nudge, not an end: after it the scripted model reads the page once,
+    // saves what it needs and finishes done.
+    page: 'credentials.html',
+    prompt: 'List the certifications on this page with the issuer of each.',
+    mockOnly: true,
+    expectPanelRows: [/^Saved 10 new records \(10 in total\)/],
+    check: (run) => /10 certifications/.test(run.answer || ''),
+    expectMock: (run) => stallProblems(run, 'done')
+  },
+  'text-then-finish': {
+    // A model that answers in text after its steps: the run asks it once to finish with an
+    // outcome, so the card can say how the run went.
+    page: 'credentials.html',
+    prompt: 'How many certifications does this page list?',
+    mockOnly: true,
+    check: (run) => /lists 10 certifications/.test(run.answer || ''),
+    expectMock: (run) => [
+      ...((run.loopNotes || []).filter((n) => n === TEXT_ANSWER_TEXT).length === 1 ? [] : ['the note asking for finish after a text answer did not reach the model exactly once']),
+      ...(run.finishOutcome === 'done' ? [] : [`the finish outcome is ${JSON.stringify(run.finishOutcome)}, expected "done"`])
+    ]
+  },
+  'bad-json': {
+    // A hand-written JSON file with a trailing comma: the engine refuses it with the reason, the
+    // model writes it again, and the file the user downloads parses.
+    page: 'credentials.html',
+    prompt: 'Write me a small JSON file with the names of the first two certifications on this page.',
+    mockOnly: true,
+    expectDownload: {
+      name: 'first-two.json',
+      problems: (text) => {
+        try {
+          const list = JSON.parse(text);
+          return Array.isArray(list) && list.length === 2 ? [] : [`the file holds ${JSON.stringify(list).slice(0, 80)}, expected two records`];
+        } catch (err) {
+          return [`the file is not valid JSON: ${err.message}`];
+        }
+      }
+    },
+    check: () => true,
+    expectMock: (run) => [
+      ...((run.toolResults || []).some((r) => /is not valid JSON/.test(r)) ? [] : ['the broken JSON file was never refused']),
+      ...(run.files.length === 1 && run.files[0].name === 'first-two.json' ? [] : [`the finish handed over ${run.files.map((f) => f.name).join(', ') || 'no file'}, expected first-two.json`])
+    ]
+  },
+  'long-read': {
+    // Thirteen reads of the whole page, each saved: the context compaction must keep the requests
+    // bounded instead of growing with every read.
+    page: 'credentials.html',
+    prompt: LONG_READ_PROMPT,
+    mockOnly: true,
+    maxRounds: 32,
+    check: (run) => /checked the certifications 13 times/.test(run.answer || ''),
+    expectMock: compactionProblems
+  },
   'store-price': {
     page: 'store.html',
     prompt: 'What does the Framework Laptop 16 cost on this page? Give the price exactly as the page shows it.',
@@ -592,6 +806,17 @@ export const TASKS = {
     timeoutMs: 8 * 60 * 1000,
     check: (run) => /0\.40\.11/.test(run.answer || ''),
     expectPage: notebookPageProblems
+  },
+  'web-credentials-json': {
+    // The LinkedIn case on the local certifications fixture, with the real model: a JSON file of
+    // ten certificates whose credential URLs are only in the links' targets.
+    page: 'credentials.html',
+    web: true,
+    prompt: CREDENTIALS_PROMPT,
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => run.files.some((f) => /\.json$/i.test(f.name) && credentialsFileProblems(f.content).length === 0),
+    // A real model may still paste the file: a note, not a failure (the mock checks it hard).
+    warn: (run) => answerRepeatProblems(run.answer)
   },
   'web-research-archive': {
     // The fact the JupyterLab run guessed wrong (a 404 URL): the name of Ollama's Linux archive.

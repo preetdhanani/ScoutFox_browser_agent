@@ -64,7 +64,15 @@ export function describeStep(tool: string, args: Record<string, any> = {}, label
     case 'go_forward': what = 'Going forward'; break;
     case 'update_plan': {
       const steps = Array.isArray(args.plan) ? args.plan.length : 0;
-      what = `Planning the work in ${steps} step${steps === 1 ? '' : 's'}`;
+      const done = Array.isArray(args.done) ? args.done.length : 0;
+      what = steps
+        ? `Planning the work in ${steps} step${steps === 1 ? '' : 's'}`
+        : `Marking ${done} plan step${done === 1 ? '' : 's'} done`;
+      break;
+    }
+    case 'save_data': {
+      const n = Array.isArray(args.records) ? args.records.length : 0;
+      what = `Saving ${n} record${n === 1 ? '' : 's'}`;
       break;
     }
     case 'finish': what = 'Finishing with the answer'; break;

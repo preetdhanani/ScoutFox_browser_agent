@@ -39,8 +39,9 @@
  * or the script below; the self-test (mockOllama.selftest.mjs) walks the tasks and shows what broke.
  */
 import http from 'node:http';
-import { buildCallRecord, MOCK_FAIL_PREFIX } from './callRecord.mjs';
-import { REFLECTION_TEXT, REPEAT_HINT_PREFIX } from '../../src/background/mcp/progress.ts';
+import { buildCallRecord, MOCK_FAIL_PREFIX, runStateOf, withoutRunState } from './callRecord.mjs';
+import { REFLECTION_TEXT, REPEAT_HINT_PREFIX, STALL_TEXT, STALL_END_TEXT } from '../../src/background/mcp/progress.ts';
+import { TEXT_ANSWER_TEXT } from '../../src/background/mcp/client.ts';
 import { UNTRUSTED_PREFIX } from '../../src/background/mcp/untrusted.ts';
 import { DOCS_PROSE, LESSON_FACT, MARKUP_SENTINEL } from '../e2e/lib/twoSources.mjs';
 
@@ -140,7 +141,8 @@ export function readConversation(messages, tools) {
       // A result joins its call by id; an id-less call (some providers omit it) is matched in order.
       const call = nameOfCallId.has(m.tool_call_id) ? null : pendingCalls.shift();
       const name = call ? call.name : (nameOfCallId.get(m.tool_call_id) || '?');
-      results.push({ name, content: m.content });
+      // The run state rides on the last message of the request: it is not part of the result.
+      results.push({ name, content: withoutRunState(m.content) });
     }
   }
   // A picture the client sends back. It arrives in ONE user message after the tool block of the
@@ -163,11 +165,11 @@ export function readConversation(messages, tools) {
   const firstAssistant = (messages || []).findIndex((m) => m.role === 'assistant');
   const notes = firstAssistant < 0 ? [] : (messages || []).slice(firstAssistant)
     .filter((m) => m.role === 'user' && typeof m.content === 'string' && !Array.isArray(m.images))
-    .map((m) => m.content);
+    .map((m) => withoutRunState(m.content));
   const system = (messages || []).find((m) => m.role === 'system');
   const lastResultOf = (name) => [...results].reverse().find((r) => r.name === name)?.content ?? null;
   const firstUser = (messages || []).find((m) => m.role === 'user');
-  const task = parseTaskMessage(firstUser ? firstUser.content : '');
+  const task = parseTaskMessage(firstUser ? withoutRunState(firstUser.content) : '');
   const pageText = lastResultOf('read_page');
   const elementsText = lastResultOf('get_page_elements') ?? lastResultOf('find');
   return {
@@ -187,9 +189,13 @@ export function readConversation(messages, tools) {
     screenshotTaken: results.some((r) => r.name === 'take_screenshot' && !/^Error:/.test(r.content)),
     notes,
     // The last two messages of the request: where a note the loop added sits.
-    tail: (messages || []).slice(-2).map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '' })),
+    tail: (messages || []).slice(-2).map((m) => ({ role: m.role, content: typeof m.content === 'string' ? withoutRunState(m.content) : '' })),
+    // The run state the client added to the last message ("[Run state] Goal: ..."), or null.
+    runState: runStateOf(messages),
     // The system prompt says so when the user approves every plan by hand.
     manualApproval: /MANUAL APPROVAL IS ON/.test(String(system ? system.content : '')),
+    // The system prompt asks for a short sample, not the whole file, when a file is handed over (ATTACHED_FILE_RULE).
+    attachedFileRule: /do not paste the whole file into the answer/.test(String(system ? system.content : '')),
     planApproved: results.some((r) => r.content.startsWith('Plan approved')),
     planRejected: results.some((r) => r.content.startsWith('Plan rejected'))
   };
@@ -214,37 +220,50 @@ function toolMapOf(request) {
  * grammar would force. Supports what SCOUTFOX_TOOLS uses: type object, properties of type
  * string / number / boolean / string-array, enum, minimum, maximum, required, additionalProperties.
  */
-export function validateToolArgs(parameters, args) {
+export function validateToolArgs(parameters, args, where = '') {
   const errors = [];
   if (!parameters || typeof parameters !== 'object' || parameters.type !== 'object') return errors;
   const props = parameters.properties || {};
   const a = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+  if (where && (!args || typeof args !== 'object' || Array.isArray(args))) return [`"${where}" must be an object`];
   for (const key of Object.keys(a)) {
+    const name = where ? `${where}.${key}` : key;
     if (!(key in props)) {
-      if (parameters.additionalProperties === false) errors.push(`unknown argument "${key}"`);
+      if (parameters.additionalProperties === false) errors.push(`unknown argument "${name}"`);
       continue;
     }
-    const schema = props[key] || {};
-    const value = a[key];
-    if (schema.enum && !schema.enum.includes(value)) errors.push(`"${key}" must be one of ${JSON.stringify(schema.enum)}`);
-    if (schema.type === 'string' && typeof value !== 'string') errors.push(`"${key}" must be a string`);
-    if (schema.type === 'boolean' && typeof value !== 'boolean') errors.push(`"${key}" must be a boolean`);
-    if (schema.type === 'integer' && !Number.isInteger(value)) errors.push(`"${key}" must be an integer`);
-    if (schema.type === 'number' || schema.type === 'integer') {
-      if (typeof value !== 'number' || Number.isNaN(value)) errors.push(`"${key}" must be a number`);
-      else {
-        if (schema.minimum !== undefined && value < schema.minimum) errors.push(`"${key}" must be >= ${schema.minimum}`);
-        if (schema.maximum !== undefined && value > schema.maximum) errors.push(`"${key}" must be <= ${schema.maximum}`);
-      }
-    }
-    if (schema.type === 'array') {
-      if (!Array.isArray(value)) errors.push(`"${key}" must be an array`);
-      else if (schema.items?.type === 'string' && value.some((v) => typeof v !== 'string')) errors.push(`"${key}" must be an array of strings`);
-      else if (Array.isArray(schema.items?.enum) && value.some((v) => !schema.items.enum.includes(v))) errors.push(`"${key}" items must be one of ${JSON.stringify(schema.items.enum)}`);
-    }
+    errors.push(...valueErrors(props[key] || {}, a[key], name));
   }
   for (const key of parameters.required || []) {
-    if (!(key in a)) errors.push(`missing required argument "${key}"`);
+    if (!(key in a)) errors.push(`missing required argument "${where ? `${where}.${key}` : key}"`);
+  }
+  return errors;
+}
+
+/**
+ * The errors of one value against its schema: the scalar types, enum, minimum and maximum, arrays
+ * with their items (strings, integers, enums, or objects checked like arguments), and objects.
+ */
+function valueErrors(schema, value, name) {
+  const errors = [];
+  if (schema.enum && !schema.enum.includes(value)) errors.push(`"${name}" must be one of ${JSON.stringify(schema.enum)}`);
+  if (schema.type === 'string' && typeof value !== 'string') errors.push(`"${name}" must be a string`);
+  if (schema.type === 'boolean' && typeof value !== 'boolean') errors.push(`"${name}" must be a boolean`);
+  if (schema.type === 'integer' && !Number.isInteger(value)) errors.push(`"${name}" must be an integer`);
+  if (schema.type === 'number' || schema.type === 'integer') {
+    if (typeof value !== 'number' || Number.isNaN(value)) errors.push(`"${name}" must be a number`);
+    else {
+      if (schema.minimum !== undefined && value < schema.minimum) errors.push(`"${name}" must be >= ${schema.minimum}`);
+      if (schema.maximum !== undefined && value > schema.maximum) errors.push(`"${name}" must be <= ${schema.maximum}`);
+    }
+  }
+  if (schema.type === 'object') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) errors.push(`"${name}" must be an object`);
+    else if (schema.properties) errors.push(...validateToolArgs(schema, value, name));
+  }
+  if (schema.type === 'array') {
+    if (!Array.isArray(value)) errors.push(`"${name}" must be an array`);
+    else if (schema.items) value.forEach((item, i) => errors.push(...valueErrors(schema.items, item, `${name}[${i}]`)));
   }
   return errors;
 }
@@ -288,6 +307,17 @@ const MONEY = /(\d{1,3}(?:\.\d{3})+|\d+),(\d{2})\s*(?:EUR|€)/;
 export function kindOfGoal(goal) {
   // A run that only ends when the user clicks Stop (the user-stop task).
   if (/\bkeep waiting\b/i.test(String(goal || ''))) return 'wait';
+  // The certifications page (credentials.html): a JSON file of the records (credentials-json), a
+  // field the page never shows (stall-wander), a run that recovers after the stall note
+  // (stall-recover), a hand-written JSON file that is broken first (bad-json), and a long run of
+  // reads for the context compaction (long-read).
+  if (/\bjson file of the certifications\b/i.test(String(goal || ''))) return 'records';
+  if (/\bcredential expires\b/i.test(String(goal || ''))) return 'wander';
+  if (/\bperson who signed\b/i.test(String(goal || ''))) return 'stubborn';
+  if (/\bhow many certifications does this page list\b/i.test(String(goal || ''))) return 'textfirst';
+  if (/\bwith the issuer of each\b/i.test(String(goal || ''))) return 'recover';
+  if (/\bsmall json file\b/i.test(String(goal || ''))) return 'badjson';
+  if (/\btwelve times\b/i.test(String(goal || ''))) return 'longread';
   // Open one link of several with the same label, far below the first screen (the far-link task).
   if (/\bopen the configure now link\b/i.test(String(goal || ''))) return 'open';
   // The same, on a page whose consent banner swallows clicks until it is answered (consent-link).
@@ -376,6 +406,18 @@ export function scriptFor(convo) {
   if (kind === 'stuck') return stuckScript(convo);
   if (kind === 'research') return researchScript(convo);
   if (kind === 'lesson') return lessonScript(convo);
+  if (kind === 'records') return recordsScript(convo);
+  if (kind === 'wander' || kind === 'recover') return wanderScript(convo, kind);
+  if (kind === 'stubborn') return stubbornScript(convo);
+  if (kind === 'textfirst') {
+    // A model that marks its work done and then answers in text, not with finish (Nemotron, 2026-11-05).
+    const count = credentialRecords(convo.pageText).length;
+    if (convo.notes.includes(TEXT_ANSWER_TEXT)) return { call: finish(`The page lists ${count} certifications.`), note: 'textfirst: finish after the note' };
+    if (!convo.lastCall) return { call: { name: 'read_page', arguments: {} }, note: 'textfirst: read the page' };
+    return { text: `The page lists ${count} certifications.`, note: 'textfirst: answer in text' };
+  }
+  if (kind === 'badjson') return badJsonScript(convo);
+  if (kind === 'longread') return longReadScript(convo);
 
   if (!convo.lastCall) {
     if (kind === 'unknown') return { fail: `I do not know this goal: "${convo.task.slice(0, 80)}".`, note: 'unknown goal' };
@@ -659,6 +701,182 @@ function lessonScript(convo) {
   return { fail: `the lesson run is in a state the mock has no script for (last call ${last}).`, note: 'lesson: unknown state' };
 }
 
+/** The file the credentials-json run asks the engine to write from its saved records. */
+export const RECORDS_FILE = 'certifications.json';
+/** How many certifications credentials.html lists. */
+export const CREDENTIAL_COUNT = 10;
+/** How many reads the long-read run makes (each followed by a save_data): enough rounds for two compactions. */
+export const LONG_READS = 13;
+
+/**
+ * The certifications of a read of credentials.html: the name and issue date from the text, the
+ * credential URL from the links block under it ("- Show credential (<name>): <url>"). The page
+ * text alone has no URL, so without the block there are no records.
+ */
+export function credentialRecords(text) {
+  const lines = String(text || '').split('\n').map((l) => l.trim());
+  return [...String(text || '').matchAll(/^- Show credential \((.+?)\): (\S+)$/gm)].map(([, name, url]) => {
+    const at = lines.indexOf(name);
+    const issued = at < 0 ? '' : (lines.slice(at + 1, at + 4).find((l) => /^Issued /.test(l)) || '').replace(/^Issued /, '');
+    const issuer = at < 0 ? '' : lines[at + 1] || '';
+    return { name, issued, url, issuer };
+  });
+}
+
+/**
+ * The credentials-json walk: plan, read the page once, save the ten records, mark the plan steps,
+ * finish with records_file. Each step checks the engine did its part: the read must list the link
+ * targets (else no URL can be known), the run state must show the ten saved records and the plan
+ * marks, and the finish must be accepted.
+ */
+function recordsScript(convo) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const result = convo.results.length ? convo.results[convo.results.length - 1].content : '';
+  const plan = ['Read the certifications', 'Save each certificate', 'Write the JSON file'];
+  if (!last) return { call: { name: 'update_plan', arguments: { plan, reason: 'Three steps: read the list, save each item, write the file' } }, note: 'records: plan' };
+  if (/^Error:/.test(result)) return { fail: `the ${last} failed: ${result.slice(0, 200)}`, note: `records: ${last} failed` };
+  if (last === 'update_plan' && !convo.calls.some((c) => c.name === 'read_page')) {
+    return { call: { name: 'read_page', arguments: { reason: 'The plan is set; read the certifications section' } }, note: 'records: read the page' };
+  }
+  if (last === 'read_page') {
+    if (!/^Links in this part:$/m.test(result)) return { fail: 'the read has no "Links in this part:" block, so no credential URL can be seen', note: 'records: no link targets' };
+    const records = credentialRecords(result).map(({ name, issued, url }) => ({ name, issued, url }));
+    if (records.length !== CREDENTIAL_COUNT) return { fail: `the read lists ${records.length} credential links, expected ${CREDENTIAL_COUNT}`, note: 'records: links missing' };
+    const undated = records.find((r) => !r.issued);
+    if (undated) return { fail: `no issue date found for "${undated.name}"`, note: 'records: no date' };
+    return { call: { name: 'save_data', arguments: { records, reason: `The read lists all ${records.length} certificates with their links; save them` } }, note: 'records: save the records' };
+  }
+  if (last === 'save_data') {
+    if (!convo.runState) return { fail: 'the request carries no run state, so the saved records cannot be seen', note: 'records: no run state' };
+    if (!new RegExp(`^Collected: ${CREDENTIAL_COUNT} records \\(fields: name, issued, url\\)$`, 'm').test(convo.runState)) {
+      return { fail: `the run state does not show the ${CREDENTIAL_COUNT} saved records: ${convo.runState.replace(/\s+/g, ' ').slice(0, 240)}`, note: 'records: run state wrong' };
+    }
+    return { call: { name: 'update_plan', arguments: { done: [1, 2], reason: 'Read and saved all certificates' } }, note: 'records: mark steps done' };
+  }
+  if (last === 'update_plan') {
+    if (!/^Plan: 1 \[done\] [^;]+; 2 \[done\] [^;]+; 3 \[ \] /m.test(convo.runState || '')) {
+      return { fail: `the run state does not show plan steps 1 and 2 done: ${(convo.runState || '').replace(/\s+/g, ' ').slice(0, 240)}`, note: 'records: plan marks lost' };
+    }
+    // With the attached-file rule the answer shows two records as the pattern and a link; without
+    // it the mock pastes every record, like the real run did, and the harness check sees the repeat.
+    const records = credentialRecords(convo.results.find((r) => r.name === 'read_page')?.content || '').map(({ name, issued, url }) => ({ name, issued, url }));
+    const sample = convo.attachedFileRule ? records.slice(0, 2) : records;
+    const answer = [
+      `I saved all ${CREDENTIAL_COUNT} certifications with their name, issue date and credential URL in ${RECORDS_FILE}.`,
+      '',
+      convo.attachedFileRule ? 'Each entry follows this pattern (the first two of the file):' : 'Here is the file:',
+      '',
+      '```json',
+      JSON.stringify(sample, null, 2),
+      '```',
+      '',
+      `The first credential opens at [its issuer's page](${records[0] ? records[0].url : 'https://example.test/'}).`
+    ].join('\n');
+    return {
+      call: { name: 'finish', arguments: { answer, outcome: 'done', records_file: RECORDS_FILE } },
+      note: 'records: finish with the file'
+    };
+  }
+  return { fail: `the records run is in a state the mock has no script for (last call ${last}).`, note: 'records: unknown state' };
+}
+
+/**
+ * The stall walks, a model like the real run that read 74 elements one by one. It lists the
+ * elements, then reads them one at a time and never stops on its own. Only the loop's stall note
+ * stops it. stall-wander (the expiry date is on no page) then finishes "partial"; stall-recover
+ * changes course: it reads the page once, saves the certificates with their issuers, and is done.
+ */
+function wanderScript(convo, kind) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const lastArgs = (convo.lastCall && convo.lastCall.args) || {};
+  const result = convo.results.length ? convo.results[convo.results.length - 1].content : '';
+  const reads = convo.calls.filter((c) => c.name === 'read_page' && c.args.element_id !== undefined).length;
+  const stalled = convo.notes.includes(STALL_TEXT);
+  if (convo.notes.includes(STALL_END_TEXT)) return { fail: 'the run stalled a second time before the mock changed course', note: `${kind}: stalled twice` };
+  if (!last) return { call: { name: 'get_page_elements', arguments: {} }, note: `${kind}: list the elements` };
+  if (stalled) {
+    if (kind === 'wander') {
+      return {
+        call: finish(`The page does not show when any credential expires: it lists each certificate's name, issuer and issue date only. I read ${reads} elements one by one and none of them has an expiry date. Open each "Show credential" link to see whether the issuer shows one.`, 'partial'),
+        note: 'wander: the stall note came, finish partial'
+      };
+    }
+    if (last !== 'read_page' || lastArgs.element_id !== undefined) {
+      if (last === 'save_data') return { call: finish(`I saved the ${CREDENTIAL_COUNT} certifications on this page with the issuer of each.`), note: 'recover: finish' };
+      return { call: { name: 'read_page', arguments: { reason: 'Element by element finds nothing new; read the whole section once' } }, note: 'recover: read the page once' };
+    }
+    const records = credentialRecords(result).map(({ name, issuer }) => ({ name, issuer }));
+    if (records.length !== CREDENTIAL_COUNT) return { fail: `the read lists ${records.length} certificates, expected ${CREDENTIAL_COUNT}`, note: 'recover: read incomplete' };
+    return { call: { name: 'save_data', arguments: { records, reason: 'The whole read has every certificate and its issuer' } }, note: 'recover: save the records' };
+  }
+  if (/^\[earlier result, shortened\]/.test(convo.elementsText)) return { call: { name: 'get_page_elements', arguments: {} }, note: `${kind}: list the elements again` };
+  const ids = [...String(convo.elementsText || '').matchAll(/^\[(\d+)\]/gm)].map((m) => Number(m[1]));
+  const next = ids[reads];
+  if (!next) return { fail: `read ${reads} elements one by one and the loop never said the run stalled`, note: `${kind}: no stall note` };
+  return { call: { name: 'read_page', arguments: { element_id: next } }, note: `${kind}: read element ${next}` };
+}
+
+/**
+ * The stall-out walk: a model that does not listen. It reads element after element and goes on
+ * after the stall note, until the loop ends the run: the last round offers only finish, with the
+ * STALL_END_TEXT note. Without that round it runs out of elements and fails.
+ */
+function stubbornScript(convo) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const reads = convo.calls.filter((c) => c.name === 'read_page' && c.args.element_id !== undefined).length;
+  if (convo.notes.includes(STALL_END_TEXT)) {
+    if (convo.tools.length !== 1 || convo.tools[0] !== 'finish') return { fail: `the last round after the second stall offers ${convo.tools.join(', ')}, expected only finish`, note: 'stubborn: last round offers more' };
+    if (!convo.notes.includes(STALL_TEXT)) return { fail: 'the run was ended for stalling without the first stall note before it', note: 'stubborn: no first note' };
+    return { call: finish(`The page does not say who signed any certificate. I read ${reads} elements and none names a signer.`, 'partial'), note: 'stubborn: finish in the last round' };
+  }
+  if (!last) return { call: { name: 'get_page_elements', arguments: {} }, note: 'stubborn: list the elements' };
+  // A long run shortens old results (the context compaction): the list is asked for again, as a model would.
+  if (/^\[earlier result, shortened\]/.test(convo.elementsText)) return { call: { name: 'get_page_elements', arguments: {} }, note: 'stubborn: list the elements again' };
+  const ids = [...String(convo.elementsText || '').matchAll(/^\[(\d+)\]/gm)].map((m) => Number(m[1]));
+  const next = ids[reads];
+  if (!next) return { fail: `read ${reads} elements one by one and the loop never ended the run`, note: 'stubborn: never ended' };
+  return { call: { name: 'read_page', arguments: { element_id: next } }, note: `stubborn: read element ${next}${convo.notes.includes(STALL_TEXT) ? ' (ignoring the stall note)' : ''}` };
+}
+
+/**
+ * The bad-json walk: a model that writes a small JSON file by hand and gets it wrong (a trailing
+ * comma). The engine must refuse it with the reason, and the corrected file is what the user gets.
+ */
+function badJsonScript(convo) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const result = convo.results.length ? convo.results[convo.results.length - 1].content : '';
+  if (!last) return { call: { name: 'read_page', arguments: {} }, note: 'badjson: read the page' };
+  const names = credentialRecords(convo.pageText).slice(0, 2).map((r) => r.name);
+  if (names.length < 2) return { fail: 'the read has no two certificates to write', note: 'badjson: no names' };
+  const file = (content) => ({ name: 'finish', arguments: { answer: `The file names the first two certifications on the page.`, outcome: 'done', files: [{ name: 'first-two.json', content }] } });
+  if (last === 'read_page') return { call: file(`[${names.map((n) => `{"name": ${JSON.stringify(n)}}`).join(', ')},]`), note: 'badjson: finish with broken JSON' };
+  if (last === 'finish') {
+    if (!/is not valid JSON/.test(result)) return { fail: `the broken JSON file was not refused: ${result.slice(0, 160)}`, note: 'badjson: not refused' };
+    return { call: file(JSON.stringify(names.map((name) => ({ name })), null, 2)), note: 'badjson: finish with valid JSON' };
+  }
+  return { fail: `the bad-json run is in a state the mock has no script for (last call ${last}).`, note: 'badjson: unknown state' };
+}
+
+/**
+ * The long-read walk: read the page and save one check, LONG_READS times, then finish. Every read
+ * brings the whole page back (about 2.5 KB with its links), so without the context compaction each
+ * request is bigger than the one before.
+ */
+function longReadScript(convo) {
+  const last = convo.lastCall && convo.lastCall.name;
+  const saves = convo.calls.filter((c) => c.name === 'save_data').length;
+  if (!last || last === 'save_data') {
+    if (saves >= LONG_READS) return { call: finish(`I checked the certifications ${saves} times; the page listed ${CREDENTIAL_COUNT} each time.`), note: 'longread: finish' };
+    return { call: { name: 'read_page', arguments: {} }, note: `longread: read ${saves + 1}` };
+  }
+  if (last === 'read_page') {
+    const count = credentialRecords(convo.pageText).length;
+    if (count !== CREDENTIAL_COUNT) return { fail: `read ${saves + 1} lists ${count} certificates, expected ${CREDENTIAL_COUNT}`, note: 'longread: read incomplete' };
+    return { call: { name: 'save_data', arguments: { records: [{ check: saves + 1, certifications: count }] } }, note: `longread: save check ${saves + 1}` };
+  }
+  return { fail: `the long-read run is in a state the mock has no script for (last call ${last}).`, note: 'longread: unknown state' };
+}
+
 /**
  * The scripted reply to one request.
  *
@@ -690,6 +908,11 @@ export function decide(request) {
   const calls = script.fail ? [failFinish(script.fail)] : [script.call];
   for (const call of calls) {
     const def = tools.get(call.name);
+    // Every tool but finish asks for the step note (REASON_TEXT in tools.ts). A script names it
+    // when the words matter; otherwise the note of the script is the reason, as a model would say it.
+    if (def && (def.parameters?.required || []).includes('reason') && !(call.arguments && 'reason' in call.arguments)) {
+      call.arguments = { ...(call.arguments || {}), reason: `mock: ${script.note}` };
+    }
     if (!def) {
       return { error: { status: 500, message: `mock bug: the scripted reply calls "${call.name}", which is not one of the tools the request offered (${[...tools.keys()].join(', ')}).` } };
     }

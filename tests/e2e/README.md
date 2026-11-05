@@ -166,6 +166,15 @@ The use cases are the open-web tasks above, on the real model.
 | --- | --- | --- |
 | `store-price` | `store.html` | read the page and finish with the price exactly as the page shows it (`1.399,00 EUR`) |
 | `model-pick` | `store.html` | run on the model picked in the composer's model picker; the composer's effort menu offers the levels the model supports |
+| `credentials-json` | `credentials.html` | plan, read the certifications once (the read lists each link's full address under the text), save the ten records, mark the plan steps, and finish with `records_file`; the answer shows two records in a json code box (coloured, with Copy) and a link, never the whole file; the card is no box; the harness clicks the file chip, the preview must show every certificate, Copy must put the file on the clipboard, and the file saved by Download must hold every name, issue date and credential URL |
+| `stall-wander` | `credentials.html` | asked for an expiry date the page never shows, read element after element until the stall note comes, then finish "partial" |
+| `stall-recover` | `credentials.html` | read element after element until the stall note, then change course: read the page once, save the records, finish "done" |
+| `stall-out` | `credentials.html` | go on reading element after element after the stall note, until the second stall in a row ends the run with a last round that offers only `finish`; finish "partial" there |
+| `text-then-finish` | `credentials.html` | read the page, then answer in plain text; the run must ask once for `finish` with an outcome, and the model finishes "done" |
+| `bad-json` | `credentials.html` | finish with a hand-written JSON file that does not parse, get it refused with the reason, and finish again with valid JSON that the downloaded file holds |
+| `long-read` | `credentials.html` | read and save thirteen times: the requests must stay bounded once old results are shortened (the context compaction) |
+
+The local fixture `credentials.html` also has a real-model task, `web-credentials-json`: the same JSON file of the ten certificates, on the real model.
 
 ## What a run checks
 
@@ -237,6 +246,16 @@ The script is stateless: it reads only the conversation of the request, the way 
   Before the run the harness sets Settings > Research to SearXNG through the side panel's Settings tab, like a user, pointing at the fixture's search endpoint under `docs.lantern.test` (`RESEARCH_HOST` in `lib/twoSources.mjs`).
   The fixture server serves `research/search` as `research/search.json`, with `__ORIGIN__` replaced by the origin asked.
   The run also checks that the tab stayed on its page and that the panel rows read "Searched the web: ...", "Read Install the Lantern CLI - Lantern docs (docs.lantern.test)" and "Read install.sh (docs.lantern.test)", and that no search or fetch result holds the markup sentinel, and it shoots the Research section in light and dark.
+- A certifications goal (`credentials-json`): `update_plan` with three steps, `read_page`, `save_data` with the ten records, `update_plan {done: [1, 2]}`, then `finish` with `records_file: "certifications.json"`.
+  It answers `MOCK-FAIL` when the read has no "Links in this part:" block (no credential URL can be known), when the run state on the last message does not show the ten saved records, or when it does not show plan steps 1 and 2 done.
+- A wandering goal (`stall-wander`, `stall-recover`): `get_page_elements`, then `read_page` of one element after another, like a real run that read 74 elements and never finished.
+  It stops only on the stall note (`STALL_TEXT` in `src/background/mcp/progress.ts`); without it, it runs out of elements and answers `MOCK-FAIL`.
+  `stall-wander` then finishes "partial"; `stall-recover` reads the page once, saves the records and finishes "done".
+- A stubborn goal (`stall-out`): the same reads, and it goes on after the stall note; it finishes "partial" only in the last round after the second stall, which must offer only `finish`.
+- A broken-file goal (`bad-json`): `read_page`, then `finish` with a JSON file that has a trailing comma; the refusal must say "is not valid JSON", and the second finish sends valid JSON.
+- A long goal (`long-read`): `read_page` and `save_data`, thirteen times, then `finish`.
+- Every reply to a tool that asks for `reason` carries one: the script's own words, or `mock: <the script note>`.
+- The run state the client adds to the last message of a request (`[Run state] Goal: ...`) is taken off every tool result and note before a script reads them, and is read on its own (`runState`).
 - Anything it cannot find: a finish whose answer starts with `MOCK-FAIL:` and says what is missing. The run then ends without the data, and no check accepts it.
 
 Every reply is validated before it is sent: the tool name must be one the request offered, and the arguments must fit the tool's parameters schema (`validateToolArgs`). A violation is an HTTP 500 - a mock bug, named, not papered over.
@@ -258,6 +277,17 @@ The self-test (`tests/mcp/mockOllama.selftest.mjs`) checks the protocol, the val
 | `no-history-rows` | Makes the runner drop every history row (`recordEntry` pushes nothing). | Exit 1: the run is invisible (no timeline rows, no final entry). |
 | `zod-not-jitless` | Removes the statement that switches zod code generation off from `background/sw.js`. | Exit 1 on two `service worker CSP violation` lines, although all tasks pass. |
 | `broken-net-recorder` | Makes `content/net-recorder.js` (the MAIN-world content script) throw when it loads. | Exit 1 on every fixture page: the recorder flag is not set, and the page reports a page error. |
+| `no-link-targets` | Makes `read_page` drop the links block of its part. | Exit 1 on `credentials-json`: the mock answers `MOCK-FAIL` (no credential URL can be seen). |
+| `no-run-state` | Sends every request without the run state on its last message. | Exit 1 on `credentials-json`: the mock cannot see the saved records. |
+| `plan-marks-ignored` | Makes `update_plan {done}` mark nothing. | Exit 1 on `credentials-json`: the run state does not show the marked steps. |
+| `no-stall-guard` | Makes the progress tracker never report a stall. | Exit 1 on `stall-wander`, `stall-recover` and `stall-out`: the wandering model reads on until it gives up. |
+| `no-json-check` | Accepts a JSON file of `finish` without parsing it. | Exit 1 on `bad-json`: the broken file is never refused, and the downloaded file does not parse. |
+| `files-not-stored` | Drops the files from the finish row. | Exit 1 on `credentials-json`: the card offers no file to download. |
+| `no-text-nudge` | Ends a run on a plain-text answer at once, with no note asking for `finish`. | Exit 1 on `text-then-finish`: the run ends with no outcome. |
+| `no-code-box` | Turns the fence parser of the side panel off. | Exit 1 on `credentials-json`: the answer's json block is no code box. |
+| `chip-downloads` | A file chip downloads its file at once, with no preview. | Exit 1 on `credentials-json`: no preview opens. |
+| `answer-repeats-file` | Drops the prompt line that keeps an answer from pasting the file it hands over. | Exit 1 on `credentials-json`: the answer repeats all ten credential URLs. |
+| `no-compaction` | Sends every old tool result whole on every request. | Exit 1 on `long-read`: the requests keep growing. |
 | `bad-tool-schema` | Sets `read_page` `inputSchema.required` to null in the copy. | Exit 1: the extension must reject the tool itself, with an error naming the tool, instead of sending a schema a provider answers with HTTP 400. |
 | `no-fox-mark` | Takes the fox mark out of the panel header in the copy. | Exit 1 on the mark check ("the header has no fox mark"), although every task passes. |
 | `no-effort` | Makes the tool loop drop the effort the run was started with. | Exit 1: every model call went out with no reasoning field ("model call 1 went out with think=undefined, expected true for effort medium"). |

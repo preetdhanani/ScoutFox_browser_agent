@@ -160,7 +160,7 @@ const LOOP_LIMIT = 15;
 // How long a run may stand paused with no hold the harness can answer, before it is stopped.
 const PAUSE_GRACE_MS = 3000;
 
-const SNAPSHOT_PAGES = ['store', 'store-spans', 'error', 'far-link', 'configurator', 'consent-link', 'editor', 'notebook', 'virtual-list', 'dead-button', 'frame-lesson'];
+const SNAPSHOT_PAGES = ['store', 'store-spans', 'error', 'far-link', 'configurator', 'consent-link', 'editor', 'notebook', 'virtual-list', 'dead-button', 'frame-lesson', 'credentials'];
 // Every run saves its screenshots here (one folder per task): the side panel with the steps and
 // the end result, and the end state of the page. Gitignored; --panel-screenshots overrides the root.
 const RUN_STAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -623,9 +623,13 @@ async function probePage(ctx, page, tabId) {
   return probe;
 }
 
-/** Every part of read_page on a tab, joined: the page's whole text as the model can read it. */
+/**
+ * Every part of read_page on a tab, joined: the page's whole text as the model can read it, and
+ * the links block of each part ("Links in this part:", content/pageLinks.ts) in part order.
+ */
 async function fullPageTextOf(driver, tabId) {
   const parts = [];
+  const linksByPart = [];
   // The embedded frames' texts, asked of each frame's agent the way the engine does
   // (readFrameTexts in src/background/browser/frames.ts), so the snapshot holds what read_page gives.
   const frames = await driver.evaluate(async (id) => {
@@ -634,7 +638,7 @@ async function fullPageTextOf(driver, tabId) {
     for (const row of rows) {
       if (row.frameId === 0 || row.result !== true) continue;
       const answer = await chrome.tabs.sendMessage(id, { action: 'FRAME_TEXT' }, { frameId: row.frameId }).catch(() => null);
-      if (answer && answer.success && typeof answer.text === 'string' && answer.text.trim()) out.push({ origin: answer.origin, text: answer.text.trim() });
+      if (answer && answer.success && typeof answer.text === 'string' && answer.text.trim()) out.push({ origin: answer.origin, text: answer.text.trim(), ...(Array.isArray(answer.links) && answer.links.length ? { links: answer.links } : {}) });
     }
     return out;
   }, tabId);
@@ -648,9 +652,10 @@ async function fullPageTextOf(driver, tabId) {
     }, tabId, part, frames);
     if (!res || !res.success) throw new Error(`read_page part ${part} failed on tab ${tabId}: ${res && res.error}`);
     parts.push(res.result.pageText);
+    linksByPart.push(typeof res.result.links === 'string' ? res.result.links : '');
     if (res.result.part >= res.result.parts) break;
   }
-  return parts.join('\n');
+  return { text: parts.join('\n'), linksByPart };
 }
 
 async function dumpSnapshots(ctx, fixtures, only) {
@@ -673,7 +678,10 @@ async function dumpSnapshots(ctx, fixtures, only) {
     const { elements, ...forModel } = snap;
     // The whole page text, the way read_page reads it (every part through the real content
     // script, joined back at the line breaks they were cut at), so the self-test pages it exactly.
-    forModel.fullPageText = await fullPageTextOf(ctx.driver, tabId);
+    const full = await fullPageTextOf(ctx.driver, tabId);
+    forModel.fullPageText = full.text;
+    // Only a page with links in what it reads carries the blocks, so the other snapshots stay as they were.
+    if (full.linksByPart.some(Boolean)) forModel.linksByPart = full.linksByPart;
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `${name}.json`);
     fs.writeFileSync(file, `${JSON.stringify(forModel, null, 2)}\n`);
@@ -1013,6 +1021,18 @@ async function panelViaCdp(panel) {
     text,
     waitForText: (selector, ms) => pollUntil(() => text(selector), ms),
     errors: () => errors.slice(),
+    /** A real mouse click (CDP Input) in the middle of the first element the selector matches: a user's click, not element.click(). */
+    click: async (selector) => {
+      const box = await panel.send('Runtime.evaluate', {
+        expression: `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`,
+        returnByValue: true
+      });
+      const at = box.result?.value;
+      if (!at) throw new Error(`no element matches ${selector} on the panel`);
+      for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+        await panel.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: type === 'mouseMoved' ? 0 : 1 });
+      }
+    },
     evaluate: async (fn, ...args) => {
       const argList = args.map((a) => JSON.stringify(a)).join(', ');
       const source = typeof fn === 'function' ? `(${fn.toString()})(${argList})` : String(fn);
@@ -1043,6 +1063,17 @@ async function pollUntil(read, timeoutMs) {
     const value = await read();
     if (value && value.trim()) return value;
     if (Date.now() > deadline) return value || '';
+    await sleep(250);
+  }
+}
+
+/** Like pollUntil, for a read that returns an object: the first truthy value, or null after the timeout. */
+async function pollValue(read, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read();
+    if (value) return value;
+    if (Date.now() > deadline) return null;
     await sleep(250);
   }
 }
@@ -1111,6 +1142,7 @@ async function panelSurface(ctx, tabId) {
     reason: real.reason,
     text,
     waitForText: (selector, ms) => pollUntil(() => text(selector), ms),
+    click: (selector) => page.click(selector),
     evaluate: (fn, ...args) => page.evaluate(fn, ...args),
     screenshot: async (file) => {
       await page.setViewport({ width: 400, height: 900 }); // no Chrome around to size the fallback
@@ -1949,6 +1981,160 @@ async function readPanelRows(ctx, tabId, patterns) {
   return problems;
 }
 
+/**
+ * The file a finish card offers, downloaded the way a user gets it: a real click on its chip in
+ * Chrome's side panel, and the browser's own download into a folder of the temp profile
+ * (Browser.setDownloadBehavior). The saved file must carry the name the run gave it, and its
+ * content must pass the task's own check (task.expectDownload.problems).
+ */
+/**
+ * The answer as the user reads it: not a box (no border, no background on the card), a code box
+ * with a Copy button for the fenced block, JSON coloured when the task says so, and http(s) links
+ * that open in a new tab. Copy is clicked like a user does; the button must say "Copied".
+ * Screenshots of the answer in light and dark go with the report.
+ */
+async function readPanelAnswerBox(ctx, tabId, expect, name, dir, screenshots) {
+  const panel = await panelSurface(ctx, tabId);
+  const problems = [];
+  try {
+    await panel.waitForText('.finish-card .finish-body', 8000);
+    const seen = await panel.evaluate(() => {
+      const cards = document.querySelectorAll('.finish-card');
+      const card = cards[cards.length - 1];
+      if (!card) return null;
+      const style = getComputedStyle(card);
+      const box = card.querySelector('.finish-body .code-box');
+      return {
+        border: ['Top', 'Right', 'Bottom', 'Left'].map((side) => parseFloat(style[`border${side}Width`]) || 0),
+        background: style.backgroundColor,
+        box: !!box,
+        lang: box?.querySelector('.code-lang')?.textContent.trim() || '',
+        copy: !!box?.querySelector('.code-copy'),
+        keys: box ? box.querySelectorAll('.tok-key').length : 0,
+        links: [...card.querySelectorAll('.finish-body a.md-link')].map((a) => ({ href: a.getAttribute('href'), target: a.getAttribute('target'), rel: a.getAttribute('rel') }))
+      };
+    });
+    if (!seen) return ['the side panel shows no final card'];
+    if (seen.border.some((w) => w > 0)) problems.push(`the answer still has a border (${seen.border.join(' ')} px): it should read as a reply, not a box`);
+    if (!/rgba\(0, 0, 0, 0\)|transparent/.test(seen.background)) problems.push(`the answer still has a background (${seen.background}): it should read as a reply, not a box`);
+    if (!seen.box) problems.push('the fenced block of the answer is not shown as a code box');
+    else {
+      if (!seen.copy) problems.push('the code box has no Copy button');
+      if (expect.lang && seen.lang !== expect.lang) problems.push(`the code box is labelled ${JSON.stringify(seen.lang)}, expected ${JSON.stringify(expect.lang)}`);
+      if (expect.json && !seen.keys) problems.push('the JSON in the code box is not coloured (no key spans)');
+    }
+    if (expect.link) {
+      const link = seen.links.find((l) => /^https:\/\//.test(l.href || ''));
+      if (!link) problems.push(`the answer shows no clickable https link (links: ${JSON.stringify(seen.links)})`);
+      else if (link.target !== '_blank' || !/noopener/.test(link.rel || '')) problems.push(`the answer link opens without target=_blank and rel=noopener: ${JSON.stringify(link)}`);
+    }
+    if (seen.box && seen.copy) {
+      // The copy button of the LAST card, marked so a real (trusted) click can find it.
+      await panel.evaluate(() => {
+        const buttons = document.querySelectorAll('.finish-card .code-copy');
+        buttons[buttons.length - 1]?.setAttribute('data-harness', 'copy');
+      });
+      await panel.click('.code-copy[data-harness="copy"]');
+      const label = await pollUntil(() => panel.evaluate(() => {
+        const buttons = document.querySelectorAll('.finish-card .code-copy');
+        const text = buttons[buttons.length - 1]?.textContent.trim() || '';
+        return text === 'Copy' ? '' : text;
+      }), 3000).catch(() => '');
+      if (label !== 'Copied') problems.push(`clicking Copy on the code box showed ${JSON.stringify(label || 'nothing')}, expected "Copied"`);
+    }
+    for (const scheme of ['light', 'dark']) {
+      await panel.evaluate((s) => document.documentElement.setAttribute('data-theme', s), scheme);
+      await panel.evaluate(() => {
+        const cards = document.querySelectorAll('.finish-card');
+        cards[cards.length - 1]?.scrollIntoView({ block: 'start' });
+      });
+      await sleep(200);
+      const file = path.join(dir, `${name}-answer-${scheme}.png`);
+      fs.mkdirSync(dir, { recursive: true });
+      await panel.screenshot(file);
+      screenshots.push(file);
+    }
+  } catch (err) {
+    problems.push(`the answer check failed: ${oneLine(err.message, 200)}`);
+  } finally {
+    ctx.panel.pageErrors.push(...panel.errors());
+    await panel.close();
+  }
+  return problems;
+}
+
+async function readPanelDownload(ctx, tabId, expect, shotName = 'file', dir = null, screenshots = []) {
+  const downloads = fs.mkdtempSync(path.join(os.tmpdir(), 'scoutfox-download-'));
+  const browserCdp = await ctx.browser.target().createCDPSession();
+  const begun = new Map();
+  let done = null;
+  const finished = new Promise((resolve) => { done = resolve; });
+  browserCdp.on('Browser.downloadWillBegin', (e) => begun.set(e.guid, e.suggestedFilename));
+  browserCdp.on('Browser.downloadProgress', (e) => { if (e.state === 'completed' || e.state === 'canceled') done(e); });
+  const panel = await panelSurface(ctx, tabId);
+  const problems = [];
+  try {
+    await browserCdp.send('Browser.setDownloadBehavior', { behavior: 'allowAndName', downloadPath: downloads, eventsEnabled: true });
+    // The clipboard, granted to the extension's pages, so Copy can be read back like a paste.
+    const origin = await panel.evaluate(() => location.origin);
+    await browserCdp.send('Browser.grantPermissions', { origin, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] }).catch((err) => console.log(`note: clipboard permission not granted: ${oneLine(err.message, 120)}`));
+    await panel.waitForText('.file-chip', 8000);
+    const chips = await panel.evaluate(() => [...document.querySelectorAll('.file-chip .file-name')].map((el) => el.textContent.trim()));
+    const index = chips.indexOf(expect.name);
+    if (index < 0) return [`the finish card offers no file "${expect.name}" (it offers ${JSON.stringify(chips)})`];
+    // The chip opens the file's preview; the download is the preview's Download button.
+    await panel.click(`.finish-files .file-chip:nth-child(${index + 1})`);
+    const preview = await pollValue(() => panel.evaluate(() => {
+      const d = document.querySelector('dialog.file-preview');
+      return d && d.open ? { name: d.querySelector('.file-name')?.textContent.trim() || '', text: d.querySelector('.file-preview-body code')?.textContent || '' } : null;
+    }), 5000);
+    if (!preview) return [`clicking "${expect.name}" on the finish card opened no preview`];
+    if (preview.name !== expect.name) problems.push(`the preview is titled ${JSON.stringify(preview.name)}, expected "${expect.name}"`);
+    if (expect.previewHas) for (const needle of expect.previewHas) if (!preview.text.includes(needle)) problems.push(`the preview of "${expect.name}" does not show ${JSON.stringify(needle)}`);
+    if (dir) {
+      for (const scheme of ['light', 'dark']) {
+        await panel.evaluate((s) => document.documentElement.setAttribute('data-theme', s), scheme);
+        await sleep(200);
+        const file = path.join(dir, `${shotName}-preview-${scheme}.png`);
+        fs.mkdirSync(dir, { recursive: true });
+        await panel.screenshot(file);
+        screenshots.push(file);
+      }
+    }
+    // Copy puts the file as it is stored on the clipboard; the button must say so.
+    await panel.click('dialog.file-preview .file-copy');
+    const copied = await pollUntil(() => panel.evaluate(() => {
+      const text = document.querySelector('dialog.file-preview .file-copy')?.textContent.trim() || '';
+      return text === 'Copy' ? '' : text;
+    }), 3000).catch(() => '');
+    if (copied !== 'Copied') problems.push(`clicking Copy in the preview of "${expect.name}" showed ${JSON.stringify(copied || 'nothing')}, expected "Copied"`);
+    const clip = await panel.evaluate(() => navigator.clipboard.readText().then((t) => ({ text: t }), (err) => ({ error: String(err && err.message || err) })));
+    if (clip.error) console.log(`note: the clipboard could not be read back in this browser (${oneLine(clip.error, 120)}); the Copied label was checked`);
+    else problems.push(...expect.problems(clip.text).map((p) => `copied ${expect.name}: ${p}`));
+    await panel.click('dialog.file-preview .file-download');
+    const event = await Promise.race([finished, sleep(10000).then(() => null)]);
+    if (!event) return [`clicking "${expect.name}" on the finish card started no download within 10 s`];
+    if (event.state !== 'completed') return [`the download of "${expect.name}" ended ${event.state}`];
+    const name = begun.get(event.guid);
+    if (name !== expect.name) problems.push(`the downloaded file is named ${JSON.stringify(name)}, expected "${expect.name}"`);
+    const content = fs.readFileSync(path.join(downloads, event.guid), 'utf8');
+    problems.push(...expect.problems(content).map((p) => `downloaded ${expect.name}: ${p}`));
+    // Close returns to the chat.
+    await panel.click('dialog.file-preview .file-close');
+    const open = await panel.evaluate(() => !!document.querySelector('dialog.file-preview')?.open);
+    if (open) problems.push(`the preview of "${expect.name}" did not close`);
+  } catch (err) {
+    problems.push(`the download of "${expect.name}" failed: ${oneLine(err.message, 200)}`);
+  } finally {
+    ctx.panel.pageErrors.push(...panel.errors());
+    await panel.close();
+    await browserCdp.send('Browser.setDownloadBehavior', { behavior: 'default' }).catch(() => {});
+    await browserCdp.detach().catch(() => {});
+    fs.rmSync(downloads, { recursive: true, force: true });
+  }
+  return problems;
+}
+
 /** The model a task runs with: the mock's behaviour can depend on the model name (see mockOllama.mjs), a real run never does. */
 const modelOf = (name) => (MOCK && TASKS[name].mockModel) || MODEL;
 
@@ -2358,6 +2544,8 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   const cardProblems = run.cleared ? await readPanelCleared(ctx, tabId) : await readPanelCard(ctx, tabId, expectCard);
   if (task.cardShots) cardProblems.push(...await cardScreenshots(ctx, tabId, shotName, shotDir, screenshots));
   const rowProblems = task.expectPanelRows ? await readPanelRows(ctx, tabId, task.expectPanelRows) : [];
+  if (task.expectAnswerBox) rowProblems.push(...await readPanelAnswerBox(ctx, tabId, task.expectAnswerBox, shotName, shotDir, screenshots));
+  if (task.expectDownload) rowProblems.push(...await readPanelDownload(ctx, tabId, task.expectDownload, shotName, shotDir, screenshots));
   // Element badges are off: whatever the run did, the page must not end with numbers drawn on it.
   const badgeCount = await Promise.race([
     page.evaluate(() => document.querySelectorAll('.scoutfox-badge').length),
@@ -2428,6 +2616,7 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
     unconfirmed: facts.unconfirmed,
     answer,
     answerCorrect: answer ? !!task.check(facts) : false,
+    notes: answer && task.warn ? task.warn(facts) : [],
     expectProblems: [...beforeProblems, ...(MOCK && task.expectMock ? task.expectMock(facts) : []), ...cardProblems, ...badgeProblems, ...restartProblems, ...logProblems, ...shotProblems, ...approvalProblems, ...modelPickProblems, ...effortProblems, ...pageProblems, ...researchProblems, ...rowProblems],
     holdProblems: run.problems,
     stateUpdates: { count: states.length, byStatus: stateStatuses },
@@ -2472,6 +2661,7 @@ function printReport(r) {
   const how = r.stopped ? `; the harness stopped it (${r.stopped}${r.loop ? `: the same prompt ${r.loop.calls} times in a row, ${r.loop.node}:${r.loop.mode}, call ${r.loop.lastCall}` : ''})` : '';
   const outcome = r.outcome === 'finish' ? 'FINISH' : r.outcome === 'partial_result' ? 'PARTIAL RESULT' : `NO FINAL ENTRY (status ${r.status})`;
   console.log(`outcome:    ${outcome}${r.unconfirmed ? ' (unconfirmed)' : ''}, status ${r.status}${how}; expected ${r.expectOutcome}; model's outcome: ${r.finishOutcome || 'none'}${r.expectFinishOutcome ? ` (expected ${r.expectFinishOutcome})` : ''}; answer check: ${r.answerCorrect ? 'PASS' : 'FAIL'}`);
+  for (const note of r.notes || []) console.log(`note:       ${note}`);
   if (r.answer) console.log(`answer:     ${oneLine(r.answer, 400)}`);
   for (const p of r.expectProblems) console.log(`run check:  ${oneLine(p, 300)}`);
   if (r.mockFail) console.log(`mock fail:  ${r.mockFail}`);

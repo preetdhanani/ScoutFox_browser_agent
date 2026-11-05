@@ -249,7 +249,7 @@ export type HistoryEntry =
       findings: number; stepsUsed: number }
   | { type: 'finish'; answer: string; outcome?: 'done' | 'partial' | 'blocked'; unconfirmed?: true; partial?: true; table?: any;
       runStats?: RunStats; offer?: any; stoppedEarly?: string; findings?: Finding[];
-      audit?: any; evidence?: string }
+      audit?: any; evidence?: string; files?: Array<{ name: string; mime: string; content: string }> }
   | { type: 'partial_result'; answer: string; table: any; reason: EndReason;
       runStats?: RunStats; offer?: any; findings?: Finding[];
       skippedSites?: Array<{ siteId: string; site: string; reason: string }> };

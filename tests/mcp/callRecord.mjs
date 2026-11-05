@@ -92,8 +92,35 @@ export function buildCallRecord({ n, status, ms, requestBytes, responseBytes, se
     // are cut to one line), so a harness check reads it here.
     toolResults: newToolResults(sent.messages),
     // The notes the loop added after that tool block (the reflection, the step limit), in full.
-    loopNotes: newLoopNotes(sent.messages)
+    loopNotes: newLoopNotes(sent.messages),
+    // The run state the request ended with (the goal, the plan, what was saved, the steps).
+    runState: runStateOf(sent.messages)
   };
+}
+
+/**
+ * The run state the client adds to the LAST message of every request (withRunState in
+ * src/background/mcp/client.ts): "[Run state] Goal: ...", at the end of that message's text. It is
+ * not part of the tool result or the note it rides on, so every reader here takes it off first.
+ */
+export const RUN_STATE_MARK = '[Run state]';
+const RUN_STATE_TAIL = /\n*\[Run state\][\s\S]*$/;
+
+/** A message text without the run state at its end. */
+export function withoutRunState(text) {
+  return typeof text === 'string' ? text.replace(RUN_STATE_TAIL, '') : text;
+}
+
+/** The run state a request carries on its last message, or null. */
+export function runStateOf(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const last = list[list.length - 1];
+  if (!last) return null;
+  const text = Array.isArray(last.content)
+    ? last.content.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n')
+    : String(last.content ?? '');
+  const at = text.indexOf(RUN_STATE_MARK);
+  return at < 0 ? null : text.slice(at);
 }
 
 /**
@@ -106,8 +133,14 @@ export function newLoopNotes(messages) {
   while (i >= 0 && list[i] && list[i].role !== 'assistant') i -= 1;
   const after = list.slice(i + 1);
   const firstTool = after.findIndex((m) => m && m.role === 'tool');
-  if (firstTool < 0) return [];
-  return after.slice(firstTool).filter((m) => m && m.role === 'user' && typeof m.content === 'string' && !Array.isArray(m.images)).map((m) => m.content);
+  // After a plain-text reply (no tool calls) the note follows the reply itself (TEXT_ANSWER_TEXT).
+  const answeredInText = list[i] && !(Array.isArray(list[i].tool_calls) && list[i].tool_calls.length);
+  if (firstTool < 0) {
+    return answeredInText
+      ? after.filter((m) => m && m.role === 'user' && typeof m.content === 'string' && !Array.isArray(m.images)).map((m) => withoutRunState(m.content))
+      : [];
+  }
+  return after.slice(firstTool).filter((m) => m && m.role === 'user' && typeof m.content === 'string' && !Array.isArray(m.images)).map((m) => withoutRunState(m.content));
 }
 
 /** The contents of the tool messages after the last assistant message of a request. */
@@ -115,5 +148,5 @@ export function newToolResults(messages) {
   const list = Array.isArray(messages) ? messages : [];
   let i = list.length - 1;
   while (i >= 0 && list[i] && list[i].role !== 'assistant') i -= 1;
-  return list.slice(i + 1).filter((m) => m && m.role === 'tool' && typeof m.content === 'string').map((m) => m.content);
+  return list.slice(i + 1).filter((m) => m && m.role === 'tool' && typeof m.content === 'string').map((m) => withoutRunState(m.content));
 }

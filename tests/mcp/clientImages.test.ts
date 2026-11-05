@@ -307,7 +307,8 @@ test('two pictures in one round travel in one user message, each with its own la
   assert.equal(pictures.length, 1, 'one message, not one per tool call');
   const blocks = pictures[0].content as any[];
   assert.equal(blocks.filter((b) => b.type === 'image_url').length, 2);
-  assert.equal(blocks.filter((b) => b.type === 'text').length, 2, 'each picture has a label');
+  // The run state rides on the last message of the request as one more text block (withRunState).
+  assert.equal(blocks.filter((b) => b.type === 'text' && !String(b.text).startsWith('[Run state]')).length, 2, 'each picture has a label');
 });
 
 test('the picture reaches the provider as an OpenAI image_url data URL', async (t) => {

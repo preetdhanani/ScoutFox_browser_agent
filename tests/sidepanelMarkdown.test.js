@@ -33,7 +33,7 @@ import fs from 'node:fs';
 globalThis.window = { addEventListener() {} };
 globalThis.document = { readyState: 'loading', addEventListener() {}, getElementById: () => null };
 
-const { formatMarkdownText, hasMarkdownBlocks, legacyBullets, splitTableRow, renderFinishCard } = await import('../sidepanel/sidepanel.js');
+const { formatMarkdownText, hasMarkdownBlocks, hasMarkdownTable, legacyBullets, splitTableRow, renderFinishCard, renderCodeBox, textKey, unfoldedCode } = await import('../sidepanel/sidepanel.js');
 
 // ---------------------------------------------------------------------------------------------
 // The oracle: the function as it was before the blocks renderer, copied verbatim.
@@ -74,7 +74,8 @@ function mulberry32(seed) {
 }
 
 // The only tags and attributes the renderer may write. A value holds letters, digits, dash and space.
-const TAG = /<(\/?)(div|span|strong|code|table|thead|tbody|tr|th|td|ul|ol|li)((?: (?:class|role|aria-level|aria-label|aria-hidden|tabindex|scope)="[A-Za-z0-9 -]*")*)>/g;
+// An <a> is allowed only with an http(s) href (richInline); a code box brings pre and button.
+const TAG = /<(\/?)(div|span|strong|code|table|thead|tbody|tr|th|td|ul|ol|li|pre|button|a)((?: (?:class|role|aria-level|aria-label|aria-hidden|aria-expanded|tabindex|scope|type|target|rel|data-lines|data-code-key)="[A-Za-z0-9 _-]*"| href="https?:\/\/[^"<>\s]*")*)>/g;
 const ENTITIES = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"' };
 
 /**
@@ -100,7 +101,12 @@ function assertSafeMarkup(html, label = '') {
 
 /** The text a reader sees: the tags cut out, the four entities turned back. */
 function visibleText(html) {
-  return html.replace(TAG, '').replace(/&(amp|lt|gt|quot);/g, (entity) => ENTITIES[entity]);
+  const decode = (text) => text.replace(TAG, '').replace(/&(amp|lt|gt|quot);/g, (entity) => ENTITIES[entity]);
+  // The buttons of a code box (Copy, Show all) are the panel's words, not the model's. A markdown
+  // link shows its label; its address is part of what the model wrote, so it is counted too.
+  return decode(html
+    .replace(/<button [^>]*>[^<]*<\/button>/g, '')
+    .replace(/<a [^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/g, (whole, href, label) => (decode(label) === decode(href) ? label : `${label} ${href}`)));
 }
 
 function alphanumerics(text) {
@@ -135,16 +141,18 @@ const INCIDENT_HONEST = ['## Prices found', '', '### shop-a.test', ...FACTS_A, '
 // ---------------------------------------------------------------------------------------------
 
 /** More than 100 answers that have no heading and no table, by hand. */
+// An address in an answer is a link now (the blocks renderer takes it), so the plain corpus has
+// the incident's facts without the URL line; the URL is checked in the incident test.
+const FACTS_A_TEXT = FACTS_A.filter((line) => !line.includes(URL_A));
 const PLAIN = [
-  // the incident answer, without its headings and its table
-  FACTS_A.join('\n'),
+  // the incident answer, without its headings, its table and its link
+  FACTS_A_TEXT.join('\n'),
   FACTS_B.join('\n'),
-  ['shop-a.test', ...FACTS_A, '', 'shop-b.test', ...FACTS_B].join('\n'),
+  ['shop-a.test', ...FACTS_A_TEXT, '', 'shop-b.test', ...FACTS_B].join('\n'),
   'Not checked. I did not open shop-b.test, so I have no price, shipping or delivery for it.',
-  ['shop-a.test', ...FACTS_A, '', 'shop-b.test', 'Not checked. I did not open shop-b.test, so I have no price, shipping or delivery for it.'].join('\n'),
-  ['Prices found', '', 'shop-a.test', ...FACTS_A].join('\n'),
-  `- **URL**: ${URL_A}`,
-  URL_A,
+  ['shop-a.test', ...FACTS_A_TEXT, '', 'shop-b.test', 'Not checked. I did not open shop-b.test, so I have no price, shipping or delivery for it.'].join('\n'),
+  ['Prices found', '', 'shop-a.test', ...FACTS_A_TEXT].join('\n'),
+  '- **URL**: [link removed: never opened]',
   // prose
   'The Framework Laptop 16 costs 1.389,00 EUR at shop-a.test.',
   'One line.',
@@ -238,10 +246,7 @@ const PLAIN = [
   '<img src=x onerror=alert(1)>',
   'a < b and c > d & e "quoted"',
   '[click](javascript:alert(1))',
-  '[ok](https://a.test/x) and <https://b.test>',
-  '`code` and ```fence```\n```\nblock\n```',
   '> quote\n> more quote',
-  '![image](http://a.test/x.png)',
   'Dollar signs $1 and $& and $` in the text',
   '&lt;already escaped&gt; &amp; &quot;',
   // long and odd
@@ -382,11 +387,11 @@ test('the incident answer: headings, lists that hang, and a real table', () => {
   assert.equal(count(html, '<table class="md-table">'), 1);
   assert.equal(count(html, '<tr>'), 3, 'the header row and two body rows');
   assert.ok(!html.includes('##') && !html.includes('|---'), 'no raw markdown left');
-  assert.ok(html.includes(`<span class="md-li-text"><strong>URL</strong>: ${URL_A.replace(/&/g, '&amp;')}</span>`), 'the long URL is text, not a link');
+  assert.ok(html.includes(`<span class="md-li-text"><strong>URL</strong>: <a class="md-link" href="${URL_A.replace(/&/g, '&amp;')}" target="_blank" rel="noopener noreferrer">${URL_A.replace(/&/g, '&amp;')}</a></span>`), 'the long URL is a link that opens in a new tab');
   // A short cell is kept on one line (md-nw); the long delivery text wraps at its spaces.
   assert.ok(html.includes('<td class="md-nw">shop-a.test</td><td class="md-nw">1.389,00 EUR</td><td class="md-nw">6,90 EUR</td><td>Lieferung in 3-4 Werktagen</td>'));
   assert.ok(html.includes('<th class="md-nw" scope="col">Shipping</th>'));
-  assert.ok(!html.includes('<a '), 'no link is rendered');
+  assert.equal(count(html, '<a '), 1, 'one link: the URL of shop-a');
   // The model's words are all there, and no other.
   assert.deepEqual(alphanumerics(visibleText(html)), alphanumerics(INCIDENT));
 
@@ -655,13 +660,121 @@ test('the escaped text is exactly what the model wrote: entities are not decoded
   assertSafeMarkup(html);
 });
 
-test('links are never rendered: a markdown link, a javascript: address and a bare URL are all text', () => {
+test('links: http(s) only, label and address escaped apart, javascript: and data: stay text', () => {
   const text = '# t\n[click](javascript:alert(1)) and [ok](https://a.test/x) and http://b.test/y and <https://c.test>\n\n| l |\n|---|\n| [x](javascript:1) |';
   const html = formatMarkdownText(text);
-  assert.ok(!html.includes('<a ') && !html.includes('href') && !html.includes('target='));
-  assert.ok(html.includes('[click](javascript:alert(1))'));
-  assert.ok(html.includes('http://b.test/y'));
   assertSafeMarkup(html);
+  assert.ok(html.includes('[click](javascript:alert(1))'), 'a javascript: link is text');
+  assert.ok(html.includes('| [x](javascript:1) |') || html.includes('[x](javascript:1)'), 'also in a table cell');
+  assert.ok(html.includes('<a class="md-link" href="https://a.test/x" target="_blank" rel="noopener noreferrer">ok</a>'));
+  assert.ok(html.includes('<a class="md-link" href="http://b.test/y" target="_blank" rel="noopener noreferrer">http://b.test/y</a>'));
+  assert.ok(html.includes('&lt;<a class="md-link" href="https://c.test"'), 'the angle brackets stay text around the address');
+  assert.equal(count(html, '<a '), 3);
+  for (const hostile of ['[x](data:text/html,<b>)', 'see vbscript:x', '[a](https://x.test/"onmouseover="alert(1))', 'https://x.test/<script>', 'https://x.test/?q="x";']) {
+    const out = formatMarkdownText(`# t\n${hostile}`);
+    assertSafeMarkup(out, hostile);
+    for (const [, href] of out.matchAll(/href="([^"]*)"/g)) assert.match(href, /^https?:\/\/[^\s"'<>]*$/, `${hostile}: an address with a quote or a bracket`);
+    assert.ok(!/onmouseover="|<script|<b>/.test(out), `${hostile}: markup made it through`);
+  }
+});
+
+test('a bare address leaves the sentence punctuation out, and keeps the parentheses it opens', () => {
+  const html = formatMarkdownText('See https://a.test/x. Or https://en.wikipedia.org/wiki/Mars_(planet), then (https://b.test/y).');
+  assert.ok(html.includes('href="https://a.test/x"'));
+  assert.ok(html.includes('href="https://en.wikipedia.org/wiki/Mars_(planet)"'));
+  assert.ok(html.includes('href="https://b.test/y"') && html.includes('</a>).'));
+  assert.ok(html.includes('&amp;') === false);
+  const amp = formatMarkdownText('Go to https://a.test/?a=1&b=2; now');
+  assert.ok(amp.includes('href="https://a.test/?a=1&amp;b=2"'), amp);
+  assertSafeMarkup(amp);
+});
+
+test('a link never forms inside a code span or a code box', () => {
+  const html = formatMarkdownText('Run `curl https://a.test/x` now\n\n```\nhttps://b.test/y\n```');
+  assert.equal(count(html, '<a '), 0, html);
+  assert.ok(html.includes('<code class="md-code">curl https://a.test/x</code>'));
+});
+
+test('a fenced block is a code box with its language and a Copy button, and its text stays exactly as written', () => {
+  const code = 'const a = "<b>" && 1;\n  # not a heading\n| a | b |\n|---|---|';
+  const html = formatMarkdownText(`Here:\n\n\`\`\`js\n${code}\n\`\`\`\nafter`);
+  assertSafeMarkup(html);
+  assert.equal(count(html, '<div class="code-box"'), 1);
+  assert.ok(html.includes('<span class="code-lang">js</span>'));
+  assert.ok(html.includes('<button type="button" class="code-copy" aria-label="Copy code">Copy</button>'));
+  assert.ok(!html.includes('md-table') && !html.includes('md-h '), 'nothing inside a fence becomes a table or a heading');
+  const inner = /<code>([\s\S]*?)<\/code><\/pre>/.exec(html)[1];
+  assert.equal(visibleText(inner), code);
+  assert.ok(html.includes('<div class="md-p">after</div>'));
+});
+
+test('fences: tildes, a longer closing run, a closing run of the other kind, and no closing line at all', () => {
+  const tilde = formatMarkdownText('~~~\na\n~~~');
+  assert.equal(count(tilde, 'code-box'), 1);
+  const longer = formatMarkdownText('````md\n```\ninner\n```\n````');
+  assert.equal(count(longer, '<div class="code-box"'), 1);
+  assert.ok(visibleText(longer).includes('```\ninner\n```'), longer);
+  const mixed = formatMarkdownText('```\na\n~~~\nb');
+  assert.equal(count(mixed, '<div class="code-box"'), 1, 'a tilde run does not close a backtick fence');
+  assert.ok(visibleText(mixed).includes('a\n~~~\nb'));
+  const shorter = formatMarkdownText('````\na\n```\nb\n````');
+  assert.ok(visibleText(shorter).includes('a\n```\nb'), 'a shorter run does not close it');
+  const open = formatMarkdownText('text\n```json\n{"a": 1}');
+  assert.equal(count(open, '<div class="code-box"'), 1, 'an unclosed fence runs to the end');
+  assert.ok(!hasMarkdownBlocks('`code` and ```fence``` on one line'), 'backticks in the info string: not a fence');
+});
+
+test('a fence after a list item ends the list; a table and a fence side by side both render', () => {
+  const html = formatMarkdownText('- one\n- two\n```\nx\n```\n| a | b |\n|---|---|\n| 1 | 2 |');
+  assert.equal(count(html, '<li class="md-li">'), 2);
+  assert.equal(count(html, '<div class="code-box"'), 1);
+  assert.equal(count(html, '<table class="md-table">'), 1);
+  assert.ok(hasMarkdownTable('| a | b |\n|---|---|\n| 1 | 2 |'));
+  assert.ok(!hasMarkdownTable('```\n| a | b |\n|---|---|\n```'), 'a table inside a fence is code');
+  assert.ok(!hasMarkdownTable('See https://a.test/x | y'), 'a link and a pipe are not a table');
+});
+
+test('JSON is coloured: keys, strings, numbers and literals in spans, each escaped on its own', () => {
+  const html = formatMarkdownText('```json\n{"name": "<a> & \\"b\\"", "n": -1.5e3, "ok": true, "none": null, "list": [1, "x"]}\n```');
+  assertSafeMarkup(html);
+  assert.ok(html.includes('<span class="tok-key">&quot;name&quot;</span>:'));
+  assert.ok(html.includes('<span class="tok-str">&quot;&lt;a&gt; &amp; \\&quot;b\\&quot;&quot;</span>'));
+  assert.ok(html.includes('<span class="tok-num">-1.5e3</span>'));
+  assert.ok(html.includes('<span class="tok-lit">true</span>') && html.includes('<span class="tok-lit">null</span>'));
+  // No language, but it parses: coloured too. A language that is not JSON: never.
+  assert.ok(formatMarkdownText('```\n[{"a": 1}]\n```').includes('tok-key'));
+  assert.ok(!formatMarkdownText('```python\n{"a": 1}\n```').includes('tok-'));
+  assert.ok(!formatMarkdownText('```\n{not json: 1}\n```').includes('tok-'));
+});
+
+test('a code box longer than 15 lines folds; unfolding is remembered across renders by its key', () => {
+  const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n');
+  const text = `\`\`\`\n${long}\n\`\`\``;
+  const folded = formatMarkdownText(text);
+  assert.ok(folded.includes('<div class="code-box folded"'));
+  assert.ok(folded.includes('<button type="button" class="code-fold" aria-expanded="false" data-lines="20">Show all 20 lines</button>'));
+  assert.ok(!formatMarkdownText('```\n' + long.split('\n').slice(0, 15).join('\n') + '\n```').includes('code-fold'), '15 lines do not fold');
+  unfoldedCode.add(textKey(long));
+  try {
+    const open = formatMarkdownText(text);
+    assert.ok(open.includes('<div class="code-box"') && !open.includes('code-box folded'));
+    assert.ok(open.includes('aria-expanded="true"') && open.includes('>Show less</button>'));
+  } finally {
+    unfoldedCode.delete(textKey(long));
+  }
+  assert.ok(!renderCodeBox(long, '', { fold: false }).includes('code-fold'), 'the file preview never folds');
+  assert.ok(!renderCodeBox(long, '', { head: false }).includes('code-copy'), 'and has its own buttons');
+});
+
+test('a 1 MB JSON fence renders fast, and the second render comes from the cache', () => {
+  const data = JSON.stringify(Array.from({ length: 12000 }, (_, i) => ({ name: `Certificate ${i}`, issued: 'Oct 2026', url: `https://a.test/c/${i}`, n: i, ok: i % 2 === 0 })), null, 2);
+  assert.ok(data.length > 1_000_000);
+  const text = `\`\`\`json\n${data}\n\`\`\``;
+  const first = timed(() => formatMarkdownText(text));
+  assert.ok(first.ms < FAST_MS, `${first.ms.toFixed(0)} ms`);
+  const second = timed(() => formatMarkdownText(text));
+  assert.ok(second.ms <= first.ms, `${second.ms.toFixed(0)} ms after ${first.ms.toFixed(0)} ms`);
+  assert.equal(second.result, first.result);
 });
 
 test('unbalanced and odd markdown neither throws nor breaks the markup', () => {

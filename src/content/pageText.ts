@@ -71,6 +71,19 @@ function chooseContainer(doc: Document): { container: Element; text: string } | 
   return doc.body ? { container: doc.body, text: visibleText(doc.body) } : null;
 }
 
+/**
+ * The element whose text a whole-page read gives (the content block, else <body>), for the links
+ * of that read: a link outside it (a nav bar, a footer) is not in the text, so it is not listed.
+ */
+export function readRootOf(doc: Document | null | undefined): Element | null {
+  if (!doc) return null;
+  try {
+    return chooseContainer(doc)?.container ?? doc.body ?? null;
+  } catch {
+    return doc.body ?? null;
+  }
+}
+
 /** True when the element has text of its own (not only inside child elements), so it cannot be split into its children. */
 function hasOwnText(el: Element): boolean {
   return Array.from(el.childNodes || []).some((node) => node.nodeType === 3 && (node.textContent || '').trim() !== '');

@@ -126,13 +126,13 @@ export async function embeddedFrames(tabId: number, port: FramePort = chromeFram
 }
 
 /** The text of each embedded frame worth reading, for read_page: its origin and its text. */
-export async function readFrameTexts(tabId: number, port: FramePort = chromeFramePort()): Promise<Array<{ origin: string; text: string }>> {
+export async function readFrameTexts(tabId: number, port: FramePort = chromeFramePort()): Promise<Array<{ origin: string; text: string; links?: unknown[] }>> {
   const frames = (await embeddedFrames(tabId, port)).filter((f) => f.agent && !describeRestrictedUrl(f.href));
   const answers = await Promise.all(frames.map((f) => port.send(tabId, f, { action: 'FRAME_TEXT' }, FRAME_ANSWER_MS)));
-  const out: Array<{ origin: string; text: string }> = [];
+  const out: Array<{ origin: string; text: string; links?: unknown[] }> = [];
   answers.forEach((a) => {
     const text = a && a.success && typeof a.text === 'string' ? a.text.trim() : '';
-    if (text) out.push({ origin: String(a.origin || 'another site'), text });
+    if (text) out.push({ origin: String(a.origin || 'another site'), text, ...(Array.isArray(a.links) && a.links.length ? { links: a.links } : {}) });
   });
   return out;
 }

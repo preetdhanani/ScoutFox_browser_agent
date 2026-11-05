@@ -4,8 +4,9 @@
  */
 
 import { formatFindMessage } from './domCompressor.ts';
-import { normalizePageText, pageTextPart } from './pageText.ts';
+import { normalizePageText, pageTextPart, readRootOf } from './pageText.ts';
 import { runScrollAction } from './scrollActions.ts';
+import { collectLinks, linksBlock, type PageLink } from './pageLinks.ts';
 
 export interface ActionExecutionContext {
   doc?: Document;
@@ -27,6 +28,15 @@ export interface ActionExecutionContext {
 export interface FrameText {
   origin: string;
   text: string;
+  /** The links of the frame, already absolute (pageLinks.ts). */
+  links?: PageLink[];
+}
+
+/** The links the frames of a read sent with their text. */
+function frameLinks(frames: unknown): PageLink[] {
+  if (!Array.isArray(frames)) return [];
+  return frames.flatMap((f: any) => (Array.isArray(f?.links) ? f.links : []))
+    .filter((l: any): l is PageLink => !!l && typeof l.url === 'string' && typeof l.label === 'string' && typeof l.context === 'string');
 }
 
 /**
@@ -347,6 +357,8 @@ export async function execute(
       }
       let source: { text: string; hidesLines: boolean };
       let what: string;
+      let links: PageLink[] = [];
+      const base = (win && win.location && win.location.href) || 'https://localhost/';
       const requestedId = actionPayload.element_id;
       if (requestedId !== undefined && requestedId !== null && String(requestedId).trim() !== '') {
         const el = context.resolveElement ? context.resolveElement(requestedId as number | string) : null;
@@ -355,6 +367,7 @@ export async function execute(
         }
         source = readableText(el);
         what = `Text of element [${String(requestedId)}]`;
+        links = collectLinks(el, base);
       } else {
         // The whole page text (inner scroll panels included, nothing windowed to the scroll
         // position), not the snapshot's capped one, so paging reaches every part of the page.
@@ -367,16 +380,18 @@ export async function execute(
         const hidesLines = !!(doc && typeof doc.querySelector === 'function' && doc.querySelector('.cm-content .cm-gap'));
         source = { text: withFrameTexts(String(text), actionPayload.frames), hidesLines };
         what = 'Page text';
+        links = [...collectLinks(readRootOf(doc), base), ...frameLinks(actionPayload.frames)];
       }
       const part = pageTextPart(source.text, partNumber);
       if (partNumber > part.count) {
         return { success: false, error: `${what} has only ${part.count} part${part.count === 1 ? '' : 's'}, so there is no part ${partNumber}. Read part 1 to ${part.count}.` };
       }
       const editorNote = source.hidesLines ? `${EDITOR_HIDES_LINES_NOTE_LINE}\n` : '';
+      const linkLines = linksBlock(links, source.text, part);
       return {
         success: true,
-        message: `${what} (${part.note}):\n${editorNote}"""\n${part.text}\n"""`,
-        result: { pageText: part.text, note: part.note, part: part.number, parts: part.count, hidesLines: source.hidesLines },
+        message: `${what} (${part.note}):\n${editorNote}"""\n${part.text}${linkLines ? `\n\n${linkLines}` : ''}\n"""`,
+        result: { pageText: part.text, links: linkLines, note: part.note, part: part.number, parts: part.count, hidesLines: source.hidesLines },
       };
     }
     case 'find_element': {

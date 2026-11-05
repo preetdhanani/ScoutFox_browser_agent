@@ -381,7 +381,10 @@ export class ScoutFoxMCPServer {
         const outcome = await this.run(tabId, { action: 'read_page', part, ...(hasId ? { element_id: args.element_id } : {}), ...(frames.length ? { frames } : {}) }, rt);
         if (!outcome.ok) return outcome.result;
         const read: any = outcome.exec?.result || {};
-        const body = typeof read.pageText === 'string' && read.pageText ? read.pageText : '(no text)';
+        const text = typeof read.pageText === 'string' && read.pageText ? read.pageText : '(no text)';
+        // The link targets of this part (content/pageLinks.ts) go after the text, inside the same
+        // untrusted envelope: an address is the page's words too.
+        const body = typeof read.links === 'string' && read.links ? `${text}\n\n${read.links}` : text;
         const editorNote = read.hidesLines ? `\n${EDITOR_LINES_NOTE}` : '';
         const head = `${hasId ? `Text of element [${args.element_id}]` : 'Page text'} (${read.note || `part ${part}`}):${editorNote}`;
         const url = (await rt.browser.tabInfo(tabId).catch(() => null))?.url || '';

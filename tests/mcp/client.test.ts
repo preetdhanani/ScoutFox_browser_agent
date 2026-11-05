@@ -304,18 +304,53 @@ test('a model that fails ends the run with an error, instead of spinning', async
   assert.ok(rec.statuses.some((s) => s.status === 'error'), 'and the run is not running any more');
 });
 
-test('the plan becomes the checklist of the panel, and the steps are ticked off as they work', async (t) => {
-  const { client, rec } = withClient(t, {
+test('the plan becomes the checklist of the panel, and only the model marks its steps done', async (t) => {
+  // A step used to be ticked off by every tool call that worked, whatever it did, so the panel
+  // showed progress a run never made. Now the model marks the steps it finished (update_plan
+  // {done}); a finish "done" marks the rest, and a "partial" one leaves them as they are.
+  const { client, rec, requests } = withClient(t, {
     replies: [
       toolCall('update_plan', { plan: ['Open the details', 'Read the price'] }),
       toolCall('get_page_elements', {}),
+      toolCall('update_plan', { done: [1] }),
       toolCall('read_page', {}),
-      toolCall('finish', { outcome: 'done', answer: 'done' })
+      toolCall('finish', { outcome: 'partial', answer: 'Only the first step' })
     ]
   });
   await client.startTask('Find the price of item 42');
   assert.deepEqual(rec.planSteps.map((s) => s.text), ['Open the details', 'Read the price']);
-  // Every step that worked is ticked off, in the order the work was done.
+  assert.deepEqual(rec.planSteps.map((s) => s.status), ['completed', 'pending'], 'the listing alone finished nothing; the mark did');
+  const state = (body: any) => String(body.messages[body.messages.length - 1].content);
+  assert.match(state(requests[2].body), /^Plan: 1 \[ \] Open the details; 2 \[ \] Read the price$/m, 'nothing was marked before the model said so');
+  assert.match(state(requests[3].body), /^Plan: 1 \[done\] Open the details; 2 \[ \] Read the price$/m);
+});
+
+test('a finish "done" marks every plan step done', async (t) => {
+  const { client, rec } = withClient(t, {
+    replies: [
+      toolCall('update_plan', { plan: ['Open the details', 'Read the price'] }),
+      toolCall('finish', { outcome: 'done', answer: 'done' })
+    ]
+  });
+  await client.startTask('Find the price of item 42');
+  assert.deepEqual(rec.planSteps.map((s) => s.status), ['completed', 'completed']);
+});
+
+test('marking steps done under manual approval asks the user nothing again', async (t) => {
+  const { client, rec } = withClient(t, {
+    autoApprovePlan: false,
+    replies: [
+      toolCall('update_plan', { plan: ['Open the details', 'Read the price'] }),
+      toolCall('update_plan', { done: [1, 2] }),
+      toolCall('finish', { outcome: 'partial', answer: 'done' })
+    ]
+  });
+  const running = client.startTask('Find the price of item 42');
+  for (let i = 0; i < 50 && !rec.pending(); i++) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(rec.pending(), 'the plan card is up');
+  client.handleApprovePlan(true);
+  await running;
+  assert.equal(rec.approvals.filter(Boolean).length, 1, 'the plan was put to the user once');
   assert.deepEqual(rec.planSteps.map((s) => s.status), ['completed', 'completed']);
 });
 
@@ -663,8 +698,11 @@ test('a failed model attempt that is retried is a warning in the log, not an err
 // ---- the repeat guard (progress.ts) in the live loop ----------------------------------------------
 
 /** The messages of one request, and where the reflection notes sit in it. */
+/** A message text without the run state the client adds to the last message of every request. */
+const bare = (content: unknown) => String(content ?? '').replace(/\n*\[Run state\][\s\S]*$/, '');
+
 function reflectionsOf(request: { body: any }): number[] {
-  return (request.body.messages as any[]).flatMap((m, i) => (m.role === 'user' && m.content === REFLECTION_TEXT ? [i] : []));
+  return (request.body.messages as any[]).flatMap((m, i) => (m.role === 'user' && bare(m.content) === REFLECTION_TEXT ? [i] : []));
 }
 
 test('repeat guard: a repeated read gets the hint in its result, and stuck steps add one reflection after the tool block', async (t) => {
@@ -749,7 +787,7 @@ test('a finish without a valid outcome is refused once, without a step, and the 
   await client.startTask('Anything');
   assert.equal(requests.length, 3, 'the model was asked again twice');
   const toolReplies = (requests[1].body.messages as any[]).filter((m) => m.role === 'tool');
-  assert.equal(toolReplies.at(-1).content, FINISH_OUTCOME_TEXT, 'the model is told what outcome means');
+  assert.equal(bare(toolReplies.at(-1).content), FINISH_OUTCOME_TEXT, 'the model is told what outcome means');
   const finishes = rowsOfType(rec.history, 'finish');
   assert.equal(finishes.length, 1, 'only the valid finish ended the run');
   assert.equal(finishes[0].outcome, 'done');
@@ -775,4 +813,80 @@ test('a plain-text answer at the step limit ends the run as partial; a plain-tex
   const plain = withClient(t, { replies: [textReply('It costs 99 USD.')] });
   await plain.client.startTask('What does it cost?');
   assert.equal(rowsOfType(plain.rec.history, 'finish')[0].outcome, undefined);
+});
+
+test('saved records become the file the finish names, and the panel row carries it', async (t) => {
+  const { client, rec, requests } = withClient(t, {
+    replies: [
+      toolCall('save_data', { records: [{ item: '42', price: '99 USD' }] }),
+      toolCall('finish', { outcome: 'done', answer: 'Saved in items.json', records_file: 'items.json' })
+    ]
+  });
+  await client.startTask('Make me a JSON file of the items');
+  const finish = rowsOfType(rec.history, 'finish')[0];
+  assert.deepEqual(finish.files.map((f: any) => [f.name, f.mime]), [['items.json', 'application/json']]);
+  assert.deepEqual(JSON.parse(finish.files[0].content), [{ item: '42', price: '99 USD' }]);
+  const last = requests[1].body.messages[requests[1].body.messages.length - 1];
+  assert.match(String(last.content), /^Saved 1 new record \(1 in total\)\. Fields: item, price\.\n\n\[Run state\] /, 'the result says what was saved, and the run state follows it');
+  assert.match(String(last.content), /^Collected: 1 record \(fields: item, price\)$/m);
+});
+
+test('a broken JSON file of finish is refused with the reason, and the run goes on', async (t) => {
+  const { client, rec, requests } = withClient(t, {
+    replies: [
+      toolCall('finish', { outcome: 'done', answer: 'here', files: [{ name: 'a.json', content: '[1,]' }] }),
+      toolCall('finish', { outcome: 'done', answer: 'here', files: [{ name: 'a.json', content: '[1]' }] })
+    ]
+  });
+  await client.startTask('Write a JSON file');
+  const refusal = requests[1].body.messages.find((m: any) => m.role === 'tool');
+  assert.match(String(refusal.content), /^Error: files\[0\] \(a\.json\) is not valid JSON/);
+  const finishes = rowsOfType(rec.history, 'finish');
+  assert.equal(finishes.length, 1);
+  assert.equal(finishes[0].files[0].content, '[1]');
+  assert.equal(rowsOfType(rec.history, 'agent_response').length, 1, 'the refused finish is no step of the run');
+});
+
+test('a run that stalls twice gets a last round with only finish, and ends partial', async (t) => {
+  const reads = Array.from({ length: 16 }, (_, i) => toolCall('find', { query: `thing ${i}` }, `call_${i}`));
+  const { client, rec, requests } = withClient(t, {
+    replies: [...reads, toolCall('finish', { answer: 'I could not find it.' }, 'call_end')]
+  });
+  await client.startTask('Find the thing');
+  const notes = (requests[requests.length - 1].body.messages as any[]).filter((m) => m.role === 'user' && /^You have taken \d+ steps without new data/.test(String(m.content)));
+  assert.equal(notes.length, 1, 'the first stall was told once');
+  const last = requests[requests.length - 1].body;
+  assert.deepEqual(last.tools.map((tool: any) => tool.function.name), ['finish'], 'the last round may only finish');
+  assert.ok(last.messages.some((m: any) => m.role === 'user' && /^STALLED: /.test(String(m.content))), 'and says why');
+  const finish = rowsOfType(rec.history, 'finish')[0];
+  assert.equal(finish.outcome, 'partial', 'a finish without an outcome in the last round is partial');
+});
+
+test('an empty plan next to marks is no plan: the marks land and the checklist stays', async (t) => {
+  const { client, rec } = withClient(t, {
+    replies: [
+      toolCall('update_plan', { plan: ['Open the details', 'Read the price'] }),
+      toolCall('update_plan', { plan: [], done: [2] }),
+      toolCall('finish', { outcome: 'partial', answer: 'done' })
+    ]
+  });
+  await client.startTask('Find the price of item 42');
+  assert.deepEqual(rec.planSteps.map((s) => [s.text, s.status]), [['Open the details', 'pending'], ['Read the price', 'completed']]);
+});
+
+test('a text answer after the run took steps is asked once to become a finish with an outcome', async (t) => {
+  // Nemotron marked its plan done and then wrote the answer as text (2026-11-05): the card could
+  // not say how the run went. One note asks for finish; a second text reply still ends the run.
+  const { TEXT_ANSWER_TEXT } = await import('../../src/background/mcp/client.ts');
+  const asked = withClient(t, { replies: [toolCall('read_page', {}), textReply('It costs 99 USD.'), toolCall('finish', { outcome: 'done', answer: 'It costs 99 USD.' })] });
+  await asked.client.startTask('What does item 42 cost?');
+  const note = (asked.requests[2].body.messages as any[]).at(-1);
+  assert.equal(note.role, 'user');
+  assert.equal(bare(note.content), TEXT_ANSWER_TEXT);
+  assert.equal(rowsOfType(asked.rec.history, 'finish')[0].outcome, 'done');
+
+  const twice = withClient(t, { replies: [toolCall('read_page', {}), textReply('It costs 99 USD.'), textReply('It costs 99 USD.')] });
+  await twice.client.startTask('What does item 42 cost?');
+  assert.equal(twice.requests.length, 3, 'asked once, not again');
+  assert.equal(rowsOfType(twice.rec.history, 'finish')[0].answer, 'It costs 99 USD.');
 });

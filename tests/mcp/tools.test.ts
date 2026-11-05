@@ -94,9 +94,12 @@ test('the url of navigate must be a full http(s) url', () => {
   assert.equal(pattern.test('example.com'), false, 'a url without a scheme is not a url to navigate to');
 });
 
-test('the plan is a list of steps, and it is required', () => {
+test('the plan is a list of steps, and the steps can be marked done without sending it again', () => {
   const tool = TOOL_MAP.get('update_plan')!;
-  assert.deepEqual(tool.inputSchema.required, ['plan']);
+  // plan or done, or both: the client refuses a call with neither (updatePlan in client.ts).
+  assert.deepEqual(tool.inputSchema.required, ['reason']);
+  assert.equal(tool.inputSchema.properties.done.items.type, 'integer');
+  assert.equal(tool.inputSchema.properties.done.items.minimum, 1);
   assert.equal(tool.inputSchema.properties.plan.type, 'array');
   assert.equal(tool.inputSchema.properties.plan.items.type, 'string');
 });
@@ -117,7 +120,7 @@ test('the answer and the outcome of finish are required: a run without an answer
 
 test('the query of find is required', () => {
   const tool = TOOL_MAP.get('find')!;
-  assert.deepEqual(tool.inputSchema.required, ['query']);
+  assert.deepEqual(tool.inputSchema.required, ['query', 'reason']);
   assert.equal(tool.inputSchema.properties.query.type, 'string');
 });
 
@@ -147,16 +150,16 @@ test('the old read and table tools are gone: read_page reads, finish.table shows
   assert.equal(read.inputSchema.properties.part.type, 'integer');
   assert.equal(read.inputSchema.properties.part.minimum, 1);
   assert.equal(read.inputSchema.properties.element_id.type, 'number');
-  assert.deepEqual(read.inputSchema.required ?? [], [], 'both are optional');
+  assert.deepEqual(read.inputSchema.required ?? [], ['reason'], 'part and element_id are optional; only the step note is asked for');
   const scroll = TOOL_MAP.get('scroll')!;
   assert.deepEqual(Object.keys(scroll.inputSchema.properties).sort(), ['direction', 'element_id', 'reason', 'x', 'y']);
 });
 
-test('take_screenshot is a tool the model can call, with only an optional reason', () => {
+test('take_screenshot is a tool the model can call, with only the step note', () => {
   const tool = TOOL_MAP.get('take_screenshot');
   assert.ok(tool, 'the screenshot tool exists');
   assert.match(tool!.description, /picture of the visible page/i);
-  assert.deepEqual(tool!.inputSchema.required ?? [], [], 'nothing is required to look at the page');
+  assert.deepEqual(tool!.inputSchema.required ?? [], ['reason'], 'nothing but the step note is required to look at the page');
   assert.equal(tool!.inputSchema.properties.reason.type, 'string');
   assert.equal(tool!.inputSchema.additionalProperties, false);
 });
@@ -164,7 +167,7 @@ test('take_screenshot is a tool the model can call, with only an optional reason
 test('click takes an element id OR a coordinate, and the rule is enforced by the server', () => {
   const click = TOOL_MAP.get('click')!;
   // element_id stops being required: a coordinate click has none.
-  assert.deepEqual(click.inputSchema.required ?? [], [], 'neither form is unconditionally required');
+  assert.deepEqual(click.inputSchema.required ?? [], ['reason'], 'neither form is unconditionally required');
   // The property keeps its shape, which is what the schema check reads.
   assert.equal(click.inputSchema.properties.element_id.type, 'number');
   assert.equal(click.inputSchema.properties.element_id.minimum, 1);
@@ -172,4 +175,26 @@ test('click takes an element id OR a coordinate, and the rule is enforced by the
   assert.equal(click.inputSchema.properties.x.type, 'number');
   assert.equal(click.inputSchema.properties.y.type, 'number');
   assert.equal(click.inputSchema.additionalProperties, false);
+});
+
+test('every tool but finish asks for the step note, so the model keeps its own thread', () => {
+  // The case: a run read 74 elements and never said what it was looking for. The tool arguments
+  // stay in the history, so the note of each step is what the model reads of its own thinking.
+  for (const tool of TOOL_MAP.values()) {
+    if (tool.name === 'finish') {
+      assert.equal((tool.inputSchema.required || []).includes('reason'), false, 'finish has its answer instead');
+      continue;
+    }
+    assert.ok((tool.inputSchema.required || []).includes('reason'), `${tool.name} asks for reason`);
+    assert.equal(tool.inputSchema.properties.reason.type, 'string', tool.name);
+  }
+});
+
+test('save_data takes a list of records, and finish can name a file of them', () => {
+  const save = TOOL_MAP.get('save_data')!;
+  assert.deepEqual(save.inputSchema.required, ['records', 'reason']);
+  assert.equal(save.inputSchema.properties.records.items.type, 'object');
+  const finish = TOOL_MAP.get('finish')!;
+  assert.equal(finish.inputSchema.properties.records_file.type, 'string');
+  assert.deepEqual(finish.inputSchema.properties.files.items.required, ['name', 'content']);
 });

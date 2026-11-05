@@ -52,7 +52,8 @@ import {
   userGoalEntry
 } from '../../src/background/mcp/historyEntries.ts';
 import { extractReadableAnswer } from '../../src/shared/answerText.ts';
-import { ProgressTracker, REFLECTION_TEXT } from '../../src/background/mcp/progress.ts';
+import { ProgressTracker, REFLECTION_TEXT, STALL_END_TEXT, STALL_TEXT, stepKey } from '../../src/background/mcp/progress.ts';
+import { ATTACHED_FILE_RULE, buildFinishFiles, compactToolResults, formatRunState, saveRecords, TEXT_ANSWER_TEXT, withRunState } from '../../src/background/mcp/client.ts';
 import { runFacts, TASKS, endedByHarness, onlyWaits } from './tasks.mjs';
 import { MOCK_THINKING_TEXT,
   MOCK_FAIL_PREFIX,
@@ -252,10 +253,13 @@ async function serverResult(name, args, snapshot, strip, state = {}) {
       const number = args.part === undefined || strip.readPart ? 1 : args.part;
       const part = pageTextPart(text, number);
       if (number > part.count) return `Error: Page text has only ${part.count} part${part.count === 1 ? '' : 's'}, so there is no part ${number}. Read part 1 to ${part.count}.`;
-      const body = `${hasId ? `Text of element [${args.element_id}]` : 'Page text'} (${part.note}):\n${wrapUntrusted(sourceOf(snapshot.url || ''), part.text || '(no text)')}`;
+      // The links block of the part (content/pageLinks.ts), as the snapshot recorded it per part.
+      // strip.links is the honesty case: the read lost the link targets.
+      const links = !hasId && !strip.links && Array.isArray(snapshot.linksByPart) ? snapshot.linksByPart[part.number - 1] || '' : '';
+      const body = `${hasId ? `Text of element [${args.element_id}]` : 'Page text'} (${part.note}):\n${wrapUntrusted(sourceOf(snapshot.url || ''), `${part.text || '(no text)'}${links ? `\n\n${links}` : ''}`)}`;
       const key = `${hasId ? args.element_id : ''}|${number}`;
-      const same = reads.get('last') === `${key}|${part.text}`;
-      reads.set('last', `${key}|${part.text}`);
+      const same = reads.get('last') === `${key}|${part.text}|${links}`;
+      reads.set('last', `${key}|${part.text}|${links}`);
       return `${same ? `${SAME_TEXT_NOTE}\n` : ''}${body}`;
     }
     case 'get_page_elements':
@@ -409,12 +413,17 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = TASKS[t
 
   const userMessage = `TASK: ${task.prompt}\n\nCURRENT PAGE: ${snapshot.title}\n${snapshot.url}\n\nPage preview:\n${String(snapshot.pageText || '').slice(0, 2000)}`;
   const messages = [
-    { role: 'system', content: `You are ScoutFox, an AI browser agent controlling a Chrome tab.${task.manualApprove ? '\n   - MANUAL APPROVAL IS ON: call update_plan before any other tool even for a simple task; the user must approve the plan before you act.' : ''}` },
+    // The line of the real prompt that keeps an answer from pasting the file it hands over; strip.fileRule is the negative case.
+    { role: 'system', content: `You are ScoutFox, an AI browser agent controlling a Chrome tab.${strip.fileRule ? '' : `\n   - ${ATTACHED_FILE_RULE}`}${task.manualApprove ? '\n   - MANUAL APPROVAL IS ON: call update_plan before any other tool even for a simple task; the user must approve the plan before you act.' : ''}` },
     { role: 'user', content: userMessage }
   ];
 
   let step = 0;
-  let planCursor = 0;
+  // The run's saved records (save_data), and whether a second stall in a row asked for the last round.
+  const records = [];
+  let stalledOut = false;
+  let textNudged = false;
+  let filesOut = [];
   // The client's repeat guard (progress.ts), the same module: strip.repeatGuard is the honesty case.
   const guard = new ProgressTracker();
   let outcome = null;
@@ -440,9 +449,18 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = TASKS[t
   };
   for (let round = 0; round < maxRounds; round++) {
     // strip.research is the no-research case: Settings > Research is off, so the tools are not offered.
-    const tools = strip.research ? ollamaTools.filter((t) => !RESEARCH_TOOL_NAMES.has(t.function.name)) : ollamaTools;
-    const body = { model: 'mock-agent', messages, tools, tool_choice: 'auto', stream: false };
-    sent.push(JSON.parse(JSON.stringify(messages)));
+    // After a second stall in a row the round offers only finish, with its note (runLoop in client.ts).
+    if (stalledOut) messages.push({ role: 'user', content: STALL_END_TEXT });
+    const offered = strip.research ? ollamaTools.filter((t) => !RESEARCH_TOOL_NAMES.has(t.function.name)) : ollamaTools;
+    const tools = stalledOut ? offered.filter((t) => t.function.name === 'finish') : offered;
+    // The request the client builds (requestHistory in client.ts): old results shortened in blocks,
+    // and the run state on the last message. strip.runState and strip.compaction are the honesty cases.
+    const compact = strip.compaction ? { history: messages, compacted: new Set() } : compactToolResults(messages);
+    const requestMessages = strip.runState ? compact.history : withRunState(compact.history, formatRunState({
+      task: task.prompt, planSteps, records, step, maxSteps: 250, sinceProgress: guard.stepsSinceProgress
+    }));
+    const body = { model: 'mock-agent', messages: requestMessages, tools, tool_choice: 'auto', stream: false };
+    sent.push(JSON.parse(JSON.stringify(requestMessages)));
     const res = await fetch(`${mock.url}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const data = await res.json().catch(() => ({}));
     if (res.status !== 200) {
@@ -452,6 +470,13 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = TASKS[t
     }
     const toolCalls = data.message?.tool_calls || [];
     if (!toolCalls.length) {
+      // A run that has taken steps is asked once to finish with an outcome (runLoop in client.ts).
+      // strip.textNudge is the honesty case.
+      if (!strip.textNudge && step > 0 && !stalledOut && !textNudged) {
+        textNudged = true;
+        messages.push({ role: 'assistant', content: data.message?.content || '' }, { role: 'user', content: TEXT_ANSWER_TEXT });
+        continue;
+      }
       // A plain-text reply completes the run, like the client handles it. The client pulls the
       // readable part out of a JSON answer, so the walk does the same: a walk that kept the raw
       // JSON would check a different thing than the engine does.
@@ -468,17 +493,64 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = TASKS[t
     // tool block, which is what the client does (runLoop in client.ts).
     const pictures = [];
     let reflect = false;
+    let stall = 0;
     for (const tc of normalized) {
       const name = tc.function.name;
       const args = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments;
+      // The files of a finish are checked before it is a step (executeToolCall in client.ts): a
+      // refused finish is answered and the run goes on, with no row. strip.jsonCheck is the honesty case.
+      if (name === 'finish') {
+        const built = strip.jsonCheck && Array.isArray(args.files)
+          ? args.files.map((f) => ({ name: f.name, mime: 'application/json', content: f.content }))
+          : buildFinishFiles(args, records);
+        if (typeof built === 'string' && !stalledOut) {
+          messages.push({ role: 'tool', tool_call_id: tc.id, content: built });
+          continue;
+        }
+        // In the last round there is no next one: the bad file is left out and the answer says so.
+        if (typeof built === 'string') args.answer = `${String(args.answer || '')}\n\n(The file could not be made: ${built.replace(/^Error:\s*/, '')})`;
+        filesOut = typeof built === 'string' ? [] : built;
+      }
       step += 1;
       const action = mapToolToAction(name, args);
       if (action) history.push(agentResponseEntry(step, String(args.reason || ''), action, JSON.stringify(tc)));
+      // update_plan (updatePlan in client.ts): a new plan replaces the old one, done marks the
+      // steps the model finished; nothing else marks them. strip.planMarks is the honesty case.
+      let planMoved = false;
+      let planReply = null;
       if (name === 'update_plan') {
-        planSteps.push(...(args.plan || []).map((text) => ({ text, status: 'pending' })));
+        const given = Array.isArray(args.plan) ? args.plan.map((t) => String(t).trim()).filter(Boolean) : [];
+        const plan = given.length ? given : null;
+        const done = Array.isArray(args.done) ? args.done.filter((n) => Number.isInteger(n) && n >= 1) : [];
+        if (plan === null && !planSteps.length) planReply = 'Error: there is no plan yet. Call update_plan with plan (the steps) first.';
+        else if (plan === null && !done.length) planReply = 'Error: update_plan needs plan (the steps), done (the numbers of finished steps), or both.';
+        else {
+          const same = plan === null || (plan.length === planSteps.length && plan.every((t, i) => t === planSteps[i].text));
+          // A new plan is approved in this walk the way the harness approves the card (manual) or the mode does (auto).
+          const head = !same || !planSteps.length ? 'Plan approved. Execute the plan step by step.' : 'Plan updated.';
+          if (!same || !planSteps.length) {
+            planSteps.splice(0, planSteps.length, ...plan.map((text) => ({ text, status: 'pending' })));
+            planMoved = true;
+          }
+          const outOfRange = done.filter((n) => n > planSteps.length);
+          for (const n of strip.planMarks ? [] : done) {
+            if (planSteps[n - 1] && planSteps[n - 1].status !== 'completed') {
+              planSteps[n - 1] = { ...planSteps[n - 1], status: 'completed' };
+              planMoved = true;
+            }
+          }
+          const note = outOfRange.length ? ` There is no step ${outOfRange.join(', ')}: the plan has ${planSteps.length}.` : '';
+          planReply = `${head} ${planSteps.filter((st) => st.status === 'completed').length} of ${planSteps.length} steps done.${note}`;
+        }
       }
       if (name === 'click') tally.messages.EXECUTE_ACTION = (tally.messages.EXECUTE_ACTION || 0) + 1;
-      let content = await serverResult(name, args, snapshot, strip, {
+      // save_data and the files of a finish are the client's own (saveRecords, buildFinishFiles).
+      let saved = 0;
+      let content = (name === 'save_data' ? (() => {
+        const out = saveRecords(records, args);
+        saved = out.saved || 0;
+        return out.text;
+      })() : name === 'update_plan' ? planReply : null) ?? await serverResult(name, args, snapshot, strip, {
         frame: state.frame,
         shuffled: state.shuffled,
         pageSignature: state.pageSignature,
@@ -518,24 +590,22 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = TASKS[t
       if (name === 'take_screenshot') {
         history.push(screenshotResultEntry(step, !failed, content.length > 200 ? `${content.slice(0, 199)}…` : content,
           failed ? undefined : { imageId: `shot-walk-${step}`, imageWidth: MOCK_SHOT_WIDTH, imageHeight: MOCK_SHOT_HEIGHT }));
-      } else {
+      } else if (name !== 'update_plan') {
+        // update_plan has no row of its own (executeToolCall): it is the plan checklist.
         history.push(executionResultEntry(step, !failed, content.length > 200 ? `${content.slice(0, 199)}…` : content));
       }
-      // The client's advancePlanChecklist: the plan step this tool worked on becomes completed.
-      // A step that failed does not tick anything off.
-      if (name !== 'update_plan' && !failed && planSteps.length) {
-        const at = Math.min(planCursor, planSteps.length - 1);
-        if (planSteps[at] && planSteps[at].status !== 'completed') {
-          planSteps[at] = { ...planSteps[at], status: 'completed' };
-          planCursor = Math.min(planCursor + 1, planSteps.length);
-        }
-      }
       // The client's executeToolCall: a repeat hint at the end of the result, and the reflection
-      // note for after the tool block. A finish ends the run before either.
-      if (!strip.repeatGuard && !content.startsWith('TASK_COMPLETE:')) {
-        const note = guard.record(name, args, content);
-        if (note.hint) content = `${content}\n${note.hint}`;
-        if (note.reflect) reflect = true;
+      // note for after the tool block, and the stall count. A finish ends the run before either.
+      // A refused update_plan never reaches the guard (executeToolCall returns before it).
+      if (!content.startsWith('TASK_COMPLETE:') && !(name === 'update_plan' && failed)) {
+        const note = guard.record(name, args, content, {
+          url: snapshot.url || '',
+          taskProgress: name === 'save_data' ? saved > 0 : name === 'update_plan' ? planMoved : false,
+          neutral: compact.compacted.has(stepKey(name, args))
+        });
+        if (!strip.repeatGuard && note.hint) content = `${content}\n${note.hint}`;
+        if (!strip.repeatGuard && note.reflect) reflect = true;
+        if (!strip.stallGuard && note.stall > stall) stall = note.stall;
       }
       messages.push({ role: 'tool', tool_call_id: tc.id, content });
       // The honesty case (strip.picture) is the real failure mode: the capture SUCCEEDED and its
@@ -545,14 +615,20 @@ export async function walkTask(mock, taskName, { strip = {}, maxRounds = TASKS[t
       if (content.startsWith('TASK_COMPLETE:')) {
         // The client stores the outcome the finish named (finishOutcomeOf), as the panel card reads it.
         // strip.outcome is finish-ignores-outcome: the row loses the outcome, as the tamper does in the worker.
-        history.push(finishEntry(content.slice('TASK_COMPLETE:'.length).trim(), '', undefined, strip.outcome ? undefined : finishOutcomeOf(args.outcome)));
+        const said = strip.outcome ? undefined : finishOutcomeOf(args.outcome) || (stalledOut ? 'partial' : undefined);
+        // A run that says it did what was asked did every step of its plan (onTaskComplete).
+        if (said === 'done') planSteps.splice(0, planSteps.length, ...planSteps.map((st) => ({ ...st, status: 'completed' })));
+        history.push(finishEntry(content.slice('TASK_COMPLETE:'.length).trim(), '', undefined, said, filesOut));
         outcome = 'finish';
         break;
       }
     }
     if (pictures.length) messages.push(...pictures);
     if (outcome) break;
-    if (reflect) messages.push({ role: 'user', content: REFLECTION_TEXT });
+    // One note at most (runLoop in client.ts): a second stall leads to the finish-only round.
+    if (stall === 2) stalledOut = true;
+    else if (reflect) messages.push({ role: 'user', content: REFLECTION_TEXT });
+    else if (stall === 1) messages.push({ role: 'user', content: STALL_TEXT });
   }
 
   const facts = runFacts({
@@ -712,7 +788,17 @@ function validatorChecks() {
   check('a wrong type is rejected', validateToolArgs(schema, { element_id: '3' }).some((e) => /"element_id" must be a number/.test(e)));
   check('an enum violation is rejected', validateToolArgs(schema, { element_id: 1, direction: 'sideways' }).some((e) => /"direction" must be one of/.test(e)));
   check('a number below the minimum is rejected', validateToolArgs(schema, { element_id: 0 }).some((e) => /"element_id" must be >= 1/.test(e)));
-  check('a non-string array item is rejected', validateToolArgs(schema, { element_id: 1, plan: ['a', 2] }).some((e) => /"plan" must be an array of strings/.test(e)));
+  check('a non-string array item is rejected', validateToolArgs(schema, { element_id: 1, plan: ['a', 2] }).some((e) => /"plan\[1\]" must be a string/.test(e)));
+  // The shapes of the newer tools: integer lists (update_plan done), object lists (save_data
+  // records), and objects with their own required fields (finish files).
+  const planSchema = ollamaTools.find((t) => t.function.name === 'update_plan').function.parameters;
+  check('a non-integer plan mark is rejected', validateToolArgs(planSchema, { done: [1, 'two'], reason: 'r' }).some((e) => /"done\[1\]" must be an integer/.test(e)));
+  check('a plan mark below 1 is rejected', validateToolArgs(planSchema, { done: [0], reason: 'r' }).some((e) => /"done\[0\]" must be >= 1/.test(e)));
+  const saveSchema = ollamaTools.find((t) => t.function.name === 'save_data').function.parameters;
+  check('a record that is not an object is rejected', validateToolArgs(saveSchema, { records: [{ a: 1 }, 'b'], reason: 'r' }).some((e) => /"records\[1\]" must be an object/.test(e)));
+  check('records without a reason are rejected', validateToolArgs(saveSchema, { records: [{ a: 1 }] }).some((e) => /missing required argument "reason"/.test(e)));
+  check('a finish file without content is rejected', validateToolArgs(finishSchema0(), { answer: 'x', outcome: 'done', files: [{ name: 'a.json' }] }).some((e) => /missing required argument "files\[0\]\.content"/.test(e)));
+  check('a finish file with an unknown field is rejected', validateToolArgs(finishSchema0(), { answer: 'x', outcome: 'done', files: [{ name: 'a.json', content: '1', path: '/tmp' }] }).some((e) => /unknown argument "files\[0\]\.path"/.test(e)));
   // The engine's finish requires an outcome: a mock finish without one, or with an unknown one, is a 501, not a silent drift.
   const finishSchema = ollamaTools.find((t) => t.function.name === 'finish').function.parameters;
   check('a finish without an outcome is rejected by the engine schema', validateToolArgs(finishSchema, { answer: 'x' }).some((e) => /missing required argument "outcome"/.test(e)));
@@ -723,6 +809,11 @@ function validatorChecks() {
 // ---------------------------------------------------------------------------------------------
 // The scripted walks, judged by the same checks as the smoke run
 // ---------------------------------------------------------------------------------------------
+
+/** The finish tool's parameters as a request carries them. */
+function finishSchema0() {
+  return ollamaTools.find((t) => t.function.name === 'finish').function.parameters;
+}
 
 async function walkChecks(mock) {
   for (const name of Object.keys(TASKS)) {
@@ -758,10 +849,20 @@ async function honestyChecks(mock) {
     // A run that is not offered web_search and fetch_url (no-research) must not answer the research task.
     { task: 'research-then-answer', strip: { research: true }, needs: 'the research tools' },
     // A fetched page whose attributes leak into its text (html-regex-tags) must not pass the research task.
-    { task: 'research-then-answer', strip: { markup: true }, needs: 'page text free of markup' }
+    { task: 'research-then-answer', strip: { markup: true }, needs: 'page text free of markup' },
+    // A read without the link targets (no-link-targets) cannot give a credential URL.
+    { task: 'credentials-json', strip: { links: true }, needs: 'the link targets in the read' },
+    // A request without the run state (no-run-state) does not show the saved records.
+    { task: 'credentials-json', strip: { runState: true }, needs: 'the run state' },
+    // update_plan {done} that marks nothing (plan-marks-ignored) leaves the plan unfinished in the run state.
+    { task: 'credentials-json', strip: { planMarks: true }, needs: 'the plan marks' },
+    // A loop that never says the run stalled (no-stall-guard) leaves the wandering model reading on.
+    { task: 'stall-wander', strip: { stallGuard: true }, needs: 'the stall note', maxRounds: 60 },
+    { task: 'stall-recover', strip: { stallGuard: true }, needs: 'the stall note', maxRounds: 60 },
+    { task: 'stall-out', strip: { stallGuard: true }, needs: 'the finish-only round after a second stall', maxRounds: 60 }
   ];
-  for (const { task, strip, needs } of cases) {
-    const { facts, problems } = await walkTask(mock, task, { strip });
+  for (const { task, strip, needs, maxRounds } of cases) {
+    const { facts, problems } = await walkTask(mock, task, { strip, ...(maxRounds ? { maxRounds } : {}) });
     const failed = problems.length > 0 && facts.answer && facts.answer.includes(MOCK_FAIL_PREFIX);
     check(`honesty ${task} without ${needs}: the run fails with MOCK-FAIL`, failed, problems.join(' | ') || 'the walk unexpectedly passed');
   }
@@ -770,6 +871,27 @@ async function honestyChecks(mock) {
   for (const task of ['stuck-recovery', 'stuck-recovery-manual', 'partial-answer']) {
     const { problems } = await walkTask(mock, task, { strip: { outcome: true } });
     check(`negative ${task} without the finish outcome: the run fails`, problems.some((p) => /finish outcome is null, expected "(blocked|partial)"/.test(p)), problems.join(' | ') || 'the walk unexpectedly passed');
+  }
+  // A finish whose JSON file is never checked (no-json-check) hands the user a broken file: the
+  // model is fine, so no MOCK-FAIL, but the run must fail its own checks.
+  {
+    const { problems } = await walkTask(mock, 'bad-json', { strip: { jsonCheck: true } });
+    check('negative bad-json without the JSON check: the run fails', problems.some((p) => /never refused/.test(p)), problems.join(' | ') || 'the walk unexpectedly passed');
+  }
+  // A text answer that is never asked to become a finish (no-text-nudge) ends the run with no outcome.
+  {
+    const { problems } = await walkTask(mock, 'text-then-finish', { strip: { textNudge: true } });
+    check('negative text-then-finish without the finish note: the run fails', problems.some((p) => /expected "done"/.test(p)), problems.join(' | ') || 'the walk unexpectedly passed');
+  }
+  // Without the attached-file line (answer-repeats-file) the answer pastes the whole file again.
+  {
+    const { problems } = await walkTask(mock, 'credentials-json', { strip: { fileRule: true } });
+    check('negative credentials-json without the attached-file rule: the run fails', problems.some((p) => /repeats 10 of the 10/.test(p)), problems.join(' | ') || 'the walk unexpectedly passed');
+  }
+  // Without the context compaction (no-compaction) the requests of a long run keep growing.
+  {
+    const { problems } = await walkTask(mock, 'long-read', { strip: { compaction: true } });
+    check('negative long-read without the compaction: the run fails', problems.some((p) => /not bounded|never shortened/.test(p)), problems.join(' | ') || 'the walk unexpectedly passed');
   }
 }
 

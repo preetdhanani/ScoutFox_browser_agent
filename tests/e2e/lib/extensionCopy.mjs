@@ -117,8 +117,8 @@ export const TAMPERS = {
   'no-repeat-guard': {
     does: 'turns the repeat guard off (no repeat hint, no reflection note, the old loop): the dead click of stuck-recovery is repeated until the model gives up, so stuck-recovery must fail',
     apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'),
-      'const guard = this.progress.record(name, args, resultText);',
-      'const guard = { hint: null, reflect: false, noProgressInWindow: 0, repeats: 0 };')
+      'const content = guard.hint ? `${resultText}\\n${guard.hint}` : resultText;',
+      'guard.hint = null; guard.reflect = false; const content = resultText;')
   },
   'no-research': {
     does: 'stops offering web_search and fetch_url to the model, as if Settings > Research were off: research-then-answer cannot find the fact outside the tab, so it must fail',
@@ -137,6 +137,50 @@ export const TAMPERS = {
     apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'const page = kind === "html" ? readHtml(fetched.text) : null;',
       'const page = kind === "html" ? { title: "", text: fetched.text.replace(/<\\/?([a-z][a-z0-9-]*)\\b[^>]*>/gi, "\\n").replace(/\\n\\s*/g, "\\n").trim() } : null;')
   },
+  'no-link-targets': {
+    does: 'makes read_page drop the links block of its part (the old read: link words, never where they go): credentials-json cannot see one credential URL, so it must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'const body = typeof read.links === "string" && read.links ? `${text}\\n\\n${read.links}` : text;', 'const body = text;')
+  },
+  'no-run-state': {
+    does: 'sends every request without the run state on its last message: the model cannot see what it saved, so credentials-json must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'return withRunState(compact.history, this.runStateText());', 'return compact.history;')
+  },
+  'plan-marks-ignored': {
+    does: 'makes update_plan {done} mark nothing (the plan never moves on): credentials-json must fail on the plan marks in the run state',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'for (const n of done) if (n <= steps.length', 'for (const n of []) if (n <= steps.length')
+  },
+  'no-stall-guard': {
+    does: 'never tells the model it stalled (the tracker never reports a stall: no note, no finish-only round): the wandering models of stall-wander, stall-recover and stall-out read on until they give up, so they must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'return this.stalls >= 2 ? 2 : 1;', 'return 0;')
+  },
+  'no-json-check': {
+    does: 'accepts a JSON file of finish without parsing it: bad-json hands the user a broken file, so it must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'const problem = jsonProblem(f.content);', 'const problem = null;')
+  },
+  'files-not-stored': {
+    does: 'drops the files from the finish row: the card offers nothing to download, so credentials-json must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'if (files && files.length) entry.files', 'if (false) entry.files')
+  },
+  'no-text-nudge': {
+    does: 'ends a run on a plain-text answer at once, as before (no note asking for finish): text-then-finish ends with no outcome, so it must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'if (!atLimit && this.step > 0 && !this.textNudged) {', 'if (false) {')
+  },
+  'no-compaction': {
+    does: 'sends every old tool result whole on every request: long-read\'s requests keep growing, so it must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'const compact = compactToolResults(history);', 'const compact = { history, compacted: new Set() };')
+  },
+  'no-code-box': {
+    does: 'turns the fence parser off: a ```json block of the answer shows as raw text with no code box, so credentials-json must fail',
+    apply: (dir) => replaceOnce(panelBundle(dir, 'no-code-box'), 'const fence = matchFenceOpen(line);', 'const fence = null;')
+  },
+  'chip-downloads': {
+    does: 'makes a file chip download its file at once, as before (no preview): credentials-json finds no preview, so it must fail',
+    apply: (dir) => replaceOnce(panelBundle(dir, 'chip-downloads'), 'openFilePreview(fileChip.getAttribute("data-file"))', 'downloadShownFile(fileChip.getAttribute("data-file"))')
+  },
+  'answer-repeats-file': {
+    does: 'drops the prompt line that keeps an answer from pasting the file it hands over: the mock pastes all ten records, so credentials-json must fail',
+    apply: (dir) => replaceOnce(inside(dir, 'background/sw.js'), 'do not paste the whole file into the answer', 'paste the file into the answer')
+  },
   'broken-net-recorder': {
     does: 'makes content/net-recorder.js (the MAIN-world content script) throw when it loads (the fixture page checks must fail)',
     apply: (dir) => prepend(inside(dir, 'content/net-recorder.js'), 'throw new Error(\'recorder boom (tamper=broken-net-recorder)\');\n')
@@ -149,10 +193,12 @@ export const TAMPERS = {
       const code = fs.readFileSync(file, 'utf8');
       const at = code.indexOf(from);
       if (at < 0 || code.indexOf(from, at + 1) >= 0) throw new Error('tamper=bad-tool-schema: expected exactly one read_page tool definition in background/sw.js');
-      const schema = code.indexOf('inputSchema: {\n\t\t\t\ttype: "object",', at);
-      if (schema < 0) throw new Error('tamper=bad-tool-schema: the read_page tool has no inputSchema');
-      const insertAt = schema + 'inputSchema: {\n\t\t\t\ttype: "object",'.length;
-      fs.writeFileSync(file, `${code.slice(0, insertAt)}\n\t\t\t\trequired: null,${code.slice(insertAt)}`);
+      // The schema's own required list is replaced: a second "required" key added before it would
+      // be overwritten by it, and the control would quietly test nothing.
+      const required = '\t\t\t\trequired: ["reason"],';
+      const schema = code.indexOf(required, at);
+      if (schema < 0 || schema > code.indexOf('name: "get_page_elements"', at)) throw new Error('tamper=bad-tool-schema: the read_page tool has no required list');
+      fs.writeFileSync(file, `${code.slice(0, schema)}\t\t\t\trequired: null,${code.slice(schema + required.length)}`);
     }
   },
   'scroll-lies': {
@@ -179,6 +225,14 @@ export const TAMPERS = {
 };
 
 /** A path in the copy. Anything that would leave the copy is an error, so dist/ can never be hit. */
+/** The side panel's built script, named by its <script src> (the bundle name carries a hash). */
+function panelBundle(dir, tamper) {
+  const html = fs.readFileSync(inside(dir, 'sidepanel/sidepanel.html'), 'utf8');
+  const src = /<script\b[^>]*\bsrc="([^"]+)"/.exec(html)?.[1];
+  if (!src) throw new Error(`tamper=${tamper}: sidepanel.html has no <script src>`);
+  return inside(dir, src.replace(/^\/+/, ''));
+}
+
 function inside(dir, rel) {
   const file = path.resolve(dir, rel);
   if (!file.startsWith(dir + path.sep)) throw new Error(`tamper: ${file} is outside the extension copy`);

@@ -128,7 +128,7 @@ export function normalizePageText(text: string): string {
 export const PAGE_TEXT_PART = 3000;
 
 /** One part of a paged read: its text, the note that says where it is, and how many parts there are. */
-export interface PageTextPart { text: string; note: string; last: boolean; count: number; number: number }
+export interface PageTextPart { text: string; note: string; last: boolean; count: number; number: number; start: number; end: number }
 
 /**
  * Part `number` (1-based) of the text split into PAGE_TEXT_PART parts at line boundaries. Stateless: the same
@@ -143,7 +143,7 @@ export function pageTextPart(text: string, number: number, nextTool = 'read_page
   const last = i === parts.length - 1;
   const next = last ? 'end of the text' : `next: ${nextTool} with part ${i + 2}`;
   const chars = text.length === 0 ? '0 chars' : `chars ${start + 1}-${end} of ${text.length}`;
-  return { text: text.slice(start, end), note: `part ${i + 1} of ${parts.length}, ${chars}, ${next}`, last, count: parts.length, number: i + 1 };
+  return { text: text.slice(start, end), note: `part ${i + 1} of ${parts.length}, ${chars}, ${next}`, last, count: parts.length, number: i + 1, start, end };
 }
 
 /** How many parts a paged read of this text has. */

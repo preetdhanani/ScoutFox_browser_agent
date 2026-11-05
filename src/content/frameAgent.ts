@@ -17,7 +17,8 @@
  * does nothing in the top frame, which has the full content script.
  */
 
-import { extractFullPageTextFromDocument } from './pageText.ts';
+import { extractFullPageTextFromDocument, readRootOf } from './pageText.ts';
+import { collectLinks } from './pageLinks.ts';
 import { maskSensitiveFields, masksStillHold, removeSensitiveMasks } from './screenshotPrivacy.ts';
 import { runScrollAction } from './scrollActions.ts';
 import { framePathKeyOf, framePathOf, pathKey, shownFrames } from './frameIds.ts';
@@ -49,7 +50,11 @@ export async function answerFrameMessage(request: any, doc: Document, win: Windo
       try {
         origin = win.location.origin;
       } catch (_) {}
-      return { success: true, origin, text: String(text || '').slice(0, FRAME_TEXT_CAP) };
+      let base = 'https://localhost/';
+      try {
+        base = win.location.href;
+      } catch (_) {}
+      return { success: true, origin, text: String(text || '').slice(0, FRAME_TEXT_CAP), links: collectLinks(readRootOf(doc), base) };
     }
     case 'FRAME_MASK': {
       // The path is read now, not at discovery: the frame that drew the covers is the one confirmed.

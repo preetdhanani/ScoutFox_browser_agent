@@ -73,6 +73,8 @@ export function mapToolToAction(name: string, args: Record<string, any> | null):
       return { action: 'go_forward' };
     case 'update_plan':
       return null;
+    case 'save_data':
+      return { action: 'save_data', count: Array.isArray(a.records) ? a.records.length : 0 };
     case 'finish':
       return { action: 'finish' };
     default:
@@ -172,9 +174,17 @@ export function finishOutcomeOf(value: unknown): FinishOutcome | undefined {
  * the user reads. `outcome` is how the run went (done, partial, blocked); a plain-text reply
  * that never called finish has none.
  */
-export function finishEntry(answer: string, evidence = '', table?: any, outcome?: FinishOutcome): HistoryEntry {
+/** A file the run hands the user with its answer (finish records_file or files). */
+export interface FinishFile {
+  name: string;
+  mime: string;
+  content: string;
+}
+
+export function finishEntry(answer: string, evidence = '', table?: any, outcome?: FinishOutcome, files?: FinishFile[]): HistoryEntry {
   const entry: any = evidence ? { type: 'finish', answer, evidence } : { type: 'finish', answer };
   if (table) entry.table = table;
   if (outcome) entry.outcome = outcome;
+  if (files && files.length) entry.files = files.map((f) => ({ name: f.name, mime: f.mime, content: f.content }));
   return entry;
 }

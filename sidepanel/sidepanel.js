@@ -2284,6 +2284,8 @@ function buildTurns(history) {
       cur.table = item.table || null;
       cur.findings = item.findings || null;
       cur.runStats = item.runStats || null;
+      // The files the run hands over with its answer (finish records_file or files).
+      cur.files = Array.isArray(item.files) ? item.files.filter((f) => f && typeof f.name === 'string' && typeof f.content === 'string') : null;
     } else if (item.type === 'partial_result') {
       // The run ended before it finished (a Stop, the step cap, a blocked site, a stop-early, unusable
       // model replies). It has an answer slot like a finish, but renderFinishCard never calls it Done.
@@ -2360,6 +2362,12 @@ function describeAction(action, outcome) {
       return { icon: ICONS.keyboard, text: `Pressed ${quote([...mods, key].join('+'))}` };
     }
     case 'wait':          return { icon: ICONS.clock, text: `Waited ${escapeHtml(String(action.amount || 1))}s` };
+    case 'save_data': {
+      // The engine counts what was new and what is saved in all: the row says that, not what was sent.
+      const saved = /^Saved \d+ new records? \(\d+ in total\)/.exec(String((outcome && outcome.message) || ''));
+      const n = Number(action.count) || 0;
+      return { icon: ICONS.doc, text: saved ? escapeHtml(saved[0]) : `Saved ${n} record${n === 1 ? '' : 's'}` };
+    }
     case 'finish':
       // A finish the engine's answer audit sent back is not a finish: the run went on. Say so, and why.
       return outcome && outcome.finishRefused
@@ -2582,6 +2590,126 @@ function failedStepsNote(count) {
  * so in the answer still did not do the task: a green "Done" next to "the click failed" is the
  * one thing a user must never be shown, because it is the green tick on a run that did nothing.
  */
+/**
+ * The files of a finish, one chip each with its name and size. A click opens the file's preview,
+ * where the reader can look at it, copy it, or download it (always the user's click, never on its
+ * own). The content stays in the history row; the chip only names it by turn and index, and the
+ * click looks it up in shownFiles.
+ */
+const shownFiles = new Map();
+
+function fileSize(chars) {
+  const bytes = new Blob([chars]).size;
+  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
+}
+
+function renderFileChips(turn) {
+  const files = Array.isArray(turn.files) ? turn.files : [];
+  if (!files.length) return '';
+  const chips = files.map((f, i) => {
+    const key = `${turn.turn}:${i}`;
+    shownFiles.set(key, f);
+    return `<button type="button" class="file-chip" data-file="${escapeHtml(key)}" title="Preview ${escapeHtml(f.name)}" aria-haspopup="dialog">${ICONS.doc}<span class="file-name">${escapeHtml(f.name)}</span><span class="file-size">${escapeHtml(fileSize(f.content))}</span></button>`;
+  }).join('');
+  return `<div class="finish-files">${chips}</div>`;
+}
+
+/** Saves one file of a finish card through the browser's own download, named as the run named it. */
+function downloadShownFile(key) {
+  const file = shownFiles.get(key);
+  if (!file) {
+    showToast('This file is no longer kept.');
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([file.content], { type: file.mime || 'text/plain' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = file.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+/** Folds or unfolds one code box, and remembers it: the timeline is rewritten on every update. */
+function toggleCodeFold(button) {
+  const box = button.closest('.code-box');
+  if (!box) return;
+  const key = box.getAttribute('data-code-key');
+  const folded = box.classList.toggle('folded');
+  if (folded) unfoldedCode.delete(key);
+  else unfoldedCode.add(key);
+  button.setAttribute('aria-expanded', folded ? 'false' : 'true');
+  button.textContent = folded ? `Show all ${button.getAttribute('data-lines')} lines` : 'Show less';
+}
+
+/** The text a preview shows: a JSON file pretty-printed when it parses, every other file as written. */
+function previewText(file) {
+  const content = String(file.content == null ? '' : file.content);
+  if (/\.json$/i.test(file.name || '')) {
+    try {
+      return { text: JSON.stringify(JSON.parse(content), null, 2), lang: 'json' };
+    } catch { /* shown as written */ }
+  }
+  const ext = (/\.([a-z0-9]+)$/i.exec(file.name || '') || [])[1] || '';
+  return { text: content, lang: ext.toLowerCase() === 'json' ? 'json' : '' };
+}
+
+/**
+ * The preview of one file of a finish card: a native modal dialog on document.body, outside the
+ * timeline (which is rewritten on every update), so it stays open while a run goes on. Escape,
+ * the focus trap and the backdrop come with showModal. Copy copies the file as it is stored,
+ * Download saves it through the browser's own download.
+ */
+let filePreviewDialog = null;
+
+function filePreview() {
+  if (filePreviewDialog) return filePreviewDialog;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'file-preview';
+  dialog.setAttribute('aria-labelledby', 'filePreviewName');
+  dialog.innerHTML = `<div class="file-preview-head">${ICONS.doc}<div class="file-preview-title"><span class="file-name" id="filePreviewName"></span><span class="file-size"></span></div><button type="button" class="file-preview-btn file-copy">Copy</button><button type="button" class="file-preview-btn file-download">Download</button><button type="button" class="file-preview-btn file-close" aria-label="Close preview">${ICONS.cross}</button></div><div class="file-preview-body"></div>`;
+  dialog.addEventListener('click', (e) => {
+    const key = dialog.getAttribute('data-file');
+    if (e.target === dialog || e.target.closest('.file-close')) {
+      dialog.close();
+      return;
+    }
+    const copy = e.target.closest('.file-copy');
+    if (copy) {
+      const file = shownFiles.get(key);
+      copyText(file ? String(file.content) : '').then((ok) => flashCopied(copy, ok && !!file));
+      return;
+    }
+    if (e.target.closest('.file-download')) downloadShownFile(key);
+  });
+  dialog.addEventListener('close', () => {
+    // The chip that opened it may have been drawn again since: find it by its key.
+    const key = dialog.getAttribute('data-file');
+    const chip = key ? document.querySelector(`.file-chip[data-file="${CSS.escape(key)}"]`) : null;
+    if (chip) chip.focus();
+  });
+  document.body.appendChild(dialog);
+  filePreviewDialog = dialog;
+  return dialog;
+}
+
+function openFilePreview(key) {
+  const file = shownFiles.get(key);
+  if (!file) {
+    showToast('This file is no longer kept.');
+    return;
+  }
+  const dialog = filePreview();
+  const { text, lang } = previewText(file);
+  dialog.setAttribute('data-file', key);
+  dialog.querySelector('.file-name').textContent = file.name;
+  dialog.querySelector('.file-size').textContent = fileSize(file.content);
+  dialog.querySelector('.file-preview-body').innerHTML = renderCodeBox(text, lang, { head: false, fold: false });
+  if (!dialog.open) dialog.showModal();
+  dialog.querySelector('.file-close').focus();
+}
+
 function renderFinishCard(turn, findings = null) {
   if (turn.partial) return renderPartialCard(turn, findings);
   const audit = normalizeAudit(turn.audit);
@@ -2601,7 +2729,7 @@ function renderFinishCard(turn, findings = null) {
   // A step of this turn failed. The run reported it and ended, so the card is a red one: the
   // user has to see that the task did not go through, not a green tick.
   const hadFailedStep = !!turn.failed;
-  const body = `<div class="finish-body">${formatMarkdownText(shown)}</div>`;
+  const body = `<div class="finish-body">${formatMarkdownText(shown)}</div>${renderFileChips(turn)}`;
   // The supporting material of a structured answer, in a section the reader opens. It is shown
   // only when there is something to show, and never in place of the answer.
   const evidenceText = extracted.evidence || turn.evidence || '';
@@ -2610,7 +2738,7 @@ function renderFinishCard(turn, findings = null) {
     : '';
 
   const allFindings = (findings && findings.length > 0) ? findings : (turn.findings || (turn.table && turn.table.rows ? turn.table.rows : []));
-  const hasEmbeddedTable = hasMarkdownBlocks(shown) && String(shown).includes('|');
+  const hasEmbeddedTable = hasMarkdownTable(shown);
   const findingsHtml = (allFindings && allFindings.length > 0 && !hasEmbeddedTable) ? renderProvenanceFindingsTable(allFindings) : '';
 
   if (!audit && turn.outcome && !isFailedAnswer) {
@@ -2713,7 +2841,7 @@ function renderPartialCard(turn, findings = null) {
   const body = shown ? `<div class="finish-body">${formatMarkdownText(shown)}</div>` : '';
 
   const allFindings = (findings && findings.length > 0) ? findings : (turn.findings || (turn.table && turn.table.rows ? turn.table.rows : []));
-  const hasEmbeddedTable = hasMarkdownBlocks(shown) && String(shown).includes('|');
+  const hasEmbeddedTable = hasMarkdownTable(shown);
   const findingsHtml = (allFindings && allFindings.length > 0 && !hasEmbeddedTable) ? renderProvenanceFindingsTable(allFindings) : '';
 
   // An unverified audit turns the edge red, as on any other card (the .unverified rule comes after .partial).
@@ -3119,6 +3247,25 @@ function initTimelineInteraction() {
       return;
     }
 
+    const fileChip = e.target.closest('.file-chip');
+    if (fileChip) {
+      openFilePreview(fileChip.getAttribute('data-file'));
+      return;
+    }
+
+    const codeCopy = e.target.closest('.code-copy');
+    if (codeCopy) {
+      const code = codeCopy.closest('.code-box')?.querySelector('code');
+      copyText(code ? code.textContent : '').then((ok) => flashCopied(codeCopy, ok));
+      return;
+    }
+
+    const codeFold = e.target.closest('.code-fold');
+    if (codeFold) {
+      toggleCodeFold(codeFold);
+      return;
+    }
+
     const copyBtn = e.target.closest('.btn-copy-findings-table');
     if (copyBtn) {
       const container = copyBtn.closest('.provenance-findings-container');
@@ -3268,7 +3415,8 @@ function initLogInteractions() {
  *   legacy - **bold** and "- item" bullets on pre-wrapped text. It is what the panel always did and
  *            it is still what an answer gets when it has no heading and no table, byte for byte
  *            (tests/sidepanelMarkdown.test.js holds a copy of the old function as an oracle).
- *   blocks - used only when the answer has an ATX heading ("## Prices found") or a pipe table.
+ *   blocks - used only when the answer has an ATX heading ("## Prices found"), a pipe table, a
+ *            fenced code block or an http(s) link.
  *            Without it those showed as raw "##" and as rows of "|", which a sans-serif font makes
  *            look like a capital I. It renders headings, pipe tables, bullet and numbered lists with
  *            a hanging indent (a wrapped line lines up under its own text, not under the bullet) and
@@ -3277,8 +3425,8 @@ function initLogInteractions() {
  * Safety, the rule for both: every character of model text goes through escapeHtml BEFORE any
  * markup exists, and every tag and attribute in the output is written here, from constants. The
  * only text that reaches a class name is a fixed alignment letter or a heading level. Links are
- * not rendered at all (the legacy renderer never did, and an answer without headings must not
- * change), so a "[x](javascript:...)" or a bare URL is just text.
+ * rendered by the blocks renderer only, and only http(s) ones (richInline): "[x](javascript:...)"
+ * stays text. A fenced code block becomes a code box with a Copy button (renderCodeBox).
  *
  * Cost: one pass over the lines, and every scan below is linear. A 500-row table and a 50 000
  * character line render in a few milliseconds.
@@ -3290,9 +3438,15 @@ function formatMarkdownText(text) {
   return blocks ? renderMarkdownBlocks(blocks) : legacyMarkdown(source);
 }
 
-/** True when the answer has a heading or a table, that is, when the blocks renderer takes over. */
+/** True when the answer has a heading, a table, a code fence or a link, that is, when the blocks renderer takes over. */
 function hasMarkdownBlocks(text) {
   return !!text && parseMarkdownBlocks(String(text)) !== null;
+}
+
+/** True when the answer holds a pipe table of its own (then the findings table is not shown twice). */
+function hasMarkdownTable(text) {
+  const blocks = text ? parseMarkdownBlocks(String(text)) : null;
+  return !!blocks && blocks.some((block) => block.type === 'table');
 }
 
 // ---- legacy renderer -------------------------------------------------------------------------
@@ -3533,11 +3687,25 @@ function parseMarkdownBlocks(source) {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    // A fence comes first: inside it no other block exists, so "# x" or "| a |" stay code.
+    const fence = matchFenceOpen(line);
+    if (fence) {
+      const body = [];
+      let j = i + 1;
+      for (; j < lines.length && !isFenceClose(lines[j], fence); j++) body.push(lines[j]);
+      blocks.push({ type: 'code', info: fence.info, text: body.join('\n') });
+      paragraph = null;
+      list = null;
+      special = true;
+      i = j;
+      continue;
+    }
     if (!line.trim()) {
       paragraph = null;
       list = null;
       continue;
     }
+    if (!special && hasLink(line)) special = true;
     const heading = matchHeading(line);
     if (heading) {
       blocks.push({ type: 'heading', level: heading.level, text: heading.text });
@@ -3580,10 +3748,195 @@ function parseMarkdownBlocks(source) {
   return special ? blocks : null;
 }
 
+/**
+ * A fence line: up to three spaces, three or more backticks or tildes, and an info string ("json").
+ * A backtick fence's info string has no backtick, so "```fence```" on one line is not a fence.
+ */
+function matchFenceOpen(line) {
+  const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!match) return null;
+  const info = match[2].trim();
+  if (match[1][0] === '`' && info.includes('`')) return null;
+  return { char: match[1][0], size: match[1].length, info };
+}
+
+/** The line that closes a fence: the same character, at least as many, nothing after them. */
+function isFenceClose(line, fence) {
+  const match = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+  return !!match && match[1][0] === fence.char && match[1].length >= fence.size;
+}
+
+/**
+ * Links in the model's RAW text: [label](http...) or a bare http(s) address. They are found before
+ * any escaping, with a character whitelist (no space, < > " ' or backtick), and the label and the
+ * address are escaped separately when the tag is written. Any other scheme never matches, so
+ * "[x](javascript:...)" stays text.
+ */
+const URL_CHARS = '[^\\s<>"\'`()]';
+const LINK = new RegExp(
+  `\\[([^\\]\\n]+)\\]\\((https?:\\/\\/${URL_CHARS}+(?:\\(${URL_CHARS}*\\)${URL_CHARS}*)*)\\)` +
+  `|(https?:\\/\\/${URL_CHARS}+(?:\\(${URL_CHARS}*\\)${URL_CHARS}*)*)`,
+  'g'
+);
+const hasLink = (text) => /https?:\/\/[^\s<>"'`]/.test(text);
+/** A bare address does not end in the sentence's punctuation. */
+const URL_TAIL = /[.,;:!?*_~]+$/;
+
+function linkTag(url, label) {
+  return `<a class="md-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+}
+
+/** Raw text to HTML: `code` spans, links, and **bold** on the text between them. */
+function richInline(text) {
+  const raw = String(text);
+  const out = [];
+  let at = 0;
+  const plain = (part) => {
+    if (!part) return;
+    let from = 0;
+    for (const match of part.matchAll(LINK)) {
+      out.push(markdownBold(escapeHtml(part.slice(from, match.index))));
+      if (match[2]) {
+        out.push(linkTag(match[2], markdownBold(escapeHtml(match[1]))));
+        from = match.index + match[0].length;
+      } else {
+        const url = match[3].replace(URL_TAIL, '');
+        out.push(url.length > 'https://'.length ? linkTag(url, escapeHtml(url)) : escapeHtml(url));
+        from = match.index + url.length;
+      }
+    }
+    out.push(markdownBold(escapeHtml(part.slice(from))));
+  };
+  for (const match of raw.matchAll(INLINE_CODE)) {
+    plain(raw.slice(at, match.index));
+    out.push(`<code class="md-code">${escapeHtml(match[1])}</code>`);
+    at = match.index + match[0].length;
+  }
+  plain(raw.slice(at));
+  return out.join('');
+}
+
 function markdownTableInline(text) {
-  return withCodeSpans(escapeHtml(text), (part) => markdownBold(
-    part.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="site-link">$1</a>')
-  ));
+  return richInline(text);
+}
+
+// ---- code boxes ------------------------------------------------------------------------------
+
+/** A code box with more lines than this folds, with a button to show all of it. */
+const CODE_FOLD_LINES = 15;
+/** The code boxes the reader unfolded, by key: the timeline is rewritten on every state update. */
+const unfoldedCode = new Set();
+/** Rendered JSON colouring, by key, so a re-render does not tokenize a long file again. */
+const codeCache = new Map();
+const CODE_CACHE_MAX = 40;
+
+/** A short, stable key for a text (FNV-1a, 32 bit, plus the length). */
+function textKey(text) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${(hash >>> 0).toString(36)}-${text.length.toString(36)}`;
+}
+
+/** Is this code JSON? Its language says so, or it has none and it parses. */
+function isJsonCode(text, lang) {
+  if (/^(json|jsonc|json5|geojson)$/i.test(lang)) return true;
+  if (lang) return false;
+  const t = text.trim();
+  if (!(t.startsWith('{') || t.startsWith('['))) return false;
+  try {
+    JSON.parse(t);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Keys, strings, numbers and true/false/null in spans. Linear: one regex pass, every piece escaped on its own. */
+const JSON_TOKEN = /("(?:[^"\\\n]|\\.)*")(\s*:)?|\b(true|false|null)\b|(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/g;
+
+function highlightJson(text) {
+  let out = '';
+  let at = 0;
+  for (const match of text.matchAll(JSON_TOKEN)) {
+    out += escapeHtml(text.slice(at, match.index));
+    if (match[1]) {
+      out += `<span class="${match[2] ? 'tok-key' : 'tok-str'}">${escapeHtml(match[1])}</span>${match[2] ? escapeHtml(match[2]) : ''}`;
+    } else {
+      out += `<span class="${match[3] ? 'tok-lit' : 'tok-num'}">${escapeHtml(match[0])}</span>`;
+    }
+    at = match.index + match[0].length;
+  }
+  return out + escapeHtml(text.slice(at));
+}
+
+function codeHtml(text, lang) {
+  if (!isJsonCode(text, lang)) return escapeHtml(text);
+  const key = textKey(text);
+  let html = codeCache.get(key);
+  if (html === undefined) {
+    html = highlightJson(text);
+    if (codeCache.size >= CODE_CACHE_MAX) codeCache.delete(codeCache.keys().next().value);
+    codeCache.set(key, html);
+  }
+  return html;
+}
+
+/**
+ * A code block as a box: the language and a Copy button on top, the code below. The Copy button
+ * copies the code element's own text, so there is no second copy of it to get out of step.
+ * `head: false` leaves the top out (the file preview has its own buttons), `fold: false` never folds.
+ */
+function renderCodeBox(text, info = '', { head = true, fold = true } = {}) {
+  const lang = String(info).split(/\s+/)[0] || '';
+  const lines = text ? text.split('\n').length : 0;
+  const key = textKey(text);
+  const foldable = fold && lines > CODE_FOLD_LINES;
+  const folded = foldable && !unfoldedCode.has(key);
+  const headHtml = head
+    ? `<div class="code-head"><span class="code-lang">${escapeHtml(info)}</span><button type="button" class="code-copy" aria-label="Copy code">Copy</button></div>`
+    : '';
+  const foldHtml = foldable
+    ? `<button type="button" class="code-fold" aria-expanded="${folded ? 'false' : 'true'}" data-lines="${lines}">${folded ? `Show all ${lines} lines` : 'Show less'}</button>`
+    : '';
+  return `<div class="code-box${folded ? ' folded' : ''}" data-code-key="${key}">${headHtml}<pre class="code-pre" tabindex="0"><code>${codeHtml(text, lang)}</code></pre>${foldHtml}</div>`;
+}
+
+/** Copies text: the async clipboard first, then a hidden textarea for a page without focus. */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* falls through to the textarea */ }
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Shows how a copy went on its button for a moment. */
+function flashCopied(button, ok, idle = 'Copy') {
+  button.textContent = ok ? 'Copied' : 'Copy failed';
+  button.classList.toggle('copied', ok);
+  clearTimeout(button._copyTimer);
+  button._copyTimer = setTimeout(() => {
+    button.textContent = idle;
+    button.classList.remove('copied');
+  }, 1500);
 }
 
 function renderMarkdownTable(table) {
@@ -3606,17 +3959,18 @@ function renderMarkdownTable(table) {
 function renderMarkdownBlocks(blocks) {
   const html = blocks.map((block) => {
     if (block.type === 'heading') {
-      return `<div class="md-h md-h${block.level}" role="heading" aria-level="${block.level}">${markdownInline(block.text)}</div>`;
+      return `<div class="md-h md-h${block.level}" role="heading" aria-level="${block.level}">${richInline(block.text)}</div>`;
     }
     if (block.type === 'table') return renderMarkdownTable(block);
+    if (block.type === 'code') return renderCodeBox(block.text, block.info);
     if (block.type === 'list') {
       const tag = block.ordered ? 'ol' : 'ul';
       const items = block.items.map((item) =>
-        `<li class="md-li${item.depth ? ` md-d${item.depth}` : ''}"><span class="md-mark" aria-hidden="true">${escapeHtml(item.marker)}</span><span class="md-li-text">${markdownInline(item.lines.join('\n'))}</span></li>`
+        `<li class="md-li${item.depth ? ` md-d${item.depth}` : ''}"><span class="md-mark" aria-hidden="true">${escapeHtml(item.marker)}</span><span class="md-li-text">${richInline(item.lines.join('\n'))}</span></li>`
       ).join('');
       return `<${tag} class="md-list" role="list">${items}</${tag}>`;
     }
-    return `<div class="md-p">${markdownInline(block.lines.join('\n'))}</div>`;
+    return `<div class="md-p">${richInline(block.lines.join('\n'))}</div>`;
   }).join('');
   return `<div class="md-doc">${html}</div>`;
 }
@@ -3636,7 +3990,7 @@ export {
   buildTurns, renderTurns, renderFinishCard, renderAuditDetails, renderPlanRows, normalizeAudit,
   planCounts, pauseReasonText, escapeHtml, initTimelineInteraction, openAuditDetails, closedAuditDetails, describeAction, firstSentence, withoutEngineNotes,
   partialSubtitle, renderState, receiveState, loadSelectedSession, finishLandingTop, finishCardKey, noteFinishCard, scrollTimelineToLatest,
-  formatMarkdownText, hasMarkdownBlocks, legacyBullets, splitTableRow,
+  formatMarkdownText, hasMarkdownBlocks, hasMarkdownTable, legacyBullets, splitTableRow, renderCodeBox, textKey, unfoldedCode,
   attachShotSlots, attachShotPicture, shotCache, shotGone,
   loadSettings, autoSaveCurrentForm, openComboboxMenu, closeComboboxMenu, updateSelectedModel,
   pickComboboxModel, initEventListeners

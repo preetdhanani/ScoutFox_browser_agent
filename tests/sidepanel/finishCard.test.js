@@ -212,18 +212,24 @@ test('an error entry also marks the turn as failed', () => {
 // 6. The card really is red
 // ---------------------------------------------------------------------------------------------
 
-test('the stylesheet has a rule for the failed card', () => {
-  assert.ok(CSS.includes('.finish-card.failed'), '.finish-card.failed has no rule');
-  assert.match(
-    CSS,
-    /\.finish-card\.failed\s*\{[^}]*border-left-color:\s*var\(--danger\)/,
-    'the failed card does not get the danger edge'
-  );
-  assert.match(
-    CSS,
-    /\.finish-card\.failed \.finish-title svg\s*\{[^}]*color:\s*var\(--danger\)/,
-    'the icon of the failed card is not in the danger colour'
-  );
+/** The declarations of the rule whose selector list holds `selector`, or ''. */
+function ruleWith(selector) {
+  for (const match of CSS.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    if (match[1].split(',').map((part) => part.trim()).includes(selector)) return match[2];
+  }
+  return '';
+}
+
+test('the stylesheet colours the status line of a failed answer red, icon and words', () => {
+  // The answer is not a box any more (no edge to colour): the status line carries the state.
+  assert.match(ruleWith('.finish-card.failed .finish-title'), /color:\s*var\(--danger\)/, 'the words of the failed status are not red');
+  assert.match(ruleWith('.finish-card.failed .finish-title svg'), /color:\s*var\(--danger\)/, 'the icon of the failed status is not red');
+});
+
+test('the answer is not a box: the card has no border and no background', () => {
+  const card = ruleWith('.finish-card');
+  assert.ok(card, 'there is a .finish-card rule');
+  assert.ok(!/border|background/.test(card), `the card rule draws a box: ${card}`);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -331,9 +337,12 @@ test('the mock failure marker wins over any outcome', () => {
   assert.match(card, /> Failed</);
 });
 
-test('the blocked card has its own danger edge in the stylesheet', () => {
-  assert.match(CSS, /\.finish-card\.blocked \{ border-left-color: var\(--danger\); \}/);
-  assert.match(CSS, /\.finish-card\.blocked \.finish-title svg \{ color: var\(--danger\); \}/);
+test('the blocked status line is red too, icon and words', () => {
+  for (const state of ['blocked', 'unconfirmed', 'unverified']) {
+    assert.match(ruleWith(`.finish-card.${state} .finish-title`), /color:\s*var\(--danger\)/, state);
+    assert.match(ruleWith(`.finish-card.${state} .finish-title svg`), /color:\s*var\(--danger\)/, state);
+  }
+  assert.match(ruleWith('.finish-card.partial .finish-title'), /color:\s*var\(--warning\)/);
 });
 
 // ---------------------------------------------------------------------------------------------
