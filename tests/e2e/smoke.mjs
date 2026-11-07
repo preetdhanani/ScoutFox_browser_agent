@@ -754,7 +754,7 @@ async function checkSidePanel(ctx) {
 }
 
 /**
- * The Tarka mark. It is a delta with a dot at its centre, drawn in one line, and it must be in
+ * The Tarka mark. It is a yantra, two interlocked triangles around one dot, and it must be in
  * the panel twice: in the header next to the name, and in the middle of the panel above "What
  * would you like to automate?".
  *
@@ -777,7 +777,7 @@ async function checkBrandMark(ctx) {
       if (!svg) return null;
       const box = svg.getBoundingClientRect();
       return {
-        path: svg.querySelector('path')?.getAttribute('d') || '',
+        paths: [...svg.querySelectorAll('path')].map((el) => el.getAttribute('d') || ''),
         dots: svg.querySelectorAll('circle').length,
         width: Math.round(box.width),
         height: Math.round(box.height),
@@ -790,14 +790,15 @@ async function checkBrandMark(ctx) {
     await page.close().catch(() => {});
   }
 
-  const MARK_PATH = 'M12 3.6 20.6 19.4H3.4Z';
+  const UP = 'M12 1.6 21 17.2H3Z';
+  const DOWN = 'M12 22.4 3 6.8h18Z';
   for (const [where, mark] of [['header', result.header], ['middle of the panel', result.middle]]) {
     if (!mark) {
       result.problems.push(`the ${where} has no Tarka mark`);
       continue;
     }
-    if (mark.path !== MARK_PATH) {
-      result.problems.push(`the ${where} does not show the Tarka mark: its shape is "${mark.path}"`);
+    if (mark.paths.length !== 2 || mark.paths[0] !== UP || mark.paths[1] !== DOWN) {
+      result.problems.push(`the ${where} does not show the Tarka mark: its shapes are ${JSON.stringify(mark.paths)}`);
     }
     if (mark.dots !== 1) {
       result.problems.push(`the ${where} shows a mark with ${mark.dots} dot(s), expected 1`);
@@ -806,7 +807,7 @@ async function checkBrandMark(ctx) {
       result.problems.push(`the ${where} shows the mark at ${mark.width}x${mark.height} px, too small to be seen`);
     }
   }
-  if (result.header && result.middle && result.header.path !== result.middle.path) {
+  if (result.header && result.middle && JSON.stringify(result.header.paths) !== JSON.stringify(result.middle.paths)) {
     result.problems.push('the mark in the header and the mark in the middle of the panel are different shapes');
   }
   return result;

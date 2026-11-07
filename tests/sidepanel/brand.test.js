@@ -1,5 +1,5 @@
 /**
- * The Tarka mark: a delta with the conclusion at its centre, in two places.
+ * The Tarka mark: a yantra, two interlocked triangles around one lit dot, in two places.
  *
  * The header mark is in the static HTML, and the mark in the middle of the panel is written by
  * the renderer in sidepanel.js, because that whole block is rebuilt when a session is cleared.
@@ -20,11 +20,13 @@ function svgsIn(html) {
   return html.match(/<svg\b[\s\S]*?<\/svg>/g) || [];
 }
 
-test('brand: the mark is a delta with a dot at its centre', () => {
-  // The delta: the classical sign of logic, drawn as one closed outline.
-  assert.match(BRAND_MARK, /<path d="M12 3\.6 20\.6 19\.4H3\.4Z"\/>/);
-  // The conclusion: one filled dot inside the delta, so it reads at 19 px.
-  assert.match(BRAND_MARK, /<circle cx="12" cy="14\.2" r="1\.5" fill="currentColor" stroke="none"\/>/);
+test('brand: the mark is a yantra, two interlocked triangles around one dot', () => {
+  // The upward triangle of the yantra.
+  assert.match(BRAND_MARK, /<path d="M12 1\.6 21 17\.2H3Z"\/>/);
+  // The downward triangle, interlocked with the first.
+  assert.match(BRAND_MARK, /<path d="M12 22\.4 3 6\.8h18Z"\/>/);
+  // The conclusion: one filled dot at the centre, so it reads at 19 px.
+  assert.match(BRAND_MARK, /<circle cx="12" cy="12" r="1\.7" fill="currentColor" stroke="none"\/>/);
   // A line drawing in the theme's own colour, so it follows the accent in light and in dark.
   assert.match(BRAND_MARK, /stroke="currentColor"/);
   assert.match(BRAND_MARK, /fill="none"/);
@@ -60,16 +62,20 @@ test('brand: the middle of the panel carries the mark above the headline', () =>
 });
 
 test('brand: the old marks are gone from the panel', () => {
-  // The mark before the delta was an eight-spoked asterisk, in three places.
+  // The mark before the yantra was an eight-spoked asterisk, in three places.
   for (const file of [HTML, PANEL_JS]) {
     assert.ok(!file.includes('M12 2.5v19'), 'the old asterisk mark must be gone');
   }
-  // The fox head from before the delta must be gone too.
+  // The fox head from before the asterisk must be gone too.
   for (const file of [HTML, PANEL_JS]) {
     assert.ok(!file.includes('M3.2 3 8.6 8.4'), 'the old fox mark must be gone');
   }
+  // The lone delta from before the yantra must be gone too.
+  for (const file of [HTML, PANEL_JS]) {
+    assert.ok(!file.includes('M12 3.6 20.6 19.4'), 'the old lone-delta mark must be gone');
+  }
   // The header and the empty state are the only places the mark appears in the static HTML.
-  assert.equal(svgsIn(HTML).filter((svg) => svg.includes('M12 3.6 20.6 19.4')).length, 2);
+  assert.equal(svgsIn(HTML).filter((svg) => svg.includes('M12 1.6 21 17.2')).length, 2);
 });
 
 test('brand: the renderer writes the same mark when it rebuilds the empty state', () => {
@@ -86,7 +92,7 @@ test('brand: the renderer writes the same mark when it rebuilds the empty state'
     'the empty state the renderer writes must use the shared mark'
   );
   // The renderer must not carry a second copy of the shape.
-  assert.ok(!PANEL_JS.includes('M12 3.6 20.6 19.4'), 'sidepanel.js must not draw the mark itself');
+  assert.ok(!PANEL_JS.includes('M12 1.6 21 17.2'), 'sidepanel.js must not draw the mark itself');
 });
 
 test('brand: the mark is sized by CSS, so one shape serves the header and the middle', () => {
