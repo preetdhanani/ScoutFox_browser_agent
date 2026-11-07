@@ -31,3 +31,8 @@ tests/e2e/screenshots/
 
 # Local bug notes
 Bugs/
+
+# Personal build notes (kept on disk, not in the repo)
+featere/
+.kilo/
+tests/e2e/verification-runs/
