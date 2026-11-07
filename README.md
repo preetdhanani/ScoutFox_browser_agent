@@ -1,37 +1,205 @@
-# ScoutFox AI Browser Agent
+# ScoutFox: Autonomous Browser Runtime for Local and Cloud AI
 
-ScoutFox is an open-source Chrome extension that uses an AI model to work in your browser for you.
-You write a task in plain words in the side panel, and ScoutFox opens the websites, reads them, clicks, types and scrolls until it has your answer.
+ScoutFox is an open-source autonomous browser agent implemented as a Chrome Manifest V3 extension.
+It executes complex, multi-step web workflows by operating inside Google Chrome's native Side Panel.
+Unlike cloud-hosted headless browser wrappers, ScoutFox runs directly inside the user's authentic browser context, executing actions via Chrome DevTools Protocol (CDP) trusted hardware events, extracting semantic accessibility trees, and grounding model assertions against an independent evidence ledger.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Runtime](https://img.shields.io/badge/Node.js-%3E%3D22.18-brightgreen.svg)](package.json)
+[![Platform](https://img.shields.io/badge/Chrome-Manifest%20V3-orange.svg)](public/manifest.json)
+[![Security Check](https://img.shields.io/badge/CSP-Zero%20Eval%20Enforced-blueviolet.svg)](scripts/evalscan.mjs)
 
-## What it can do
+```mermaid
+flowchart TD
+    User["User Task via Side Panel UI"] --> SidePanel["Side Panel (Vanilla JS + Event Bus)"]
+    SidePanel --> SW["MV3 Service Worker (AgentRunner Engine)"]
+    
+    subgraph CoreEngine ["Agent Runtime & Memory"]
+        SW --> MCP["MCP Protocol Loop (Tools & Schemas)"]
+        MCP --> LLM["LLM Translation Layer (LangChain / REST)"]
+        MCP --> Ledger["Provenance Evidence Ledger"]
+        MCP --> Gate["Finish Audit Gate (Fact Verification)"]
+    end
 
-- **Answer questions from the web.** Ask "What is the latest React version on npm?" and it finds the right site, reads the page and answers with its source.
-- **Do multi-step tasks.** It plans the work as a checklist, visits several sites, compares what it finds and checks off each step.
-- **Use the page like a person.** It clicks links and buttons, fills in fields, searches, scrolls, goes back, and handles cookie banners.
-- **Check facts outside your tab.** It can search the web and read a page, an API or a raw file (like an `install.sh`) in the background, without your cookies and without moving your tab, so a URL, version or command it gives you was checked first.
-  Search uses DuckDuckGo with no key, or your own SearXNG server; turn it off or pick the backend in Settings > Research.
-- **Look at the page.** With a model that can see pictures, it takes a screenshot when the text is not enough and can click what it sees.
-- **Work with many AI models.** OpenRouter, AgentRouter, Google Gemini, OpenAI, Anthropic Claude, NVIDIA NIM, Groq and other OpenAI-compatible servers, local models through Ollama, or your own custom endpoint.
+    subgraph BrowserControl ["Perception & Execution Control"]
+        SW --> CDP["CDP Controller (Hardware Mouse & Key Events)"]
+        SW --> Content["Content Scripts (DOMCompressor & FrameAgent)"]
+        Content --> DOM["Viewport Semantic Tree & Frame Isolation"]
+        CDP --> Page["Target Browser Page (Orange Tab Group)"]
+    end
 
-## How it works for you
+    LLM <--> CloudLocal["Ollama / Claude / OpenAI / Gemini / NIM"]
+    Page --> Ledger
+```
 
-- **One session per tab.** Each tab has its own task, history and Stop button, so two tabs can run different tasks at the same time.
-- **Your tabs stay yours.** Tabs the agent works in go into an orange ScoutFox tab group, and tabs you open yourself are never touched.
-- **You can watch every step.** The side panel shows each action as it happens, and you can pause, resume or stop the run at any time.
-- **Honest results.** The agent says how the task went when it finishes, and the final card follows it: Done, Partly done, or Could not finish (or Stopped by you).
-  A step that failed on the way is a note on the card, so a run that did not work never looks like a success, and one blocked search does not hide a correct answer.
-- **History and logs.** You can reopen past runs, and the Logs tab shows every model call and step when you want to know what happened.
+---
 
-## Safety
+## Architectural Highlights
 
-- It never types passwords, card numbers or one-time codes.
-- It never tries to solve a CAPTCHA or bot check: it stops and tells you that a person has to pass it.
-- Password, card and code fields are hidden before a screenshot is sent to the model.
-- Text from web pages and search results reaches the model marked as untrusted data, so instructions written into a page are not taken as yours.
+### 1. Dual Input Dispatch Engine (Hardware CDP + Fallback)
+ScoutFox routes input events through `chrome.debugger` to produce real OS-level dispatch sequences rather than fragile JavaScript synthetic clicks.
+- **Trusted Events:** Emits genuine `Input.dispatchMouseEvent` (hover, mouse-down, mouse-up, click) and `Input.dispatchKeyEvent` sequences.
+- **Bot Trap Resilience:** Defeats anti-automation barriers that reject `isTrusted: false` synthetic events.
+- **Selective Fallback:** Falls back to safe DOM dispatch on restricted internal schemes (`chrome://`) or native `<select>` dropdown controls.
+- **Focus Emulation:** Emulates tab window focus state across background tasks, preventing pages from throttling inactive tabs.
+
+### 2. Viewport-Ordered Perception Pipeline
+Passing raw HTML or massive DOM trees to LLMs quickly saturates prompt budgets and pollutes context.
+- **Semantic Compression (`DOMCompressor`):** Extracts an accessibility-oriented snapshot ordered by visual viewport coordinates.
+- **Stable References:** Generates ephemeral integer reference IDs for interactive controls (`[12]`) that survive DOM reflows.
+- **Deterministic Off-Screen Matching (`find_element`):** Employs weighted heuristic scoring across text, ARIA attributes, placeholders, names, and roles to resolve targets located beyond the active scroll window.
+- **Embedded Frame Agent (`frameAgent`):** Injects dedicated frame agents across nested cross-origin iframes, computing absolute coordinate offsets and boundary masks.
+
+### 3. Provenance Evidence Ledger and Anti-Hallucination Gate
+Most LLM agents blindly report their final answer without auditing whether their outputs correspond to facts on the visited pages.
+- **Independent Evidence Ledger:** Tracks every URL visited, full text segments extracted, and research documents fetched throughout the session.
+- **Pre-Finish Audit Gate:** Mechanically audits the model's generated answer before showing completion to the user.
+- **Policy Enforcement:** Enforces `send_back` (instructs model to self-correct missing facts), `annotate` (flags ungrounded claims), or `replace` (prevents hallucinated success cards).
+
+### 4. Heterogeneous Vision Coordinate Reconciliation
+Different visual frontier models disagree on coordinate spaces.
+Claude and GPT emit absolute pixel coordinates, while Nemotron, Qwen-VL, and Gemini emit normalized 0-1000 per-mille or 0-1 fractional values.
+- **Dynamic Tool Schema Rewriting:** Rewrites tool definitions per active provider (`clickToolFor`).
+- **Coordinate Space Normalizer:** Detects the model's coordinate convention and applies scale normalization into physical hardware device pixels.
+- **Sub-pixel Snapping:** Corrects near-miss clicks within bounding box tolerances before dispatch.
+
+### 5. KV-Cache-Friendly Memory and Compaction
+Context exhaustion is managed with architectural awareness of LLM provider prefix caching.
+- **Staggered Block Compaction:** Compaction triggers in fixed historical blocks, preserving stable prompt prefixes to maintain provider KV-cache hits.
+- **Image Budget Pruning:** Retains only the most recent visual screenshots, dropping historical picture buffers from model payloads.
+- **Untrusted Content Envelopes:** Wraps all extracted web content and external search outputs inside strict untrusted demarcation blocks to mitigate indirect prompt injection attacks.
+
+### 6. Blink-Style Quadratic HTML Protection (`parse5`)
+During background research, untrusted external pages can attempt denial-of-service via adversarial tag nesting.
+- **Linear Depth Capping:** Flattens HTML nesting exceeding 512 levels using a linear tokenizer pre-pass.
+- **Fast WHATWG Compliance:** Guarantees standard WHATWG compliance without leaking attributes or Stimulus/React metadata into model context.
+
+---
+
+## Core Execution Loop
+
+ScoutFox operates an explicit perception-action loop driven by the Model Context Protocol (MCP):
+
+```
+       ┌───────────────────────────────┐
+       │   1. Observe Current State    │
+       │  (DOMCompressor + FrameAgent) │
+       └──────────────┬────────────────┘
+                      ▼
+       ┌───────────────────────────────┐
+       │  2. Reason & Tool Selection   │
+       │  (LLM Provider + Context Ring)│
+       └──────────────┬────────────────┘
+                      ▼
+       ┌───────────────────────────────┐
+       │  3. Execute via Trusted Path  │
+       │    (CDP Hardware Dispatch)    │
+       └──────────────┬────────────────┘
+                      ▼
+       ┌───────────────────────────────┐
+       │  4. Probe Effect & Log Record │
+       │   (Provenance Evidence Ledger)│
+       └──────────────┬────────────────┘
+                      ▼
+       ┌───────────────────────────────┐
+       │   5. Audit & Validate Finish  │
+       │    (Mechanical Grounding Gate)│
+       └───────────────────────────────┘
+```
+
+---
+
+## Real-World Workflows
+
+### Autonomous Multi-Site Sourcing
+- Dispatches web research via DuckDuckGo or self-hosted SearXNG instances.
+- Paginates large web documents cleanly through background workers without navigating the user's primary tab.
+- Reconciles conflicting information across tabs into structured, typed markdown tables.
+
+### Deep Application Workflows
+- Interacts with single-page applications, custom design systems, shadow DOMs, and nested frame architectures.
+- Performs multi-step form completion, table sorting, keyboard navigation, and file preview extraction.
+
+### Resumable Long-Horizon Tasks
+- Saves task states and session snapshots incrementally in local extension storage.
+- Allows users to pause, inspect DOM steps, manually resolve ambiguous authentication challenges, and resume task execution seamlessly.
+
+---
+
+## Supported Model Infrastructure
+
+ScoutFox supports any OpenAI-compatible API format, as well as native SDK integrations:
+
+| Provider | Runtime Mode | Recommended Models |
+| --- | --- | --- |
+| **Ollama** | Local / Offline | `qwen3.8:27b-mlx`, `gemma4:12b`, `llama3.3:70b` |
+| **Google Gemini** | Cloud API | `gemini-2.0-flash`, `gemini-1.5-pro` |
+| **Anthropic** | Cloud API | `claude-3-7-sonnet`, `claude-3-5-sonnet` |
+| **OpenAI** | Cloud API | `gpt-4o`, `o3-mini` |
+| **NVIDIA NIM** | Enterprise / Cloud | `nvidia/nemotron-3.5-super-vl-120b-a12b` |
+| **Groq** | Low-Latency Cloud | `llama-3.3-70b-versatile` |
+| **OpenRouter / AgentRouter** | Multi-Provider Gateway | Dynamic model routing |
+| **Custom Endpoints** | Local or Hosted | Self-hosted vLLM, SGLang, LISA, or custom proxies |
+
+---
+
+## Installation & Development Setup
+
+### Requirements
+- Google Chrome (or modern Chromium equivalent).
+- Node.js 22.18 or higher.
+- npm.
+
+### Quickstart
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/preetdhanani/ScoutFox_browser_agent.git
+   cd ScoutFox_browser_agent
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm ci
+   ```
+
+3. **Build the extension:**
+   ```bash
+   npm run build
+   ```
+
+4. **Load into Google Chrome:**
+   - Open Chrome and navigate to `chrome://extensions`.
+   - Toggle **Developer mode** in the top right.
+   - Click **Load unpacked**.
+   - Select the `dist/` directory generated by the build.
+
+5. **Open Side Panel:**
+   - Click the ScoutFox icon in Chrome's toolbar to launch the Side Panel.
+   - Open **Settings**, configure your desired LLM endpoint, and begin.
+
+---
+
+## Security Model
+
+- **Zero Remote Code Execution:** Built strictly under Chrome MV3 CSP.
+- **Visual Credential Protection:** Password, cardholder, and verification fields are visually shielded with non-mutating overlay masks before any screenshot leaves the browser.
+- **Prompt Injection Defense:** External page content is demarcated within structured untrusted boundary tags.
+- **No CAPTCHA Tampering:** Refuses automated bot bypasses, pausing execution for human intervention.
+- **Device-Local Data Ownership:** Session histories, token logs, and API credentials are kept strictly inside local browser storage.
+
+---
+
+## Contributing
+
+We welcome contributions from systems engineers, browser automation specialists, and AI researchers.
+Please review:
+- [CONTRIBUTING.md](CONTRIBUTING.md) for code submission standards.
+- [DEVELOPMENT.md](DEVELOPMENT.md) for complete architecture, debugging, and bundle analysis guidelines.
+- [AGENTS.md](AGENTS.md) for verification and testing requirements.
+
+---
 
 ## License
 
-ScoutFox is released under the [MIT License](LICENSE).
-See [CONTRIBUTING.md](CONTRIBUTING.md) to help, and [DEVELOPMENT.md](DEVELOPMENT.md) for building and testing it.
+ScoutFox AI Browser Agent is open-source software licensed under the [MIT License](LICENSE).
