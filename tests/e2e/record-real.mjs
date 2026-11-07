@@ -33,11 +33,13 @@ import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import {
   CORPUS_DIR, HTML_CAP, TEXT_CAP, HTML_TRUNCATION_MARK, TEXT_TRUNCATION_MARK,
-  loadManifest, scrubPersonalData, scrubUrl, capWithMark, capWithMarkBytes, pageFilePaths
+  loadManifest, scrubPersonalData, scrubUrl, capWithMark, capWithMarkBytes, pageFilePaths,
+  parseChromiumArgs
 } from './lib/realCorpus.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CHROMIUM = process.env.CHROMIUM_PATH || '/Applications/Chromium.app/Contents/MacOS/Chromium';
+const CHROMIUM_ARGS = parseChromiumArgs();
 
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   const m = a.match(/^--([^=]+)(?:=(.*))?$/);
@@ -102,7 +104,8 @@ async function main() {
       // the page renders. These two flags present it as a normal browser of the same engine.
       '--disable-blink-features=AutomationControlled',
       '--lang=de-DE,de',
-      '--window-size=1280,900'
+      '--window-size=1280,900',
+      ...CHROMIUM_ARGS
     ]
   });
   cleanups.push(() => browser.close().catch(() => {}));

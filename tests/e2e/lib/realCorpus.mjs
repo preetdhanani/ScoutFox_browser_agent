@@ -35,6 +35,15 @@ export const MANIFEST_FILE = 'manifest.json';
 export const EXPECTATIONS_FILE = 'expectations.json';
 export const BASELINE_FILE = 'baseline.json';
 
+/**
+ * Splits a whitespace-delimited flag string (such as process.env.CHROMIUM_ARGS) into an array
+ * of arguments suitable for Puppeteer's args option.
+ */
+export function parseChromiumArgs(raw = process.env.CHROMIUM_ARGS) {
+  if (typeof raw !== 'string') return [];
+  return raw.trim().split(/\s+/).filter(Boolean);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Scrubbing: personal data never reaches the committed corpus.
 // ---------------------------------------------------------------------------------------------

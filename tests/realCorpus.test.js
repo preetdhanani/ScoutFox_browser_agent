@@ -27,6 +27,7 @@ import {
   evaluateExpectations,
   baselineProblems,
   auditCorpus,
+  parseChromiumArgs,
   CORPUS_DIR
 } from './e2e/lib/realCorpus.mjs';
 
@@ -166,4 +167,34 @@ test('the committed corpus is complete, capped and free of personal data', () =>
   assert.ok(audit.problems.length === 0, `corpus audit problems: ${summary || '(none)'}`);
   assert.ok(audit.pages.length >= MIN_CORPUS_PAGES, `only ${audit.pages.length} recorded pages, expected at least ${MIN_CORPUS_PAGES}`);
   assert.ok(fs.existsSync(CORPUS_DIR));
+});
+
+test('parseChromiumArgs returns empty array on empty, whitespace, null, or non-string input', () => {
+  assert.deepEqual(parseChromiumArgs(''), []);
+  assert.deepEqual(parseChromiumArgs('   '), []);
+  assert.deepEqual(parseChromiumArgs(' \t \n '), []);
+  assert.deepEqual(parseChromiumArgs(null), []);
+  assert.deepEqual(parseChromiumArgs(undefined), []);
+  assert.deepEqual(parseChromiumArgs(123), []);
+});
+
+test('parseChromiumArgs splits flags and strips extra whitespace', () => {
+  assert.deepEqual(parseChromiumArgs('--no-sandbox'), ['--no-sandbox']);
+  assert.deepEqual(
+    parseChromiumArgs('  --no-sandbox   --disable-dev-shm-usage  --disable-gpu  '),
+    ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+  );
+});
+
+test('parseChromiumArgs reads process.env.CHROMIUM_ARGS by default', () => {
+  const prev = process.env.CHROMIUM_ARGS;
+  try {
+    process.env.CHROMIUM_ARGS = '--no-sandbox --disable-dev-shm-usage';
+    assert.deepEqual(parseChromiumArgs(), ['--no-sandbox', '--disable-dev-shm-usage']);
+    delete process.env.CHROMIUM_ARGS;
+    assert.deepEqual(parseChromiumArgs(), []);
+  } finally {
+    if (prev !== undefined) process.env.CHROMIUM_ARGS = prev;
+    else delete process.env.CHROMIUM_ARGS;
+  }
 });

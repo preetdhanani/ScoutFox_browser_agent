@@ -83,7 +83,7 @@ jobs:
       - name: Replay the Corpus Against the Baseline
         if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'replay')
         env:
-          CHROMIUM_ARGS: --no-sandbox
+          CHROMIUM_ARGS: --no-sandbox --disable-dev-shm-usage
         run: |
           out="$RUNNER_TEMP/corpus-out"
           mkdir -p "$out"
@@ -92,7 +92,7 @@ jobs:
       - name: Refresh the Corpus From the Live Web
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'refresh'
         env:
-          CHROMIUM_ARGS: --no-sandbox
+          CHROMIUM_ARGS: --no-sandbox --disable-dev-shm-usage
         run: |
           out="$RUNNER_TEMP/corpus-out"
           mkdir -p "$out"

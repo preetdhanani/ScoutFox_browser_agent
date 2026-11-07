@@ -32,7 +32,8 @@ import { fileURLToPath } from 'node:url';
 import {
   CORPUS_DIR, BASELINE_DROP_TOLERANCE, BASELINE_FILE,
   loadManifest, loadExpectations, loadBaseline, readCorpusPage, stripScripts,
-  evaluateExpectations, baselineProblems, auditCorpus, pageFilePaths
+  evaluateExpectations, baselineProblems, auditCorpus, pageFilePaths,
+  parseChromiumArgs
 } from './lib/realCorpus.mjs';
 import { prepareExtensionCopy } from './lib/extensionCopy.mjs';
 
@@ -40,6 +41,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
 const DIST = path.join(REPO, 'dist');
 const CHROMIUM = process.env.CHROMIUM_PATH || '/Applications/Chromium.app/Contents/MacOS/Chromium';
+const CHROMIUM_ARGS = parseChromiumArgs();
 const CORPUS_PORT = Number(process.env.CORPUS_PORT || 8766);
 
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
@@ -209,7 +211,8 @@ async function main() {
       `--user-data-dir=${profileDir}`,
       '--no-first-run',
       '--no-default-browser-check',
-      '--window-size=1280,900'
+      '--window-size=1280,900',
+      ...CHROMIUM_ARGS
     ]
   });
   cleanups.push(() => browser.close().catch(() => {}));
