@@ -12,10 +12,10 @@ Every requirement is testable as written.
 
 | Persona | Context | What they need |
 |---|---|---|
-| **Local-first power user** | Ollama is already supported; runs vLLM, llama.cpp, LM Studio, TGI on a LAN box or a second GPU machine | Point ScoutFox at an IP address without waiting for a release |
-| **Team gateway admin** | One LiteLLM, one-api, or Kong proxy in front of four vendors plus one in-house model | One entry in ScoutFox, not one ScoutFox release per model |
+| **Local-first power user** | Ollama is already supported; runs vLLM, llama.cpp, LM Studio, TGI on a LAN box or a second GPU machine | Point Tarka at an IP address without waiting for a release |
+| **Team gateway admin** | One LiteLLM, one-api, or Kong proxy in front of four vendors plus one in-house model | One entry in Tarka, not one Tarka release per model |
 | **Cost shifter** | Buys quota from a relay that is not in the list, often per-token cheaper for the model they use | Use the quota they already paid for |
-| **Evaluator and researcher** | Exposes their own fine-tune behind a FastAPI shim, wants ScoutFox to score it | Reproduce a run against a model id nobody has heard of |
+| **Evaluator and researcher** | Exposes their own fine-tune behind a FastAPI shim, wants Tarka to score it | Reproduce a run against a model id nobody has heard of |
 
 ---
 
@@ -23,7 +23,7 @@ Every requirement is testable as written.
 
 ### A1 (M) Add a provider from the Settings tab without a rebuild
 
-**As** any persona, **I want** to add a provider by giving an id, a display name, a base URL, a protocol, and an optional key, **so that** I can use an endpoint that ScoutFox has never heard of.
+**As** any persona, **I want** to add a provider by giving an id, a display name, a base URL, a protocol, and an optional key, **so that** I can use an endpoint that Tarka has never heard of.
 
 Acceptance:
 

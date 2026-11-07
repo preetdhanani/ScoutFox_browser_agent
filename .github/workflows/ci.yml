@@ -1,4 +1,4 @@
-name: ScoutFox AI Browser Agent CI
+name: Tarka AI Browser Agent CI
 
 # Runs on every push and pull request to main and dev.
 # The browser e2e run is not part of this workflow: it needs a model key (see tests/e2e/README.md).
@@ -19,22 +19,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    strategy:
-      # Let both Node versions finish, so a failure that only one of them has is visible.
-      fail-fast: false
-      matrix:
-        # package.json "engines" is node >=22.18, so nothing older is tested: the .ts sources and tests
-        # run through Node's type stripping, which is on by default only from 22.18.
-        node-version: [22.x]
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js ${{ matrix.node-version }}
+      - name: Setup Node.js 22.x
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 22.x
           cache: npm
 
       - name: Install Dependencies
@@ -64,9 +56,9 @@ jobs:
         run: npm run zip
 
       - name: Upload Extension Build Artifact
-        if: matrix.node-version == '22.x' && github.event_name == 'push'
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: scoutfox-chrome-extension
-          path: scoutfox-chrome-extension.zip
+          name: tarka-chrome-extension
+          path: tarka-chrome-extension.zip
           if-no-files-found: error

@@ -1,5 +1,5 @@
 // src/background/runner/AgentRunner.ts
-// Runner that drives the ScoutFox MCP tool loop (replaces LangGraph).
+// Runner that drives the Tarka MCP tool loop (replaces LangGraph).
 // Single runner per tab. Client calls LLM with tools, server executes in browser.
 import { Storage, type SavedSession, type Settings } from '../../shared/storage.ts';
 import { Logger } from '../../shared/logger.ts';
@@ -15,9 +15,9 @@ import { cdp } from '../browser/cdp.ts';
 import { lastRuntimeError } from '../browser/tabs.ts';
 import { TOP_FRAME } from '../browser/frames.ts';
 import { NetworkBuffers } from '../browser/network.ts';
-import { ensureScoutFoxGroup, isTabInScope, groupIdForWindow } from '../browser/groups.ts';
+import { ensureTarkaGroup, isTabInScope, groupIdForWindow } from '../browser/groups.ts';
 import { takeSnapshot } from '../browser/snapshot.ts';
-import { ScoutFoxMCPClient, idleRequestTokens, type CallUsage } from '../mcp/client.ts';
+import { TarkaMCPClient, idleRequestTokens, type CallUsage } from '../mcp/client.ts';
 import { STOPPED_TEXT, partialResultEntry } from '../mcp/historyEntries.ts';
 import { CHAIN_WINDOW_SHARE, COMPACT_PROMPT, COMPACT_SYSTEM, chainTokens, chainTurns, compactionInput, hasEarlierTurn, lastSummary } from '../mcp/chatChain.ts';
 import { normalizeEffort } from '../llm/effort.ts';
@@ -112,7 +112,7 @@ export class AgentRunner {
   /** Writes the chat into Recent tasks: throttled while a run goes, at once when it rests. */
   private chatSaver = new ChatSaver();
 
-  public scoutFoxGroupIds = new Map<number, number>();
+  public tarkaGroupIds = new Map<number, number>();
   public networkBuffers = new NetworkBuffers(100);
   public autoApprovePlan = true;
 
@@ -129,7 +129,7 @@ export class AgentRunner {
   private runtime: RunRuntime;
 
   // MCP Client (replaces graph engine)
-  private mcpClient: ScoutFoxMCPClient | null = null;
+  private mcpClient: TarkaMCPClient | null = null;
 
   constructor(ownerTabId: number, windowId: number | 'default' = 'default') {
     this.ownerTabId = ownerTabId;
@@ -173,9 +173,9 @@ export class AgentRunner {
     this.runtime.tabs.activeTabId = tabId;
   }
 
-  get scoutFoxGroupId(): number | null {
+  get tarkaGroupId(): number | null {
     return groupIdForWindow(
-      { windowId: this.windowId, groupIds: this.scoutFoxGroupIds, persist: () => this.persistState() },
+      { windowId: this.windowId, groupIds: this.tarkaGroupIds, persist: () => this.persistState() },
       this.windowId
     );
   }
@@ -193,19 +193,19 @@ export class AgentRunner {
       stepSignal: () => {
         activeStepAbort = new AbortController();
         if (pauseReq || stopReq) {
-          activeStepAbort.abort({ scoutfox: 'user', reason: stopReq ? 'user_stop' : 'user_pause' });
+          activeStepAbort.abort({ tarka: 'user', reason: stopReq ? 'user_stop' : 'user_pause' });
         }
         return activeStepAbort.signal;
       },
       abortStep: (reason: string) => {
         if (reason === 'user_pause') pauseReq = true;
         if (reason === 'user_stop') stopReq = true;
-        activeStepAbort?.abort({ scoutfox: 'user', reason });
+        activeStepAbort?.abort({ tarka: 'user', reason });
       },
       isUserAbort: (err: any, signal: AbortSignal) => {
         if (signal?.aborted) {
           const reason = signal.reason as any;
-          if (reason?.scoutfox === 'user') return true;
+          if (reason?.tarka === 'user') return true;
         }
         return false;
       },
@@ -292,9 +292,9 @@ export class AgentRunner {
         });
       },
       isTabInScope: async (tabId: number) => {
-        if (tabId === this.ownerTabId && this.scoutFoxGroupIds.size === 0) return true;
+        if (tabId === this.ownerTabId && this.tarkaGroupIds.size === 0) return true;
         return await isTabInScope(
-          { windowId: this.windowId, groupIds: this.scoutFoxGroupIds, persist: () => this.persistState() },
+          { windowId: this.windowId, groupIds: this.tarkaGroupIds, persist: () => this.persistState() },
           tabId
         );
       }
@@ -307,7 +307,7 @@ export class AgentRunner {
       control,
       tabs: { activeTabId: this._activeTabId, ownerTabId: this.ownerTabId },
       windowId: this.windowId,
-      scoutFoxGroupIds: this.scoutFoxGroupIds,
+      tarkaGroupIds: this.tarkaGroupIds,
       attachedTabIds: new Set(),
       resumedAfterRestart: false,
       settings: () => Storage.getSettings(),
@@ -440,7 +440,7 @@ export class AgentRunner {
       if (!this.chatTitle || !this.history.some((row) => row.type === 'user_goal')) this.chatTitle = this.currentTask;
       Logger.event('agent', 'AgentRunner', `Started the task "${this.currentTask}" on tab [${tabId}]`, { task: this.currentTask, tabId, autoApprovePlan: autoApprove !== false });
 
-      await this.ensureScoutFoxGroup(tabId);
+      await this.ensureTarkaGroup(tabId);
 
       // The window of the model this task runs on, and the chain of the chat checked against it: a
       // chain over a quarter of the window is compacted first (the timeline shows the divider).
@@ -487,7 +487,7 @@ export class AgentRunner {
       // The meter shows this task's own calls from its first one on; its token counts start at zero.
       this.lastCall = null;
       this.runStats = { level: level as Level, modelCalls: 0, stepsUsed: 0, tokensIn: 0, tokensOut: 0, sitesDone: 0, sitesPartial: 0, elapsedMs: 0 };
-      this.mcpClient = new ScoutFoxMCPClient(this.runtime, this);
+      this.mcpClient = new TarkaMCPClient(this.runtime, this);
       await this.mcpClient.startTask(userPrompt, { startPaused: pauseLanded, effort: level });
 
       return { success: true };
@@ -547,7 +547,7 @@ export class AgentRunner {
       if (this.taskClaimed) {
         this.stopDuringClaim = true;
         // A task start that is compacting the chat first: the summary call is cancelled too.
-        this.compactAbort?.abort({ scoutfox: 'user', reason: 'user_stop' });
+        this.compactAbort?.abort({ tarka: 'user', reason: 'user_stop' });
         this.notifyStateChange({ stopped: true });
         return { success: true };
       }
@@ -697,7 +697,7 @@ export class AgentRunner {
       pendingContinueBudget: this.pendingContinueBudget,
       stateVersion: this.stateVersion,
       bootId: this.bootId,
-      scoutFoxGroupId: this.scoutFoxGroupId,
+      tarkaGroupId: this.tarkaGroupId,
       effort: this.effort,
       effortProfile: this.effortProfile,
       runStats: this.runStats,
@@ -893,7 +893,7 @@ export class AgentRunner {
   async persistState() {
     await this.meta.writeImmediate({
       stateVersion: this.stateVersion,
-      scoutFoxGroupIds: Array.from(this.scoutFoxGroupIds.entries()) as [number, number][],
+      tarkaGroupIds: Array.from(this.tarkaGroupIds.entries()) as [number, number][],
       aliases: [],
       attachedTabIds: Array.from(this.runtime.attachedTabIds),
       pauseDetach: null,
@@ -905,9 +905,9 @@ export class AgentRunner {
   // Tab Sandboxing
   // -----------------------------------------------------------------------
 
-  async ensureScoutFoxGroup(tabId: number, explicitWindowId?: number) {
-    return await ensureScoutFoxGroup(
-      { windowId: this.windowId, groupIds: this.scoutFoxGroupIds, persist: () => this.persistState() },
+  async ensureTarkaGroup(tabId: number, explicitWindowId?: number) {
+    return await ensureTarkaGroup(
+      { windowId: this.windowId, groupIds: this.tarkaGroupIds, persist: () => this.persistState() },
       tabId,
       explicitWindowId
     );
@@ -973,10 +973,10 @@ export class AgentRunner {
     void chrome.storage.session.remove([runSnapshotKey(threadId), `sf:meta:${threadId}`]).catch(() => {});
   }
 
-  // groupIdForWindow: returns the ScoutFox group id for a window
+  // groupIdForWindow: returns the Tarka group id for a window
   groupIdForWindow(windowId: number): number | null {
     return groupIdForWindow(
-      { windowId: this.windowId, groupIds: this.scoutFoxGroupIds, persist: () => this.persistState() },
+      { windowId: this.windowId, groupIds: this.tarkaGroupIds, persist: () => this.persistState() },
       windowId
     );
   }
@@ -1051,8 +1051,8 @@ export class AgentRunner {
    */
   private restoreGroupMap(entries: Array<[number, number]>): void {
     for (const [windowId, groupId] of entries) {
-      if (typeof windowId === 'number' && typeof groupId === 'number' && !this.scoutFoxGroupIds.has(windowId)) {
-        this.scoutFoxGroupIds.set(windowId, groupId);
+      if (typeof windowId === 'number' && typeof groupId === 'number' && !this.tarkaGroupIds.has(windowId)) {
+        this.tarkaGroupIds.set(windowId, groupId);
       }
     }
   }
@@ -1092,7 +1092,7 @@ export class AgentRunner {
       const saved = await this.meta.read();
       // Only the tab group map comes back from the meta. The status is the restored run's own
       // (an interrupted run stays "stopped" with its final row), never reset here.
-      if (saved) this.restoreGroupMap(saved.scoutFoxGroupIds || []);
+      if (saved) this.restoreGroupMap(saved.tarkaGroupIds || []);
     } catch {
       // Ignore restore errors
     }

@@ -25,8 +25,8 @@ export const MIN_CORPUS_PAGES = 15;
 export const HTML_CAP = 4 * 1024 * 1024;
 /** The visible text of one page is capped at this many characters before it is stored. */
 export const TEXT_CAP = 200 * 1024;
-export const HTML_TRUNCATION_MARK = '<!-- scoutfox-corpus: html truncated at the size cap -->';
-export const TEXT_TRUNCATION_MARK = '[scoutfox-corpus: text truncated at the size cap]';
+export const HTML_TRUNCATION_MARK = '<!-- tarka-corpus: html truncated at the size cap -->';
+export const TEXT_TRUNCATION_MARK = '[tarka-corpus: text truncated at the size cap]';
 
 /** A drop of a page's text length or element count beyond this share of the baseline fails the replay. */
 export const BASELINE_DROP_TOLERANCE = 0.05;

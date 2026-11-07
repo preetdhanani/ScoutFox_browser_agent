@@ -46,7 +46,7 @@ function fakeDoc() {
     querySelectorAll() { return []; },
     elementFromPoint() { return null; }
   };
-  for (const id of ['scoutfox-badge-container', 'scoutfox-cursor-container']) {
+  for (const id of ['tarka-badge-container', 'tarka-cursor-container']) {
     const node: any = { id, style: { visibility: 'visible' }, remove() { nodes.delete(id); } };
     nodes.set(id, node);
     body.appendChild(node);
@@ -60,7 +60,7 @@ test('hiding makes the overlays invisible without removing them from the page', 
 
   executor.hideAgentUi();
 
-  for (const id of ['scoutfox-badge-container', 'scoutfox-cursor-container']) {
+  for (const id of ['tarka-badge-container', 'tarka-cursor-container']) {
     const node = nodes.get(id);
     assert.ok(node, `${id} must still be in the page: a screenshot must not delete it`);
     assert.equal(node.style.visibility, 'hidden');
@@ -69,22 +69,22 @@ test('hiding makes the overlays invisible without removing them from the page', 
 
 test('showing puts back the visibility each overlay had', () => {
   const { doc, nodes } = fakeDoc();
-  nodes.get('scoutfox-cursor-container').style.visibility = 'collapse';
+  nodes.get('tarka-cursor-container').style.visibility = 'collapse';
   const executor = new ActionExecutor(doc);
 
   executor.hideAgentUi();
-  assert.equal(nodes.get('scoutfox-cursor-container').style.visibility, 'hidden');
+  assert.equal(nodes.get('tarka-cursor-container').style.visibility, 'hidden');
 
   executor.showAgentUi();
-  assert.equal(nodes.get('scoutfox-badge-container').style.visibility, 'visible');
-  assert.equal(nodes.get('scoutfox-cursor-container').style.visibility, 'collapse', 'not a blanket "visible"');
+  assert.equal(nodes.get('tarka-badge-container').style.visibility, 'visible');
+  assert.equal(nodes.get('tarka-cursor-container').style.visibility, 'collapse', 'not a blanket "visible"');
 });
 
 test('showing when nothing was hidden changes nothing', () => {
   const { doc, nodes } = fakeDoc();
   const executor = new ActionExecutor(doc);
   assert.doesNotThrow(() => executor.showAgentUi());
-  assert.equal(nodes.get('scoutfox-badge-container').style.visibility, 'visible');
+  assert.equal(nodes.get('tarka-badge-container').style.visibility, 'visible');
 });
 
 test('a page without the overlays is not an error', () => {

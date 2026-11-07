@@ -185,7 +185,7 @@ const CLICK_TOOL = {
 
 async function askModel(picture, image, target) {
   const messages = [
-    { role: 'system', content: 'You are ScoutFox, a browser agent. You act on the page with tools. Answer with exactly one tool call.' },
+    { role: 'system', content: 'You are Tarka, a browser agent. You act on the page with tools. Answer with exactly one tool call.' },
     { role: 'user', content: `Click ${target} on this page.` },
     { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'take_screenshot', arguments: '{}' } }] },
     { role: 'tool', tool_call_id: 'c1', content: `Captured the visible page (${image.width}x${image.height}, image/jpeg).` },

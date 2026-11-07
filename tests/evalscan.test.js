@@ -158,7 +158,7 @@ test('an entry does not take another kind of hit, or another line, in its own fi
 test('the zod probe entry is keyed by the zod source path, so another copy of zod is a new hit', () => {
   const probe = ALLOWLIST.find((entry) => entry.snippet === 'new F("")');
   assert.equal(probe.file, 'node_modules/zod/v4/core/util.js');
-  const nested = hitOf(probe, { file: 'node_modules/@langchain/core/node_modules/zod/v4/core/util.js' });
+  const nested = hitOf(probe, { file: 'node_modules/other-pkg/node_modules/zod/v4/core/util.js' });
   assert.equal(classifyHits([nested]).results[0].entry, null);
 });
 

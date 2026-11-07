@@ -45,14 +45,14 @@ test('Gemini (prompt-engineered tools): the arguments survive as a JSON string t
 test('Gemini: the system message is the system prompt, and earlier tool calls and results are readable text', async (t) => {
   const sent = spyFetch(t, () => geminiStream('done'));
   await callProviderWithTools('gemini', { provider: 'gemini', apiKey: 'AIza-test', model: 'gemini-1.5-flash' }, [
-    { role: 'system', content: 'You are ScoutFox.' },
+    { role: 'system', content: 'You are Tarka.' },
     { role: 'user', content: 'Open example.com' },
     { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'navigate', arguments: '{"url":"https://example.com"}' } }] },
     { role: 'tool', tool_call_id: 'c1', content: 'Navigated.' }
   ], '', { tools: TOOLS });
 
   const body = sent[0].body as any;
-  assert.equal(body.systemInstruction.parts[0].text, 'You are ScoutFox.', 'the system message is the system instruction');
+  assert.equal(body.systemInstruction.parts[0].text, 'You are Tarka.', 'the system message is the system instruction');
   const texts = body.contents.map((c: any) => c.parts.map((p: any) => p.text).join(''));
   assert.ok(texts.some((text: string) => /"name": "navigate"/.test(text) && /example\.com/.test(text)), 'the model sees which tool it called');
   assert.ok(texts.some((text: string) => /Result of navigate:\s*Navigated\./.test(text)), 'and what came back');
@@ -131,7 +131,7 @@ test('a Pause cancels the tool request in flight instead of waiting for the mode
   const call = callProviderWithTools('openai', { provider: 'openai', apiKey: 'sk-test', model: 'm' }, [{ role: 'user', content: 'go' }], '', { tools: TOOLS, signal: pause.signal });
   await waitForRequests(sent, 1);
   const started = Date.now();
-  pause.abort(Object.assign(new DOMException('paused', 'AbortError'), { scoutfox: 'user', reason: 'user_pause' }));
+  pause.abort(Object.assign(new DOMException('paused', 'AbortError'), { tarka: 'user', reason: 'user_pause' }));
   await assert.rejects(call);
   assert.ok(Date.now() - started < 1000, 'the request ended at once');
 });

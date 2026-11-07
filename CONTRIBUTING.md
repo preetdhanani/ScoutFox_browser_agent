@@ -1,6 +1,6 @@
-# Contributing to ScoutFox AI Browser Agent
+# Contributing to Tarka AI Browser Agent
 
-Thank you for your interest in contributing to **ScoutFox AI Browser Agent**!
+Thank you for your interest in contributing to **Tarka AI Browser Agent**!
 
 ## How to Contribute
 
@@ -13,7 +13,7 @@ Thank you for your interest in contributing to **ScoutFox AI Browser Agent**!
 * Clearly describe the proposed feature and why it would be beneficial to users.
 
 ### 3. Pull Requests
-1. Fork the repository: `https://github.com/preetdhanani/ScoutFox_browser_agent.git`
+1. Fork the repository: `https://github.com/preetdhanani/Tarka_browser_agent.git`
 2. Create your feature branch: `git checkout -b feature/amazing-feature`
 3. Commit your changes: `git commit -m 'Add amazing feature'`
 4. Push to the branch: `git push origin feature/amazing-feature`
@@ -23,7 +23,7 @@ Thank you for your interest in contributing to **ScoutFox AI Browser Agent**!
 
 See **Quick Setup** in [README.md](README.md) to load the unpacked extension.
 Run `npm run build` after each code change, and load the `dist/` folder in Chrome, not the repository folder.
-Once it's loaded, open any webpage, open the ScoutFox Side Panel, and test your changes there before opening a PR.
+Once it's loaded, open any webpage, open the Tarka Side Panel, and test your changes there before opening a PR.
 
 ## Code Guidelines
 * Keep DOM distillation light (<2,500 tokens).

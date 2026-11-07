@@ -7,7 +7,7 @@
 //
 //   1. What can this provider + model take? (`effortSupportOf`, `resolveEffortSupport`)
 //      In this order:
-//        - a user-added custom endpoint takes nothing. ScoutFox does not guess parameters for a
+//        - a user-added custom endpoint takes nothing. Tarka does not guess parameters for a
 //          server it does not know;
 //        - a model that refused the fields at run time is not sent them again;
 //        - what the endpoint itself reported wins over the built-in list: OpenRouter's
@@ -241,7 +241,7 @@ export function rememberRefused(settings: LlmSettings): void {
  * value the model accepts.
  */
 export function learnValuesFromError(settings: LlmSettings, dialect: EffortDialect, text: string, sentValue: string): boolean {
-  // Only a list that answers the value ScoutFox sent is about effort: an "expected one of" of
+  // Only a list that answers the value Tarka sent is about effort: an "expected one of" of
   // another field (tool_choice, a role) must not become the model's effort values.
   const variant = /unknown variant [`'"]([^`'"]+)[`'"]/i.exec(text || '')?.[1];
   if (!variant || variant.toLowerCase() !== String(sentValue).toLowerCase()) return false;
@@ -308,7 +308,7 @@ export function registryDialect(provider: string, model: string, baseUrl = ''): 
       return 'openrouter';
     case 'openai_compatible':
       // The built-in "OpenAI compatible" provider points at Groq by default. Any other host is a
-      // server ScoutFox does not know, which is treated like a custom endpoint: nothing is sent.
+      // server Tarka does not know, which is treated like a custom endpoint: nothing is sent.
       if (!GROQ_HOST.test(hostOf(baseUrl))) return null;
       return /gpt-oss|qwen/.test(m) ? 'openai' : null;
     case 'ollama':
@@ -396,7 +396,7 @@ export function effortSupportOf(settings: LlmSettings): EffortSupport {
     }
   }
   if (listed) return supportOf(listed, 'registry', NOTE_REASONS, registryValues(provider, listed, model), model);
-  return supportOf('none', 'none', 'This model has no reasoning setting that ScoutFox knows.', undefined, model);
+  return supportOf('none', 'none', 'This model has no reasoning setting that Tarka knows.', undefined, model);
 }
 
 /** The dialect of a provider whose endpoint said "reasons" but whose model the list does not name. */
@@ -652,7 +652,7 @@ export function applyEffortPatch(base: Record<string, unknown>, patch: EffortPat
 }
 
 /**
- * Whether an error answer refused what ScoutFox added for the effort: a 400 or 422 whose text
+ * Whether an error answer refused what Tarka added for the effort: a 400 or 422 whose text
  * names one of the fields that were sent (`reasoning` only as a whole word, so an error about
  * reasoning_details is not one), or the value of one ("unknown variant `xhigh`"), or the token
  * limit when the effort raised it. Anything else is the round's own error.

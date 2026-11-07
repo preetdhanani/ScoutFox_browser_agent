@@ -5,8 +5,8 @@
 // The loop is one awaited chain: startTask resolves when the run ends, so the runner's task
 // claim is held for the whole run. Every tool call and result is recorded into the runner's
 // history, which is what the side panel's timeline renders from (STATE_UPDATE broadcasts).
-import { ScoutFoxMCPServer, type ImageContent } from './server.ts';
-import { SCOUTFOX_TOOLS, offeredToolDefs, type ToolDef } from './tools.ts';
+import { TarkaMCPServer, type ImageContent } from './server.ts';
+import { TARKA_TOOLS, offeredToolDefs, type ToolDef } from './tools.ts';
 import { coordinateSpaceOf, coordinateWords, pictureCaption, type CoordinateSpace } from '../llm/coordinates.ts';
 import { Storage } from '../../shared/storage.ts';
 import { Logger } from '../../shared/logger.ts';
@@ -189,7 +189,7 @@ export const COMPACTED_PREFIX = '[earlier result, shortened]';
  * already waited the whole deadline.
  */
 export function isTransientProviderError(err: any): boolean {
-  if (!err || err.scoutfox === 'user' || err.name === 'AbortError' || err.name === 'ProviderTimeoutError') return false;
+  if (!err || err.tarka === 'user' || err.name === 'AbortError' || err.name === 'ProviderTimeoutError') return false;
   const status = Number(err.status);
   if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) return true;
   return err.name === 'TypeError' && /fetch|network/i.test(String(err.message || ''));
@@ -553,7 +553,7 @@ export function systemPromptText(p: SystemPromptInput): string {
   // tokens on every call.
   const coords = coordinateWords(p.space);
   const userRules = p.instructions ? `USER INSTRUCTIONS (from Settings, follow them):\n${p.instructions}\n\n` : '';
-  return `${userRules}You are ScoutFox, an AI browser agent controlling a Chrome tab.
+  return `${userRules}You are Tarka, an AI browser agent controlling a Chrome tab.
 
 CURRENT CONTEXT:
 - Active tab: ${p.tabId ?? ''}
@@ -669,8 +669,8 @@ Example 4 - Look at the page (visual task):
   -> take_screenshot -> ${coords.example} -> finish`;
 }
 
-export class ScoutFoxMCPClient {
-  private server: ScoutFoxMCPServer;
+export class TarkaMCPClient {
+  private server: TarkaMCPServer;
   private runtime: RunRuntime;
   private runner: RunRecorder;
   private messageHistory: Message[] = [];
@@ -721,7 +721,7 @@ export class ScoutFoxMCPClient {
   constructor(runtime: RunRuntime, runner: RunRecorder) {
     this.runtime = runtime;
     this.runner = runner;
-    this.server = new ScoutFoxMCPServer();
+    this.server = new TarkaMCPServer();
     this.server.setRuntime(runtime);
   }
 
@@ -729,7 +729,7 @@ export class ScoutFoxMCPClient {
    * Replaces the capture path of the server, so a test or the harness can stand in for Chrome.
    * The client owns its server, so this is the one seam a test has into the tool execution.
    */
-  setScreenshotDeps(factory: Parameters<ScoutFoxMCPServer['setScreenshotDeps']>[0]) {
+  setScreenshotDeps(factory: Parameters<TarkaMCPServer['setScreenshotDeps']>[0]) {
     this.server.setScreenshotDeps(factory);
   }
 
@@ -1011,7 +1011,7 @@ export class ScoutFoxMCPClient {
     const request = {
       messageCount: this.messageHistory.length,
       messages: this.messageHistory.map(messageSummary),
-      tools: (finishOnly ? SCOUTFOX_TOOLS.filter((tool) => tool.name === 'finish') : this.offeredTools()).map((tool) => tool.name)
+      tools: (finishOnly ? TARKA_TOOLS.filter((tool) => tool.name === 'finish') : this.offeredTools()).map((tool) => tool.name)
     };
     // Before the request: a call that never comes back is then still visible in the log.
     Logger.event('llm', 'Model', `Model call ${round} started (${model})`, { round, provider: settings.provider, model, messageCount: request.messageCount, tools: request.tools });
@@ -1049,7 +1049,7 @@ export class ScoutFoxMCPClient {
 
   private async requestModel(settings: any, finishOnly: boolean, effort: EffortLevel): Promise<ToolReply> {
     const { callProviderWithTools } = await import('../llm/index.ts');
-    const tools = finishOnly ? SCOUTFOX_TOOLS.filter((tool) => tool.name === 'finish') : this.offeredTools();
+    const tools = finishOnly ? TARKA_TOOLS.filter((tool) => tool.name === 'finish') : this.offeredTools();
     const signal = this.loopAbort?.signal;
     // The trim happens here, where the payload is built: the last two pictures keep their bytes
     // and older ones become text, so a long run does not re-send every picture on every round.

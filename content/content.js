@@ -1,21 +1,21 @@
 /**
- * Content Script Entry Point for ScoutFox AI Agent
+ * Content Script Entry Point for Tarka AI Agent
  * Listens for background agent execution messages, relays network recordings from MAIN world,
  * and executes actions or returns DOM snapshot state.
  */
 
 (function init() {
-  console.log('[ScoutFox Agent] Content script active.');
+  console.log('[Tarka Agent] Content script active.');
 
   // Guard against duplicate listener registration
-  if (window.__scoutfox_listener_registered) {
+  if (window.__tarka_listener_registered) {
     return;
   }
-  window.__scoutfox_listener_registered = true;
+  window.__tarka_listener_registered = true;
 
   // Relay network requests from MAIN world net-recorder.js to Background Service Worker
   window.addEventListener('message', (event) => {
-    if (event.source === window && event.data && event.data.source === 'scoutfox-net') {
+    if (event.source === window && event.data && event.data.source === 'tarka-net') {
       try {
         if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
           chrome.runtime.sendMessage({
@@ -59,13 +59,13 @@
   });
 
   // Mutation tracking for DOM quiet and effect probes
-  window.__scoutfox_mutations = 0;
-  window.__scoutfox_last_mutation = Date.now();
+  window.__tarka_mutations = 0;
+  window.__tarka_last_mutation = Date.now();
   try {
     if (typeof MutationObserver !== 'undefined' && document.documentElement) {
       const observer = new MutationObserver(() => {
-        window.__scoutfox_mutations = (window.__scoutfox_mutations || 0) + 1;
-        window.__scoutfox_last_mutation = Date.now();
+        window.__tarka_mutations = (window.__tarka_mutations || 0) + 1;
+        window.__tarka_last_mutation = Date.now();
       });
       observer.observe(document.documentElement, {
         childList: true,
@@ -361,7 +361,7 @@
       if (visible === undefined) {
         const tag = parent.tagName;
         visible = tag !== 'SCRIPT' && tag !== 'STYLE' && tag !== 'NOSCRIPT' && tag !== 'TEMPLATE'
-          && !(typeof parent.closest === 'function' && parent.closest('[class*="scoutfox"], [id^="scoutfox"]'));
+          && !(typeof parent.closest === 'function' && parent.closest('[class*="tarka"], [id^="tarka"]'));
         if (visible) {
           try {
             const style = window.getComputedStyle(parent);
@@ -582,9 +582,9 @@
     if (action === 'EFFECT_PROBE_BEGIN') {
       let state = null;
       try { state = measurePageState(); } catch (_) { state = null; }
-      window.__scoutfox_probe_baseline = {
+      window.__tarka_probe_baseline = {
         url: window.location.href,
-        mutCount: window.__scoutfox_mutations || 0,
+        mutCount: window.__tarka_mutations || 0,
         value: document.activeElement && 'value' in document.activeElement ? String(document.activeElement.value) : '',
         activeTag: document.activeElement && document.activeElement.tagName ? document.activeElement.tagName.toLowerCase() : '',
         activeId: document.activeElement ? (document.activeElement.id || '') : '',
@@ -601,13 +601,13 @@
     }
 
     if (action === 'EFFECT_PROBE_END') {
-      const base = window.__scoutfox_probe_baseline;
+      const base = window.__tarka_probe_baseline;
       let effect = 'none';
       if (!base || window.location.href !== base.url) {
         effect = 'url_changed';
       } else if (document.activeElement && 'value' in document.activeElement && String(document.activeElement.value) !== base.value) {
         effect = 'value_set';
-      } else if ((window.__scoutfox_mutations || 0) > base.mutCount) {
+      } else if ((window.__tarka_mutations || 0) > base.mutCount) {
         effect = 'dom_changed';
       } else {
         const curTag = document.activeElement && document.activeElement.tagName ? document.activeElement.tagName.toLowerCase() : '';
@@ -630,7 +630,7 @@
       const checkQuiet = () => {
         const now = Date.now();
         const elapsed = now - start;
-        const lastMut = window.__scoutfox_last_mutation || start;
+        const lastMut = window.__tarka_last_mutation || start;
         if (now - lastMut >= quietMs || elapsed >= maxWaitMs) {
           return sendResponse({ success: true, quiet: true, elapsedMs: elapsed });
         }

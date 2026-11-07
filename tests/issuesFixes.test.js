@@ -6,13 +6,13 @@ import { isValidWebTab } from '../src/background/browser/tabs.ts';
 // Test 1: isValidWebTab url validation logic
 test('isValidWebTab - rejects Chrome Web Store and restricted protocols', () => {
 
-  assert.equal(isValidWebTab({ url: 'https://chromewebstore.google.com/detail/scoutfox' }), false);
+  assert.equal(isValidWebTab({ url: 'https://chromewebstore.google.com/detail/tarka' }), false);
   assert.equal(isValidWebTab({ url: 'https://chrome.google.com/webstore/category/extensions' }), false);
   assert.equal(isValidWebTab({ url: 'view-source:https://example.com' }), false);
   assert.equal(isValidWebTab({ url: 'data:text/html,<h1>Hello</h1>' }), false);
   assert.equal(isValidWebTab({ url: 'devtools://devtools/bundled/inspector.html' }), false);
   assert.equal(isValidWebTab({ url: 'chrome://extensions' }), false);
-  assert.equal(isValidWebTab({ url: 'https://github.com/preetdhanani/ScoutFox_browser_agent' }), true);
+  assert.equal(isValidWebTab({ url: 'https://github.com/preetdhanani/Tarka_browser_agent' }), true);
 });
 
 // Test 2: doClick dispatch logic

@@ -1,6 +1,6 @@
 /**
  * content/content.js forwards errors to the extension's log. The window's error events carry the
- * page's own errors too, and a website's broken script is not a ScoutFox error: only errors from
+ * page's own errors too, and a website's broken script is not a Tarka error: only errors from
  * the extension's own files are forwarded.
  */
 import test from 'node:test';

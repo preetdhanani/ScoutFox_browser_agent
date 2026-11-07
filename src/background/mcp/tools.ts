@@ -16,7 +16,7 @@ export interface ToolDef {
  */
 export const REASON_TEXT = 'One or two sentences: what the last result told you, and why this step comes next.';
 
-export const SCOUTFOX_TOOLS: ToolDef[] = [
+export const TARKA_TOOLS: ToolDef[] = [
   // === PLANNING ===
   {
     name: 'update_plan',
@@ -286,8 +286,8 @@ export const RESEARCH_TOOL_NAMES: ReadonlySet<string> = new Set(['web_search', '
  * without take_screenshot when the model cannot see pictures.
  */
 export function offeredToolDefs({ research, vision }: { research: boolean; vision: boolean }): ToolDef[] {
-  return SCOUTFOX_TOOLS.filter((tool) => (research || !RESEARCH_TOOL_NAMES.has(tool.name)) && (vision || tool.name !== 'take_screenshot'));
+  return TARKA_TOOLS.filter((tool) => (research || !RESEARCH_TOOL_NAMES.has(tool.name)) && (vision || tool.name !== 'take_screenshot'));
 }
 
-export const TOOL_NAMES = SCOUTFOX_TOOLS.map(t => t.name);
-export const TOOL_MAP = new Map(SCOUTFOX_TOOLS.map(t => [t.name, t]));
+export const TOOL_NAMES = TARKA_TOOLS.map(t => t.name);
+export const TOOL_MAP = new Map(TARKA_TOOLS.map(t => [t.name, t]));

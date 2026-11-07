@@ -1,5 +1,5 @@
 /**
- * Storage utility for ScoutFox Agentic Browser Extension
+ * Storage utility for Tarka Agentic Browser Extension
  * Manages settings, per-provider API configuration memory, multi-session history, and model caching.
  */
 import { DEFAULT_NVIDIA_LLM_TIMEOUT_MS, endpointHostOf, endpointOriginOf } from '../background/llm/settings.ts';
@@ -284,7 +284,7 @@ export const DEFAULT_SETTINGS: Settings = {
   actionDelayMs: 1000,
   autoScroll: true,
   theme: 'system',
-  systemInstructions: 'You are ScoutFox, an autonomous web browsing AI agent. Your goal is to help the user complete tasks on the web efficiently and accurately.',
+  systemInstructions: 'You are Tarka, an autonomous web browsing AI agent. Your goal is to help the user complete tasks on the web efficiently and accurately.',
   effortDefault: 'medium',
   effortAdaptive: true,
   autoApprove: true,

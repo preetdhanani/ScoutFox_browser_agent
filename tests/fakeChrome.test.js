@@ -861,13 +861,13 @@ test('tabGroups: get, update and query, with Chrome\'s color names and its "No g
   const fc = fakeChrome({
     windows: { list: [{ id: 1, focused: true }, { id: 2 }] },
     tabs: { list: [{ id: 1, windowId: 1, groupId: 10 }, { id: 2, windowId: 2, groupId: 11 }] },
-    tabGroups: { list: [{ id: 10, title: 'ScoutFox', color: 'orange', windowId: 1 }, { id: 11, title: 'Other', windowId: 2 }] },
+    tabGroups: { list: [{ id: 10, title: 'Tarka', color: 'orange', windowId: 1 }, { id: 11, title: 'Other', windowId: 2 }] },
   });
   const { tabGroups } = fc.chrome;
   assert.equal(tabGroups.TAB_GROUP_ID_NONE, -1);
-  assert.deepEqual(await tabGroups.get(10), { id: 10, title: 'ScoutFox', color: 'orange', windowId: 1, collapsed: false });
+  assert.deepEqual(await tabGroups.get(10), { id: 10, title: 'Tarka', color: 'orange', windowId: 1, collapsed: false });
   await assert.rejects(tabGroups.get(99), { message: 'No group with id: 99.' });
-  assert.deepEqual((await tabGroups.query({ title: 'Scout*' })).map((g) => g.id), [10]);
+  assert.deepEqual((await tabGroups.query({ title: 'Tark*' })).map((g) => g.id), [10]);
   assert.deepEqual((await tabGroups.query({ windowId: 2 })).map((g) => g.id), [11]);
   assert.deepEqual((await tabGroups.query({ windowId: -2 })).map((g) => g.id), [10]);
   assert.deepEqual((await tabGroups.query({ color: 'grey' })).map((g) => g.id), [11]);
@@ -884,7 +884,7 @@ test('tabGroups: get, update and query, with Chrome\'s color names and its "No g
 test('tabGroups handle: add() and remove() act as the user would', async () => {
   const fc = fakeChrome({ tabs: { list: [{ id: 1 }] }, tabGroups: true });
   const log = listen(fc, 'tabGroups.onCreated', 'tabGroups.onRemoved', 'tabs.onUpdated');
-  const group = fc.tabGroups.add({ id: 5, title: 'ScoutFox', color: 'orange' });
+  const group = fc.tabGroups.add({ id: 5, title: 'Tarka', color: 'orange' });
   assert.deepEqual(log, [['tabGroups.onCreated', group]]);
   await fc.chrome.tabs.group({ tabIds: 1, groupId: 5 });
   await fc.settle();
@@ -1128,9 +1128,9 @@ test('runtime ports: connect() gives the panel end, onConnect listeners get the 
     workerSide.push(port);
     port.onMessage.addListener((message, from) => from.postMessage({ echo: message }));
   });
-  const panel = fc.runtime.connect({ name: 'scoutfox_sidepanel_fresh:101' });
+  const panel = fc.runtime.connect({ name: 'tarka_sidepanel_fresh:101' });
   assert.equal(workerSide.length, 1);
-  assert.equal(workerSide[0].name, 'scoutfox_sidepanel_fresh:101');
+  assert.equal(workerSide[0].name, 'tarka_sidepanel_fresh:101');
   assert.equal(workerSide[0].sender.id, fc.chrome.runtime.id, 'the worker end carries the sender');
   assert.equal(panel.sender, undefined);
   workerSide[0].postMessage({ type: 'STATE_UPDATE', payload: { n: 1 } });
@@ -1463,11 +1463,11 @@ test('action: setBadgeText is recorded and readable per tab over a default; onCl
   await action.setBadgeText({ text: 'ON' });
   await action.setBadgeText({ text: '3', tabId: 1 });
   await action.setBadgeBackgroundColor({ color: '#ff8800' });
-  await action.setTitle({ title: 'ScoutFox is running', tabId: 1 });
+  await action.setTitle({ title: 'Tarka is running', tabId: 1 });
   assert.equal(await action.getBadgeText({}), 'ON');
   assert.equal(await action.getBadgeText({ tabId: 1 }), '3');
   assert.equal(await action.getBadgeText({ tabId: 2 }), 'ON');
-  assert.deepEqual([fcAction.action.badgeText(), fcAction.action.badgeText(1), fcAction.action.badgeColor(), fcAction.action.title(1), fcAction.action.title()], ['ON', '3', '#ff8800', 'ScoutFox is running', undefined]);
+  assert.deepEqual([fcAction.action.badgeText(), fcAction.action.badgeText(1), fcAction.action.badgeColor(), fcAction.action.title(1), fcAction.action.title()], ['ON', '3', '#ff8800', 'Tarka is running', undefined]);
   assert.deepEqual(fcAction.callsTo('action.setBadgeText').map((c) => c.args), [[{ text: 'ON' }], [{ text: '3', tabId: 1 }]]);
 
   const log = listen(fcAction, 'action.onClicked');
@@ -1568,7 +1568,7 @@ test('a worker restart end to end: the panel notices, reconnects to the new work
   const first = boot(1);
   await first.chrome.storage.session.set({ 'sf:meta:1': { boot: 1 } });
   await first.chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });
-  const panel = first.runtime.connect({ name: 'scoutfox_sidepanel_fresh:1' });
+  const panel = first.runtime.connect({ name: 'tarka_sidepanel_fresh:1' });
   await first.settle();
   assert.deepEqual(panel.received, [{ type: 'STATE_UPDATE', boot: 1 }]);
 
@@ -1580,7 +1580,7 @@ test('a worker restart end to end: the panel notices, reconnects to the new work
   assert.equal(panelNoticed, true);
 
   const second = boot(2);
-  const panelAgain = second.runtime.connect({ name: 'scoutfox_sidepanel_fresh:1' });
+  const panelAgain = second.runtime.connect({ name: 'tarka_sidepanel_fresh:1' });
   await second.settle();
   assert.deepEqual(panelAgain.received, [{ type: 'STATE_UPDATE', boot: 2 }]);
   assert.deepEqual(await second.chrome.storage.session.get('sf:meta:1'), { 'sf:meta:1': { boot: 1 } });

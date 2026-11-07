@@ -13,7 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { PLAN_FIRST_TEXT, ScoutFoxMCPClient } from '../../src/background/mcp/client.ts';
+import { PLAN_FIRST_TEXT, TarkaMCPClient } from '../../src/background/mcp/client.ts';
 import { REFLECTION_TEXT, REPEAT_HINT_PREFIX } from '../../src/background/mcp/progress.ts';
 import type { RunRecorder } from '../../src/background/mcp/client.ts';
 import { cdp } from '../../src/background/browser/cdp.ts';
@@ -87,7 +87,7 @@ function makeRuntime(activeTabId: number | null = 101): RunRuntime {
     },
     tabs: { activeTabId, ownerTabId: 101 },
     windowId: 1,
-    scoutFoxGroupIds: new Map(),
+    tarkaGroupIds: new Map(),
     attachedTabIds: new Set(),
     resumedAfterRestart: false,
     settings: async () => ({ provider: 'openrouter', model: 'test-model', maxSteps: 20, actionDelayMs: 1 } as any),
@@ -166,7 +166,7 @@ function withClient(t: any, options: { replies: Array<Record<string, unknown>>; 
 
   const runtime = makeRuntime();
   const rec = makeRecorder({ autoApprovePlan: options.autoApprovePlan });
-  const client = new ScoutFoxMCPClient(runtime, rec.recorder);
+  const client = new TarkaMCPClient(runtime, rec.recorder);
   return { fc, site, client, rec, requests, runtime };
 }
 

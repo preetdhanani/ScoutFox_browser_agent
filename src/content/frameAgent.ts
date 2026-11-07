@@ -1,5 +1,5 @@
 /**
- * ScoutFox frame agent: the content script of every embedded frame (manifest `all_frames`).
+ * Tarka frame agent: the content script of every embedded frame (manifest `all_frames`).
  *
  * The top frame's content script cannot see into an iframe from another origin, and innerText never
  * enters any iframe, so a lesson or a document that lives in one was invisible to the model. The
@@ -85,10 +85,10 @@ export async function answerFrameMessage(request: any, doc: Document, win: Windo
 /** Installs the agent in this frame. Does nothing in the top frame, or twice. */
 export function installFrameAgent(win: Window & typeof globalThis): void {
   const g = win as any;
-  if (!g || g.top === g || g.__scoutfoxFrameAgent) return;
+  if (!g || g.top === g || g.__tarkaFrameAgent) return;
   const runtime = g.chrome && g.chrome.runtime;
   if (!runtime || !runtime.onMessage) return;
-  g.__scoutfoxFrameAgent = true;
+  g.__tarkaFrameAgent = true;
   runtime.onMessage.addListener((request: any, _sender: unknown, sendResponse: (r: unknown) => void) => {
     if (!request || typeof request.action !== 'string' || !request.action.startsWith('FRAME_')) return false;
     answerFrameMessage(request, win.document, win).then(

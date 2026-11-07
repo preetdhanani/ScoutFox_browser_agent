@@ -1,5 +1,5 @@
 /**
- * ScoutFox Perception and Element Representation
+ * Tarka Perception and Element Representation
  * Computes ARIA roles, field kinds, form kinds, and produces byte-compatible element summaries.
  */
 

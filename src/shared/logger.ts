@@ -1,5 +1,5 @@
 /**
- * Logger utility for ScoutFox Agentic Browser Extension
+ * Logger utility for Tarka Agentic Browser Extension
  * Outputs formatted console logs and broadcasts debug messages to Sidepanel UI safely.
  * Persists logs to storage to survive background service worker lifecycle restarts.
  */

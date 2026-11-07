@@ -1,5 +1,5 @@
 /**
- * ScoutFox Page Text Extraction and Repeat Run Collapsing
+ * Tarka Page Text Extraction and Repeat Run Collapsing
  * Pure text processing functions and scroll-aware body text extraction.
  */
 
@@ -148,7 +148,7 @@ export function extractFullPageTextFromDocument(
 
 function extractText(doc: Document, win: Window, full: boolean): string {
   if (!doc) return '';
-  const badgeContainer = doc.getElementById ? doc.getElementById('scoutfox-badge-container') : null;
+  const badgeContainer = doc.getElementById ? doc.getElementById('tarka-badge-container') : null;
   let prevDisplay = '';
   if (badgeContainer && badgeContainer.style) {
     prevDisplay = badgeContainer.style.display;

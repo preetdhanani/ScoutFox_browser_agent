@@ -26,22 +26,22 @@ export function describeRestrictedUrl(url: string | null | undefined): string | 
     return 'That tab has not finished loading a page yet. Wait for it to load, then start the task again.';
   }
   if (/^chrome:\/\//i.test(url) || /^edge:\/\//i.test(url) || /^about:/i.test(url) || /^brave:\/\//i.test(url)) {
-    return `ScoutFox cannot read ${url} - Chrome blocks all extensions from accessing its own internal pages, so no extension can automate this screen. Switch to a normal website tab (anything starting with http:// or https://) and start the task again.`;
+    return `Tarka cannot read ${url} - Chrome blocks all extensions from accessing its own internal pages, so no extension can automate this screen. Switch to a normal website tab (anything starting with http:// or https://) and start the task again.`;
   }
   if (/^chrome-extension:\/\//i.test(url) || /^moz-extension:\/\//i.test(url)) {
-    return `ScoutFox cannot read ${url} - browsers block extensions from scripting other extensions' pages. Switch to a normal website tab and start the task again.`;
+    return `Tarka cannot read ${url} - browsers block extensions from scripting other extensions' pages. Switch to a normal website tab and start the task again.`;
   }
   if (/^https:\/\/chromewebstore\.google\.com/i.test(url) || /^https:\/\/chrome\.google\.com\/webstore/i.test(url)) {
-    return 'ScoutFox cannot read the Chrome Web Store - Chrome blocks extensions from scripting it. Switch to another site and start the task again.';
+    return 'Tarka cannot read the Chrome Web Store - Chrome blocks extensions from scripting it. Switch to another site and start the task again.';
   }
   if (/^(file|view-source|devtools|data):/i.test(url)) {
-    return `ScoutFox cannot read ${url.split(':')[0]}: pages. Switch to a normal website tab and start the task again.`;
+    return `Tarka cannot read ${url.split(':')[0]}: pages. Switch to a normal website tab and start the task again.`;
   }
   return null;
 }
 
 /**
- * Can this tab be automated by ScoutFox?
+ * Can this tab be automated by Tarka?
  * Delegates to describeRestrictedUrl as the single source of truth.
  */
 export function isValidWebTab(tab: { url?: string | null } | null | undefined): boolean {

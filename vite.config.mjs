@@ -197,7 +197,7 @@ function base(recorder, output = {}) {
     // build.mjs prints its own summary. Warnings and errors still come through.
     logLevel: 'warn',
     publicDir: false,
-    define: { 'process.env.NODE_ENV': JSON.stringify('production'), __SCOUTFOX_BUILD__: JSON.stringify(buildStamp()) },
+    define: { 'process.env.NODE_ENV': JSON.stringify('production'), __TARKA_BUILD__: JSON.stringify(buildStamp()) },
     build: {
       outDir: OUT_DIR,
       emptyOutDir: false,

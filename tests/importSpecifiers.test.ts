@@ -106,7 +106,7 @@ test('the scan sees each way the mistake is made, and only that', () => {
   assert.deepEqual(bad("import { a } from './sanitize.ts';"), []);
   assert.deepEqual(bad("import data from './data.json' with { type: 'json' };"), []);
   assert.deepEqual(bad("import { Logger } from './logger.js?case=1';"), [], 'a query is not part of the file name');
-  assert.deepEqual(bad("import test from 'node:test';\nimport { x } from '@langchain/core';\nimport y from 'zod';"), []);
+  assert.deepEqual(bad("import test from 'node:test';\nimport { x } from '9router';\nimport y from 'zod';"), []);
   assert.deepEqual(bad("// import { a } from './sanitize';\n/* import { b } from './sanitize'; */\n * import c from './sanitize';"), [], 'comments');
   assert.deepEqual(bad("const text = \"import a from './sanitize'\";"), [], 'a string that is not at the start of a line');
   assert.deepEqual(bad("/**\n *   await import('./sanitize');\n */"), [], 'an example in a doc comment');

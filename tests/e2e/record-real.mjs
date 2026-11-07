@@ -87,7 +87,7 @@ async function main() {
     throw err;
   }
 
-  const profileDir = makeTempDir('scoutfox-record-');
+  const profileDir = makeTempDir('tarka-record-');
   const browser = await puppeteer.launch({
     executablePath: CHROMIUM,
     headless: true,

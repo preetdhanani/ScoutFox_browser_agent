@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ScoutFox Standalone AI Agentic Browser (Python + Playwright)
+Tarka Standalone AI Agentic Browser (Python + Playwright)
 Runs web browser automation directly from terminal using local Ollama (8B/9B/14B/27B) or Cloud LLMs.
 No Chrome Extension or $5 developer account required!
 """
@@ -104,11 +104,11 @@ def extract_dom_elements(page, max_elements=120):
       const elements = [];
       let count = 0;
 
-      const oldContainer = document.getElementById('scoutfox-py-badges');
+      const oldContainer = document.getElementById('tarka-py-badges');
       if (oldContainer) oldContainer.remove();
 
       const badgeContainer = document.createElement('div');
-      badgeContainer.id = 'scoutfox-py-badges';
+      badgeContainer.id = 'tarka-py-badges';
       badgeContainer.style.position = 'absolute';
       badgeContainer.style.top = '0';
       badgeContainer.style.left = '0';
@@ -253,7 +253,7 @@ def run_agent(goal, start_url, provider, base_url, api_key, model, max_steps, he
         print("❌ Playwright is not installed. Install it with: pip install playwright && playwright install chromium")
         sys.exit(1)
 
-    print(f"\n🦊 Launching ScoutFox Standalone Agent...")
+    print(f"\n🦊 Launching Tarka Standalone Agent...")
     print(f"🎯 Goal: {goal}")
     print(f"🌐 Start URL: {start_url}")
     print(f"🦙 Provider: {provider} | Model: {model}\n")
@@ -349,7 +349,7 @@ Choose your next action:"""
         browser.close()
 
 def build_arg_parser():
-    parser = argparse.ArgumentParser(description="ScoutFox Standalone AI Agentic Browser")
+    parser = argparse.ArgumentParser(description="Tarka Standalone AI Agentic Browser")
     parser.add_argument("--goal", type=str, default="Search Google for open source AI agents", help="User task goal")
     parser.add_argument("--url", type=str, default="https://google.com", help="Initial webpage URL")
     parser.add_argument("--provider", type=str, default="ollama", choices=["ollama", "openai", "nvidia"], help="LLM Provider")

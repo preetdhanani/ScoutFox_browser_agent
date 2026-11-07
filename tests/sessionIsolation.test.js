@@ -1,5 +1,5 @@
 /**
- * Tests for the per-TAB session model: each tab gets its own independent ScoutFox session (own
+ * Tests for the per-TAB session model: each tab gets its own independent Tarka session (own
  * tab group, own history, own running task, own Stop/Pause), reopening the panel on a tab
  * reflects that tab's current session rather than resetting it, and the agent can only read/act
  * on tabs inside its OWN group - zero access outside it.
@@ -77,7 +77,7 @@ test('two tabs in DIFFERENT windows are independent too, with their own tab grou
 
   assert.equal(stateA.task, 'window 2 task');
   assert.equal(stateB.task, 'window 3 task');
-  assert.notEqual(stateA.scoutFoxGroupId, stateB.scoutFoxGroupId,
+  assert.notEqual(stateA.tarkaGroupId, stateB.tarkaGroupId,
     'each session must get its OWN tab group, never a shared one - and a Chrome group cannot span windows anyway');
 
   portA.disconnect();
@@ -134,7 +134,7 @@ test('a brand new tab opening the extension starts its own blank session', async
   portNew.disconnect();
 });
 
-test('the hard access wall: a session cannot read a tab outside its own ScoutFox group', async (t) => {
+test('the hard access wall: a session cannot read a tab outside its own Tarka group', async (t) => {
   const rig = await routerRig({
     tabs: [
       { id: 1001, url: 'https://example.com/mine', windowId: 10, groupId: 7000 },
@@ -145,14 +145,14 @@ test('the hard access wall: a session cannot read a tab outside its own ScoutFox
 
   const runnerA = new AgentRunner(1001, 10);
   await runnerA.restorePromise;
-  runnerA.scoutFoxGroupIds.set(10, 7000);
+  runnerA.tarkaGroupIds.set(10, 7000);
 
   assert.equal(await runnerA.runtime.browser.isTabInScope(1001), true, 'a tab inside this session\'s own group must be in scope');
   assert.equal(await runnerA.runtime.browser.isTabInScope(1002), false, 'a tab in a DIFFERENT group must never be in scope');
 
   await assert.rejects(
     () => runnerA.runtime.browser.snapshot(1002, { docId: '1' }),
-    /outside this session's ScoutFox group/,
+    /outside this session's Tarka group/,
     'acting on a tab outside this session\'s group must be refused outright, not silently succeed'
   );
 });

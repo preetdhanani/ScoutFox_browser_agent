@@ -1,5 +1,5 @@
 /**
- * ScoutFox ActionExecutor Class
+ * Tarka ActionExecutor Class
  * Handles element highlighting overlay, stable locator re-resolution,
  * and executes the content-side actions (click, type, scroll, read_page, find_element).
  * Preserves the instance method dispatch seam for all callers and tamper scripts.
@@ -113,7 +113,7 @@ export class ActionExecutor implements ActionExecutionContext {
   hideAgentUi(shownFramePaths: unknown = []): void {
     const doc = this.getDoc();
     if (!doc || !doc.getElementById) return;
-    const containers = ['scoutfox-badge-container', 'scoutfox-cursor-container'];
+    const containers = ['tarka-badge-container', 'tarka-cursor-container'];
     for (const id of containers) {
       const el = doc.getElementById(id);
       if (!el || !el.style) continue;

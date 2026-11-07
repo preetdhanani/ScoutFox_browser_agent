@@ -46,7 +46,7 @@ export const RUN_SNAPSHOT_MAX_CHARS = 800_000;
 export const RUN_SNAPSHOT_DEBOUNCE_MS = 250;
 
 /** The row a run gets when the worker died under it. */
-export const INTERRUPTED_TEXT = 'Chrome restarted ScoutFox\'s background worker, so the run could not go on. The steps so far are kept; start the task again to continue.';
+export const INTERRUPTED_TEXT = 'Chrome restarted Tarka\'s background worker, so the run could not go on. The steps so far are kept; start the task again to continue.';
 
 /** The row a saved chat gets when its run was cut off by a closed browser or panel (it was never saved as ended). */
 export const CLOSED_TEXT = 'The run was cut off when the browser or panel closed. The steps so far are kept; resume the task to continue.';

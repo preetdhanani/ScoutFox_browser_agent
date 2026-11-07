@@ -4,7 +4,6 @@
  * Callers (the old engine today, the graph's LlmPort later) hand in plain settings and plain
  * { role, content } turns and get a string back. Nothing LangChain-shaped leaks out of llm/.
  */
-import type { Callbacks } from '@langchain/core/callbacks/manager';
 import type { CustomProviders } from '../../shared/storage.ts';
 
 /** One turn as the engine keeps it. Only 'user' and 'assistant' occur; anything else is read as 'user'. */
@@ -43,7 +42,7 @@ export interface LlmSettings {
   llmTimeoutMs?: number;
   /** Anthropic and AgentRouter max_tokens. No settings screen sets it, so it is 8192 unless someone stored a value. */
   maxTokens?: number;
-  /** Ollama only: the context window (num_ctx). Ollama's own default is 4096, so ScoutFox always sends one (8192). */
+  /** Ollama only: the context window (num_ctx). Ollama's own default is 4096, so Tarka always sends one (8192). */
   ollamaNumCtx?: number;
   /** Ollama only: the generation cap (num_predict). Not sent when it is missing or not above 0. */
   ollamaNumPredict?: number;
@@ -58,8 +57,8 @@ export interface CompletionOptions {
   schema?: object | null;
   /** Gemini only: the thinkingConfig of the request (llm/effort.ts). The other providers get nothing from it. */
   thinkingConfig?: { thinkingBudget?: number; thinkingLevel?: 'LOW' | 'MEDIUM' | 'HIGH' };
-  /** Forwarded into model.invoke for opt-in tracing, because there is no AsyncLocalStorage parent lookup. */
-  callbacks?: Callbacks;
+  /** Optional callbacks, for compatibility with callers. */
+  callbacks?: unknown;
   /** Called with the token usage of the call when the provider reports one (LangChain's usage_metadata). */
   onUsage?: (usage: TokenUsage) => void;
 }

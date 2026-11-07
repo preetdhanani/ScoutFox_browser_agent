@@ -1,5 +1,5 @@
 /**
- * ScoutFox DOMCompressor Content Script Entry
+ * Tarka DOMCompressor Content Script Entry
  * Injected in ISOLATED world at document_idle.
  * Attaches DOMCompressor class and singleton instances to window.
  */

@@ -40,7 +40,7 @@ const NON_CHAT_MODEL_PATTERN = /embed|rerank|guard|safety|clip/i;
 /**
  * The fallback lists of the built-in providers, used when a fetch fails or answers nothing. A provider
  * this file does not know (a user-added custom endpoint) gets an EMPTY list: guessing Gemini or Ollama
- * ids for a gateway ScoutFox has never seen would fill its picker with models it cannot serve. The
+ * ids for a gateway Tarka has never seen would fill its picker with models it cannot serve. The
  * caller that knows the custom descriptor hands back its saved list instead.
  */
 export function getFallbackModels(provider: string): string[] {

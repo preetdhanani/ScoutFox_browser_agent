@@ -180,8 +180,8 @@ The mock's wording is kept wherever it is already right. Additions:
 | Sub-title | `Connect a relay, a self-hosted server, or any other OpenAI- or Anthropic-compatible endpoint by its base URL, protocol, and models.` |
 | Key helper | `Optional for local and allowlisted servers. No Authorization header is sent when it is empty.` |
 | Key erased (C1) | `The host changed, so the key was removed. Paste it again to send it to the new host.` |
-| Wrong host (C2) | `The endpoint redirected to <host>, which is not <configured host>. ScoutFox did not follow it.` |
-| Provider deleted elsewhere | `Provider <id> is no longer configured, so ScoutFox switched to <fallback>.` |
+| Wrong host (C2) | `The endpoint redirected to <host>, which is not <configured host>. Tarka did not follow it.` |
+| Provider deleted elsewhere | `Provider <id> is no longer configured, so Tarka switched to <fallback>.` |
 | Toast after Add | `Provider <display name> added.` |
 | Chat error (B3) | `<display name> (<protocol>) returned <status> at <url>: <server message>` |
 

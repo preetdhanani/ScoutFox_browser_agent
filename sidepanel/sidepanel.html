@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ScoutFox AI Agent</title>
+  <title>Tarka AI Agent</title>
   <link rel="stylesheet" href="sidepanel.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -14,11 +14,11 @@
     <!-- Header -->
     <header class="app-header">
       <div class="brand">
-        <div class="logo-icon" title="ScoutFox AI Agent">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.2 3 8.6 8.4 5.6 11.2Q6.6 17 12 21.6Q17.4 17 18.4 11.2L15.4 8.4 20.8 3 15.2 6.2Q12 5.2 8.8 6.2Z"/><circle cx="9.5" cy="12.8" r="1" fill="currentColor" stroke="none"/><circle cx="14.5" cy="12.8" r="1" fill="currentColor" stroke="none"/></svg>
+        <div class="logo-icon" title="Tarka AI Agent">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3.6 20.6 19.4H3.4Z"/><circle cx="12" cy="14.2" r="1.5" fill="currentColor" stroke="none"/></svg>
         </div>
         <div class="brand-text">
-          <h1>ScoutFox</h1>
+          <h1>Tarka</h1>
           <span class="brand-meta">
             <span class="badge-tag" id="currentModelBadge">Gemini 1.5 Flash</span>
           </span>
@@ -41,7 +41,7 @@
 
     <!-- Shown when the background worker is from an older build than this page (see checkWorkerBuild) -->
     <div class="update-banner" id="updateBanner" role="status" hidden>
-      <span class="update-banner-text">ScoutFox was updated. Reload it to use the new version.</span>
+      <span class="update-banner-text">Tarka was updated. Reload it to use the new version.</span>
       <button class="update-banner-btn" id="btnReloadExtension" type="button" title="Reloads the extension. A running task stops.">Reload</button>
     </div>
 
@@ -82,10 +82,10 @@
         <div class="timeline-container" id="timeline">
           <div class="empty-state" id="emptyState">
             <div class="empty-glyph" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.2 3 8.6 8.4 5.6 11.2Q6.6 17 12 21.6Q17.4 17 18.4 11.2L15.4 8.4 20.8 3 15.2 6.2Q12 5.2 8.8 6.2Z"/><circle cx="9.5" cy="12.8" r="1" fill="currentColor" stroke="none"/><circle cx="14.5" cy="12.8" r="1" fill="currentColor" stroke="none"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3.6 20.6 19.4H3.4Z"/><circle cx="12" cy="14.2" r="1.5" fill="currentColor" stroke="none"/></svg>
             </div>
             <h3>What would you like to automate?</h3>
-            <p>Enter a task below. ScoutFox will read the page, index elements, and execute browser actions step-by-step.</p>
+            <p>Enter a task below. Tarka will read the page, index elements, and execute browser actions step-by-step.</p>
 
             <div class="sample-prompts">
               <span class="sample-chip" data-prompt="Search Google for open-source AI browser frameworks">
@@ -141,7 +141,7 @@
           </div>
 
           <div class="composer" id="composer">
-            <textarea id="taskInput" class="composer-input" placeholder="Ask ScoutFox to do something..." rows="2"></textarea>
+            <textarea id="taskInput" class="composer-input" placeholder="Ask Tarka to do something..." rows="2"></textarea>
 
             <div class="composer-bar">
               <button type="button" class="composer-icon-btn" id="btnApprovalMode" aria-haspopup="menu" aria-expanded="false" title="Automatically approve" aria-label="Approval mode">

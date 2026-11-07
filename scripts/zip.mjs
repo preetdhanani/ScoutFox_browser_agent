@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Zips the CONTENTS of dist/ into scoutfox-chrome-extension.zip at the repo root, with
+ * Zips the CONTENTS of dist/ into tarka-chrome-extension.zip at the repo root, with
  * manifest.json at the root of the zip. No dependencies: the zip format is written here with
  * node:zlib (deflate, and zlib.crc32, which needs Node 22.2 or newer).
  *
@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = path.join(ROOT, 'dist');
-const OUT = path.join(ROOT, 'scoutfox-chrome-extension.zip');
+const OUT = path.join(ROOT, 'tarka-chrome-extension.zip');
 const EXCLUDE = /(?:\.map|(?:^|\/)\.DS_Store|(?:^|\/)Thumbs\.db)$/;
 
 // MS-DOS time and date for 1980-01-01 00:00:00, the earliest a zip can store (year 0 = 1980).

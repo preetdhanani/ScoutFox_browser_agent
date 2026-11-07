@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentRunner } from '../../src/background/runner/AgentRunner.ts';
-import { ScoutFoxMCPClient } from '../../src/background/mcp/client.ts';
+import { TarkaMCPClient } from '../../src/background/mcp/client.ts';
 import { cdp } from '../../src/background/browser/cdp.ts';
 import { fakeChrome } from '../helpers/fakeChrome.ts';
 
@@ -13,7 +13,7 @@ test('a Pause clicked while the task is being claimed lands as a real pause, and
   const restore = fakeChrome({ storage: true, tabs: { list: [{ id: 201, url: 'https://a.test', title: 'A', windowId: 1 }] }, tabGroups: true }).install();
   t.after(restore);
   const seen: any[] = [];
-  t.mock.method(ScoutFoxMCPClient.prototype, 'startTask', async function (_prompt: string, opts: any) { seen.push(opts); });
+  t.mock.method(TarkaMCPClient.prototype, 'startTask', async function (_prompt: string, opts: any) { seen.push(opts); });
 
   const runner = new AgentRunner(201, 'default');
   assert.equal(runner.claimForTask().success, true);
@@ -31,7 +31,7 @@ test('a failure while setting up the tab group still releases the claim', async 
   const restore = fakeChrome({ storage: true }).install();
   t.after(restore);
   const runner = new AgentRunner(202, 'default');
-  (runner as any).ensureScoutFoxGroup = async () => { throw new Error('tabGroups is gone'); };
+  (runner as any).ensureTarkaGroup = async () => { throw new Error('tabGroups is gone'); };
   assert.equal(runner.claimForTask().success, true);
   await assert.rejects(runner.startTask('Do it', 202), /tabGroups is gone/);
   assert.equal(runner.claimForTask().success, true, 'the next task on the tab can claim it');
@@ -58,19 +58,19 @@ test('the tab group map is read back after a worker restart', async (t) => {
   const restore = fakeChrome({ storage: true }).install();
   t.after(restore);
   const first = new AgentRunner(204, 'default');
-  first.scoutFoxGroupIds.set(7, 99);
+  first.tarkaGroupIds.set(7, 99);
   await first.persistState();
 
   const restarted = new AgentRunner(204, 'default');
   await restarted.restorePromise;
-  assert.equal(restarted.scoutFoxGroupIds.get(7), 99, 'the group of window 7 is known again');
+  assert.equal(restarted.tarkaGroupIds.get(7), 99, 'the group of window 7 is known again');
 });
 
 test('a runner is not kept alive by a global map nothing reads', () => {
   const restore = fakeChrome({ storage: true }).install();
   try {
     new AgentRunner(205, 'default');
-    assert.equal((globalThis as any).__scoutfoxSessions, undefined);
+    assert.equal((globalThis as any).__tarkaSessions, undefined);
   } finally {
     restore();
   }

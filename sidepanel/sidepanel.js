@@ -1,5 +1,5 @@
 /**
- * Sidepanel Controller Script for ScoutFox AI Agent
+ * Sidepanel Controller Script for Tarka AI Agent
  * Connects to Background Agent Engine, renders timeline, session history drawer, plan checklist, progress banner, settings, and backend logs.
  * Employs persistent per-provider API key storage, automatic model fetching, instant key auto-saving, and a smart searchable combobox component.
  */
@@ -16,7 +16,7 @@ import {
   renderProvenanceFindingsTable
 } from './cards.js';
 
-import { FOX_MARK } from './brand.js';
+import { BRAND_MARK } from './brand.js';
 import { contextCardHtml, contextWindowHint, meterView, ringSvg } from './contextMeter.js';
 import { parseTokenCount } from '../src/shared/tokens.ts';
 import { logEntryHtml, logMatchesFilter, parseLogData, treeStateKey } from './logView.js';
@@ -1055,7 +1055,7 @@ function connectPort() {
       // What actually matters here is tabId, so this panel is routed to ITS OWN tab's session
       // rather than a shared one - riding in the port name itself is simple, synchronous, and
       // available the instant the port is created.
-      const base = hasConnectedBefore ? 'scoutfox_sidepanel' : 'scoutfox_sidepanel_fresh';
+      const base = hasConnectedBefore ? 'tarka_sidepanel' : 'tarka_sidepanel_fresh';
       hasConnectedBefore = true;
       const portName = myTabId !== null ? `${base}:${myTabId}` : base;
       backgroundPort = chrome.runtime.connect({ name: portName });
@@ -1120,7 +1120,7 @@ function followRunToTab(payload) {
   if (!payload || typeof payload.tabId !== 'number' || payload.fromTabId !== myTabId) return;
   if (!chrome.sidePanel || !chrome.sidePanel.open) return;
   chrome.sidePanel.open({ tabId: payload.tabId }).catch((err) => {
-    appendLocalLog('WARN', 'Sidepanel', `[PANEL_HANDOFF_FAILED] The task moved to tab [${payload.tabId}], but the panel could not follow it there (${err.message}). Click the ScoutFox icon on that tab to see the run.`);
+    appendLocalLog('WARN', 'Sidepanel', `[PANEL_HANDOFF_FAILED] The task moved to tab [${payload.tabId}], but the panel could not follow it there (${err.message}). Click the Tarka icon on that tab to see the run.`);
   });
 }
 
@@ -1219,7 +1219,7 @@ function checkWorkerBuild() {
     if (reload) reload.onclick = () => chrome.runtime.reload();
     if (stale && !staleWorkerLogged) {
       staleWorkerLogged = true;
-      appendLocalLog('WARN', 'Sidepanel', `[STALE_WORKER] The panel is build ${BUILD_STAMP}, the background worker is ${workerBuild ? `build ${workerBuild}` : 'an older build'}. Reload ScoutFox to run the new version.`);
+      appendLocalLog('WARN', 'Sidepanel', `[STALE_WORKER] The panel is build ${BUILD_STAMP}, the background worker is ${workerBuild ? `build ${workerBuild}` : 'an older build'}. Reload Tarka to run the new version.`);
     }
   });
 }
@@ -1596,7 +1596,7 @@ function initEventListeners() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `scoutfox-logs-${new Date().toISOString().slice(0,10)}.txt`;
+    a.download = `tarka-logs-${new Date().toISOString().slice(0,10)}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   });
@@ -2014,10 +2014,10 @@ function renderEmptyState() {
     timeline.innerHTML = `
       <div class="empty-state" id="emptyState">
         <div class="empty-glyph" aria-hidden="true">
-          ${FOX_MARK}
+          ${BRAND_MARK}
         </div>
         <h3>What would you like to automate?</h3>
-        <p>Enter a task below. ScoutFox will read the page, index elements, and execute browser actions step-by-step.</p>
+        <p>Enter a task below. Tarka will read the page, index elements, and execute browser actions step-by-step.</p>
         <div class="sample-prompts">
           <span class="sample-chip" data-prompt="Search Google for open-source AI browser frameworks">${ICONS.search} Search Google for AI agents</span>
           <span class="sample-chip" data-prompt="Find top trending repositories on GitHub for python">${ICONS.star} Top Python GitHub repos</span>
@@ -2667,7 +2667,7 @@ const NOTE_SEVERITY_RANK = { lie: 0, gap: 1, soft: 2 };
 const NOTE_SEVERITY_LABEL = { lie: 'Problem', gap: 'Gap', soft: 'Note' };
 
 const AUDIT_SUBTITLE = {
-  unverified: 'Some parts of this answer could not be checked against the pages ScoutFox read.',
+  unverified: 'Some parts of this answer could not be checked against the pages Tarka read.',
   partial: 'Not every source was checked.'
 };
 const UNCONFIRMED_NOTICE = 'The model replied in plain text instead of finishing the task.';
@@ -2828,7 +2828,7 @@ function failedStepsNote(count) {
  *   unverified -> danger card "Unconfirmed answer"     partial -> warning card "Partial answer"
  *   verified   -> today's green "Done" plus a quiet "Checked against N pages" line
  *   no audit   -> today's card, byte for byte ("Done", or "Unconfirmed answer" for a freeform reply)
- * The old `unconfirmed` flag (the model never called finish, ScoutFox inferred the end from a plain
+ * The old `unconfirmed` flag (the model never called finish, Tarka inferred the end from a plain
  * reply) is a separate fact and stays visible next to a verdict: it turns a green or amber card
  * red, and it adds one line saying why. A verified-but-unconfirmed answer keeps the title
  * "Unconfirmed answer": its content was checked, but the model never said it was done.
@@ -3111,10 +3111,10 @@ function renderPartialCard(turn, findings = null) {
 // What the engine writes into an annotated answer (annotateAnswer in agent/answerAudit.ts): one warning line on top, and a
 // section at the end. Both repeat what the finish card shows from the audit.
 const ENGINE_BANNERS = [
-  'WARNING - UNVERIFIED ANSWER: parts of this answer are not backed by any page ScoutFox read. See the notes at the end.',
+  'WARNING - UNVERIFIED ANSWER: parts of this answer are not backed by any page Tarka read. See the notes at the end.',
   'PARTIAL ANSWER: not every source was checked. See the notes at the end.'
 ];
-const ENGINE_SECTION = '\n\n---\nVerification notes (written by ScoutFox, not by the model)';
+const ENGINE_SECTION = '\n\n---\nVerification notes (written by Tarka, not by the model)';
 
 function withoutEngineNotes(answer) {
   let text = String(answer == null ? '' : answer);
@@ -3179,7 +3179,7 @@ function renderPlanApprovalCard(pendingApproval) {
       <span class="plan-approval-icon">${ICONS.layers}</span>
       <div class="plan-approval-copy">
         <div class="plan-approval-title">Here is my plan</div>
-        <div class="plan-approval-lead">Approve it and ScoutFox will start working.</div>
+        <div class="plan-approval-lead">Approve it and Tarka will start working.</div>
       </div>
     </div>
     <ol class="plan-approval-steps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol>

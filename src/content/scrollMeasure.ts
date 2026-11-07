@@ -1,5 +1,5 @@
 /**
- * ScoutFox scroll measurement: which box a scroll moves, where that box is, and whether it moved.
+ * Tarka scroll measurement: which box a scroll moves, where that box is, and whether it moved.
  *
  * The page itself often does not scroll. JupyterLab, Gmail, Slack and most web apps keep the
  * window still and scroll an inner panel, so window.scrollBy moves nothing there. The background

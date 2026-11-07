@@ -1,5 +1,5 @@
 /**
- * ScoutFox Element Reference Map and Navigation State
+ * Tarka Element Reference Map and Navigation State
  * Manages numeric element ID assignment, WeakRef dereferencing, and document freshness checks.
  */
 

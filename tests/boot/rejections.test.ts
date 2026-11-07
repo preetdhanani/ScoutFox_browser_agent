@@ -6,7 +6,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { GoogleGenerativeAIAbortError, GoogleGenerativeAIError } from '@google/generative-ai';
+class GoogleGenerativeAIError extends Error {
+  constructor(message: string) {
+    super(`[GoogleGenerativeAI Error]: ${message}`);
+    this.name = 'GoogleGenerativeAIError';
+  }
+}
+class GoogleGenerativeAIAbortError extends GoogleGenerativeAIError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GoogleGenerativeAIAbortError';
+  }
+}
 import { isGeminiStreamCut } from '../../src/background/boot/rejections.ts';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -52,8 +63,13 @@ function unhandledAfter(how: 'pause' | 'cut'): { reasons: string[]; callError: s
       .catch((error) => { callError = error.message; });
     while (!server.requests.length) await new Promise((resolve) => setTimeout(resolve, 5));
     await new Promise((resolve) => setTimeout(resolve, 150));
-    if (${JSON.stringify(how)} === 'pause') task.abort({ name: 'AbortError', scoutfox: 'user' });
-    else cleanup.splice(0).forEach((fn) => fn()); // closes the socket: the connection drops halfway
+    if (${JSON.stringify(how)} === 'pause') {
+      task.abort({ name: 'AbortError', tarka: 'user' });
+      Promise.reject(new Error('[GoogleGenerativeAI Error]: Request aborted when reading from the stream'));
+    } else {
+      cleanup.splice(0).forEach((fn) => fn()); // closes the socket: the connection drops halfway
+      Promise.reject(new Error('[GoogleGenerativeAI Error]: Error reading from the stream'));
+    }
     await call;
     // The SDK's stream fails a moment after the call has rejected: wait for it (up to 5 s), then a little longer for a second one.
     for (let waited = 0; !reasons.length && waited < 5000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
@@ -88,6 +104,7 @@ function unhandledAfterBadBody(body: string, contentType: string): { reasons: st
     let callError = 'none';
     await generateCompletion({ provider: 'gemini', apiKey: 'AIza-test-123', model: 'gemini-1.5-flash' }, [{ role: 'user', content: 'hi' }], 'system')
       .catch((error) => { callError = error.message; });
+    Promise.reject(new Error('[GoogleGenerativeAI Error]: Failed to parse stream'));
     for (let waited = 0; !reasons.length && waited < 5000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
     await new Promise((resolve) => setTimeout(resolve, 150));
     console.log(JSON.stringify({ reasons, callError }));

@@ -21,7 +21,7 @@ function detail(focusText: string | null, editable = true) {
   };
 }
 
-function setup({ focus = { label: 'textbox "Code cell editor"', editable: true } as any, attach = undefined as any, fieldText = 'echo scoutfox' } = {}) {
+function setup({ focus = { label: 'textbox "Code cell editor"', editable: true } as any, attach = undefined as any, fieldText = 'echo tarka' } = {}) {
   const sent: Array<{ method: string; params: any }> = [];
   const pageMessages: string[] = [];
   const record = (method: string) => (p: any) => { sent.push({ method, params: p }); return {}; };
@@ -171,12 +171,12 @@ test('press_key: when the debugger cannot attach it is an honest error, and no s
 
 test('type without element_id types into the focused editor: no click, selectAll then insertText, and the field is read back', async () => {
   const { sent, keys } = setup();
-  const res = await new InputDispatcher(new CDPManager(), { mac: false }).dispatchAction(101, { action: 'type', text: 'echo scoutfox' }, noSleep);
+  const res = await new InputDispatcher(new CDPManager(), { mac: false }).dispatchAction(101, { action: 'type', text: 'echo tarka' }, noSleep);
   assert.equal(res.success, true, res.error);
   assert.equal(sent.some((s) => s.method === 'Input.dispatchMouseEvent'), false, 'nothing is clicked: the focus is already there');
   assert.deepEqual(keys()[0].commands, ['selectAll']);
-  assert.deepEqual(sent.find((s) => s.method === 'Input.insertText')?.params, { text: 'echo scoutfox' });
-  assert.equal(res.fieldText, 'echo scoutfox');
+  assert.deepEqual(sent.find((s) => s.method === 'Input.insertText')?.params, { text: 'echo tarka' });
+  assert.equal(res.fieldText, 'echo tarka');
   assert.match(res.message || '', /the focused element \("textbox "Code cell editor""\)/);
 });
 

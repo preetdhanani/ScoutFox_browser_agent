@@ -105,7 +105,7 @@ function scrubSdkEnv(t: { after: (fn: () => void) => void }): void {
   t.after(() => { for (const [name, value] of saved) process.env[name] = value; });
 }
 
-const ORIGINAL_FETCH = Symbol.for('scoutfox.llmWire.originalFetch');
+const ORIGINAL_FETCH = Symbol.for('tarka.llmWire.originalFetch');
 type Installed = typeof fetch & { [ORIGINAL_FETCH]?: typeof fetch };
 
 /**

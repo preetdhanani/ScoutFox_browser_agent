@@ -196,7 +196,7 @@ async function main() {
   tempDirs.add(copy.dir);
   cleanups.push(() => { copy.remove(); tempDirs.delete(copy.dir); });
 
-  const profileDir = makeTempDir('scoutfox-replay-');
+  const profileDir = makeTempDir('tarka-replay-');
   const browser = await puppeteer.launch({
     executablePath: CHROMIUM,
     headless: true,

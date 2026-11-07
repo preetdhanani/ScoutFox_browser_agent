@@ -46,13 +46,13 @@ test('1. renderBadges and removeBadges manage floating badges correctly', () => 
   executor.renderBadges([{ id: 1 }]);
 
   assert.ok(executor.badgeContainer, 'badgeContainer must be created');
-  assert.equal(executor.badgeContainer!.id, 'scoutfox-badge-container');
+  assert.equal(executor.badgeContainer!.id, 'tarka-badge-container');
   assert.equal(executor.badgeContainer!.style.zIndex, '2147483647');
 
   const children = (executor.badgeContainer as any).children;
   assert.equal(children.length, 1);
   const badge = children[0];
-  assert.equal(badge.className, 'scoutfox-badge');
+  assert.equal(badge.className, 'tarka-badge');
   assert.equal(badge.textContent, '1');
   assert.equal(badge.style.backgroundColor, ACCENT_COLOR);
   assert.equal(badge.style.top, '110px'); // top 10 + scrollY 100
@@ -96,9 +96,9 @@ test('2. ensureCursorOverlay, animateCursor, and showClickEffect produce correct
   executor.ensureCursorOverlay();
 
   assert.ok(executor.cursorContainer);
-  assert.equal(executor.cursorContainer!.id, 'scoutfox-cursor-container');
+  assert.equal(executor.cursorContainer!.id, 'tarka-cursor-container');
   assert.ok(executor.cursorEl);
-  assert.equal(executor.cursorEl!.id, 'scoutfox-cursor-pointer');
+  assert.equal(executor.cursorEl!.id, 'tarka-cursor-pointer');
   assert.match(executor.cursorEl!.innerHTML, /<svg/);
   assert.match(executor.cursorEl!.innerHTML, /#ff7a00/);
 

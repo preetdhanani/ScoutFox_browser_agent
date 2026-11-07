@@ -45,7 +45,7 @@ export function missingManifestFiles(dir) {
  * @returns {{dir: string, files: string[], remove: () => void}}
  */
 export function prepareExtensionCopy({ distDir, driverHtml, panelTriggerHtml, panelTriggerJs }) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'scoutfox-e2e-ext-')));
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tarka-e2e-ext-')));
   const remove = () => fs.rmSync(dir, { recursive: true, force: true });
   try {
     fs.cpSync(distDir, dir, {

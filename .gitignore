@@ -24,7 +24,7 @@ docs/
 
 # Build output
 dist/
-scoutfox-chrome-extension.zip
+tarka-chrome-extension.zip
 
 # E2E screenshots (one folder per run, saved by the smoke harness)
 tests/e2e/screenshots/

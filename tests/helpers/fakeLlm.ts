@@ -79,12 +79,39 @@
  *   The one error a function may throw is the call's own abort reason, which is an abort.
  */
 
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import type { BaseChatModelCallOptions, BaseChatModelParams } from '@langchain/core/language_models/chat_models';
-import { AIMessage } from '@langchain/core/messages';
-import type { BaseMessage } from '@langchain/core/messages';
-import type { ChatResult } from '@langchain/core/outputs';
 import type { LlmPort } from '../../src/background/runner/runtimeRegistry.ts';
+
+export class AIMessage {
+  readonly role = 'assistant';
+  readonly type = 'ai';
+  public additional_kwargs: Record<string, unknown> = {};
+  fields: { content: string; additional_kwargs?: Record<string, unknown> } | string;
+  constructor(fields: { content: string; additional_kwargs?: Record<string, unknown> } | string) {
+    this.fields = fields;
+    if (typeof fields !== 'string' && fields.additional_kwargs) {
+      this.additional_kwargs = fields.additional_kwargs;
+    }
+  }
+  get content(): string {
+    return typeof this.fields === 'string' ? this.fields : this.fields.content;
+  }
+  get text(): string {
+    return this.content;
+  }
+}
+
+export type BaseMessage = { type?: string; role?: string; content?: string; text?: string };
+
+export interface ChatResult {
+  generations: Array<{ text: string; message: AIMessage }>;
+}
+
+export interface BaseChatModelParams {}
+
+export class BaseChatModel<T = any> {
+  ParsedCallOptions!: T;
+  constructor(_params?: BaseChatModelParams) {}
+}
 
 // ---------------------------------------------------------------------------------------------
 // Types
@@ -170,9 +197,10 @@ export interface CompletionOptions {
 }
 export type GenerateCompletion = (settings: unknown, messages: LlmMessage[], systemPrompt: string, options?: CompletionOptions) => Promise<string>;
 
-export interface FakeChatCallOptions extends BaseChatModelCallOptions {
+export interface FakeChatCallOptions {
   /** ChatOllama's constrained-decoding schema. Recorded as call.schema. */
   format?: object;
+  signal?: AbortSignal;
 }
 
 export interface FakeLlm {
@@ -306,7 +334,7 @@ type Run = (input: CallInput) => Promise<Answer>;
 const ROLES: Record<string, string> = { human: 'user', ai: 'assistant', system: 'system', tool: 'tool' };
 
 function textOf(message: BaseMessage): string {
-  return typeof message.content === 'string' ? message.content : message.text;
+  return typeof message.content === 'string' ? message.content : (message.text ?? '');
 }
 
 class FakeChatModel extends BaseChatModel<FakeChatCallOptions> {
@@ -321,13 +349,13 @@ class FakeChatModel extends BaseChatModel<FakeChatCallOptions> {
     return 'fake-llm';
   }
 
-  async _generate(messages: BaseMessage[], options: this['ParsedCallOptions']): Promise<ChatResult> {
+  async _generate(messages: BaseMessage[], options: FakeChatCallOptions = {}): Promise<ChatResult> {
     const system = messages.filter((m) => m.type === 'system');
     const rest = messages.filter((m) => m.type !== 'system');
     const answer = await this.#run({
       via: 'chatModel',
       settings: undefined,
-      messages: rest.map((m) => ({ role: ROLES[m.type] ?? m.type, content: textOf(m) })),
+      messages: rest.map((m) => ({ role: (m.type && ROLES[m.type]) || m.type || 'user', content: textOf(m) })),
       systemPrompt: system.map(textOf).join('\n'),
       schema: options.format ?? null,
       json: false,

@@ -230,7 +230,7 @@ function geminiBodyOf(error: unknown): string {
 function bodyOf(provider: ChatProvider | 'agent_router', error: unknown, ctx: { rawBody?: string }): string {
   if (error instanceof UnreadableReplyError) return `not a chat reply: ${excerpt(ctx.rawBody)}`;
   if (provider === 'gemini') return geminiBodyOf(error);
-  if (ctx.rawBody) return ctx.rawBody;
+  if (ctx.rawBody !== undefined) return ctx.rawBody;
   const body = messageOf(error).replace(/^\d{3} /, '').replace(/\n\nTroubleshooting URL: \S+\n?$/, '');
   return body === 'status code (no body)' ? '' : body;
 }
@@ -306,7 +306,7 @@ export interface CustomFailureContext extends FailureContext {
 /**
  * The provider's own words for a failed call to a user-added endpoint. Unlike the built-ins, the
  * text names the display name, the protocol and the exact URL, because no curated knowledge exists
- * for an endpoint ScoutFox has never heard of: the user must be able to see what was sent (B3).
+ * for an endpoint Tarka has never heard of: the user must be able to see what was sent (B3).
  */
 export function describeCustomFailure(error: unknown, ctx: CustomFailureContext): string {
   const status = statusOf(error);

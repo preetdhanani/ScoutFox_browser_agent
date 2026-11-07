@@ -1,5 +1,5 @@
 // BUG-45 regression: the MAIN-world net-recorder runs in every frame, but its
-// `scoutfox-net` messages dispatch on the recording frame's own window - a
+// `tarka-net` messages dispatch on the recording frame's own window - a
 // child frame's postMessage never reaches the top frame's listener in
 // content/content.js (which is top-frame-only). The per-frame relay
 // content/netRelay.js must exist, be wired into the manifest for all frames,
@@ -27,11 +27,11 @@ function runRelay() {
   return { sent, listeners, window };
 }
 
-test('netRelay forwards same-frame scoutfox-net records to the background (BUG-45)', () => {
+test('netRelay forwards same-frame tarka-net records to the background (BUG-45)', () => {
   const { sent, listeners, window } = runRelay();
   assert.equal(listeners.length, 1, 'the relay registers one message listener');
 
-  listeners[0]({ source: window, data: { source: 'scoutfox-net', payload: { url: 'https://api.test/x', method: 'GET' } } });
+  listeners[0]({ source: window, data: { source: 'tarka-net', payload: { url: 'https://api.test/x', method: 'GET' } } });
 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].action, 'NET_REQUEST_RECORDED');
@@ -43,7 +43,7 @@ test('netRelay ignores cross-frame sources and foreign messages (BUG-45)', () =>
 
   // A message posted from a DIFFERENT frame (e.g. a child page relaying up):
   // the relay must not forward it.
-  listeners[0]({ source: {}, data: { source: 'scoutfox-net', payload: { url: 'https://evil.test' } } });
+  listeners[0]({ source: {}, data: { source: 'tarka-net', payload: { url: 'https://evil.test' } } });
   // Same frame but not a recorder message.
   listeners[0]({ source: window, data: { source: 'something-else' } });
   listeners[0]({ source: window, data: null });

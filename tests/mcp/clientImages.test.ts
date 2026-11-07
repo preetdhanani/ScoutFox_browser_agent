@@ -26,7 +26,7 @@ import assert from 'node:assert/strict';
 
 import {
   KEPT_PICTURES,
-  ScoutFoxMCPClient,
+  TarkaMCPClient,
   TRIMMED_PICTURE_TEXT,
   UNSEEN_PICTURE_TEXT,
   carriesPicture,
@@ -124,7 +124,7 @@ function makeRuntime(): RunRuntime {
     },
     tabs: { activeTabId: 101, ownerTabId: 101 },
     windowId: 1,
-    scoutFoxGroupIds: new Map(),
+    tarkaGroupIds: new Map(),
     attachedTabIds: new Set(),
     resumedAfterRestart: false,
     settings: async () => ({ provider: 'openrouter', model: 'test-model' } as any),
@@ -239,7 +239,7 @@ function withClient(
 
   const runtime = makeRuntime();
   const rec = makeRecorder();
-  const client = new ScoutFoxMCPClient(runtime, rec.recorder);
+  const client = new TarkaMCPClient(runtime, rec.recorder);
   client.setScreenshotDeps(options.capture ?? fakeCapture());
   return { fc, site, client, rec, requests };
 }

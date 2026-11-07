@@ -22,7 +22,7 @@ export function sourceOf(url: string): string {
 
 /**
  * The body in the envelope. A copy of the end line inside the body (a page that tries to close
- * the envelope early) is defused, so the envelope always ends where ScoutFox ended it.
+ * the envelope early) is defused, so the envelope always ends where Tarka ended it.
  *
  * @param source who the content comes from: an origin ("https://ollama.com") or a short name ("web search")
  */

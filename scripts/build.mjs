@@ -404,7 +404,7 @@ async function main() {
   const verifyOnly = process.argv.includes('--verify-only');
 
   if (!verifyOnly) {
-    console.log(`ScoutFox build, vite ${viteVersion}`);
+    console.log(`Tarka build, vite ${viteVersion}`);
     for (const pass of passes()) {
       await build({ ...pass.config, customLogger: recordingLogger(pass.warnings) }); // throws on any error, which exits 1 below
       const { allowed, unexpected } = pass.warnings;

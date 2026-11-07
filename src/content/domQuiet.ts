@@ -1,5 +1,5 @@
 /**
- * ScoutFox DOM Quietness Settle Helper
+ * Tarka DOM Quietness Settle Helper
  * Waits for DOM mutation quietness between sequential actions.
  */
 

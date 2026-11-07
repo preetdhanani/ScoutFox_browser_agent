@@ -217,7 +217,7 @@ test('nvidia filters non-chat models (embedding, reranker, guard, safety, clip)'
 });
 
 test('an unknown provider gets an empty list, never another provider\u2019s list', async () => {
-  // featere/custom-endpoint: a provider ScoutFox does not know (a user-added endpoint above all)
+  // featere/custom-endpoint: a provider Tarka does not know (a user-added endpoint above all)
   // gets no guessed defaults; the caller that holds the descriptor hands back the saved list.
   assert.deepEqual(await fetchAvailableModels({ provider: 'nope' }, true), []);
   assert.deepEqual(getFallbackModels('nope'), []);

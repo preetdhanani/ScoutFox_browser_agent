@@ -91,7 +91,7 @@ test('a restarted worker keeps an interrupted run "stopped" with its final row, 
   const restore = fakeChrome({ storage: true, tabs: true, dom: true }).install();
   t.after(restore);
   const first = new AgentRunner(622, 'default');
-  first.scoutFoxGroupIds.set(7, 99);
+  first.tarkaGroupIds.set(7, 99);
   await first.persistState(); // the meta every real run writes when it groups its tab
   first.recordEntry({ type: 'user_goal', turn: 1, prompt: 'Keep waiting', timestamp: '', isNewRun: true });
   first.setRunStatus('running');
@@ -101,7 +101,7 @@ test('a restarted worker keeps an interrupted run "stopped" with its final row, 
   await restarted.restorePromise;
   assert.equal(restarted.status, 'stopped', 'the meta does not turn the interrupted run into an idle one');
   assert.deepEqual(restarted.history.at(-1), { type: 'partial_result', answer: INTERRUPTED_TEXT, table: null, reason: 'interrupted' });
-  assert.equal(restarted.scoutFoxGroupIds.get(7), 99, 'the tab group map still comes back from the meta');
+  assert.equal(restarted.tarkaGroupIds.get(7), 99, 'the tab group map still comes back from the meta');
 });
 
 test('through the router: Stop, New chat and a closed tab each end a run that is waiting on the model', async (t) => {

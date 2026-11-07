@@ -1,5 +1,5 @@
 /**
- * ScoutFox text clipping with a visible note.
+ * Tarka text clipping with a visible note.
  * Every cap on a model-facing text goes through clipWithNote, so a cut text always says that it was cut, how much
  * of it is shown, how long the whole is, and how to see more. A text cut with no sign of it reads as the whole
  * text, and the model then concludes a value is absent when it is only past the cut.

@@ -1,5 +1,5 @@
 /**
- * ScoutFox DOMCompressor Class
+ * Tarka DOMCompressor Class
  * Extracts interactive elements from the webpage and produces a concise structured snapshot.
  * Preserves the instance method dispatch seam for all callers and tamper scripts.
  */

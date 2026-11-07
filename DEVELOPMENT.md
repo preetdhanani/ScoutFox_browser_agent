@@ -1,6 +1,6 @@
 # 🛠️ Development & Chrome Publishing Guide
 
-> Developer guidelines for building, testing, and submitting **ScoutFox AI Browser Agent** to the Chrome Web Store.
+> Developer guidelines for building, testing, and submitting **Tarka AI Browser Agent** to the Chrome Web Store.
 
 ---
 
@@ -15,7 +15,7 @@ Chrome runs the built files in `dist/`, not the sources, so build again after ev
 When modifying background scripts, content scripts, or sidepanel UI:
 1. Run `npm run build`.
 2. Go to `chrome://extensions`.
-3. Locate **ScoutFox AI Browser Agent** (the `name` field in `public/manifest.json`).
+3. Locate **Tarka AI Browser Agent** (the `name` field in `public/manifest.json`).
 4. Click the **Reload (🔄)** icon on the extension card.
 5. If testing content script DOM changes, refresh the target web page tab as well.
 
@@ -34,13 +34,13 @@ With nothing committed, `-dirty` is the same for every build, so the time is wha
 | `npm run typecheck` | Runs `tsc --noEmit` twice (TypeScript 7): over `src/` with `tsconfig.json`, and over the tests, their helpers and `src/` again with `tests/tsconfig.json`. |
 | `npm test` | Runs the unit tests (`tests/**/*.test.js` and `tests/**/*.test.ts`) with `node --test`, no browser and no build step needed: Node runs the `.ts` files by stripping their types. |
 | `npm run evalscan` | Fails when `dist/` calls `eval`, `new Function` or `Function()` (five hits are allowed, see "Worker Bundle and CSP" in section 3), so run `npm run build` first. |
-| `npm run zip` | Zips the contents of `dist/` into `scoutfox-chrome-extension.zip` in the repository root, without sourcemaps, so run `npm run build` first. |
+| `npm run zip` | Zips the contents of `dist/` into `tarka-chrome-extension.zip` in the repository root, without sourcemaps, so run `npm run build` first. |
 | `npm run test:e2e` | Builds, then runs the real-model tasks in Chromium on LISA (`lisa-pro`, an OpenAI-compatible custom endpoint the run adds through the "Custom model API" dialog): the open-web tasks start on a neutral page with only a question, and the model picks and opens the real websites itself; two more run on local fixture pages. Needs `LISA_API_KEY` in the shell or `LISA_API` in the repo `.env` (one-time setup, see "E2E Smoke" in section 3). Add `-- --held-out` for the held-out tasks, `-- --sealed` for the sealed ones, or `-- --provider=nvidia` for NVIDIA NIM. |
 
 ### CI
 `.github/workflows/ci.yml` runs on every push to `main` or `dev` and on every pull request into them, on Node 22.x and 24.x.
 It runs `npm ci`, `npm run check`, `npm run typecheck`, `npm test`, `npm run build`, `npm run evalscan` and `npm run zip`.
-On a push, the Node 22.x run uploads the zip as the `scoutfox-chrome-extension` artifact.
+On a push, the Node 22.x run uploads the zip as the `tarka-chrome-extension` artifact.
 Flaky tests are fixed, never retried.
 
 ---
@@ -50,7 +50,7 @@ Flaky tests are fixed, never retried.
 ### Service Worker Logs
 To inspect background service worker output:
 1. Navigate to `chrome://extensions`.
-2. Find the ScoutFox AI Browser Agent extension.
+2. Find the Tarka AI Browser Agent extension.
 3. Click **service worker** link under "Inspect views".
 4. Developer Tools console will open for the background worker.
 
@@ -110,7 +110,7 @@ A 401, an abort and a network error do not fall back, and the first error is log
 A 200 that `ChatAnthropic` cannot read (an `{"error": ...}` object, `{}`, HTML) did get an answer, so it does fall back, unless it is a chat reply in the OpenAI shape, which is simply read.
 The declarativeNetRequest rule 8888 in `background.js` still sets the `User-Agent` for agentrouter.org, because Chromium replaces it on every fetch.
 `deadline.ts` gives every call a deadline (`llmTimeoutMs`) and joins it with the task's abort signal, so a timeout, Pause and Stop really cancel the request.
-Pause and Stop abort with a reason tagged `{ scoutfox: 'user' }`, and that tag, never the text of an error, tells them from a timeout.
+Pause and Stop abort with a reason tagged `{ tarka: 'user' }`, and that tag, never the text of an error, tells them from a timeout.
 The SDK clients' own 10 minute `timeout` is set out of the way (`SDK_TIMEOUT_MS`), so `llmTimeoutMs` is the only timer, also above 10 minutes.
 NVIDIA NIM defaults to a 300s timeout (`DEFAULT_NVIDIA_LLM_TIMEOUT_MS`) to handle cold-start and queue latency on hosted 70B+ models, while other providers default to 120s.
 `errors.ts` keeps the old user-facing error texts, `models.ts` keeps the model lists and their cache, and API keys are taken out of every error text.
@@ -365,9 +365,9 @@ Before packaging for the Chrome Web Store:
    ```bash
    npm run build && npm run zip
    ```
-   This writes `scoutfox-chrome-extension.zip` in the repository root.
+   This writes `tarka-chrome-extension.zip` in the repository root.
    It holds the contents of `dist/`, with `manifest.json` at the root of the zip, and no sourcemaps.
-6. Upload `scoutfox-chrome-extension.zip` to [Chrome Developer Dashboard](https://chrome.google.com/webstore/devconsole).
+6. Upload `tarka-chrome-extension.zip` to [Chrome Developer Dashboard](https://chrome.google.com/webstore/devconsole).
 
 ---
 

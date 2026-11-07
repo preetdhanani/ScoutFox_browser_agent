@@ -27,9 +27,15 @@ export function usageOfOllama(data: any): TokenUsage | undefined {
   return { promptTokens: prompt, outputTokens: countOf(data?.eval_count) ?? 0 };
 }
 
-/** The usage LangChain puts on a reply message (`usage_metadata.input_tokens`, `output_tokens`), or undefined. */
+/** The token usage from a message object, reply metadata, or usage payload. */
 export function usageOfMessage(message: any): TokenUsage | undefined {
-  const prompt = countOf(message?.usage_metadata?.input_tokens);
+  if (typeof message?.promptTokens === 'number') {
+    return { promptTokens: message.promptTokens, outputTokens: message.outputTokens ?? 0 };
+  }
+  if (typeof message?.usage?.promptTokens === 'number') {
+    return { promptTokens: message.usage.promptTokens, outputTokens: message.usage.outputTokens ?? 0 };
+  }
+  const prompt = countOf(message?.usage_metadata?.input_tokens ?? message?.usage?.promptTokens ?? message?.usage?.prompt_tokens ?? message?.usage?.input_tokens);
   if (prompt === null) return undefined;
-  return { promptTokens: prompt, outputTokens: countOf(message?.usage_metadata?.output_tokens) ?? 0 };
+  return { promptTokens: prompt, outputTokens: countOf(message?.usage_metadata?.output_tokens ?? message?.usage?.outputTokens ?? message?.usage?.completion_tokens ?? message?.usage?.output_tokens) ?? 0 };
 }

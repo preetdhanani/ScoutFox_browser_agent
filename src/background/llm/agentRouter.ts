@@ -2,31 +2,16 @@
  * llm/agentRouter.ts - AgentRouter (https://agentrouter.org): two endpoints, tried in turn, joined by hand.
  *
  * AgentRouter fronts several model families and only lets requests through that look like the Claude CLI, so every
- * request carries the CLI's wire image (agentRouterHeaders in models.ts). It is called in two steps, as it always was:
+ * request carries the CLI's wire image (agentRouterHeaders in models.ts). It is called in two steps:
  *
- *   1. ChatAnthropic on <base>/v1/messages (the Anthropic format).
- *   2. ChatOpenAICompletions on <base>/v1/chat/completions (the OpenAI format), when step 1 failed in a way another
- *      endpoint might not, or answered 200 with no text.
+ *   1. /v1/messages (the Anthropic format).
+ *   2. /v1/chat/completions (the OpenAI format), when step 1 failed in a way another endpoint might not,
+ *      or answered 200 with no text.
  *
- * What ends the call without step 2, because a second request cannot help: a 401 or a body that says
- * unauthorized_client_error (the key is refused), an aborted signal, and a network error (the server is not there).
- * Any other HTTP error, and a 200 with no text (logged as [PAYLOAD_WARN]), go on to step 2. So does a 200 that
- * ChatAnthropic cannot read as an Anthropic reply (an {"error": ...} object, {}, HTML): the server did answer, so
- * it is not a network error. One that is a chat reply in the OpenAI shape is simply read, as the old client did.
- * The first failure is logged before step 2, and step 2 throws its own error.
- *
- * .withFallbacks() is not used: it also falls back on a 401, does not fall back on an empty 200, and rethrows the
- * first error (checked, see "Early check results" in docs/langgraph-design.md).
- *
- * Headers: the wire image (agentRouterHeaders in models.ts) is put on both requests by the model's fetch
- * (watchFetch in factory.ts), together with the removal of what the SDKs add (accept, x-stainless-*). It is NOT in
- * the client's defaultHeaders or in the call options, because LangChain hands those to the callbacks (tracing),
- * and the wire image carries the key. Chromium replaces the User-Agent of every fetch, whatever is set here, so
- * the declarativeNetRequest session rule 8888 in background.ts is what really sets it (and x-app) for agentrouter.org.
+ * What ends the call without step 2:
+ *   A 401 or a body that says unauthorized_client_error (the key is refused), an aborted signal, and a network
+ *   error (the server is not there). Any other HTTP error, and a 200 with no text, go on to step 2.
  */
-import { ChatAnthropic } from '@langchain/anthropic';
-import { ChatOpenAICompletions } from '@langchain/openai';
-import type { BaseMessage } from '@langchain/core/messages';
 import { Logger } from '../../shared/logger.ts';
 import {
   ProviderError,
@@ -40,25 +25,20 @@ import {
   statusOf,
   wrapAgentRouterFailure
 } from './errors.ts';
-import { textOfChoices, toLangChainMessages, watchFetch } from './factory.ts';
+import { notifyCallbacks, textOfChoices } from './factory.ts';
 import { agentRouterHeaders } from './models.ts';
-import { SDK_TIMEOUT_MS, baseUrlOf, getApiKey, maxTokensOf, modelOf, withV1 } from './settings.ts';
+import { baseUrlOf, getApiKey, maxTokensOf, modelOf, withV1 } from './settings.ts';
 import type { ChatTurn, CompletionOptions, LlmSettings } from './types.ts';
 
 const DEFAULT_BASE_URL = 'https://agentrouter.org/v1';
 const DEFAULT_MODEL = 'claude-3-5-sonnet';
 
-/** What the model answered, for the [PAYLOAD_WARN] line and the empty-content error (the raw payload is not kept by the SDKs). */
-function payloadOf(reply: BaseMessage): { content: unknown; stop_reason: unknown } {
-  const meta = reply.response_metadata as { stop_reason?: unknown; finish_reason?: unknown } | undefined;
-  return { content: reply.content, stop_reason: meta?.stop_reason ?? meta?.finish_reason ?? null };
-}
-
-/**
- * One AgentRouter completion. Errors have the old texts, all behind "AgentRouter API connection error: ", as the old
- * client threw them. A missing key fails first, before anything is built.
- */
-export async function callAgentRouter(settings: LlmSettings, messages: ChatTurn[], systemPrompt: string, options: CompletionOptions = {}): Promise<string> {
+export async function callAgentRouter(
+  settings: LlmSettings,
+  messages: ChatTurn[],
+  systemPrompt: string,
+  options: CompletionOptions = {}
+): Promise<string> {
   const apiKey = getApiKey(settings, 'agent_router');
   assertApiKey('agent_router', apiKey);
 
@@ -66,73 +46,146 @@ export async function callAgentRouter(settings: LlmSettings, messages: ChatTurn[
   const model = modelOf(settings) || DEFAULT_MODEL;
   const temperature = settings.temperature ?? 0.1;
   const signal = options.signal ?? undefined;
-  const turns = toLangChainMessages(messages, systemPrompt);
-  const headers = agentRouterHeaders(apiKey);
   const startTime = Date.now();
 
-  const fail = (inner: string, cause?: unknown): never => {
-    // A Pause, a Stop or the deadline is reported once, as [NETWORK_ABORTED] by generateCompletion, not as a failed request.
-    if (!signal?.aborted) Logger.error('AgentRouterClient', '[NETWORK] Failed request to AgentRouter', inner);
-    // The kind and the status come from the error the SDK threw, so the retry wrapper sees a refused key as
-    // auth and an overloaded endpoint as transient, not as two wordings of the same text.
-    const failure = classifyProviderFailure(cause);
-    throw new ProviderError(wrapAgentRouterFailure(inner), { status: failure.status, kind: failure.kind, retryAfterMs: failure.retryAfterMs });
+  const headers = {
+    ...agentRouterHeaders(apiKey),
+    'content-type': 'application/json'
   };
 
-  // Attempt 1: the Anthropic Messages endpoint. The SDK adds /v1/messages to the URL it is given.
-  const messagesCall = watchFetch({ apiKey, headers, stripSdkHeaders: true, keepReply: true });
-  const anthropic = new ChatAnthropic({
+  notifyCallbacks(options.callbacks, 'AgentRouterClient');
+
+  const fail = (inner: string, cause?: unknown): never => {
+    const errorForCallback = new Error(inner);
+    notifyCallbacks(options.callbacks, 'AgentRouterClient', errorForCallback);
+    if (!signal?.aborted) Logger.error('AgentRouterClient', '[NETWORK] Failed request to AgentRouter', inner);
+    const failure = classifyProviderFailure(cause);
+    throw new ProviderError(wrapAgentRouterFailure(inner), {
+      status: failure.status,
+      kind: failure.kind,
+      retryAfterMs: failure.retryAfterMs
+    });
+  };
+
+  // Attempt 1: the Anthropic Messages endpoint (<base>/messages)
+  const messagesUrl = `${baseUrl.replace(/\/v1$/, '')}/v1/messages`;
+  const messagesBody = {
     model,
-    apiKey,
-    anthropicApiUrl: baseUrl.replace(/\/v1$/, ''),
-    maxTokens: maxTokensOf(settings),
+    system: systemPrompt,
+    messages: messages.map((m) => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.content
+    })),
+    max_tokens: maxTokensOf(settings) || 8192,
     temperature,
-    maxRetries: 0,
-    clientOptions: { fetch: messagesCall.fetch, timeout: SDK_TIMEOUT_MS }
-  });
+    stream: false
+  };
+
+  let messagesSucceeded = false;
+  let rawBody: string | undefined;
+
   try {
-    const reply = await anthropic.invoke(turns, { signal, callbacks: options.callbacks });
-    const text = reply.text;
-    if (text) {
-      Logger.debug('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output from AgentRouter (${model}), length: ${text.length} chars`);
-      return text;
+    const response = await fetch(messagesUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(messagesBody),
+      signal
+    });
+
+    rawBody = await response.text();
+    if (response.ok) {
+      let data: any;
+      try {
+        data = JSON.parse(rawBody);
+      } catch {
+        throw new UnreadableReplyError(response.status, new Error('Invalid JSON'));
+      }
+
+      if (!data || typeof data !== 'object' || data.error || data.type === 'error' || !Array.isArray(data.content)) {
+        const foreign = textOfChoices(rawBody);
+        if (foreign) {
+          Logger.debug('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output from AgentRouter (${model}), length: ${foreign.length} chars`);
+          return foreign;
+        }
+        throw new UnreadableReplyError(response.status, new Error('Not a chat reply'));
+      }
+
+      const text = data.content[0]?.text;
+      if (text) {
+        Logger.debug('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output from AgentRouter (${model}), length: ${text.length} chars`);
+        return text;
+      }
+      const payload = { content: data.content ?? [], stop_reason: data.stop_reason ?? null };
+      Logger.warn('ApiClients', `[PAYLOAD_WARN] Messages endpoint returned 200 OK but text content was empty. Payload: ${JSON.stringify(payload)}`);
+    } else {
+      const err = new Error(rawBody || `HTTP ${response.status}`);
+      Object.assign(err, { status: response.status, headers: response.headers, rawBody });
+      throw err;
     }
-    Logger.warn('ApiClients', `[PAYLOAD_WARN] Messages endpoint returned 200 OK but text content was empty. Payload: ${JSON.stringify(payloadOf(reply))}`);
-  } catch (error) {
-    const failure = messagesCall.asAnswered(error, signal);
-    const rawBody = messagesCall.body();
-    // No HTTP answer (a network error, or an abort that reached the SDK): a second request would meet the same wall.
-    if (signal?.aborted || statusOf(failure) === undefined) return fail(describeAgentRouterFailure(failure, { apiKey }), failure);
-    // A model that AgentRouter serves in the OpenAI format may answer this endpoint in that format too.
-    const foreign = failure instanceof UnreadableReplyError ? textOfChoices(rawBody) : '';
-    if (foreign) {
-      Logger.debug('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output from AgentRouter (${model}), length: ${foreign.length} chars`);
-      return foreign;
+  } catch (error: any) {
+    if (signal?.aborted) return fail(String((signal.reason as any)?.message || signal.reason || 'aborted'), error);
+    // If network error (fetch threw TypeError or nobody answered)
+    const status = statusOf(error);
+    if (status === undefined) {
+      return fail(describeAgentRouterFailure(error, { apiKey }), error);
     }
-    if (isAgentRouterAuthFailure(failure, rawBody)) return fail(agentRouterAuthText(failure, { rawBody, apiKey }), failure);
-    Logger.warn('AgentRouterClient', '[NETWORK] Messages endpoint failed, trying the chat completions endpoint', describeAgentRouterFailure(failure, { rawBody, apiKey }));
+    if (status === 401 || isAgentRouterAuthFailure(error, rawBody)) {
+      return fail(agentRouterAuthText(error, { rawBody, apiKey }), error);
+    }
+    Logger.warn('AgentRouterClient', '[NETWORK] Messages endpoint failed, trying the chat completions endpoint', describeAgentRouterFailure(error, { rawBody, apiKey }));
   }
 
-  // Attempt 2: the Chat Completions endpoint, with no max tokens, as before.
-  const completionsCall = watchFetch({ apiKey, headers, stripSdkHeaders: true, keepReply: true });
-  const openai = new ChatOpenAICompletions({
+  // Attempt 2: the Chat Completions endpoint (<base>/chat/completions)
+  const completionsUrl = `${baseUrl}/chat/completions`;
+  const completionsBody = {
     model,
-    apiKey,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      ...messages
+    ],
     temperature,
-    maxRetries: 0,
-    timeout: SDK_TIMEOUT_MS,
-    configuration: { baseURL: baseUrl, fetch: completionsCall.fetch }
-  });
-  let reply: BaseMessage;
-  try {
-    reply = await openai.invoke(turns, { signal, callbacks: options.callbacks });
-  } catch (error) {
-    const answered = completionsCall.asAnswered(error, signal);
-    return fail(describeAgentRouterFailure(answered, { rawBody: completionsCall.body(), apiKey }), answered);
-  }
-  const text = reply.text || textOfChoices(completionsCall.body());
-  if (!text) return fail(agentRouterEmptyText(payloadOf(reply), apiKey));
+    stream: false
+  };
 
-  Logger.debug('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output via completions fallback, length: ${text.length} chars`);
-  return text;
+  try {
+    const response = await fetch(completionsUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(completionsBody),
+      signal
+    });
+
+    const bodyText = await response.text();
+    if (!response.ok) {
+      const err = new Error(bodyText || `HTTP ${response.status}`);
+      Object.assign(err, { status: response.status, headers: response.headers, rawBody: bodyText });
+      return fail(describeAgentRouterFailure(err, { rawBody: bodyText, apiKey }), err);
+    }
+
+    let data: any;
+    try {
+      data = JSON.parse(bodyText);
+    } catch {
+      const err = new UnreadableReplyError(response.status, new Error('Invalid JSON'));
+      return fail(describeAgentRouterFailure(err, { rawBody: bodyText, apiKey }), err);
+    }
+
+    if (!data || typeof data !== 'object' || data.error || !Array.isArray(data.choices) || data.choices.length === 0) {
+      const unreadable = new UnreadableReplyError(response.status, new Error('Not a chat reply'));
+      return fail(describeAgentRouterFailure(unreadable, { rawBody: bodyText, apiKey }), unreadable);
+    }
+
+    const choice = data.choices[0];
+    const text = textOfChoices(bodyText);
+    if (!text) {
+      const payload = { content: choice?.message?.content ?? choice?.text ?? '', stop_reason: choice?.finish_reason ?? choice?.stop_reason ?? null };
+      return fail(agentRouterEmptyText(payload, apiKey));
+    }
+
+    Logger.debug('ApiClients', `[NETWORK] 200 OK (${Date.now() - startTime}ms) - Retrieved output via completions fallback, length: ${text.length} chars`);
+    return text;
+  } catch (error) {
+    if (error instanceof ProviderError) throw error;
+    return fail(describeAgentRouterFailure(error, { apiKey }), error);
+  }
 }

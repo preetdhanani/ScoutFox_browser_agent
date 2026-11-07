@@ -12,7 +12,7 @@ function tool(name: string, inputSchema: any) {
   return { name, inputSchema };
 }
 
-test('every current ScoutFox tool schema passes (get_page_text with empty properties included)', () => {
+test('every current Tarka tool schema passes (get_page_text with empty properties included)', () => {
   assert.doesNotThrow(() => assertToolSchema(tool('get_page_text', { type: 'object', properties: {}, additionalProperties: false })));
   assert.doesNotThrow(() => assertToolSchema(tool('get_page_elements', { type: 'object', properties: {}, additionalProperties: false })));
   assert.doesNotThrow(() => assertToolSchema(tool('read_page_text', { type: 'object', properties: {}, additionalProperties: false })));

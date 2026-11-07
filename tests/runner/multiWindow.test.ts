@@ -60,7 +60,7 @@ test('multiWindow: groupIdForWindow returns null for unassociated windowId', asy
   const runner = new AgentRunner(101, 1);
   await runner.restorePromise;
 
-  await runner.ensureScoutFoxGroup(101, 1);
+  await runner.ensureTarkaGroup(101, 1);
   assert.equal(runner.groupIdForWindow(9999), null);
 });
 

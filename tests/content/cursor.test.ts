@@ -1,7 +1,7 @@
 /**
  * The cursor overlay: src/content/cursor.ts.
  *
- * The overlay is what the user sees when the agent acts: a fox-shaped pointer that moves to the
+ * The overlay is what the user sees when the agent acts: a pointer that moves to the
  * target, a ripple where it clicks, and a ring around the element it highlighted. It is the
  * only sign the user gets that the agent is doing something, so it has to be visible, and it
  * has to clean up after itself.
@@ -98,11 +98,11 @@ test('the overlay is injected once, with a container and a pointer', () => {
   const { container, pointer } = ensureCursorOverlay(null, null, doc);
 
   assert.ok(container, 'there is a container');
-  assert.equal(container.id, 'scoutfox-cursor-container');
+  assert.equal(container.id, 'tarka-cursor-container');
   assert.ok(pointer, 'there is a pointer');
-  assert.equal(pointer.id, 'scoutfox-cursor-pointer');
-  assert.equal(elements.get('scoutfox-cursor-container'), container);
-  assert.match(pointer.innerHTML, /<svg/, 'the pointer is the fox shape');
+  assert.equal(pointer.id, 'tarka-cursor-pointer');
+  assert.equal(elements.get('tarka-cursor-container'), container);
+  assert.match(pointer.innerHTML, /<svg/, 'the pointer is an svg shape');
 });
 
 test('the overlay is reused, not injected a second time', () => {
@@ -113,7 +113,7 @@ test('the overlay is reused, not injected a second time', () => {
 
   assert.equal(second.container, first.container, 'the same container');
   assert.equal(second.pointer, first.pointer, 'the same pointer');
-  assert.equal(elements.get('scoutfox-cursor-container'), first.container);
+  assert.equal(elements.get('tarka-cursor-container'), first.container);
 });
 
 test('an overlay that is already on the page is taken over, not replaced', () => {
@@ -176,7 +176,7 @@ test('a click leaves a ripple, and the ripple goes away again', async () => {
   showClickEffect(300, 400, box, tip, doc);
 
   // The ripple goes into the overlay container, so it is removed with the overlay.
-  const ripple = kids(box).find((el) => el.className === 'scoutfox-click-ripple');
+  const ripple = kids(box).find((el) => el.className === 'tarka-click-ripple');
   const mark = must(ripple, 'there is a ripple');
   assert.equal(mark.style.left, '300px');
   assert.equal(mark.style.top, '400px');
@@ -184,7 +184,7 @@ test('a click leaves a ripple, and the ripple goes away again', async () => {
 
   await new Promise((r) => setTimeout(r, 600));
   assert.equal(
-    kids(box).some((el) => el.className === 'scoutfox-click-ripple'),
+    kids(box).some((el) => el.className === 'tarka-click-ripple'),
     false,
     'the ripple is gone again'
   );

@@ -5,7 +5,11 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
+class BaseCallbackHandler {
+  static fromMethods(methods: { handleChatModelStart: (llm: any) => void }) {
+    return methods;
+  }
+}
 import { generateCompletion } from '../../src/background/llm/index.ts';
 import type { LlmSettings } from '../../src/background/llm/types.ts';
 import { spyFetch } from '../helpers/llmWire.ts';

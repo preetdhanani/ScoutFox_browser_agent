@@ -6,7 +6,7 @@ Owner: Prit.
 
 ## The problem
 
-A user asked ScoutFox, on their LinkedIn certifications page, for a JSON file with each certificate's name, issue date and credential URL.
+A user asked Tarka, on their LinkedIn certifications page, for a JSON file with each certificate's name, issue date and credential URL.
 Run 1 took 16 steps of `find` for one certificate name after another and was stopped.
 Run 2 took 74 steps: it read every "Show credential" link, every "Edit" button, then the nav bar, the Premium ad, the messaging overlay and the footer, one element at a time.
 It never finished.

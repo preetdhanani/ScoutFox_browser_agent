@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { coordinateSpaceOf, coordinateWords, pictureCaption, toPicturePixels } from '../../src/background/llm/coordinates.ts';
 import { clickToolFor } from '../../src/background/mcp/client.ts';
-import { SCOUTFOX_TOOLS } from '../../src/background/mcp/tools.ts';
+import { TARKA_TOOLS } from '../../src/background/mcp/tools.ts';
 
 test('Nemotron VL, Qwen3-VL and Gemini point on a 0-1000 scale; other models in pixels', () => {
   assert.equal(coordinateSpaceOf({ provider: 'nvidia', model: 'nvidia/nemotron-3.5-super-vl-120b-a12b' } as any), 'per-mille');
@@ -39,7 +39,7 @@ test('a fraction is a fraction in either scale; whole 0 and 1 are pixels or per-
 });
 
 test('the click tool and the picture caption ask for the scale the model points with', () => {
-  const click = SCOUTFOX_TOOLS.find((tool) => tool.name === 'click')!;
+  const click = TARKA_TOOLS.find((tool) => tool.name === 'click')!;
   assert.equal(clickToolFor(click, 'pixels'), click, 'a pixel model gets the tool unchanged');
   const perMille = clickToolFor(click, 'per-mille');
   assert.match(perMille.description, /0-1000 scale/);

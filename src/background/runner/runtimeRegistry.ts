@@ -11,7 +11,7 @@ export interface RunControl {
   pauseRequested: boolean;
   stopRequested: boolean;
   stepSignal(): AbortSignal;                            // fresh AbortController per LLM call or wait
-  abortStep(reason: 'user_pause' | 'user_stop'): void;  // signal.reason = { scoutfox: 'user', reason }
+  abortStep(reason: 'user_pause' | 'user_stop'): void;  // signal.reason = { tarka: 'user', reason }
   isUserAbort(err: unknown, signal?: AbortSignal): boolean; // checks the reason tag, never error text
   snapshot(): ControlSnapshot;
 }
@@ -84,7 +84,7 @@ export interface RunRuntime {
   control: RunControl;
   tabs: { activeTabId: number | null; ownerTabId: number };
   windowId: number | 'default';
-  scoutFoxGroupIds: Map<number, number>;
+  tarkaGroupIds: Map<number, number>;
   attachedTabIds: Set<number>;
   resumedAfterRestart: boolean;
   settings(): Promise<Settings>;

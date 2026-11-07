@@ -10,7 +10,7 @@
  * Who caused the abort is told by the signals, never by an error text:
  *   - the deadline fired and the task's signal did not: ProviderTimeoutError, whatever the SDK threw
  *     (the openai and Anthropic SDKs throw their own APIUserAbortError, "Request was aborted.")
- *   - the task's signal was aborted with a reason tagged { scoutfox: 'user' }: the fixed "cancelled" text
+ *   - the task's signal was aborted with a reason tagged { tarka: 'user' }: the fixed "cancelled" text
  *   - the task's signal was aborted for any other reason: that reason, unchanged
  */
 
@@ -38,17 +38,17 @@ export class ProviderTimeoutError extends Error {
 }
 
 /** The abort reason of a Pause or Stop. It is an AbortError, so code that checks the name still works, and it carries the tag. */
-export type UserAbortReason = DOMException & { scoutfox: 'user'; reason: string };
+export type UserAbortReason = DOMException & { tarka: 'user'; reason: string };
 
 /** What to pass to controller.abort() when the user pauses or stops the task. `why` is free text for logs. */
 export function userAbortReason(why: string): UserAbortReason {
-  return Object.assign(new DOMException(`The task was ${why}.`, 'AbortError'), { scoutfox: 'user' as const, reason: why });
+  return Object.assign(new DOMException(`The task was ${why}.`, 'AbortError'), { tarka: 'user' as const, reason: why });
 }
 
 /** True when the signal was aborted by the user (Pause or Stop), judged by the tag on its reason. */
 export function isUserAbort(signal: AbortSignal | null | undefined): boolean {
   if (!signal?.aborted) return false;
-  return (signal.reason as { scoutfox?: unknown } | null | undefined)?.scoutfox === 'user';
+  return (signal.reason as { tarka?: unknown } | null | undefined)?.tarka === 'user';
 }
 
 /** The error to throw for an aborted task signal: the fixed text for a user abort, otherwise the reason itself. */

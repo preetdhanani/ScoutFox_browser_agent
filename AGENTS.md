@@ -1,4 +1,4 @@
-# Agent instructions for this project (ScoutFox)
+# Agent instructions for this project (Tarka)
 
 These rules apply to every agent session working in this repository.
 
@@ -35,3 +35,8 @@ These rules apply to every agent session working in this repository.
 - For bug fixes, reproduce the bug first, in a unit test or a real-model task, as close to the user experience as possible, then fix it.
 - Be picky about the UI in screenshots. If something looks off, fix it along the way, even if it is not the task at hand.
 - Implementation plans are reviewed by an independent subagent in a separate context before execution.
+
+## Desktop automation
+
+Use `agent-desktop` to see and operate desktop apps. Before the first use, run
+`agent-desktop skills get desktop` and `agent-desktop skills get platform`, and follow them.

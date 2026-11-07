@@ -81,7 +81,7 @@ export function toPerceiveError(err: unknown, tries = 1): PerceiveError {
     };
   }
 
-  if (/outside.*scoutfox group/i.test(msg)) {
+  if (/outside.*tarka group/i.test(msg)) {
     return {
       message: msg,
       terminal: true,
@@ -154,11 +154,11 @@ export async function takeSnapshot(
     );
   }
 
-  // 3. Hard access wall: tab must be within this session's ScoutFox group
+  // 3. Hard access wall: tab must be within this session's Tarka group
   const inScope = await deps.isTabInScope(tabId);
   if (!inScope) {
     throw new SnapshotError(
-      `Tab [${tabId}] is outside this session's ScoutFox group and cannot be automated from here. Each window's ScoutFox session only acts on tabs within its own group.`,
+      `Tab [${tabId}] is outside this session's Tarka group and cannot be automated from here. Each window's Tarka session only acts on tabs within its own group.`,
       'out_of_scope',
       true,
       true

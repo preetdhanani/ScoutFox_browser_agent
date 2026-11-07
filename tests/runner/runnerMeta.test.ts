@@ -2,7 +2,7 @@
  * The runner metadata: SessionRunnerMeta in src/background/runner/runnerMeta.ts.
  *
  * The metadata is what the runner knows about itself between service worker cold boots: the
- * ScoutFox tab groups it owns, the tab aliases, which tabs it had attached, and where it paused.
+ * Tarka tab groups it owns, the tab aliases, which tabs it had attached, and where it paused.
  * It lives in chrome.storage.session, so it is written often (the group map changes on every
  * tab move) but not on every change: writes are throttled, and the LAST payload is the one that
  * gets written.
@@ -45,7 +45,7 @@ function fakeArea(): StorageSessionArea & { data: Record<string, unknown>; write
 function meta(stateVersion: number, groupId: number): RunnerMeta {
   return {
     stateVersion,
-    scoutFoxGroupIds: [[1, groupId]],
+    tarkaGroupIds: [[1, groupId]],
     aliases: [],
     attachedTabIds: [],
     pauseDetach: null,
@@ -62,7 +62,7 @@ test('what was written can be read back', async () => {
   const read = await runnerMeta.read();
   assert.ok(read, 'the metadata is there');
   assert.equal(read.stateVersion, 7);
-  assert.deepEqual(read.scoutFoxGroupIds, [[1, 42]]);
+  assert.deepEqual(read.tarkaGroupIds, [[1, 42]]);
 });
 
 test('nothing stored reads as nothing, not as a crash', async () => {
@@ -85,7 +85,7 @@ test('a write inside the throttle window is not lost: the newest payload is what
   const read = await runnerMeta.read();
   assert.ok(read, 'the metadata landed');
   assert.equal(read.stateVersion, 3, 'and it is the newest one, not the first');
-  assert.deepEqual(read.scoutFoxGroupIds, [[1, 30]]);
+  assert.deepEqual(read.tarkaGroupIds, [[1, 30]]);
 });
 
 test('the first write goes out at once, because nothing was written before it', async () => {

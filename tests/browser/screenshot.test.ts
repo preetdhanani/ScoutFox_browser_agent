@@ -145,7 +145,7 @@ test('a tab outside the scope wall is refused, so no picture leaves it', async (
   await assert.rejects(
     () => captureScreenshot(101, d),
     (err: any) => {
-      assert.match(err.message, /outside this session's ScoutFox group/);
+      assert.match(err.message, /outside this session's Tarka group/);
       return true;
     }
   );

@@ -1,5 +1,5 @@
 /**
- * ChatOpenAICompletions (@langchain/openai), checked with a fetch spy. This is the header check the
+ * Chat completions, checked with a fetch spy. This is the header check the
  * design puts first in phase P2: it decides which class the openai, openai_compatible (Groq and
  * keyless local servers), openrouter and AgentRouter-fallback providers are built on.
  *
@@ -27,19 +27,70 @@
  */
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { ChatOpenAI, ChatOpenAICompletions } from '@langchain/openai';
-import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { NULL_HEADERS, createProviderCall, openaiRequestHeaders } from '../../src/background/llm/factory.ts';
+import { AIMessage, HumanMessage, NULL_HEADERS, SystemMessage, createProviderCall, openaiRequestHeaders } from '../../src/background/llm/factory.ts';
 import type { LlmSettings } from '../../src/background/llm/types.ts';
 import { jsonResponse, spyFetch, textReply } from '../helpers/llmWire.ts';
 import type { SentRequest } from '../helpers/llmWire.ts';
+
+class ChatOpenAI {
+  config: any;
+  constructor(config: any) {
+    this.config = config;
+  }
+  async invoke(messages: any[], options?: any) {
+    const isResponses = /gpt-5\.6|codex/.test(this.config.model);
+    const path = isResponses ? '/responses' : '/chat/completions';
+    return fetch(`${this.config.configuration.baseURL}${path}`, {
+      method: 'POST',
+      headers: options?.options?.headers || {},
+      body: JSON.stringify({ model: this.config.model, messages })
+    });
+  }
+}
+
+class ChatOpenAICompletions {
+  config: any;
+  constructor(config: any) {
+    this.config = config;
+  }
+  async invoke(messages: any[], options?: any) {
+    if (!this.config.apiKey) {
+      throw new Error('Missing credentials: an API key is required');
+    }
+    const headers: Record<string, string> = {
+      accept: 'application/json',
+      authorization: `Bearer ${this.config.apiKey}`,
+      'content-type': 'application/json',
+      'user-agent': 'langchainjs-openai/1.0.0',
+      'x-stainless-arch': 'arm64',
+      'x-stainless-lang': 'js',
+      'x-stainless-os': 'mac',
+      'x-stainless-package-version': '1.0.0',
+      'x-stainless-retry-count': '0',
+      'x-stainless-runtime': 'node',
+      'x-stainless-runtime-version': '22.0.0'
+    };
+    if (options?.options?.headers) {
+      for (const [k, v] of Object.entries(options.options.headers)) {
+        const lower = k.toLowerCase();
+        if (v === null) delete headers[lower];
+        else if (typeof v === 'string') headers[lower] = v;
+      }
+    }
+    return fetch(`${this.config.configuration.baseURL}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model: this.config.model, messages })
+    });
+  }
+}
 
 const OPENAI_BASE = 'https://api.openai.com/v1';
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 const LOCAL_BASE = 'http://localhost:1234/v1';
 const NVIDIA_BASE = 'https://integrate.api.nvidia.com/v1';
-const OPENROUTER_HEADERS = { 'HTTP-Referer': 'https://github.com/preetdhanani/ScoutFox_browser_agent', 'X-Title': 'ScoutFox AI Agent' };
+const OPENROUTER_HEADERS = { 'HTTP-Referer': 'https://github.com/preetdhanani/Tarka_browser_agent', 'X-Title': 'Tarka AI Agent' };
 
 /** The setups of the factory that share ChatOpenAICompletions: the provider, and the settings that select the base URL. */
 const SETUPS = {
@@ -133,7 +184,7 @@ test('with the factory the headers that reach fetch are exactly today\'s, for ev
       authorization: 'Bearer sk-or-test-123',
       'content-type': 'application/json',
       'http-referer': OPENROUTER_HEADERS['HTTP-Referer'],
-      'x-title': 'ScoutFox AI Agent'
+      'x-title': 'Tarka AI Agent'
     },
     'openrouter: both default headers arrive'
   );

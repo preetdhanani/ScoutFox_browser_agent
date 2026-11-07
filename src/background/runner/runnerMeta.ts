@@ -4,7 +4,7 @@ import type { StorageSessionArea } from './actionJournal.ts';
 
 export interface RunnerMeta {
   stateVersion: number;
-  scoutFoxGroupIds: [windowId: number, groupId: number][];
+  tarkaGroupIds: [windowId: number, groupId: number][];
   aliases: number[];
   attachedTabIds: number[];
   pauseDetach: { tabIds: number[]; at: number } | null;
@@ -15,7 +15,7 @@ export interface RunnerMeta {
 export class SessionRunnerMeta {
   private threadId: string;
   private area: StorageSessionArea;
-  private pendingWrite: NodeJS.Timeout | null = null;
+  private pendingWrite: ReturnType<typeof setTimeout> | null = null;
   private pendingMeta: RunnerMeta | null = null;
   private lastWrittenAt = 0;
 

@@ -34,7 +34,7 @@ test('routerRig: the router loads on fakeChrome with its listeners registered, a
   assert.ok(rig.selfListeners.has('unhandledrejection'), 'the worker-level handlers are recorded');
 
   const panel = await rig.connect(100);
-  assert.equal(panel.port.name, 'scoutfox_sidepanel:100');
+  assert.equal(panel.port.name, 'tarka_sidepanel:100');
   const first = panel.lastState();
   assert.equal(first?.['status'], 'idle');
   assert.deepEqual(first?.['history'], []);
@@ -72,7 +72,7 @@ test('routerRig: START_TASK runs a real task on the injected model, and the pane
   // The measured scroll first asks the page which box to move; this short page is already at its
   // bottom, so nothing is moved and nothing else is asked.
   assert.deepEqual(rig.site?.actions.map((a) => a.payload['action']), ['scroll_target'], 'the action reached the page through the router');
-  assert.notEqual(rig.fc.tabs.get(100)?.groupId, -1, 'a task puts its tab in the ScoutFox group');
+  assert.notEqual(rig.fc.tabs.get(100)?.groupId, -1, 'a task puts its tab in the Tarka group');
   assert.equal(rig.runtime(100)?.llm !== undefined, true);
   rig.llm.assertDrained();
   rig.assertClean();

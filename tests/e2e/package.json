@@ -1,5 +1,5 @@
 {
-  "name": "scoutfox-e2e",
+  "name": "tarka-e2e",
   "version": "1.0.0",
   "private": true,
   "description": "Opt-in end-to-end run of the built extension (dist/) in Chromium, against a real model (LISA by default, NVIDIA NIM or a local Ollama). Not part of npm test.",

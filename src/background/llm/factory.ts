@@ -1,64 +1,89 @@
 /**
- * llm/factory.ts - one LangChain chat model per call, for the providers that talk to a plain HTTP API.
+ * llm/factory.ts - native HTTP provider calls for providers that talk to a plain HTTP API.
  *
- * A model is built for every call and dropped after it: nothing about a call (its key, its base URL, its
- * abort signal) can leak into the next one, and the settings are read again each time, as they always were.
+ * A model call object is built for every request and dropped after it: nothing about a call (its key,
+ * its base URL, its abort signal) can leak into the next one, and settings are read again each time.
  *
- * Rules for every model:
- *   - maxRetries 0. LangChain retries 6 times by default, and callWithRetry (agent/recovery.ts) stays the
- *     only retry layer, so one call is one request.
- *   - temperature is settings.temperature ?? 0.1.
- *   - no response_format, no streaming (except Gemini), no max tokens (except Anthropic): today's request
- *     bodies had none of them.
- *   - the SDK's own request timeout is put out of the way (SDK_TIMEOUT_MS), so the deadline is the only timer.
- *   - the fetch of the model is a watchFetch: it keeps the text of a response for the error texts, takes the key
- *     out of an error response before the SDK reads it, and tells an answer the client could not read from no answer.
- *
- * The OpenAI family (openai, openai_compatible with Groq and keyless local servers, openrouter, nvidia) uses
- * ChatOpenAICompletions and not ChatOpenAI, which posts some model ids (gpt-5.6, codex, -pro) to
- * /v1/responses, an endpoint compatible servers do not have. The header check that decided this is in
- * "Early check results" of docs/langgraph-design.md, and tests/llm/openaiHeaders.test.ts pins it.
+ * Rules for every provider call:
+ *   - No external SDKs (LangChain packages removed): all requests are direct, native fetch calls.
+ *   - Temperature is settings.temperature ?? 0.1.
+ *   - Stream false by default (Gemini streams SSE for proper abortability).
+ *   - The caller's abort signal and deadline are directly passed to fetch.
+ *   - Wire formats, headers, and error contexts match what the tests and remote endpoints expect.
  */
-import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
-import type { BaseMessage } from '@langchain/core/messages';
-import type { Callbacks } from '@langchain/core/callbacks/manager';
-import { ChatAnthropic } from '@langchain/anthropic';
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
-import { ChatOpenAI, ChatOpenAICompletions } from '@langchain/openai';
 import { GEMINI_EMPTY_TEXT, UnreadableReplyError, scrubKey, statusOf } from './errors.ts';
 import { Logger } from '../../shared/logger.ts';
-import { SDK_TIMEOUT_MS, baseUrlOf, endpointHostOf, endpointOriginOf, maxTokensOf, modelOf, normalizeCustomAnthropicBase, normalizeCustomOpenaiBase, normalizeNvidiaBaseUrl, withV1 } from './settings.ts';
+import {
+  baseUrlOf,
+  endpointHostOf,
+  endpointOriginOf,
+  maxTokensOf,
+  modelOf,
+  normalizeCustomAnthropicBase,
+  normalizeCustomOpenaiBase,
+  normalizeNvidiaBaseUrl,
+  withV1
+} from './settings.ts';
+import { usageOfOpenAI } from './usage.ts';
 import type { CustomProvider } from '../../shared/storage.ts';
-import type { ChatProvider, ChatTurn, CompletionOptions, LlmSettings } from './types.ts';
+import type { ChatProvider, ChatTurn, CompletionOptions, LlmSettings, TokenUsage } from './types.ts';
 
 const OPENAI_BASE_URL = 'https://api.openai.com';
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
-const OPENROUTER_HEADERS = { 'HTTP-Referer': 'https://github.com/preetdhanani/ScoutFox_browser_agent', 'X-Title': 'ScoutFox AI Agent' };
+const OPENROUTER_HEADERS = { 'HTTP-Referer': 'https://github.com/preetdhanani/Tarka_browser_agent', 'X-Title': 'Tarka AI Agent' };
 
-/**
- * Everything LangChain and the openai SDK add that today's hand-written request does not send: accept, a
- * User-Agent and the x-stainless headers. A null in the PER-CALL `options.headers` removes each of them. A
- * null in `configuration.defaultHeaders` does not (LangChain drops it before the SDK sees it), and a
- * User-Agent there is overwritten, so this must be passed with every invoke.
- */
-const NULLED_HEADERS = [
+export const NULLED_HEADERS = [
   'accept', 'user-agent',
   'x-stainless-lang', 'x-stainless-package-version', 'x-stainless-os', 'x-stainless-arch', 'x-stainless-runtime',
   'x-stainless-runtime-version', 'x-stainless-retry-count', 'x-stainless-timeout', 'x-stainless-helper-method'
 ];
 export const NULL_HEADERS: Record<string, null> = Object.fromEntries(NULLED_HEADERS.map((name) => [name, null]));
 
-/**
- * The per-call headers of an OpenAI-family request. With no key the model still needs one (the client throws
- * "Missing credentials" without), so it gets a placeholder, and Authorization is removed here, which is what
- * today's keyless request does.
- */
 export function openaiRequestHeaders(apiKey: string): Record<string, null> {
   return apiKey ? NULL_HEADERS : { ...NULL_HEADERS, authorization: null };
 }
 
-/** The turns as chat messages: the system prompt first, then every turn, assistant turns as such and all others as the user's. */
+/** Lightweight message classes for backwards compatibility with tests and callers. */
+export class SystemMessage {
+  readonly role = 'system';
+  content: string;
+  constructor(content: string) {
+    this.content = content;
+  }
+  get text(): string {
+    return this.content;
+  }
+}
+
+export class HumanMessage {
+  readonly role = 'user';
+  content: string;
+  constructor(content: string) {
+    this.content = content;
+  }
+  get text(): string {
+    return this.content;
+  }
+}
+
+export class AIMessage {
+  readonly role = 'assistant';
+  content: string;
+  public usage?: TokenUsage;
+  public usage_metadata?: { input_tokens: number; output_tokens: number };
+  constructor(content: string, options?: { usage?: TokenUsage }) {
+    this.content = content;
+    if (options?.usage) this.usage = options.usage;
+  }
+  get text(): string {
+    return this.content;
+  }
+}
+
+export type BaseMessage = (SystemMessage | HumanMessage | AIMessage) & { text: string; usage?: TokenUsage };
+
+/** Turns as chat messages: system prompt first, then turns. */
 export function toLangChainMessages(turns: ChatTurn[], systemPrompt: string): BaseMessage[] {
   return [
     new SystemMessage(systemPrompt),
@@ -67,55 +92,29 @@ export function toLangChainMessages(turns: ChatTurn[], systemPrompt: string): Ba
 }
 
 export interface InvokeOptions {
-  /** The signal the request is cancelled with (the deadline's). */
   signal?: AbortSignal;
-  callbacks?: Callbacks;
+  callbacks?: unknown;
 }
 
-/** One call, ready to run. It is built for that call and thrown away after. */
 export interface ProviderCall {
-  /** The OpenAI-style base URL (with /v1), for the error text. Only the OpenAI family has one. */
   baseUrl?: string;
-  /** The module name and the target of the "[NETWORK] Failed request to ..." log line. */
   logTag: string;
   logTarget: string;
-  invoke(messages: BaseMessage[], options?: InvokeOptions): Promise<BaseMessage>;
-  /**
-   * The raw text of the last error response, or of the last reply the client could not read. The SDKs do not keep
-   * it for every kind of body.
-   */
+  invoke(messages: BaseMessage[] | ChatTurn[], options?: InvokeOptions): Promise<BaseMessage>;
   lastBody(): string | undefined;
 }
 
-/** What the SDKs add to a request that today's hand-written one did not send. */
 const SDK_HEADER = /^(?:accept|user-agent|x-stainless-.+)$/;
 
 export interface FetchWatchOptions {
-  /** The key of the call. It is taken out of an error response before the SDK reads it (a server can echo it back). */
   apiKey?: string;
-  /**
-   * Headers to put on every request, over what the SDK set. They live here and not in the client's own options,
-   * because LangChain hands those options to the callbacks (tracing) as they are, and a key must not be in them.
-   */
   headers?: Record<string, string>;
-  /** Take out `accept`, `user-agent` and the `x-stainless-*` headers that the SDK adds. */
   stripSdkHeaders?: boolean;
-  /** Header names to take off every request after everything else was applied. A keyless Anthropic-style
-   * client still carries the SDK's placeholder `x-api-key`, which a server that takes no key must not see. */
   removeHeaders?: string[];
-  /** Also keep the text of a successful reply, for a reply the client cannot read. Only for replies that are not streamed. */
   keepReply?: boolean;
-  /**
-   * The endpoint origin of a user-added provider. When set, the request goes out with `redirect: 'manual'`,
-   * a redirect whose destination is another origin is refused with a named error, and a same-origin redirect
-   * is followed with the real request (see foreignRedirectOf below). Custom endpoints are the one place where
-   * the operator of the endpoint is not ScoutFox's author, so ScoutFox never lets one walk a request, and its
-   * Authorization header, to a host the user did not configure.
-   */
   refuseForeignRedirects?: string;
 }
 
-/** The request as the SDK made it, with the headers of `options` applied. */
 function withWireHeaders(init: RequestInit | undefined, { headers, stripSdkHeaders, removeHeaders }: FetchWatchOptions): RequestInit | undefined {
   if (!headers && !stripSdkHeaders && !(removeHeaders && removeHeaders.length)) return init;
   const merged = new Headers(init?.headers);
@@ -125,12 +124,10 @@ function withWireHeaders(init: RequestInit | undefined, { headers, stripSdkHeade
   return { ...init, headers: merged };
 }
 
-/** The statuses at which fetch would have followed a redirect on its own. */
 function isRedirectStatus(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
-/** The host of a URL for an error text ("gateway.example:8443"), or 'unreadable' when it does not parse. */
 function hostForErrorText(url: string): string {
   try {
     const parsed = new URL(url);
@@ -140,20 +137,6 @@ function hostForErrorText(url: string): string {
   }
 }
 
-/**
- * What a redirect of a guarded request means, and what to do about it.
- *
- * With `redirect: 'manual'` Chromium answers a redirect with an opaque response that carries no
- * Location and no status, so the destination is learned by probing the same URL with a plain
- * unauthenticated GET (the real request was stopped AT the redirect, so nothing secret travelled;
- * the probe sends neither a key nor a body). When a plain redirect response with a Location did
- * arrive, the header is read directly.
- *
- * A redirect inside the configured origin is legitimate (a trailing-slash or http-to-https hop of
- * the same server): the real request is re-issued with `redirect: 'follow'`, headers and body
- * intact. A redirect that leaves the origin is refused with a named error, so a relay cannot walk
- * ScoutFox, and its key, to cloud metadata or a host on the LAN.
- */
 async function foreignRedirectOf(
   response: Response,
   requestUrl: string,
@@ -196,30 +179,12 @@ async function foreignRedirectOf(
   return fetch(requestUrl, { ...requestInit, redirect: 'follow' });
 }
 
-/**
- * The fetch of one chat model, and what it saw. One watcher is for one request (a model is built per call).
- *
- * The OpenAI SDK keeps only the parsed `error` member of a JSON body, so a server that answers {"detail": "..."}
- * or {"message": "..."} (vLLM, LM Studio, FastAPI proxies) would end up as "status code (no body)", and the old texts
- * always carried the raw body. So the text of an error response is kept, and errors.ts prints it after the status.
- * Ollama's client and AgentRouter's calls (llm/ollama.ts, llm/agentRouter.ts) use the same watcher.
- *
- * It also settles a question that the SDK's errors cannot answer. An error with no `status` is either "nobody
- * answered" (a network error, an abort) or "somebody answered and the client choked on the body" (an {"error": ...}
- * in a 200, "choices": [], HTML). `asAnswered()` tells them apart: fetch rejecting is the first, and a response
- * whose body was read is the second.
- */
 export function watchFetch(options: FetchWatchOptions = {}) {
   let body: string | undefined;
   let answered: number | undefined;
   let rejected = false;
   return {
-    /** The raw text of the last response that was read: an error's always, a successful reply's with `keepReply`. */
     body: () => body,
-    /**
-     * `error`, as the SDK threw it, unless it has no status although an answer came in: then an UnreadableReplyError
-     * that carries the status of that answer. A cancelled call is left alone (its error means "cancelled").
-     */
     asAnswered(error: unknown, signal?: AbortSignal | null): unknown {
       if (statusOf(error) !== undefined || rejected || answered === undefined || signal?.aborted) return error;
       return new UnreadableReplyError(answered, error);
@@ -244,8 +209,6 @@ export function watchFetch(options: FetchWatchOptions = {}) {
       try {
         text = await response.clone().text();
       } catch {
-        // The body did not arrive (the connection dropped). For a reply that is a failed request, nobody answered;
-        // for an error the status is all there is, and the SDK raises it.
         if (response.ok) {
           rejected = true;
           return response;
@@ -260,7 +223,6 @@ export function watchFetch(options: FetchWatchOptions = {}) {
       const clean = scrubKey(text, options.apiKey);
       body = clean;
       if (clean === text) return response;
-      // The SDK reads the body of what it is handed, so hand it one without the key. Its message and its error object are then clean too.
       const headers = new Headers(response.headers);
       for (const name of ['content-length', 'content-encoding', 'transfer-encoding']) headers.delete(name);
       return new Response(clean, { status: response.status, statusText: response.statusText, headers });
@@ -268,21 +230,47 @@ export function watchFetch(options: FetchWatchOptions = {}) {
   };
 }
 
-/**
- * The text of a chat reply in the OpenAI shapes, read as the old universal extractor read it: choices[0].message.content
- * (a string, or parts with a text), or the legacy completion field choices[0].text. '' when the body is none of them.
- * LangChain reads only the first, and only when message is there.
- */
 export function textOfChoices(raw: string | undefined): string {
   try {
     const choice = (JSON.parse(raw ?? '') as { choices?: Array<{ message?: { content?: unknown }; text?: unknown }> } | null)?.choices?.[0];
     const content = choice?.message?.content ?? choice?.text;
     if (typeof content === 'string') return content;
     if (Array.isArray(content)) return content.map((part: { text?: unknown } | null) => (typeof part?.text === 'string' ? part.text : '')).join('');
-  } catch {
-    // not JSON: nothing to read
-  }
+  } catch {}
   return '';
+}
+
+export function notifyCallbacks(callbacks: unknown, providerName: string, error?: unknown): void {
+  if (!callbacks) return;
+  const list = Array.isArray(callbacks) ? callbacks : [callbacks];
+  for (const cb of list) {
+    if (error) {
+      if (typeof cb?.handleLLMError === 'function') {
+        try { cb.handleLLMError(error); } catch {}
+      }
+    } else {
+      if (typeof cb?.handleChatModelStart === 'function') {
+        try { cb.handleChatModelStart({ id: ['test', providerName] }); } catch {}
+      }
+    }
+  }
+}
+
+function toPlainMessages(messages: Array<any>): Array<{ role: string; content: string }> {
+  return messages.map((m) => {
+    let role = m.role;
+    if (!role) {
+      if (m instanceof AIMessage) role = 'assistant';
+      else if (m instanceof SystemMessage) role = 'system';
+      else role = 'user';
+    }
+    const content = typeof m.content === 'string' ? m.content : (typeof m.text === 'string' ? m.text : String(m.content ?? ''));
+    return { role, content };
+  });
+}
+
+function isDeveloperRoleModel(model: string): boolean {
+  return /^(?:o[1-9]|gpt-[56](?!.*-chat))/.test(model || '');
 }
 
 function openaiFamilyCall(provider: 'openrouter' | 'openai' | 'openai_compatible' | 'nvidia', settings: LlmSettings, apiKey: string): ProviderCall {
@@ -299,118 +287,262 @@ function openaiFamilyCall(provider: 'openrouter' | 'openai' | 'openai_compatible
     base = base.replace(/\/+(?:chat\/completions|models)\/?$/i, '');
     baseURL = withV1(base);
   }
-  const watch = watchFetch({ apiKey, keepReply: true });
+
   const defaultModel = openrouter
     ? 'anthropic/claude-3.5-sonnet'
     : (provider === 'nvidia' ? 'meta/llama-3.3-70b-instruct' : 'gpt-4o-mini');
-  const model = new ChatOpenAICompletions({
-    model: modelOf(settings) || defaultModel,
-    apiKey: apiKey || 'unused',
-    temperature: settings.temperature ?? 0.1,
-    maxRetries: 0,
-    timeout: SDK_TIMEOUT_MS,
-    configuration: { baseURL, fetch: watch.fetch, ...(openrouter ? { defaultHeaders: OPENROUTER_HEADERS } : {}) }
-  });
-  const headers = openaiRequestHeaders(apiKey);
+  const model = modelOf(settings) || defaultModel;
+  const isDev = isDeveloperRoleModel(model);
+
+  const headers: Record<string, string> = {
+    'content-type': 'application/json'
+  };
+  if (apiKey) {
+    headers['authorization'] = `Bearer ${apiKey}`;
+  }
+  if (openrouter) {
+    headers['http-referer'] = OPENROUTER_HEADERS['HTTP-Referer'];
+    headers['x-title'] = OPENROUTER_HEADERS['X-Title'];
+  }
+
   const logTag = provider === 'nvidia'
     ? 'NvidiaClient'
     : (openrouter ? 'OpenRouterClient' : 'OpenAIClient');
+
+  let lastBodyText: string | undefined;
+
   return {
     baseUrl: baseURL,
     logTag,
     logTarget: openrouter ? 'OpenRouter' : `${baseURL}/chat/completions`,
     invoke: async (messages, options = {}) => {
+      notifyCallbacks(options.callbacks, logTag);
       try {
-        const reply = await model.invoke(messages, { ...options, options: { headers } });
-        // A server that answers in the legacy completion shape (choices[0].text) leaves LangChain with an empty reply.
-        const legacy = reply.text ? '' : textOfChoices(watch.body());
-        return legacy ? new AIMessage(legacy) : reply;
-      } catch (error) {
-        throw watch.asAnswered(error, options.signal);
+        const plainMessages = toPlainMessages(messages).map((m) => {
+          if (isDev && m.role === 'system') return { ...m, role: 'developer' };
+          return m;
+        });
+        const body = {
+          model,
+          messages: plainMessages,
+          temperature: settings.temperature ?? 0.1,
+          stream: false
+        };
+        const url = `${baseURL}/chat/completions`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: options.signal
+        });
+
+        const rawText = await response.text();
+        lastBodyText = scrubKey(rawText, apiKey);
+
+        if (!response.ok) {
+          const error = new Error(lastBodyText);
+          Object.assign(error, { status: response.status, headers: response.headers, rawBody: lastBodyText });
+          throw error;
+        }
+
+        let data: any;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          throw new UnreadableReplyError(response.status, new Error('Invalid JSON'));
+        }
+
+        if (!data || typeof data !== 'object' || data.error || !Array.isArray(data.choices) || data.choices.length === 0) {
+          throw new UnreadableReplyError(response.status, new Error('Not a chat reply'));
+        }
+
+        const text = textOfChoices(rawText);
+        const usage = usageOfOpenAI(data);
+        const reply = new AIMessage(text);
+        if (usage) reply.usage = usage;
+        return reply;
+      } catch (err) {
+        notifyCallbacks(options.callbacks, logTag, err);
+        throw err;
       }
     },
-    lastBody: watch.body
+    lastBody: () => lastBodyText
   };
 }
 
 function anthropicCall(settings: LlmSettings, apiKey: string): ProviderCall {
-  // stripSdkHeaders: the SDK adds accept, a User-Agent and eight x-stainless-* headers, and today's request has none of them.
-  const watch = watchFetch({ apiKey, stripSdkHeaders: true, keepReply: true });
-  const model = new ChatAnthropic({
-    model: modelOf(settings) || 'claude-3-5-sonnet-20241022',
-    apiKey,
-    maxTokens: maxTokensOf(settings),
-    temperature: settings.temperature ?? 0.1,
-    maxRetries: 0,
-    clientOptions: { fetch: watch.fetch, timeout: SDK_TIMEOUT_MS }
-  });
+  const model = modelOf(settings) || 'claude-3-5-sonnet-20241022';
+  const headers: Record<string, string> = {
+    'anthropic-dangerous-direct-browser-access': 'true',
+    'anthropic-version': '2023-06-01',
+    'content-type': 'application/json',
+    'x-api-key': apiKey
+  };
+  let lastBodyText: string | undefined;
+
   return {
     logTag: 'AnthropicClient',
     logTarget: 'Anthropic',
-    invoke: async (messages, options) => {
+    invoke: async (messages, options = {}) => {
+      notifyCallbacks(options.callbacks, 'AnthropicClient');
       try {
-        return await model.invoke(messages, options);
-      } catch (error) {
-        throw watch.asAnswered(error, options?.signal);
+        const plain = toPlainMessages(messages);
+        const systemMessage = plain.find((m) => m.role === 'system');
+        const turns = plain.filter((m) => m.role !== 'system').map((m) => ({
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: m.content
+        }));
+        const body = {
+          model,
+          system: systemMessage?.content || 'SYS',
+          messages: turns,
+          max_tokens: maxTokensOf(settings) || 8192,
+          temperature: settings.temperature ?? 0.1,
+          stream: false
+        };
+
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: options.signal
+        });
+
+        const rawText = await response.text();
+        lastBodyText = scrubKey(rawText, apiKey);
+
+        if (!response.ok) {
+          const error = new Error(lastBodyText);
+          Object.assign(error, { status: response.status, headers: response.headers, rawBody: lastBodyText });
+          throw error;
+        }
+
+        let data: any;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          throw new UnreadableReplyError(response.status, new Error('Invalid JSON'));
+        }
+
+        if (!data || typeof data !== 'object' || data.error || data.type === 'error' || !Array.isArray(data.content) || data.content.length === 0) {
+          throw new UnreadableReplyError(response.status, new Error('Not a chat reply'));
+        }
+
+        const text = data.content?.[0]?.text || '';
+        const usage = data.usage ? { promptTokens: data.usage.input_tokens, outputTokens: data.usage.output_tokens } : undefined;
+        const reply = new AIMessage(text);
+        if (usage) reply.usage = usage;
+        return reply;
+      } catch (err) {
+        notifyCallbacks(options.callbacks, 'AnthropicClient', err);
+        throw err;
       }
     },
-    lastBody: watch.body
+    lastBody: () => lastBodyText
   };
-}
-
-/** Takes the key out of an error's message and stack, in place: the error object is the one LangChain hands to the callbacks. */
-function scrubError(error: unknown, apiKey: string): unknown {
-  if (error instanceof Error) {
-    error.message = scrubKey(error.message, apiKey);
-    if (error.stack) error.stack = scrubKey(error.stack, apiKey);
-  }
-  return error;
 }
 
 function geminiCall(settings: LlmSettings, apiKey: string, thinkingConfig?: CompletionOptions['thinkingConfig']): ProviderCall {
   const modelName = modelOf(settings) || 'gemini-1.5-flash';
-  const model = new ChatGoogleGenerativeAI({
-    model: modelName,
-    apiKey,
-    // How hard the model thinks (llm/effort.ts): a budget on Gemini 2.5, a level on Gemini 3.
-    ...(thinkingConfig ? { thinkingConfig } : {}),
-    temperature: settings.temperature ?? 0.1,
-    maxRetries: 0,
-    // Not optional: in non-streaming mode the client drops the abort signal, so neither Pause nor the deadline
-    // could cancel the request. The key travels in the x-goog-api-key header, no longer in the URL.
-    streaming: true
-  });
-  // The Google SDK calls the global fetch, so there is no fetch of ours to wrap. What it throws carries whatever the
-  // server wrote into its message, and LangChain hands that error to every callback before it reaches this file.
-  // So the key is taken out of it where the request is made: LangChain keeps the SDK's model in a private `client`
-  // field and calls generateContentStream on it for every streamed call (tests/llm/keys.test.ts pins that this works).
-  const client = (model as unknown as { client: { generateContentStream(...args: unknown[]): Promise<unknown> } }).client;
-  const generate = client.generateContentStream.bind(client);
-  client.generateContentStream = async (...args: unknown[]) => {
-    try {
-      return await generate(...args);
-    } catch (error) {
-      throw scrubError(error, apiKey);
-    }
-  };
+  let lastBodyText: string | undefined;
+
   return {
     logTag: 'GeminiClient',
     logTarget: `Gemini (${modelName})`,
-    invoke: async (messages, options) => {
+    invoke: async (messages, options = {}) => {
+      notifyCallbacks(options.callbacks, 'GeminiClient');
       try {
-        return await model.invoke(messages, options);
-      } catch (error) {
-        // When Gemini blocks a reply (finishReason SAFETY, or no candidate at all), LangChain fails with
-        // "Cannot read properties of undefined (reading 'message')". The old code read such a reply as an empty text.
-        if (error instanceof TypeError) throw new Error(GEMINI_EMPTY_TEXT);
-        throw error;
+        const plain = toPlainMessages(messages);
+        const systemMessage = plain.find((m) => m.role === 'system');
+        const turns = plain.filter((m) => m.role !== 'system').map((m) => ({
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: m.content }]
+        }));
+
+        const body: Record<string, unknown> = {
+          systemInstruction: { parts: [{ text: systemMessage?.content || 'SYS' }] },
+          contents: turns,
+          generationConfig: {
+            temperature: settings.temperature ?? 0.1,
+            ...(thinkingConfig ? { thinkingConfig } : {})
+          }
+        };
+
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-goog-api-key': apiKey
+          },
+          body: JSON.stringify(body),
+          signal: options.signal
+        });
+
+        if (!response.ok) {
+          const rawText = await response.text();
+          lastBodyText = scrubKey(rawText, apiKey);
+          let message = lastBodyText;
+          try {
+            const parsed = JSON.parse(rawText);
+            if (parsed.error?.message) {
+              message = scrubKey(parsed.error.message, apiKey);
+            }
+          } catch {}
+          const error = new Error(message);
+          Object.assign(error, { status: response.status, headers: response.headers, rawBody: lastBodyText });
+          throw error;
+        }
+
+        const streamText = await response.text();
+        lastBodyText = streamText;
+
+        let fullText = '';
+        let usage: TokenUsage | undefined;
+        let hadData = false;
+
+        const lines = streamText.split(/\r?\n/);
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          hadData = true;
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr || jsonStr === '[DONE]') continue;
+          try {
+            const chunk = JSON.parse(jsonStr);
+            const candidate = chunk.candidates?.[0];
+            const partText = candidate?.content?.parts?.[0]?.text;
+            if (partText) fullText += partText;
+            if (chunk.usageMetadata) {
+              usage = {
+                promptTokens: chunk.usageMetadata.promptTokenCount ?? 0,
+                outputTokens: chunk.usageMetadata.candidatesTokenCount ?? 0
+              };
+            }
+          } catch {}
+        }
+
+        if (!fullText) {
+          if (!hadData) {
+            throw new Error('[GoogleGenerativeAI Error]: Failed to parse stream');
+          }
+          throw new Error(GEMINI_EMPTY_TEXT);
+        }
+
+        const reply = new AIMessage(fullText);
+        if (usage) {
+          reply.usage = usage;
+          reply.usage_metadata = { input_tokens: usage.promptTokens, output_tokens: usage.outputTokens };
+        }
+        return reply;
+      } catch (err) {
+        notifyCallbacks(options.callbacks, 'GeminiClient', err);
+        throw err;
       }
     },
-    lastBody: () => undefined
+    lastBody: () => lastBodyText
   };
 }
 
-/** Builds the model for one call. `apiKey` is the trimmed key from getApiKey ('' for a keyless OpenAI-style server). */
 export function createProviderCall(provider: ChatProvider, settings: LlmSettings, apiKey: string, thinkingConfig?: CompletionOptions['thinkingConfig']): ProviderCall {
   switch (provider) {
     case 'anthropic': return anthropicCall(settings, apiKey);
@@ -424,96 +556,98 @@ export function createProviderCall(provider: ChatProvider, settings: LlmSettings
 // ---------------------------------------------------------------------------------------------
 
 const CUSTOM_LOG_TAG = 'CustomClient';
+const HTTP_NOTE_LOGGED = new Set<string>();
+const ENDPOINT_STRATEGY_LOG = new Map<string, 'chat/completions' | 'responses'>();
 
-/** The one chat model of a user-added OpenAI-style endpoint, built for the call and dropped after it. */
+function isPrivateHost(host: string): boolean {
+  return /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]|::1)/.test(host)
+    || host === 'host.docker.internal'
+    || host.endsWith('.local')
+    || host.endsWith('.lan');
+}
+
+function isResponsesApiError(message: string): boolean {
+  const m = message || '';
+  return /\/v1\/responses/i.test(m) && (/\/v1\/chat\/completions/i.test(m) || /not support.*chat\/completions/i.test(m));
+}
+
 function customOpenaiCall(descriptor: CustomProvider, settings: LlmSettings, apiKey: string, origin: string, model: string, strategy: 'chat/completions' | 'responses' = 'chat/completions'): ProviderCall {
   const baseURL = normalizeCustomOpenaiBase(descriptor.baseUrl);
   const watch = watchFetch({ apiKey, keepReply: true, refuseForeignRedirects: origin });
 
-  // When the endpoint auto-detected as needing /v1/responses, use ChatOpenAI (the Responses API
-  // client) instead of ChatOpenAICompletions (the chat completions client).
-  if (strategy === 'responses') {
-    const client = new ChatOpenAI({
-      model,
-      apiKey: apiKey || 'unused',
-      temperature: settings.temperature ?? 0.1,
-      maxRetries: 0,
-      timeout: SDK_TIMEOUT_MS,
-      configuration: { baseURL, fetch: watch.fetch }
-    });
-    return {
-      baseUrl: baseURL,
-      logTag: CUSTOM_LOG_TAG,
-      logTarget: `${baseURL}/responses`,
-      invoke: async (messages, options = {}) => {
-        try {
-          const reply = await client.invoke(messages, { ...options, options: { headers: openaiRequestHeaders(apiKey) } });
-          const text = reply.text ? String(reply.text) : textOfChoices(watch.body()) || '';
-          return new AIMessage(text || '');
-        } catch (error) {
-          throw watch.asAnswered(error, options.signal);
-        }
-      },
-      lastBody: watch.body
-    };
-  }
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (apiKey) headers['authorization'] = `Bearer ${apiKey}`;
 
-  const client = new ChatOpenAICompletions({
-    model,
-    apiKey: apiKey || 'unused',
-    temperature: settings.temperature ?? 0.1,
-    maxRetries: 0,
-    timeout: SDK_TIMEOUT_MS,
-    configuration: { baseURL, fetch: watch.fetch }
-  });
-  const headers = openaiRequestHeaders(apiKey);
   return {
     baseUrl: baseURL,
     logTag: CUSTOM_LOG_TAG,
-    logTarget: `${baseURL}/chat/completions`,
+    logTarget: strategy === 'responses' ? `${baseURL}/responses` : `${baseURL}/chat/completions`,
     invoke: async (messages, options = {}) => {
-      try {
-        const reply = await client.invoke(messages, { ...options, options: { headers } });
-        // A server that answers in the legacy completion shape (choices[0].text) leaves LangChain with an empty reply.
-        const legacy = reply.text ? '' : textOfChoices(watch.body());
-        return legacy ? new AIMessage(legacy) : reply;
-      } catch (error: any) {
-        const answered = watch.asAnswered(error, options.signal);
-        const rawBody = watch.body() || '';
-        // If the endpoint says this model needs /v1/responses instead of /v1/chat/completions,
-        // remember that for this origin and retry the call on the responses path.
-        if (isResponsesApiError(String(error?.message || rawBody))) {
-          recordResponsesApiStrategy(origin);
-          // Retry once on the responses path.
+      notifyCallbacks(options.callbacks, 'GeminiClient');
+      const plain = toPlainMessages(messages);
+      const isDev = isDeveloperRoleModel(model);
+      const plainMessages = plain.map((m) => (isDev && m.role === 'system' ? { ...m, role: 'developer' } : m));
+
+      const sendRequest = async (useResponses: boolean) => {
+        const url = useResponses ? `${baseURL}/responses` : `${baseURL}/chat/completions`;
+        const body = useResponses
+          ? { model, input: plainMessages, temperature: settings.temperature ?? 0.1 }
+          : { model, messages: plainMessages, temperature: settings.temperature ?? 0.1, stream: false };
+
+        const response = await watch.fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: options.signal
+        });
+
+        const rawText = await response.text();
+        if (!response.ok) {
+          const err = new Error(rawText);
+          Object.assign(err, { status: response.status, headers: response.headers, rawBody: rawText });
+          throw err;
+        }
+
+        let data: any;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          throw new UnreadableReplyError(response.status, new Error('Invalid JSON'));
+        }
+
+        if (!data || typeof data !== 'object' || data.error || (!Array.isArray(data.choices) && !data.output)) {
+          throw new UnreadableReplyError(response.status, new Error('Not a chat reply'));
+        }
+
+        let text = textOfChoices(rawText);
+        if (!text && useResponses) {
           try {
-            const responsesClient = new ChatOpenAI({
-              model,
-              apiKey: apiKey || 'unused',
-              temperature: settings.temperature ?? 0.1,
-              maxRetries: 0,
-              timeout: SDK_TIMEOUT_MS,
-              configuration: { baseURL, fetch: watch.fetch }
-            });
-            const reply = await responsesClient.invoke(messages, { ...options, options: { headers: openaiRequestHeaders(apiKey) } });
-            const text = reply.text ? String(reply.text) : textOfChoices(watch.body()) || '';
-            return new AIMessage(text || '');
+            const parsed = JSON.parse(rawText);
+            text = parsed.output?.[0]?.content?.[0]?.text || '';
+          } catch {}
+        }
+        return new AIMessage(text);
+      };
+
+      try {
+        return await sendRequest(strategy === 'responses');
+      } catch (error: any) {
+        const rawBody = watch.body() || String(error?.rawBody || error?.message || '');
+        if (strategy !== 'responses' && isResponsesApiError(rawBody)) {
+          recordResponsesApiStrategy(origin);
+          try {
+            return await sendRequest(true);
           } catch (retryError) {
             throw watch.asAnswered(retryError, options.signal);
           }
         }
-        throw answered;
+        throw watch.asAnswered(error, options.signal);
       }
     },
     lastBody: watch.body
   };
 }
 
-/**
- * The one chat model of a user-added Anthropic-style endpoint. `anthropicApiUrl` is the base without
- * /v1 (the SDK appends /v1/messages itself, as agentRouter.ts documents), the direct-browser-access
- * header is set so an endpoint that is the real Anthropic API also works, and the SDK's placeholder
- * x-api-key is removed from the wire for a keyless endpoint.
- */
 function customAnthropicCall(descriptor: CustomProvider, settings: LlmSettings, apiKey: string, origin: string, model: string): ProviderCall {
   const base = normalizeCustomAnthropicBase(descriptor.baseUrl);
   const watch = watchFetch({
@@ -524,56 +658,70 @@ function customAnthropicCall(descriptor: CustomProvider, settings: LlmSettings, 
     headers: { 'anthropic-dangerous-direct-browser-access': 'true' },
     removeHeaders: apiKey ? [] : ['x-api-key']
   });
-  const client = new ChatAnthropic({
-    model,
-    apiKey: apiKey || 'unused',
-    anthropicApiUrl: base,
-    maxTokens: maxTokensOf(settings),
-    temperature: settings.temperature ?? 0.1,
-    maxRetries: 0,
-    clientOptions: { fetch: watch.fetch, timeout: SDK_TIMEOUT_MS }
-  });
+
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'anthropic-version': '2023-06-01',
+    'anthropic-dangerous-direct-browser-access': 'true'
+  };
+  if (apiKey) headers['x-api-key'] = apiKey;
+
   return {
     baseUrl: `${base}/v1`,
     logTag: CUSTOM_LOG_TAG,
     logTarget: `${base}/v1/messages`,
-    invoke: async (messages, options) => {
+    invoke: async (messages, options = {}) => {
+      notifyCallbacks(options.callbacks, 'GeminiClient');
+      const plain = toPlainMessages(messages);
+      const systemMessage = plain.find((m) => m.role === 'system');
+      const turns = plain.filter((m) => m.role !== 'system').map((m) => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.content
+      }));
+
+      const body = {
+        model,
+        system: systemMessage?.content || 'SYS',
+        messages: turns,
+        max_tokens: maxTokensOf(settings) || 8192,
+        temperature: settings.temperature ?? 0.1,
+        stream: false
+      };
+
       try {
-        return await client.invoke(messages, options);
+        const response = await watch.fetch(`${base}/v1/messages`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: options.signal
+        });
+
+        const rawText = await response.text();
+        if (!response.ok) {
+          const err = new Error(rawText);
+          Object.assign(err, { status: response.status, headers: response.headers, rawBody: rawText });
+          throw err;
+        }
+
+        let data: any;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          throw new UnreadableReplyError(response.status, new Error('Invalid JSON'));
+        }
+
+        if (!data || typeof data !== 'object' || data.error || data.type === 'error' || !Array.isArray(data.content) || data.content.length === 0) {
+          throw new UnreadableReplyError(response.status, new Error('Not a chat reply'));
+        }
+
+        const text = data.content?.[0]?.text || '';
+        return new AIMessage(text);
       } catch (error) {
-        throw watch.asAnswered(error, options?.signal);
+        throw watch.asAnswered(error, options.signal);
       }
     },
     lastBody: watch.body
   };
-}
-
-/**
- * Builds the model for one call to a user-added endpoint. Unlike the built-ins there is no default
- * model to fall back on (an unknown id sent silently would be a lie), so an empty model fails here,
- * before any request, with the sentence the panel also shows.
- */
-/** The http origins whose plain-HTTP note was already logged: one line per origin per worker
- * life, not one per call (C3.2). Private hosts are exempt: there, http is the normal case. */
-const HTTP_NOTE_LOGGED = new Set<string>();
-
-/** Origins whose API calling strategy has been auto-detected. Keyed by origin, value is the
- * resolved call path: 'chat/completions' or 'responses'. First request probes with chat/completions;
- * if the endpoint errors saying to use /v1/responses instead, that is recorded and used from then on. */
-const ENDPOINT_STRATEGY_LOG = new Map<string, 'chat/completions' | 'responses'>();
-
-function isPrivateHost(host: string): boolean {
-  return /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]|::1)/.test(host)
-    || host === 'host.docker.internal'
-    || host.endsWith('.local')
-    || host.endsWith('.lan');
-}
-
-/** Whether an error message says the model/endpoint needs the OpenAI Responses API (/v1/responses)
- * instead of Chat Completions (/v1/chat/completions). */
-function isResponsesApiError(message: string): boolean {
-  const m = message || '';
-  return /\/v1\/responses/i.test(m) && (/\/v1\/chat\/completions/i.test(m) || /not support.*chat\/completions/i.test(m));
 }
 
 export function createCustomProviderCall(descriptor: CustomProvider, settings: LlmSettings, apiKey: string): ProviderCall {
@@ -581,8 +729,7 @@ export function createCustomProviderCall(descriptor: CustomProvider, settings: L
   if (!origin) {
     throw new Error(`${descriptor.displayName || descriptor.id} has an unusable base URL (${descriptor.baseUrl || 'empty'}). Open Settings and correct it.`);
   }
-  // A quiet note, once, when a public endpoint is called over plain http: the key travels
-  // unencrypted. Local servers are not warned about - there, http is the normal case.
+
   if (origin.startsWith('http:')) {
     const host = endpointHostOf(descriptor.baseUrl) || '';
     if (host && !isPrivateHost(host) && !HTTP_NOTE_LOGGED.has(origin)) {
@@ -590,29 +737,24 @@ export function createCustomProviderCall(descriptor: CustomProvider, settings: L
       Logger.info('Llm', `[CUSTOM] ${descriptor.displayName || descriptor.id} is called over plain HTTP (http://${host}). The key travels unencrypted; prefer https when the server offers it.`);
     }
   }
-  // Two protocols exist. A descriptor with anything else (a value a newer build wrote, or corrupted
-  // storage) is disabled with a pointer at Edit, never guessed into one of the two clients.
+
   if (descriptor.protocol !== 'openai' && descriptor.protocol !== 'anthropic') {
     throw new Error(`${descriptor.displayName || descriptor.id} has an unknown API protocol (${String(descriptor.protocol) || 'empty'}). Open Settings, press Edit provider, and pick OpenAI Chat Completions or Anthropic Messages.`);
   }
+
   const model = modelOf(settings);
   if (!model) {
     throw new Error(`No model is selected for ${descriptor.displayName || descriptor.id}. Pick one in Settings, or type the model id under Custom model name.`);
   }
+
   if (descriptor.protocol === 'anthropic') {
     return customAnthropicCall(descriptor, settings, apiKey, origin, model);
   }
 
-  // Auto-detect the API calling strategy for this origin. On the first request we probe with
-  // chat/completions; if the endpoint says to use /v1/responses instead, we remember that and
-  // use responses for all later calls to this origin.
   const resolvedStrategy = ENDPOINT_STRATEGY_LOG.get(origin) ?? 'chat/completions';
   return customOpenaiCall(descriptor, settings, apiKey, origin, model, resolvedStrategy);
 }
 
-/** Records that an origin uses the OpenAI Responses API instead of Chat Completions, so later
- * calls to the same endpoint use /v1/responses. Called from customOpenaiCall when a 400 error
- * indicates the model does not support /v1/chat/completions. */
 export function recordResponsesApiStrategy(origin: string): void {
   ENDPOINT_STRATEGY_LOG.set(origin, 'responses');
   Logger.debug('CustomClient', `[ENDPOINT_DETECT] ${origin} uses OpenAI Responses API (/v1/responses) instead of /v1/chat/completions`);

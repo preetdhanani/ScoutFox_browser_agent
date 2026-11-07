@@ -1,5 +1,5 @@
 # Product Requirement Document (PRD)
-## ScoutFox Custom Endpoint (user-added third-party model provider)
+## Tarka Custom Endpoint (user-added third-party model provider)
 
 > **Version**: 0.2
 > **Status**: Implemented on the extension path (storage, LLM layer, background routes, Settings UI, tests). The open questions of section 9 were decided as recommended; section 11 records what shipped and where.
@@ -15,7 +15,7 @@
 
 ### 1.1 The problem
 
-ScoutFox today supports eight providers, and the list is a compile-time constant.
+Tarka today supports eight providers, and the list is a compile-time constant.
 
 - [`src/background/llm/types.ts:47`](../../src/background/llm/types.ts) is a closed union: `'openrouter' | 'openai' | 'openai_compatible' | 'anthropic' | 'gemini' | 'nvidia'`.
   [`isChatProvider`](../../src/background/llm/types.ts) is a hand-written `||` chain over those same names.
@@ -43,7 +43,7 @@ The dialect is the valuable part, and it is the same dialect the whole industry 
 A user who can paste a base URL, a protocol, and a key is insulated from this list forever.
 The provider list stops being a product surface and becomes a convenience.
 
-### 1.3 Fit with the ScoutFox niche
+### 1.3 Fit with the Tarka niche
 
 The niche in [PRD.md section 1](../../PRD.md) is small local models and privacy.
 That niche lives on a long tail of servers, not on eight brands:
@@ -72,7 +72,7 @@ Each one is the kind of endpoint the project exists to serve.
 ### 2.2 The one-line rule
 
 **A custom provider is a provider.**
-Anything that works for `nvidia` should work for `acme-gateway`, with one exception: ScoutFox can ship no default model list, no default timeout, and no vendor-specific fixup for a provider it has never heard of.
+Anything that works for `nvidia` should work for `acme-gateway`, with one exception: Tarka can ship no default model list, no default timeout, and no vendor-specific fixup for a provider it has never heard of.
 Where a built-in has a curated default, a custom provider shows an honest empty state instead of a guessed one.
 
 ### 2.3 Non-goals
@@ -281,7 +281,7 @@ A Chrome MV3 extension service worker is **not** a Secure Context.
 The Mixed Content spec blocks `https:` pages from reaching `http:` origins, but the block does not apply to extension pages and workers, and `<all_urls>` host permission is already granted.
 The proof is in the repo: Ollama ships as `http://localhost:11434` in [`storage.ts:60`](../../src/shared/storage.ts) and works.
 
-So: an `https://` relay can 302 ScoutFox to `http://169.254.169.254/...` (cloud metadata) or `http://192.168.x.x:8000/v1` (a LAN model server), and ScoutFox will follow, because `fetch` follows redirects by default.
+So: an `https://` relay can 302 Tarka to `http://169.254.169.254/...` (cloud metadata) or `http://192.168.x.x:8000/v1` (a LAN model server), and Tarka will follow, because `fetch` follows redirects by default.
 That is true of the existing `openai_compatible` provider whenever the user types a third-party base URL, and this feature hands the sharp end to more users with a nicer form.
 
 Decisions asked for in section 9 (O1, O2). The recommended floor, cheap enough to fold into the first cut:
@@ -294,7 +294,7 @@ Decisions asked for in section 9 (O1, O2). The recommended floor, cheap enough t
 
 - A custom provider has no curated default timeout, so a slow gateway uses the global 120s unless the user sets one.
   The form shows the current effective timeout per provider.
-- A gateway that answers with a body ScoutFox's parser cannot read surfaces as an UnreadableReplyError with the raw body, which is honest but not friendly.
+- A gateway that answers with a body Tarka's parser cannot read surfaces as an UnreadableReplyError with the raw body, which is honest but not friendly.
 - Users will point an OpenAI-protocol provider at an Anthropic endpoint.
   The error text must name the protocol it used and the URL it posted to, so the fix is obvious without opening the Logs tab.
 
@@ -310,11 +310,11 @@ A user-supplied endpoint neither adds nor removes exposure on those axes.
 | Item | Why it is its own decision |
 |---|---|
 | Per-request custom headers | Real need (tenant ids, trace ids), and a credential-leak surface. Design separately |
-| Non-chat model kinds (embeddings, rerank) | Nothing in ScoutFox calls them yet |
+| Non-chat model kinds (embeddings, rerank) | Nothing in Tarka calls them yet |
 | Ollama-native and Gemini-native custom protocols | The `/v1` shim covers most self-hosted servers; revisit with demand |
 | Streaming for custom providers | No provider streams today (Gemini streams internally only to keep its abort signal alive), so this is a separate change |
 | Constrained decoding for custom endpoints | Ollama-only today ([PRD.md 3.3 item 17](../../PRD.md)). A `response_format` probe is a good follow-on: detect support once, cache it per endpoint, send the schema when supported. It would lift small-model reliability on vLLM and SGLang, which is the core niche |
-| Provider presets and an import file | A good v2 shape (share a `scoutfox-provider.json`), out of scope for v1 |
+| Provider presets and an import file | A good v2 shape (share a `tarka-provider.json`), out of scope for v1 |
 | Auto-detecting the protocol from the endpoint | Tempting, and it guesses wrong on relays that speak both |
 
 ---

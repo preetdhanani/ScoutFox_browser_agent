@@ -1,5 +1,5 @@
 // src/background/browser/groups.ts
-// ScoutFox tab group management, sandboxing, and scope checks.
+// Tarka tab group management, sandboxing, and scope checks.
 import { lastRuntimeError } from './tabs.ts';
 import { Logger } from '../../shared/logger.ts';
 
@@ -41,7 +41,7 @@ export async function isTabInScope(ctx: GroupContext, tabId: number): Promise<bo
   return tab.groupId === ownGroupForThatWindow;
 }
 
-export async function ensureScoutFoxGroup(
+export async function ensureTarkaGroup(
   ctx: GroupContext,
   tabId: number,
   explicitWindowId?: number
@@ -92,7 +92,7 @@ export async function ensureScoutFoxGroup(
       ctx.groupIds.delete(windowId);
     }
 
-    // 2. If valid ScoutFox group exists and tab is not yet in it -> join tab into existing group
+    // 2. If valid Tarka group exists and tab is not yet in it -> join tab into existing group
     if (activeGroupValid && recordedGroupId) {
       if (tab.groupId !== recordedGroupId) {
         const rejoinErr = await new Promise<string | null>((resolve) => {
@@ -109,16 +109,16 @@ export async function ensureScoutFoxGroup(
           recordedGroupId = null;
           ctx.groupIds.delete(windowId);
         } else {
-          Logger.debug('Browser', `[TAB_SANDBOX] Tab [${tabId}] joined active 'ScoutFox' tab group (GroupID: ${recordedGroupId}, window [${windowId}])`);
+          Logger.debug('Browser', `[TAB_SANDBOX] Tab [${tabId}] joined active 'Tarka' tab group (GroupID: ${recordedGroupId}, window [${windowId}])`);
           return recordedGroupId;
         }
       } else {
-        Logger.debug('Browser', `[TAB_SANDBOX] Tab [${tabId}] joined active 'ScoutFox' tab group (GroupID: ${recordedGroupId}, window [${windowId}])`);
+        Logger.debug('Browser', `[TAB_SANDBOX] Tab [${tabId}] joined active 'Tarka' tab group (GroupID: ${recordedGroupId}, window [${windowId}])`);
         return recordedGroupId;
       }
     }
 
-    // 3. Check if target tab is already in a titled ScoutFox group
+    // 3. Check if target tab is already in a titled Tarka group
     if (tab.groupId && tab.groupId !== TAB_GROUP_ID_NONE && chrome.tabGroups && chrome.tabGroups.get) {
       const currentGrp = await new Promise<chrome.tabGroups.TabGroup | null>((resolve) => {
         chrome.tabGroups.get(tab.groupId, (g) => {
@@ -126,14 +126,14 @@ export async function ensureScoutFoxGroup(
           resolve(g ?? null);
         });
       });
-      if (currentGrp && currentGrp.title === 'ScoutFox') {
+      if (currentGrp && currentGrp.title === 'Tarka') {
         ctx.groupIds.set(windowId, tab.groupId);
         try { ctx.persist(); } catch (_) {}
         return tab.groupId;
       }
     }
 
-    // 4. Create fresh 'ScoutFox' tab group, in the tab's OWN window.
+    // 4. Create fresh 'Tarka' tab group, in the tab's OWN window.
     const createProperties = tab.windowId !== undefined ? { windowId: tab.windowId } : undefined;
     const newGroupId = await new Promise<number | null>((resolve) => {
       chrome.tabs.group({ tabIds: tabId, ...(createProperties ? { createProperties } : {}) }, (gid) => {
@@ -145,7 +145,7 @@ export async function ensureScoutFoxGroup(
     if (newGroupId) {
       if (chrome.tabGroups && chrome.tabGroups.update) {
         await new Promise<void>((resolve) => {
-          chrome.tabGroups.update(newGroupId, { title: 'ScoutFox', color: 'orange' }, () => {
+          chrome.tabGroups.update(newGroupId, { title: 'Tarka', color: 'orange' }, () => {
             lastRuntimeError();
             resolve();
           });
@@ -154,13 +154,13 @@ export async function ensureScoutFoxGroup(
 
       ctx.groupIds.set(windowId, newGroupId);
       try { ctx.persist(); } catch (_) {}
-      Logger.debug('Browser', `[TAB_SANDBOX] Created fresh 'ScoutFox' tab group (GroupID: ${newGroupId}) for tab [${tabId}] (window [${windowId}])`);
+      Logger.debug('Browser', `[TAB_SANDBOX] Created fresh 'Tarka' tab group (GroupID: ${newGroupId}) for tab [${tabId}] (window [${windowId}])`);
       return newGroupId;
     }
 
     return null;
   } catch (err: any) {
-    Logger.warn('Browser', '[TAB_SANDBOX_WARN] Could not sandbox tab into ScoutFox group', err.message);
+    Logger.warn('Browser', '[TAB_SANDBOX_WARN] Could not sandbox tab into Tarka group', err.message);
     return null;
   }
 }

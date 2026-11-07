@@ -1,5 +1,5 @@
 /**
- * ScoutFox scroll actions: scroll_target, scroll_measure, scroll_fallback and the plain scroll, for
+ * Tarka scroll actions: scroll_target, scroll_measure, scroll_fallback and the plain scroll, for
  * one document. The top frame's executor (actions.ts) and the frame agent of every embedded frame
  * (frameAgent.ts) both run them, each on its own document with its own kept box.
  *

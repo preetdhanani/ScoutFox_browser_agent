@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ensureScoutFoxGroup, isTabInScope, groupIdForWindow, type GroupContext } from '../../src/background/browser/groups.ts';
+import { ensureTarkaGroup, isTabInScope, groupIdForWindow, type GroupContext } from '../../src/background/browser/groups.ts';
 
 function createMockChrome(tabsMap = new Map<number, any>(), groupsMap = new Map<number, any>()) {
   let groupCounter = 1000;
@@ -104,7 +104,7 @@ test('isTabInScope: returns true when chrome.tabs.get is unavailable', async () 
   }
 });
 
-test('isTabInScope: validates whether tab belongs to session ScoutFox group for that window', async () => {
+test('isTabInScope: validates whether tab belongs to session Tarka group for that window', async () => {
   const originalChrome = (globalThis as any).chrome;
   try {
     const tabsMap = new Map([
@@ -131,7 +131,7 @@ test('isTabInScope: validates whether tab belongs to session ScoutFox group for 
   }
 });
 
-test('ensureScoutFoxGroup: creates fresh ScoutFox group in tab own window and persists', async () => {
+test('ensureTarkaGroup: creates fresh Tarka group in tab own window and persists', async () => {
   const originalChrome = (globalThis as any).chrome;
   try {
     const tabsMap = new Map([
@@ -147,15 +147,15 @@ test('ensureScoutFoxGroup: creates fresh ScoutFox group in tab own window and pe
       persist: () => { persisted = true; }
     };
 
-    const gid = await ensureScoutFoxGroup(ctx, 101);
+    const gid = await ensureTarkaGroup(ctx, 101);
     assert.ok(gid);
     assert.equal(persisted, true);
     assert.equal(ctx.groupIds.get(4), gid);
 
-    // Group should be created with title ScoutFox and orange color
+    // Group should be created with title Tarka and orange color
     const grp = groupsMap.get(gid);
     assert.ok(grp);
-    assert.equal(grp.title, 'ScoutFox');
+    assert.equal(grp.title, 'Tarka');
     assert.equal(grp.color, 'orange');
     assert.equal(grp.windowId, 4); // Created in tab's own window!
   } finally {
@@ -163,7 +163,7 @@ test('ensureScoutFoxGroup: creates fresh ScoutFox group in tab own window and pe
   }
 });
 
-test('ensureScoutFoxGroup: reuses active group for subsequent tabs in same window', async () => {
+test('ensureTarkaGroup: reuses active group for subsequent tabs in same window', async () => {
   const originalChrome = (globalThis as any).chrome;
   try {
     const tabsMap = new Map([
@@ -171,7 +171,7 @@ test('ensureScoutFoxGroup: reuses active group for subsequent tabs in same windo
       [102, { id: 102, windowId: 1, groupId: -1 }]
     ]);
     const groupsMap = new Map([
-      [1001, { id: 1001, title: 'ScoutFox', color: 'orange', windowId: 1 }]
+      [1001, { id: 1001, title: 'Tarka', color: 'orange', windowId: 1 }]
     ]);
     (globalThis as any).chrome = createMockChrome(tabsMap, groupsMap);
 
@@ -181,7 +181,7 @@ test('ensureScoutFoxGroup: reuses active group for subsequent tabs in same windo
       persist: () => {}
     };
 
-    const gid = await ensureScoutFoxGroup(ctx, 102);
+    const gid = await ensureTarkaGroup(ctx, 102);
     assert.equal(gid, 1001);
     assert.equal(tabsMap.get(102)?.groupId, 1001);
   } finally {
@@ -189,14 +189,14 @@ test('ensureScoutFoxGroup: reuses active group for subsequent tabs in same windo
   }
 });
 
-test('ensureScoutFoxGroup: adopts existing titled ScoutFox group if tab already in one', async () => {
+test('ensureTarkaGroup: adopts existing titled Tarka group if tab already in one', async () => {
   const originalChrome = (globalThis as any).chrome;
   try {
     const tabsMap = new Map([
       [101, { id: 101, windowId: 2, groupId: 2002 }]
     ]);
     const groupsMap = new Map([
-      [2002, { id: 2002, title: 'ScoutFox', color: 'orange', windowId: 2 }]
+      [2002, { id: 2002, title: 'Tarka', color: 'orange', windowId: 2 }]
     ]);
     (globalThis as any).chrome = createMockChrome(tabsMap, groupsMap);
 
@@ -207,7 +207,7 @@ test('ensureScoutFoxGroup: adopts existing titled ScoutFox group if tab already 
       persist: () => { persisted = true; }
     };
 
-    const gid = await ensureScoutFoxGroup(ctx, 101);
+    const gid = await ensureTarkaGroup(ctx, 101);
     assert.equal(gid, 2002);
     assert.equal(ctx.groupIds.get(2), 2002);
     assert.equal(persisted, true);
@@ -216,7 +216,7 @@ test('ensureScoutFoxGroup: adopts existing titled ScoutFox group if tab already 
   }
 });
 
-test('ensureScoutFoxGroup: detects closed group and creates fresh group', async () => {
+test('ensureTarkaGroup: detects closed group and creates fresh group', async () => {
   const originalChrome = (globalThis as any).chrome;
   try {
     const tabsMap = new Map([
@@ -232,7 +232,7 @@ test('ensureScoutFoxGroup: detects closed group and creates fresh group', async 
       persist: () => {}
     };
 
-    const newGid = await ensureScoutFoxGroup(ctx, 101);
+    const newGid = await ensureTarkaGroup(ctx, 101);
     assert.ok(newGid);
     assert.notEqual(newGid, 8888);
     assert.equal(ctx.groupIds.get(1), newGid);
@@ -241,30 +241,30 @@ test('ensureScoutFoxGroup: detects closed group and creates fresh group', async 
   }
 });
 
-test('ensureScoutFoxGroup: returns null safely when passed invalid tabId', async () => {
+test('ensureTarkaGroup: returns null safely when passed invalid tabId', async () => {
   const originalChrome = (globalThis as any).chrome;
   try {
     (globalThis as any).chrome = createMockChrome();
     const ctx: GroupContext = { windowId: 1, groupIds: new Map(), persist: () => {} };
-    assert.equal(await ensureScoutFoxGroup(ctx, null as any), null);
-    assert.equal(await ensureScoutFoxGroup(ctx, undefined as any), null);
+    assert.equal(await ensureTarkaGroup(ctx, null as any), null);
+    assert.equal(await ensureTarkaGroup(ctx, undefined as any), null);
   } finally {
     (globalThis as any).chrome = originalChrome;
   }
 });
 
-test('ensureScoutFoxGroup: returns null when target tab ID does not exist in Chrome', async () => {
+test('ensureTarkaGroup: returns null when target tab ID does not exist in Chrome', async () => {
   const originalChrome = (globalThis as any).chrome;
   try {
     (globalThis as any).chrome = createMockChrome(new Map()); // empty tabsMap
     const ctx: GroupContext = { windowId: 1, groupIds: new Map(), persist: () => {} };
-    assert.equal(await ensureScoutFoxGroup(ctx, 9999), null);
+    assert.equal(await ensureTarkaGroup(ctx, 9999), null);
   } finally {
     (globalThis as any).chrome = originalChrome;
   }
 });
 
-test('ensureScoutFoxGroup: creates group in tab own window', async () => {
+test('ensureTarkaGroup: creates group in tab own window', async () => {
   const originalChrome = (globalThis as any).chrome;
   try {
     const tabsMap = new Map([
@@ -279,7 +279,7 @@ test('ensureScoutFoxGroup: creates group in tab own window', async () => {
       persist: () => {}
     };
 
-    const gid = await ensureScoutFoxGroup(ctx, 101, 7);
+    const gid = await ensureTarkaGroup(ctx, 101, 7);
     assert.ok(gid);
     assert.equal(tabsMap.get(101)?.windowId, 7);
     assert.equal(ctx.groupIds.get(7), gid);
@@ -288,7 +288,7 @@ test('ensureScoutFoxGroup: creates group in tab own window', async () => {
   }
 });
 
-test('ensureScoutFoxGroup: persist callback writes group id to caller store', async () => {
+test('ensureTarkaGroup: persist callback writes group id to caller store', async () => {
   const originalChrome = (globalThis as any).chrome;
   try {
     const tabsMap = new Map([
@@ -304,7 +304,7 @@ test('ensureScoutFoxGroup: persist callback writes group id to caller store', as
       persist: () => { persistedCount++; }
     };
 
-    const gid = await ensureScoutFoxGroup(ctx, 101);
+    const gid = await ensureTarkaGroup(ctx, 101);
     assert.ok(gid);
     assert.equal(persistedCount, 1);
   } finally {
@@ -312,7 +312,7 @@ test('ensureScoutFoxGroup: persist callback writes group id to caller store', as
   }
 });
 
-test('ensureScoutFoxGroup: cold boot without stored session starts empty', () => {
+test('ensureTarkaGroup: cold boot without stored session starts empty', () => {
   const ctx: GroupContext = {
     windowId: 1,
     groupIds: new Map(),

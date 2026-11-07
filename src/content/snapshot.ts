@@ -1,5 +1,5 @@
 /**
- * ScoutFox Interactive Element Selection and CSS Path Computation
+ * Tarka Interactive Element Selection and CSS Path Computation
  * Queries interactive elements and checks real-time viewport and layout visibility.
  */
 

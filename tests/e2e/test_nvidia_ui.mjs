@@ -24,7 +24,7 @@ async function run() {
   }
 
   const extCopy = prepareExtensionCopy({ distDir: DIST, driverHtml: path.join(HERE, 'driver.html') });
-  const profileDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'scoutfox-e2e-prof-')));
+  const profileDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tarka-e2e-prof-')));
 
   let browser;
   try {

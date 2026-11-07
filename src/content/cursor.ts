@@ -1,5 +1,5 @@
 /**
- * ScoutFox Cursor Overlay and Action Animations
+ * Tarka Cursor Overlay and Action Animations
  * Injects and manages visual cursor indicator, click ripple, and element highlight.
  */
 
@@ -22,10 +22,10 @@ export function ensureCursorOverlay(
     return { container: existingContainer, pointer: existingPointer };
   }
 
-  let container = doc.getElementById ? doc.getElementById('scoutfox-cursor-container') : null;
+  let container = doc.getElementById ? doc.getElementById('tarka-cursor-container') : null;
   if (!container) {
     container = doc.createElement('div');
-    container.id = 'scoutfox-cursor-container';
+    container.id = 'tarka-cursor-container';
     if (container.style) {
       container.style.position = 'fixed';
       container.style.top = '0';
@@ -42,10 +42,10 @@ export function ensureCursorOverlay(
     }
   }
 
-  let pointer = doc.getElementById ? doc.getElementById('scoutfox-cursor-pointer') : null;
+  let pointer = doc.getElementById ? doc.getElementById('tarka-cursor-pointer') : null;
   if (!pointer) {
     pointer = doc.createElement('div');
-    pointer.id = 'scoutfox-cursor-pointer';
+    pointer.id = 'tarka-cursor-pointer';
     if (pointer.style) {
       pointer.style.position = 'fixed';
       pointer.style.top = '0';
@@ -108,7 +108,7 @@ export function showClickEffect(
   if (!doc || !doc.createElement) return;
 
   const ripple = doc.createElement('div');
-  ripple.className = 'scoutfox-click-ripple';
+  ripple.className = 'tarka-click-ripple';
   if (ripple.style) {
     ripple.style.position = 'fixed';
     ripple.style.left = `${x}px`;

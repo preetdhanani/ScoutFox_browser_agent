@@ -13,10 +13,10 @@ import {
 function createMockWindow() {
   const records: NetRecordPayload[] = [];
   const win: WindowLike = {
-    __scoutfox_net_recorder_active: false,
+    __tarka_net_recorder_active: false,
     postMessage: (msg: unknown) => {
       const data = msg as { source?: string; payload?: NetRecordPayload };
-      if (data && data.source === 'scoutfox-net' && data.payload) {
+      if (data && data.source === 'tarka-net' && data.payload) {
         records.push(data.payload);
       }
     },

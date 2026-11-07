@@ -1,5 +1,5 @@
 /**
- * ScoutFox frame paths: which embedded frame an iframe element is, without asking the page.
+ * Tarka frame paths: which embedded frame an iframe element is, without asking the page.
  *
  * A frame's path is its index among its parent's child frames, at every level from the top:
  * [] is the top page, [2] is the third frame of the top page, [2, 0] is the first frame inside that.

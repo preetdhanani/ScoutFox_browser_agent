@@ -1,5 +1,5 @@
 /**
- * ScoutFox Network Recorder Capture Logic
+ * Tarka Network Recorder Capture Logic
  * Intercepts window.fetch and XMLHttpRequest to record request/response metadata and bodies safely.
  * MAIN world compatible: strictly never references chrome.* APIs.
  */
@@ -18,7 +18,7 @@ export interface NetRecordPayload {
 }
 
 export interface WindowLike {
-  __scoutfox_net_recorder_active?: boolean;
+  __tarka_net_recorder_active?: boolean;
   postMessage(message: unknown, targetOrigin: string, transfer?: unknown[]): void;
   fetch?: typeof fetch;
   XMLHttpRequest?: typeof XMLHttpRequest;
@@ -48,7 +48,7 @@ export function emitRequest(win: WindowLike, reqData: NetRecordPayload): void {
   try {
     win.postMessage(
       {
-        source: 'scoutfox-net',
+        source: 'tarka-net',
         payload: reqData
       },
       '*'
@@ -103,8 +103,8 @@ interface SfXhrInstance extends XMLHttpRequest {
 }
 
 export function installNetCapture(win: WindowLike): void {
-  if (win.__scoutfox_net_recorder_active) return;
-  win.__scoutfox_net_recorder_active = true;
+  if (win.__tarka_net_recorder_active) return;
+  win.__tarka_net_recorder_active = true;
 
   // Intercept fetch API
   if (typeof win.fetch === 'function') {

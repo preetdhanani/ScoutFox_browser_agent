@@ -1,5 +1,5 @@
 /**
- * ScoutFox Browser Actions Execution
+ * Tarka Browser Actions Execution
  * Executes the content-side primitives of the page tools: click, type, scroll, navigate, read_page, find_element.
  */
 

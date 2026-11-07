@@ -16,14 +16,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { SCOUTFOX_TOOLS, TOOL_MAP, TOOL_NAMES } from '../../src/background/mcp/tools.ts';
+import { TARKA_TOOLS, TOOL_MAP, TOOL_NAMES } from '../../src/background/mcp/tools.ts';
 import { assertToolSchema } from '../../src/background/llm/index.ts';
 import { mapToolToAction } from '../../src/background/mcp/historyEntries.ts';
 
 test('every tool has a schema the provider accepts', () => {
   // The same check the LLM layer makes before a request goes out. A tool that fails here would
   // kill every run with an HTTP 400 from the provider.
-  for (const tool of SCOUTFOX_TOOLS) {
+  for (const tool of TARKA_TOOLS) {
     assert.doesNotThrow(
       () => assertToolSchema(tool),
       `the tool "${tool.name}" has a schema the provider would reject`
@@ -32,7 +32,7 @@ test('every tool has a schema the provider accepts', () => {
 });
 
 test('every tool has a name, a description and a required field where it needs one', () => {
-  for (const tool of SCOUTFOX_TOOLS) {
+  for (const tool of TARKA_TOOLS) {
     assert.ok(tool.name, 'a tool has a name');
     assert.match(tool.name, /^[a-z][a-z0-9_]*$/, `the tool name "${tool.name}" is a plain snake_case name`);
     assert.ok(tool.description.length > 20, `the tool "${tool.name}" explains what it does`);
@@ -43,8 +43,8 @@ test('every tool has a name, a description and a required field where it needs o
 
 test('the tool names are unique, and the map holds exactly the list', () => {
   assert.equal(new Set(TOOL_NAMES).size, TOOL_NAMES.length, 'no tool name is used twice');
-  assert.equal(TOOL_MAP.size, SCOUTFOX_TOOLS.length);
-  for (const tool of SCOUTFOX_TOOLS) {
+  assert.equal(TOOL_MAP.size, TARKA_TOOLS.length);
+  for (const tool of TARKA_TOOLS) {
     assert.equal(TOOL_MAP.get(tool.name), tool);
   }
 });
@@ -58,7 +58,7 @@ test('the tools the model needs to finish a task are all there', () => {
 });
 
 test('a tool that needs an argument says which one, and the argument has a type', () => {
-  for (const tool of SCOUTFOX_TOOLS) {
+  for (const tool of TARKA_TOOLS) {
     for (const required of tool.inputSchema.required ?? []) {
       const property = tool.inputSchema.properties[required];
       assert.ok(property, `the tool "${tool.name}" requires "${required}" but does not describe it`);

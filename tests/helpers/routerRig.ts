@@ -205,7 +205,7 @@ export interface RouterRig {
 
   /** A side panel sendMessage round trip: the response of the router. */
   send(message: Record<string, unknown>, sender?: Record<string, unknown>): Promise<any>;
-  /** The side panel of a tab connects (port name scoutfox_sidepanel[_fresh]:<tabId>) and the router's first push is awaited. */
+  /** The side panel of a tab connects (port name tarka_sidepanel[_fresh]:<tabId>) and the router's first push is awaited. */
   connect(tabId: number, options?: { fresh?: boolean }): Promise<Panel>;
   /** The toolbar icon is clicked on a tab (default: the first tab). */
   clickIcon(tab?: TabInit): Promise<void>;
@@ -373,7 +373,7 @@ export async function routerRig(options: RouterRigOptions = {}): Promise<RouterR
     send,
     connect: async (tabId, connectOptions = {}) => {
       knownTabs.add(tabId);
-      const port = fc.runtime.connect({ name: `${connectOptions.fresh ? 'scoutfox_sidepanel_fresh' : 'scoutfox_sidepanel'}:${tabId}` });
+      const port = fc.runtime.connect({ name: `${connectOptions.fresh ? 'tarka_sidepanel_fresh' : 'tarka_sidepanel'}:${tabId}` });
       const states = () => port.received.filter((m): m is { type: string; payload: Record<string, any> } => (m as { type?: string })?.type === 'STATE_UPDATE').map((m) => m.payload);
       const panel: Panel = {
         tabId,

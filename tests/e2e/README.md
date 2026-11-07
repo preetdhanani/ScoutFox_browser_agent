@@ -1,4 +1,4 @@
-# ScoutFox end-to-end verification harness
+# Tarka end-to-end verification harness
 
 ## What it is
 
@@ -67,7 +67,7 @@ node tests/e2e/smoke.mjs \
 ```
 
 Nothing is scripted and no answer is predicted. The extension decides where to go, what to click, and
-when it is done, so this is the closest the harness gets to watching a person use ScoutFox. It is
+when it is done, so this is the closest the harness gets to watching a person use Tarka. It is
 judged on what a user would notice: the run finished, the answer is not empty, the panel's final card
 matches how the run ended, and nothing threw on the way. It always runs on a real model.
 

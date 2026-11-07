@@ -64,7 +64,7 @@ test('a custom endpoint never takes an effort, even with a model name the built-
   assert.equal(support.dialect, 'none');
   assert.deepEqual(support.levels, ['auto']);
   assert.match(support.note, /not sent to custom endpoints/);
-  // The built-in "OpenAI compatible" provider pointed at a server ScoutFox does not know is the same.
+  // The built-in "OpenAI compatible" provider pointed at a server Tarka does not know is the same.
   assert.equal(effortSupportOf({ provider: 'openai_compatible', baseUrl: 'http://localhost:8000/v1', model: 'qwen3-32b' }).dialect, 'none');
   assert.equal(effortSupportOf({ provider: 'openai_compatible', baseUrl: 'https://api.groq.com/openai/v1', model: 'openai/gpt-oss-120b' }).dialect, 'openai', 'Groq is known');
   assert.equal(effortSupportOf({ provider: 'openai_compatible', model: 'openai/gpt-oss-120b' }).dialect, 'none', 'no base URL: the host is not known, so nothing is assumed');

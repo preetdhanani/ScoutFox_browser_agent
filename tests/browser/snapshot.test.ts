@@ -18,7 +18,7 @@ test('toPerceiveError - maps standard Error patterns to structured PerceiveError
   assert.equal(closedErr.kind, 'tab_gone');
   assert.equal(closedErr.fatal, true);
 
-  const scopeErr = toPerceiveError(new Error('outside this session scoutfox group'));
+  const scopeErr = toPerceiveError(new Error('outside this session tarka group'));
   assert.equal(scopeErr.kind, 'out_of_scope');
   assert.equal(scopeErr.fatal, true);
 
@@ -59,7 +59,7 @@ test('takeSnapshot - throws tab_gone on invalid or missing tabId', async () => {
   );
 });
 
-test('takeSnapshot - throws out_of_scope when tab is outside ScoutFox group', async () => {
+test('takeSnapshot - throws out_of_scope when tab is outside Tarka group', async () => {
   const prevChrome = (globalThis as any).chrome;
   (globalThis as any).chrome = {
     tabs: {

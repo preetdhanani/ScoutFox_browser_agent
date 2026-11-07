@@ -985,7 +985,7 @@ test('real domCompressor.getSnapshot() keys match fakeDom snapshot keys exactly'
 
 test('rendered element badges never pollute extractPageText()', () => {
   const badgeContainer = {
-    id: 'scoutfox-badge-container',
+    id: 'tarka-badge-container',
     style: { display: '' },
     textContent: '1 2 3 4 5 6 7 8 9 10',
     innerText: '1 2 3 4 5 6 7 8 9 10',
@@ -1011,7 +1011,7 @@ test('rendered element badges never pollute extractPageText()', () => {
     body,
     querySelector: () => null,
     querySelectorAll: () => [],
-    getElementById: (id: string) => (id === 'scoutfox-badge-container' ? badgeContainer : null),
+    getElementById: (id: string) => (id === 'tarka-badge-container' ? badgeContainer : null),
   };
   const text = withGlobals(
     {

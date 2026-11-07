@@ -61,13 +61,13 @@ test('ensureCursorOverlay creates container and SVG pointer overlay with safe at
 
   executor.ensureCursorOverlay();
 
-  const container = elements.get('scoutfox-cursor-container');
+  const container = elements.get('tarka-cursor-container');
   assert.ok(container, 'container element must exist');
   assert.equal(container.style.position, 'fixed');
   assert.equal(container.style.pointerEvents, 'none');
   assert.equal(container.style.zIndex, '2147483647');
 
-  const pointer = elements.get('scoutfox-cursor-pointer');
+  const pointer = elements.get('tarka-cursor-pointer');
   assert.ok(pointer, 'pointer element must exist');
   assert.equal(pointer.style.pointerEvents, 'none');
   assert.equal(pointer.style.zIndex, '2147483647');
@@ -80,7 +80,7 @@ test('animateCursor moves cursor to coordinates and makes it visible', () => {
 
   executor.animateCursor(120, 240);
 
-  const pointer = elements.get('scoutfox-cursor-pointer');
+  const pointer = elements.get('tarka-cursor-pointer');
   assert.ok(pointer);
   assert.equal(pointer.style.opacity, '1');
   assert.equal(pointer.style.transform, 'translate(120px, 240px) scale(1)');
@@ -91,13 +91,13 @@ test('showClickEffect creates expanding ripple ring and animates pointer press d
 
   executor.showClickEffect(200, 350);
 
-  const pointer = elements.get('scoutfox-cursor-pointer');
+  const pointer = elements.get('tarka-cursor-pointer');
   assert.ok(pointer);
   assert.equal(pointer.style.opacity, '1');
   assert.match(pointer.style.transform, /scale\(0\.82\)/);
 
-  const container = elements.get('scoutfox-cursor-container');
-  const ripple = container.children.find((c: any) => c.className === 'scoutfox-click-ripple');
+  const container = elements.get('tarka-cursor-container');
+  const ripple = container.children.find((c: any) => c.className === 'tarka-click-ripple');
   assert.ok(ripple, 'click ripple element must be created');
   assert.equal(ripple.style.position, 'fixed');
   assert.equal(ripple.style.left, '200px');
@@ -109,10 +109,10 @@ test('removeCursorOverlay cleans up container and resets state', () => {
   const { executor, elements } = createFakeDOM();
 
   executor.ensureCursorOverlay();
-  assert.ok(elements.get('scoutfox-cursor-container'));
+  assert.ok(elements.get('tarka-cursor-container'));
 
   executor.removeCursorOverlay();
-  assert.equal(elements.get('scoutfox-cursor-container'), undefined);
+  assert.equal(elements.get('tarka-cursor-container'), undefined);
 });
 
 test('highlightElement applies outline and outlineOffset to target', () => {

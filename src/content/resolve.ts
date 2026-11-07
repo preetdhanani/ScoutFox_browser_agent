@@ -1,5 +1,5 @@
 /**
- * ScoutFox Stable Element Resolver
+ * Tarka Stable Element Resolver
  * Resolves element references across DOM mutations using the live reference
  * plus a recovery tier over stable attributes only. The unanchored CSS path
  * and the same-tag same-text tiers were removed: both could silently hit a

@@ -1,11 +1,11 @@
 /**
- * Background Service Worker for ScoutFox AI Agent
+ * Background Service Worker for Tarka AI Agent
  * Routes extension messages, maintains one AgentRunner session PER TAB, manages port
  * connections, dynamically tracks active tab switching when links or automation open new
  * tabs, and defends against the MV3 service-worker lifecycle silently dropping in-flight tasks.
  *
  * Session model: opening the extension on a tab starts (or resumes) THAT TAB's own, fully
- * independent session - its own ScoutFox tab group, its own history, its own running task, its
+ * independent session - its own Tarka tab group, its own history, its own running task, its
  * own Stop/Pause. Two tabs side by side in the same window can automate different things at the
  * same time without ever seeing or touching each other. Every AgentRunner method operates on
  * "this" instance's own state (history, status, tab group, etc.), so the only thing this file
@@ -14,7 +14,7 @@
  *
  * Per tab rather than per window because Chrome's side panel is itself per tab. Keying sessions
  * the same way means "which tabs should show the panel" has a direct answer - the ones with a
- * session - instead of needing a proxy such as the ScoutFox tab group, which would have to exist
+ * session - instead of needing a proxy such as the Tarka tab group, which would have to exist
  * before any work had been asked for.
  *
  * Two things stay window-shaped, because Chrome makes them so: a tab group cannot span windows,
@@ -68,7 +68,7 @@ export interface BackgroundSession {
  *
  * One entry is created the first time a TAB's panel connects or its toolbar icon is clicked,
  * and removed when that tab closes (see chrome.tabs.onRemoved below). A tab that never opened
- * ScoutFox has no entry at all - tab events for it are no-ops.
+ * Tarka has no entry at all - tab events for it are no-ops.
  *
  * Per TAB, not per window. Chrome's side panel is itself per-tab, so this matches the
  * granularity the platform already works at: two tabs side by side in the same window each get
@@ -210,7 +210,7 @@ async function returnRunToOwnerTab(session: BackgroundSession, closedTabId: numb
   Logger.info('Background', `[TAB_FALLBACK] The working tab [${closedTabId}] closed. The run continues on the owner tab [${ownerTabId}].`);
 }
 
-// Clean network request buffers when tab is closed & track ScoutFox tab group removal.
+// Clean network request buffers when tab is closed & track Tarka tab group removal.
 // Both search every session rather than assuming a single global runner owns the tab/group -
 // with one runner per tab, ownership has to be looked up, not assumed.
 if (typeof chrome !== 'undefined') {
@@ -242,10 +242,10 @@ if (typeof chrome !== 'undefined') {
       // group cannot span windows, so that part stays window-shaped. Several tab ids can point
       // at the same session object, so this deduplicates before touching any runner.
       for (const session of new Set(sessions.values())) {
-        for (const [windowId, groupId] of Array.from(session.engine.scoutFoxGroupIds.entries())) {
+        for (const [windowId, groupId] of Array.from(session.engine.tarkaGroupIds.entries())) {
           if (groupId !== group.id) continue;
-          Logger.debug('Background', `[TAB_SANDBOX] ScoutFox tab group [${group.id}] was closed by user (window [${windowId}]).`);
-          session.engine.scoutFoxGroupIds.delete(windowId);
+          Logger.debug('Background', `[TAB_SANDBOX] Tarka tab group [${group.id}] was closed by user (window [${windowId}]).`);
+          session.engine.tarkaGroupIds.delete(windowId);
           void session.engine.persistState();
         }
       }
@@ -295,7 +295,7 @@ Logger.setBroadcastCallback((logEntry: unknown) => {
  *
  * The panel's page is set per tab (see setPanelVisibility and the action.onClicked handler), and
  * the manifest deliberately has NO side_panel.default_path. Declaring one registers the panel as
- * Chrome's fallback on EVERY tab of the browser, which is the "ScoutFox shows up everywhere"
+ * Chrome's fallback on EVERY tab of the browser, which is the "Tarka shows up everywhere"
  * symptom a user reported. The workaround that used to sit here disabled the panel globally at
  * startup; it fixed that symptom but made the panel impossible to open programmatically: with a
  * global setOptions({enabled:false}) on record, sidePanel.open() either rejects with "No active
@@ -374,7 +374,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onConnect)
     // The id in the port name is the panel's own TAB, which it resolves for itself before
     // connecting (see sidepanel.js) - the background worker cannot work it out, because a side
     // panel port arrives with no sender.tab.
-    const match = port.name.match(/^(scoutfox_sidepanel(?:_fresh)?)(?::(-?\d+))?$/);
+    const match = port.name.match(/^(tarka_sidepanel(?:_fresh)?)(?::(-?\d+))?$/);
     if (!match) return;
     if (match[2] === undefined) {
       // A panel that could not resolve its own tab id connects with a bare
@@ -499,7 +499,7 @@ function broadcastToAllSidepanels(type: string, payload: unknown): void {
  * window is idle, but ANY one running/paused window is enough to hold the worker awake for
  * all of them, since they share the one process.
  */
-const KEEPALIVE_ALARM_NAME = 'scoutfox_keepalive';
+const KEEPALIVE_ALARM_NAME = 'tarka_keepalive';
 const KEEPALIVE_INTERVAL_MS = 20000;
 let keepaliveIntervalId: ReturnType<typeof setInterval> | null = null;
 
@@ -581,21 +581,21 @@ Logger.debug('Background', `[WORKER_BOOT] Service worker started (build ${BUILD_
 void cdp.reconcileLeakedTargets(tabsInUse());
 
 /**
- * Take a tab the USER opened back out of the ScoutFox group, if Chrome put it there.
+ * Take a tab the USER opened back out of the Tarka group, if Chrome put it there.
  *
  * Chrome natively adds a new tab to whatever group its opener tab belongs to - ctrl+click a
  * link inside a grouped tab and the result joins that group, with no extension involvement at
- * all. So the ScoutFox group grows on its own as soon as the user starts browsing from the
+ * all. So the Tarka group grows on its own as soon as the user starts browsing from the
  * agent's tab, which is the opposite of what the group is for: it is meant to show, at a
  * glance, exactly which tabs the agent is allowed to touch.
  *
  * Two deliberate limits on how far this reaches:
  *
  *   - it only ever releases a tab from OUR group. A tab that lands in a group the user built
- *     themselves is none of ScoutFox's business, and pulling it out would be the extension
+ *     themselves is none of Tarka's business, and pulling it out would be the extension
  *     reorganising their tab strip for them;
  *   - it only runs at CREATION time, from onCreated. Chrome's auto-grouping is what this
- *     undoes. If the user later drags one of their own tabs into the ScoutFox group on purpose,
+ *     undoes. If the user later drags one of their own tabs into the Tarka group on purpose,
  *     that is a decision they made and it stands - fighting them over it would be obnoxious.
  *
  * Chrome creates an auto-grouped tab directly into the group, so the event's own groupId is
@@ -606,7 +606,7 @@ function releaseUserTabFromGroup(tab: chrome.tabs.Tab, groupIdForThisWindow?: nu
   if (tab.groupId !== groupIdForThisWindow) return;
   chrome.tabs.ungroup(tab.id, () => {
     lastRuntimeError();
-    Logger.debug('Background', `[TAB_RELEASED] Chrome auto-added the user's new Tab ID [${tab.id}] to the 'ScoutFox' group [${groupIdForThisWindow}] because it was opened from a grouped tab. Removed it again - the group only ever holds tabs the agent itself opened (window [${tab.windowId}]).`);
+    Logger.debug('Background', `[TAB_RELEASED] Chrome auto-added the user's new Tab ID [${tab.id}] to the 'Tarka' group [${groupIdForThisWindow}] because it was opened from a grouped tab. Removed it again - the group only ever holds tabs the agent itself opened (window [${tab.windowId}]).`);
   });
 }
 
@@ -621,7 +621,7 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
 
       // The tab must also live in the session's own window. The opener path exists for the
       // tabs a click in the working tab opens, and those land in the working tab's window; a
-      // tab in some OTHER window (no ScoutFox session there) is nobody's business.
+      // tab in some OTHER window (no Tarka session there) is nobody's business.
       if (session.engine.windowId !== 'default' && tab.windowId !== session.engine.windowId) return;
 
       // The group is keyed by WINDOW even though sessions are keyed by tab: grouping into a
@@ -655,7 +655,7 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
         && session.engine.status === 'running';
       if (!openedByThisSession) {
         if (groupIdForThisWindow) {
-          Logger.debug('Background', `[TAB_LEFT_ALONE] Tab [${tab.id}] was opened by the user, not by automation - keeping it outside the 'ScoutFox' group (window [${tab.windowId}]).`);
+          Logger.debug('Background', `[TAB_LEFT_ALONE] Tab [${tab.id}] was opened by the user, not by automation - keeping it outside the 'Tarka' group (window [${tab.windowId}]).`);
           releaseUserTabFromGroup(tab, groupIdForThisWindow);
         }
         return;
@@ -671,7 +671,7 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
       if (groupIdForThisWindow && typeof chrome.tabs.group === 'function' && typeof tab.id === 'number') {
         chrome.tabs.group({ tabIds: tab.id, groupId: groupIdForThisWindow }, () => {
           lastRuntimeError();
-          Logger.debug('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'ScoutFox' tab group [${groupIdForThisWindow}] (window [${tab.windowId}])`);
+          Logger.debug('Background', `[TAB_SANDBOX] Auto-grouped newly created Tab ID [${tab.id}] into 'Tarka' tab group [${groupIdForThisWindow}] (window [${tab.windowId}])`);
         });
       }
 
@@ -928,7 +928,7 @@ function routeMessage(
         .then((tab) => {
           if (!tab || typeof tab.id !== 'number') {
             runner.releaseTaskClaim();
-            throw new Error('No automatable tab found. ScoutFox cannot script Chrome\'s internal pages (chrome://…) - open a normal website such as https://google.com and try again.');
+            throw new Error('No automatable tab found. Tarka cannot script Chrome\'s internal pages (chrome://…) - open a normal website such as https://google.com and try again.');
           }
           // Plans are approved automatically: the plan card is no longer part of the product.
           // Only an explicit payload.autoApprove:false (tests, or a future opt-in tool) still holds.
@@ -1091,7 +1091,7 @@ async function getActiveTab(session: BackgroundSession, requestingTabId?: number
     const focusedTabId = focused.id;
     Logger.debug('Background', `[TAB_REUSED] The session's tab [${focusedTabId}] (${focused.url}) is an empty page, so this task runs in it rather than opening another tab beside it.`);
     try {
-      await session.engine.ensureScoutFoxGroup(focusedTabId, focused.windowId);
+      await session.engine.ensureTarkaGroup(focusedTabId, focused.windowId);
     } catch (err) {
       Logger.warn('Background', '[TAB_SANDBOX_ERROR] Could not group the reused tab', err);
     }
@@ -1145,10 +1145,10 @@ async function getActiveTab(session: BackgroundSession, requestingTabId?: number
   // Group it and enable the panel on it BEFORE it is activated. The enable must land first or
   // the handoff's open() is rejected with "No active side panel for tabId", and onActivated
   // must find the tab already in this session or it disables the panel again on arrival.
-  // ensureScoutFoxGroup is idempotent, so startTask calling it again right after is a no-op.
+  // ensureTarkaGroup is idempotent, so startTask calling it again right after is a no-op.
   if (typeof newTab.id === 'number') {
     try {
-      await session.engine.ensureScoutFoxGroup(newTab.id, newTab.windowId);
+      await session.engine.ensureTarkaGroup(newTab.id, newTab.windowId);
     } catch (err) {
       Logger.warn('Background', '[TAB_SANDBOX_ERROR] Could not group the freshly opened tab', err);
     }

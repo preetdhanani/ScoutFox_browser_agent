@@ -314,7 +314,7 @@ export async function captureScreenshot(tabId: number, deps: ScreenshotDeps): Pr
   }
   if (!inScope) {
     throw new ScreenshotError(
-      `Error: tab [${tabId}] is outside this session's ScoutFox group, so it cannot be photographed from here.`
+      `Error: tab [${tabId}] is outside this session's Tarka group, so it cannot be photographed from here.`
     );
   }
   const url = await deps.page.tabUrl(tabId);

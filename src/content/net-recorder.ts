@@ -1,5 +1,5 @@
 /**
- * ScoutFox Network Recorder (MAIN World Content Script Entry)
+ * Tarka Network Recorder (MAIN World Content Script Entry)
  * Runs at document_start in MAIN world to intercept window.fetch and XMLHttpRequest.
  */
 import { installNetCapture } from './netCapture.ts';

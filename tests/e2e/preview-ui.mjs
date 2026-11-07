@@ -8,7 +8,7 @@ import path from 'node:path';
 
 const CHROMIUM = '/Applications/Chromium.app/Contents/MacOS/Chromium';
 const extensionPath = path.resolve('dist');
-const profile = fs.mkdtempSync('/tmp/scoutfox-preview-');
+const profile = fs.mkdtempSync('/tmp/tarka-preview-');
 const out = path.resolve('tests/e2e/screenshots/ui-preview');
 fs.mkdirSync(out, { recursive: true });
 

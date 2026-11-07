@@ -1,5 +1,5 @@
 /**
- * ScoutFox Floating Visual Badges
+ * Tarka Floating Visual Badges
  * Renders floating indexed numeric badges for elements visible on the page.
  */
 
@@ -22,7 +22,7 @@ export function renderBadges(
   if (!doc || !doc.body || !doc.createElement) return null;
 
   const badgeContainer = doc.createElement('div') as HTMLDivElement;
-  badgeContainer.id = 'scoutfox-badge-container';
+  badgeContainer.id = 'tarka-badge-container';
   badgeContainer.style.position = 'absolute';
   badgeContainer.style.top = '0';
   badgeContainer.style.left = '0';
@@ -43,7 +43,7 @@ export function renderBadges(
 
     const rect = el.getBoundingClientRect();
     const badge = doc.createElement('div') as HTMLDivElement;
-    badge.className = 'scoutfox-badge';
+    badge.className = 'tarka-badge';
     badge.textContent = String(item.id);
     badge.style.position = 'absolute';
     badge.style.top = `${rect.top + scrollY}px`;
@@ -77,7 +77,7 @@ export function removeBadges(
   if (badgeContainer && typeof badgeContainer.remove === 'function') {
     badgeContainer.remove();
   }
-  const existing = doc && typeof doc.getElementById === 'function' ? doc.getElementById('scoutfox-badge-container') : null;
+  const existing = doc && typeof doc.getElementById === 'function' ? doc.getElementById('tarka-badge-container') : null;
   if (existing && typeof existing.remove === 'function') {
     existing.remove();
   }

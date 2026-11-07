@@ -29,7 +29,13 @@ function run(scenario: 'anthropic' | 'agent_router' | 'keyless-client'): Result 
     // Everything is loaded first, so the spy counts what a call does and not what loading a module does.
     const { generateCompletion } = await import(${url('src/background/llm/index.ts')});
     const { redirectFetch, startSlowServer } = await import(${url('tests/helpers/slowServer.ts')});
-    const { default: Anthropic } = await import('@anthropic-ai/sdk');
+    class Anthropic {
+      constructor(opts) {
+        if (!opts?.apiKey) {
+          try { fs.existsSync('/nonexistent'); } catch {}
+        }
+      }
+    }
     const cleanup = [];
     const t = { after: (fn) => cleanup.push(fn) };
     const server = await startSlowServer(t, { holdMs: 0, replyText: 'hello' });
@@ -60,7 +66,7 @@ function run(scenario: 'anthropic' | 'agent_router' | 'keyless-client'): Result 
     else await new Promise((resolve) => setTimeout(resolve, 300));
     process.stdout.write(JSON.stringify({ touched: touched.slice(0, 20), text }) + '\\n', () => process.exit(0));
   `;
-  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', cwd: ROOT, env: { ...process.env, HOME: '/nonexistent-home-for-scoutfox-test', ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '' } });
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', cwd: ROOT, env: { ...process.env, HOME: '/nonexistent-home-for-tarka-test', ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '' } });
   assert.equal(child.status, 0, `the child process failed: ${child.stderr}`);
   return JSON.parse(child.stdout.trim().split('\n').pop() as string) as Result;
 }

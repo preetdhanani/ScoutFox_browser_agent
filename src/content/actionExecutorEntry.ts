@@ -1,5 +1,5 @@
 /**
- * ScoutFox ActionExecutor Entry Point
+ * Tarka ActionExecutor Entry Point
  * IIFE entry point for content/actionExecutor.js classic script bundle.
  * Preserves re-injection safety and window global references.
  */

@@ -1,5 +1,5 @@
 /**
- * ScoutFox end-to-end smoke run, on the BUILT extension (dist/).
+ * Tarka end-to-end smoke run, on the BUILT extension (dist/).
  *
  * It copies dist/ into a temp folder, adds tests/e2e/driver.html to the copy as driver.html (the
  * only extra file, so the loaded files are exactly what the shipped zip has), and loads that copy
@@ -450,7 +450,7 @@ async function closeBrowser(browser) {
 }
 
 async function launch(puppeteer, extensionDir) {
-  const profileDir = makeTempDir('scoutfox-e2e-');
+  const profileDir = makeTempDir('tarka-e2e-');
   const browser = await puppeteer.launch({
     executablePath: CHROMIUM,
     headless: !!args.headless,
@@ -570,7 +570,7 @@ function watchFixturePage(page, errors) {
  */
 async function probePage(ctx, page, tabId) {
   const probe = { url: page.url(), recorderActive: false, contentScript: false, contentScriptError: null };
-  probe.recorderActive = (await page.evaluate(() => window.__scoutfox_net_recorder_active === true).catch(() => false)) === true;
+  probe.recorderActive = (await page.evaluate(() => window.__tarka_net_recorder_active === true).catch(() => false)) === true;
   try {
     await snapshotOf(ctx.driver, tabId, 15);
     probe.contentScript = true;
@@ -591,7 +591,7 @@ async function fullPageTextOf(driver, tabId) {
   // (readFrameTexts in src/background/browser/frames.ts), so the snapshot holds what read_page gives.
   const frames = await driver.evaluate(async (id) => {
     const out = [];
-    const rows = await chrome.scripting.executeScript({ target: { tabId: id, allFrames: true }, func: () => globalThis.__scoutfoxFrameAgent === true }).catch(() => []);
+    const rows = await chrome.scripting.executeScript({ target: { tabId: id, allFrames: true }, func: () => globalThis.__tarkaFrameAgent === true }).catch(() => []);
     for (const row of rows) {
       if (row.frameId === 0 || row.result !== true) continue;
       const answer = await chrome.tabs.sendMessage(id, { action: 'FRAME_TEXT' }, { frameId: row.frameId }).catch(() => null);
@@ -747,16 +747,16 @@ async function checkSidePanel(ctx) {
   }
   gate.problems.push(...gate.timeoutField.problems);
   if (!gate.workerBuild || !gate.workerBuild.result) gate.problems.push('the panel never compared its build with the background worker (no GET_BUILD answer)');
-  else if (gate.workerBuild.result !== 'same' || gate.workerBuild.shown) gate.problems.push('the panel shows "ScoutFox was updated. Reload it": the background worker is from a different build than the panel');
+  else if (gate.workerBuild.result !== 'same' || gate.workerBuild.shown) gate.problems.push('the panel shows "Tarka was updated. Reload it": the background worker is from a different build than the panel');
   if (gate.badge !== MODEL) gate.problems.push(`the panel script did not run: the model badge shows ${JSON.stringify(gate.badge)}, expected ${JSON.stringify(MODEL)}`);
   if (!/^(Loaded|Retrieved) \d+ model/.test(gate.modelStatus || '')) gate.problems.push(`the panel did not get the model list: status ${JSON.stringify(gate.modelStatus)}`);
   return gate;
 }
 
 /**
- * The ScoutFox mark. It is a fox head, drawn in one line, and it must be in the panel twice: in
- * the header next to the name, and in the middle of the panel above "What would you like to
- * automate?".
+ * The Tarka mark. It is a delta with a dot at its centre, drawn in one line, and it must be in
+ * the panel twice: in the header next to the name, and in the middle of the panel above "What
+ * would you like to automate?".
  *
  * The check reads the shape out of the rendered DOM, not out of a source file, so it proves what
  * a user sees: both marks are there, both are the same shape, and neither is a zero-size box
@@ -778,7 +778,7 @@ async function checkBrandMark(ctx) {
       const box = svg.getBoundingClientRect();
       return {
         path: svg.querySelector('path')?.getAttribute('d') || '',
-        eyes: svg.querySelectorAll('circle').length,
+        dots: svg.querySelectorAll('circle').length,
         width: Math.round(box.width),
         height: Math.round(box.height),
         color: getComputedStyle(svg).color
@@ -790,17 +790,17 @@ async function checkBrandMark(ctx) {
     await page.close().catch(() => {});
   }
 
-  const FOX_PATH = 'M3.2 3 8.6 8.4 5.6 11.2Q6.6 17 12 21.6Q17.4 17 18.4 11.2L15.4 8.4 20.8 3 15.2 6.2Q12 5.2 8.8 6.2Z';
+  const MARK_PATH = 'M12 3.6 20.6 19.4H3.4Z';
   for (const [where, mark] of [['header', result.header], ['middle of the panel', result.middle]]) {
     if (!mark) {
-      result.problems.push(`the ${where} has no fox mark`);
+      result.problems.push(`the ${where} has no Tarka mark`);
       continue;
     }
-    if (mark.path !== FOX_PATH) {
-      result.problems.push(`the ${where} does not show the fox mark: its shape is "${mark.path}"`);
+    if (mark.path !== MARK_PATH) {
+      result.problems.push(`the ${where} does not show the Tarka mark: its shape is "${mark.path}"`);
     }
-    if (mark.eyes !== 2) {
-      result.problems.push(`the ${where} shows a mark with ${mark.eyes} eye(s), expected 2`);
+    if (mark.dots !== 1) {
+      result.problems.push(`the ${where} shows a mark with ${mark.dots} dot(s), expected 1`);
     }
     if (mark.width < 8 || mark.height < 8) {
       result.problems.push(`the ${where} shows the mark at ${mark.width}x${mark.height} px, too small to be seen`);
@@ -1618,7 +1618,7 @@ async function driveTask(ctx, llm, task, tabId, hosts, shot, opts = {}) {
     window.__states = [];
     window.__replies = [];
     if (window.__port) window.__port.disconnect();
-    window.__port = chrome.runtime.connect({ name: `scoutfox_sidepanel:${id}` });
+    window.__port = chrome.runtime.connect({ name: `tarka_sidepanel:${id}` });
     window.__port.onMessage.addListener((m) => {
       if (m.type === 'LOG_ENTRY') window.__logs.push(m.payload);
       // Every state the runner broadcasts is what the side panel renders from. Only the few fields that decide whether a
@@ -2169,7 +2169,7 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   const cardProblems = await readPanelCard(ctx, tabId, expectCard);
   // Element badges are off: whatever the run did, the page must not end with numbers drawn on it.
   const badgeCount = await Promise.race([
-    page.evaluate(() => document.querySelectorAll('.scoutfox-badge').length),
+    page.evaluate(() => document.querySelectorAll('.tarka-badge').length),
     sleep(5000).then(() => { throw new Error('the page did not answer the badge count within 5 s'); })
   ]).catch((err) => { console.log(`badge check: ${err.message}`); return 0; });
   const badgeProblems = badgeCount > 0 ? [`the page shows ${badgeCount} numbered element badge(s), but element badges are off`] : [];
@@ -2340,12 +2340,12 @@ function judge(ctx, reports, gate) {
     for (const p of r.holdProblems) failures.push(`${r.task}: ${p}`);
     for (const p of r.probes) {
       const where = p.url.replace(/^https?:\/\/[^/]+/, '');
-      if (!p.recorderActive) failures.push(`${r.task}: the net recorder (content/net-recorder.js, MAIN world) did not run on ${where}: window.__scoutfox_net_recorder_active is not true`);
+      if (!p.recorderActive) failures.push(`${r.task}: the net recorder (content/net-recorder.js, MAIN world) did not run on ${where}: window.__tarka_net_recorder_active is not true`);
       if (!p.contentScript) failures.push(`${r.task}: the content script did not answer GET_DOM_SNAPSHOT on ${where} (${p.contentScriptError})`);
     }
     // On the open web a site's own errors (a 429 from a search engine, a broken analytics script)
     // are the site's, not the extension's: there only an error that names the extension fails.
-    const pageErrors = TASKS[r.task]?.web ? r.pageErrors.filter((e) => /chrome-extension:|scoutfox/i.test(e)) : r.pageErrors;
+    const pageErrors = TASKS[r.task]?.web ? r.pageErrors.filter((e) => /chrome-extension:|tarka/i.test(e)) : r.pageErrors;
     if (pageErrors.length) failures.push(`${r.task}: the page logged ${pageErrors.length} console error(s) or page error(s): ${oneLine(pageErrors[0], 200)}`);
   }
   if (ctx.workerErrors.length) failures.push(`${ctx.workerErrors.length} service worker or driver page error(s)`);
@@ -2532,7 +2532,7 @@ async function main() {
   }
   if (ctx.brand) {
     const b = ctx.brand;
-    console.log(`fox mark: header ${b.header ? `${b.header.width}x${b.header.height} px` : 'missing'}, middle of the panel ${b.middle ? `${b.middle.width}x${b.middle.height} px` : 'missing'}`);
+    console.log(`Tarka mark: header ${b.header ? `${b.header.width}x${b.header.height} px` : 'missing'}, middle of the panel ${b.middle ? `${b.middle.width}x${b.middle.height} px` : 'missing'}`);
   }
   const surfaces = [...(ctx.panelSurfaces || new Map()).entries()];
   if (surfaces.length) {

@@ -86,16 +86,16 @@ export function coordinateClickRefusal(args: Record<string, any>): string | null
   return 'Error: click needs either an element_id from get_page_elements or find, or both x and y read off a take_screenshot picture.';
 }
 
-/** The words a bot check or CAPTCHA control uses. ScoutFox never clicks one: a person must pass it. */
+/** The words a bot check or CAPTCHA control uses. Tarka never clicks one: a person must pass it. */
 export const BOT_CHECK_PATTERN = /verify (?:that )?you(?: are|'re) (?:a )?human|i'?m not a robot|are you a robot|captcha|human verification|bot check|challenges\.cloudflare\.com|turnstile/i;
 
 /** The refusal of a click on a bot check, worded so the model stops and tells the user. */
 export function botCheckRefusal(elementId: unknown, label: string): string {
-  return `Refused: element [${elementId}] is a bot check (${label.trim().slice(0, 80)}). ScoutFox never clicks or solves bot checks or CAPTCHAs. Call finish now and tell the user the page is behind a bot check that a person has to pass.`;
+  return `Refused: element [${elementId}] is a bot check (${label.trim().slice(0, 80)}). Tarka never clicks or solves bot checks or CAPTCHAs. Call finish now and tell the user the page is behind a bot check that a person has to pass.`;
 }
 
 export function botCheckPointRefusal(what: string): string {
-  return `Refused: that point is on a bot check (${what.trim().slice(0, 80)}). ScoutFox never clicks or solves bot checks or CAPTCHAs. Call finish now and tell the user the page is behind a bot check that a person has to pass.`;
+  return `Refused: that point is on a bot check (${what.trim().slice(0, 80)}). Tarka never clicks or solves bot checks or CAPTCHAs. Call finish now and tell the user the page is behind a bot check that a person has to pass.`;
 }
 
 /**
@@ -268,7 +268,7 @@ function elementLinesById(elementsText: string): Map<number, string> {
   return lines;
 }
 
-export class ScoutFoxMCPServer {
+export class TarkaMCPServer {
   private runtime: RunRuntime | null = null;
   /** The element list the model last saw, per tab: what a click on an id targets. */
   private elementLines = new Map<number, Map<number, string>>();
@@ -329,10 +329,10 @@ export class ScoutFoxMCPServer {
     return this.elementLines.get(tabId)?.get(Number(elementId)) || '';
   }
 
-  // List available tools - returns the same definitions as SCOUTFOX_TOOLS
+  // List available tools - returns the same definitions as TARKA_TOOLS
   async listTools(): Promise<any[]> {
-    const { SCOUTFOX_TOOLS } = await import('./tools.ts');
-    return SCOUTFOX_TOOLS;
+    const { TARKA_TOOLS } = await import('./tools.ts');
+    return TARKA_TOOLS;
   }
 
   /** The fetch the research tools use: the worker's own, unless a test stood one in. */

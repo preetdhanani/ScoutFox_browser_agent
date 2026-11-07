@@ -75,7 +75,7 @@ export function chromeFramePort(): FramePort {
           try {
             href = String(page.location.href);
           } catch (_) {}
-          return { depth: path.length, path: path.join('.'), agent: page.__scoutfoxFrameAgent === true, href };
+          return { depth: path.length, path: path.join('.'), agent: page.__tarkaFrameAgent === true, href };
         }
       });
       return (results || []).map((r: any) => ({ frameId: r.frameId, documentId: r.documentId, result: r.result }));

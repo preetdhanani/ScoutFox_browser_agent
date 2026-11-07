@@ -1,5 +1,5 @@
 /**
- * ScoutFox Screenshot Privacy
+ * Tarka Screenshot Privacy
  * What must not be in a picture of the page, and what is where the model wants to click.
  *
  * A screenshot sends the page as PIXELS to a model, often a cloud model. The text path is
@@ -20,7 +20,7 @@
 import { computeFieldKind } from './perception.ts';
 
 /** The id of the layer the masks are drawn in. */
-export const MASK_LAYER_ID = 'scoutfox-shot-mask';
+export const MASK_LAYER_ID = 'tarka-shot-mask';
 
 /** The field kinds the text path refuses to read, and the picture must not show. */
 const MASKED_FIELD_KINDS = new Set(['password', 'cc', 'otp']);
@@ -349,7 +349,7 @@ export function maskSensitiveFields(doc: Doc, win?: Window, shown: FrameShown = 
   const cover = (rect: Rect, label: string) => {
     if (rect.width <= 0 || rect.height <= 0) return;
     const box = doc.createElement('div');
-    box.className = 'scoutfox-shot-mask';
+    box.className = 'tarka-shot-mask';
     box.setAttribute('data-mask', label);
     box.style.position = 'fixed';
     box.style.left = `${Math.max(0, rect.left)}px`;
