@@ -9,29 +9,6 @@ Unlike cloud-hosted headless browser wrappers, ScoutFox runs directly inside the
 [![Platform](https://img.shields.io/badge/Chrome-Manifest%20V3-orange.svg)](public/manifest.json)
 [![Security Check](https://img.shields.io/badge/CSP-Zero%20Eval%20Enforced-blueviolet.svg)](scripts/evalscan.mjs)
 
-```mermaid
-flowchart TD
-    User["User Task via Side Panel UI"] --> SidePanel["Side Panel (Vanilla JS + Event Bus)"]
-    SidePanel --> SW["MV3 Service Worker (AgentRunner Engine)"]
-    
-    subgraph CoreEngine ["Agent Runtime & Memory"]
-        SW --> MCP["MCP Protocol Loop (Tools & Schemas)"]
-        MCP --> LLM["LLM Translation Layer (LangChain / REST)"]
-        MCP --> Ledger["Provenance Evidence Ledger"]
-        MCP --> Gate["Finish Audit Gate (Fact Verification)"]
-    end
-
-    subgraph BrowserControl ["Perception & Execution Control"]
-        SW --> CDP["CDP Controller (Hardware Mouse & Key Events)"]
-        SW --> Content["Content Scripts (DOMCompressor & FrameAgent)"]
-        Content --> DOM["Viewport Semantic Tree & Frame Isolation"]
-        CDP --> Page["Target Browser Page (Orange Tab Group)"]
-    end
-
-    LLM <--> CloudLocal["Ollama / Claude / OpenAI / Gemini / NIM"]
-    Page --> Ledger
-```
-
 ---
 
 ## Architectural Highlights
