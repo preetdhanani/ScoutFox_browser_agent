@@ -579,6 +579,7 @@ async function loadSettings() {
   }
 
   loadResearchSettings(currentSettings.research);
+  loadBridgeSettings(currentSettings.bridge);
 
   syncCustomProviderActions(activeProvider);
   updateSelectedModel(providerCfg.model || currentSettings.model);
@@ -620,6 +621,25 @@ function researchFromForm() {
     enabled: document.getElementById('researchEnabledSelect')?.value !== 'off',
     backend: document.getElementById('researchBackendSelect')?.value === 'searxng' ? 'searxng' : 'duckduckgo',
     searxngUrl: (document.getElementById('searxngUrlInput')?.value || '').trim()
+  };
+}
+
+/** The Bridge section from the stored settings (getSettings already filled the defaults). */
+function loadBridgeSettings(bridge) {
+  const b = bridge || DEFAULT_SETTINGS.bridge;
+  const select = document.getElementById('bridgeEnabledSelect');
+  if (!select) return;
+  select.value = b.enabled ? 'on' : 'off';
+  document.getElementById('bridgeUrlInput').value = b.url || 'ws://127.0.0.1:7877';
+  document.getElementById('bridgeTokenInput').value = b.token || '';
+}
+
+/** The Bridge section as the settings object stores it. */
+function bridgeFromForm() {
+  return {
+    enabled: document.getElementById('bridgeEnabledSelect')?.value === 'on',
+    url: (document.getElementById('bridgeUrlInput')?.value || '').trim() || 'ws://127.0.0.1:7877',
+    token: (document.getElementById('bridgeTokenInput')?.value || '').trim()
   };
 }
 
@@ -880,7 +900,8 @@ async function autoSaveCurrentForm() {
     screenshots: true,
     effortDefault: document.getElementById('effortDefaultSelect')?.value || currentSettings.effortDefault || 'medium',
     effortAdaptive: (document.getElementById('effortAdaptiveSelect')?.value || 'on') !== 'off',
-    research: researchFromForm()
+    research: researchFromForm(),
+    bridge: bridgeFromForm()
   };
 
   // A provider with a timeout of its own (a custom provider's, set in its dialog) is read before

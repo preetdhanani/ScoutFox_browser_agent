@@ -1243,6 +1243,9 @@ export class TarkaMCPClient {
     if (result.image) this.sawPicture = true;
 
     if (resultText.startsWith('TASK_COMPLETE:')) {
+      // The closing row must carry what the run collected: noteRunData is what endRun's
+      // withRunData reads, and a finish round skips the normal post-step mirroring below.
+      this.runner.noteRunData?.({ records: this.records });
       await this.onTaskComplete(resultText.slice('TASK_COMPLETE:'.length).trim(), result.table, result.outcome, files);
       return { done: true, content: resultText, image: result.image, table: result.table };
     }

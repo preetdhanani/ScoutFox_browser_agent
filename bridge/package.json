@@ -1,0 +1,17 @@
+{
+  "name": "tarka-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local MCP bridge: an external LLM harness (Claude Code, Codex, any MCP client) drives Tarka, the browser agent.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "tarka-bridge": "bridge.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "@modelcontextprotocol/sdk": "^1.13.0"
+  }
+}

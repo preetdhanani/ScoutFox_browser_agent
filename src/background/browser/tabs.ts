@@ -51,11 +51,17 @@ export function isValidWebTab(tab: { url?: string | null } | null | undefined): 
 
 /**
  * Is this tab a disposable throwaway page that can be navigated in place?
+ * A tab that is already navigating to a real page (pendingUrl) is NOT disposable: navigating
+ * it elsewhere would throw that navigation away.
  */
 export function isDisposableTab(tab: { url?: string | null; pendingUrl?: string | null } | null | undefined): boolean {
-  const url = tab && (tab.url || tab.pendingUrl);
-  if (!url) return false;
-  return url === 'about:blank' || /^(chrome|edge|brave):\/\/(newtab|new-tab-page)\/?$/i.test(url);
+  if (!tab) return false;
+  const disposableUrl = (u: string | null | undefined) =>
+    !!u && (u === 'about:blank' || /^(chrome|edge|brave):\/\/(newtab|new-tab-page)\/?$/i.test(u));
+  // A tab already navigating to a real page is NOT disposable: navigating it elsewhere would
+  // throw that navigation away (the bridge's startUrl was lost exactly this way).
+  if (tab.pendingUrl && !disposableUrl(tab.pendingUrl)) return false;
+  return disposableUrl(tab.url || tab.pendingUrl);
 }
 
 /**

@@ -77,6 +77,13 @@ test('isDisposableTab recognizes throwaway and new-tab pages', () => {
   assert.equal(isDisposableTab({ url: 'chrome://settings' }), false);
   assert.equal(isDisposableTab(null), false);
   assert.equal(isDisposableTab({}), false);
+
+  // A tab that is already navigating to a real page is NOT disposable, even while its url is
+  // still about:blank: navigating it elsewhere would throw the pending navigation away
+  // (the bridge's startUrl was lost exactly this way).
+  assert.equal(isDisposableTab({ url: 'about:blank', pendingUrl: 'https://example.com/page' }), false);
+  assert.equal(isDisposableTab({ url: '', pendingUrl: 'http://127.0.0.1:8765/credentials.html' }), false);
+  assert.equal(isDisposableTab({ url: 'about:blank', pendingUrl: 'chrome://newtab' }), true);
 });
 
 test('lastRuntimeError reads message when chrome.runtime.lastError is present', () => {

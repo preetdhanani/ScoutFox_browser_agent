@@ -393,6 +393,21 @@ export const TASKS = {
       check: (run) => run.files.some((f) => /\.json$/i.test(f.name) && credentialsFileProblems(f.content).length === 0)
     }
   },
+  'bridge-credentials-json': {
+    // The same job as web-credentials-json, but the task reaches Tarka through the local MCP
+    // bridge (bridge/bridge.mjs): the harness speaks MCP to the bridge's stdio, the bridge
+    // relays over WebSocket to the extension, and Tarka's own model runs the task autonomously.
+    // The tool result must carry the answer, the outcome and the records, so the external LLM
+    // knows what happened without reading the panel.
+    page: 'credentials.html',
+    web: true,
+    bridge: true,
+    prompt: CREDENTIALS_PROMPT,
+    timeoutMs: 6 * 60 * 1000,
+    check: (run) => run.bridgeResult && run.bridgeResult.outcome === 'done' && Array.isArray(run.bridgeResult.records) && run.bridgeResult.records.length === CREDENTIALS.length,
+    // The bridge result must also hold the step timeline: the external LLM sees the thinking.
+    warn: (run) => (!run.bridgeSteps || run.bridgeSteps.length === 0) ? ['the bridge result carried no step timeline'] : []
+  },
   'web-research-archive': {
     // The fact the JupyterLab run guessed wrong (a 404 URL): the name of Ollama's Linux archive.
     // The run must look it up with web_search or fetch_url (the default keyless DuckDuckGo

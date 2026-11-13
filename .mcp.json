@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "tarka": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["bridge/bridge.mjs"]
+    }
+  }
+}

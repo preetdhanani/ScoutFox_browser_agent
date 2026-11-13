@@ -31,10 +31,12 @@ import { partialResultEntry } from './mcp/historyEntries.ts';
 import { callProvider, fetchAvailableModels, getFallbackModels } from './llm/index.ts';
 import { resolveEffortSupport } from './llm/effort.ts';
 import { getEffectiveContextWindow } from './llm/models.ts';
-import { BUILTIN_PROVIDER_IDS } from '../shared/storage.ts';
+import { BUILTIN_PROVIDER_IDS, Storage } from '../shared/storage.ts';
 import { Logger } from '../shared/logger.ts';
 import { BUILD_STAMP } from '../shared/build.ts';
 import { cdp } from './browser/cdp.ts';
+import { BridgeClient } from './bridge/wsClient.ts';
+import { BridgeSessionManager } from './bridge/bridgeSession.ts';
 
 // Catch anything that would otherwise die silently in the service worker's global scope.
 self.addEventListener('error', (event: Event) => {
@@ -61,6 +63,8 @@ export interface BackgroundSession {
   ports: Set<chrome.runtime.Port>;
   lastBroadcastHadNoListeners: boolean;
   ownerTabId: number;
+  /** What started the current/last run: the panel or the external bridge. */
+  source?: 'panel' | 'bridge';
 }
 
 /**
@@ -102,12 +106,100 @@ function adoptTabIntoSession(session: BackgroundSession, tabId?: number | null):
  */
 const START_URL = 'https://www.google.com';
 
+// ---------------------------------------------------------------------------
+// Local MCP bridge (an external LLM harness drives Tarka).
+// The bridge is a Node process the user runs (`npm run bridge`); the extension dials it as a
+// WebSocket client because an MV3 worker cannot listen. All bridge logging stays on the silent
+// path: Logger broadcasts re-enter broadcastToSession, which is not safe from here.
+// ---------------------------------------------------------------------------
+const bridgeSessionManager = new BridgeSessionManager({
+  getSessions: () => [...new Set(sessions.values())].map((s) => ({ ownerTabId: s.ownerTabId, engine: s.engine })),
+  startTaskOnSession: async (tabId, payload) => {
+    if (tabId === null) return { ok: false, error: 'No tab to run in.' };
+    if (anySessionActive()) {
+      const active = [...new Set(sessions.values())].find((s) => s.engine.status === 'running' || s.engine.status === 'paused');
+      if (active) return { ok: false, error: `A task is already active in Tarka (chatId: ${active.engine.chatId}).` };
+    }
+    const session = getOrCreateSession(tabId);
+    const runner = session.engine;
+    // The panel follows the session, so a bridge task's tab shows it like any other.
+    setPanelVisibility(tabId, true);
+    // A bridge task starts a fresh chat: the tab may hold a finished run from an earlier bridge
+    // call, and its history would otherwise mix into the new run's timeline.
+    if (runner.history.length > 0) runner.clearHistory();
+    const claim = runner.claimForTask();
+    if (!claim.success) return { ok: false, error: claim.error ?? 'A task is already active or paused.' };
+    try {
+      const tab = await getActiveTab(session, tabId);
+      if (!tab || typeof tab.id !== 'number') {
+        runner.releaseTaskClaim();
+        return { ok: false, error: 'No automatable tab found. Tarka cannot script Chrome\'s internal pages (chrome://...).' };
+      }
+      runner.startTask(payload.prompt, tab.id, payload.effort ?? undefined, payload.autoApprove).catch((err) => {
+        Logger.error('Background', '[BRIDGE_START_TASK_ERROR] Uncaught exception starting bridge task', err);
+      });
+      // chatId is read AFTER startTask synchronously claims: startTask does not renew it (only
+      // clearHistory does, above), so this is the id the run's history rows land under.
+      return { ok: true, data: { tabId: tab.id, chatId: runner.chatId } };
+    } catch (err) {
+      runner.releaseTaskClaim();
+      return { ok: false, error: errorText(err) };
+    }
+  },
+  stopSession: (session) => {
+    const res = session.engine.stop() as { success?: boolean; error?: string };
+    return { ok: Boolean(res?.success ?? true), data: res, error: res?.error };
+  },
+  isValidWebTab,
+  createTab: (url) => new Promise((resolve) => {
+    if (typeof chrome === 'undefined' || !chrome.tabs?.create) return resolve(null);
+    chrome.tabs.create({ url, active: false }, (t) => {
+      lastRuntimeError();
+      if (!t || typeof t.id !== 'number') return resolve(t ?? null);
+      // tabs.create returns before navigation starts: the tab still reads about:blank, and a
+      // caller that immediately asks whether it can be automated would reuse/navigate it again.
+      // Wait for the load so the tab reports its real URL (the bridge's startUrl). The session
+      // does not exist yet at this point (it is created after createTab), so wait directly.
+      const tabId = t.id;
+      const timer = setTimeout(() => { cleanup(); resolve(t); }, 8000);
+      const listener = (updatedTabId: number, changeInfo: { status?: string }) => {
+        if (updatedTabId !== tabId || changeInfo.status !== 'complete') return;
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(t);
+      };
+      const cleanup = () => chrome.tabs.onUpdated.removeListener(listener);
+      chrome.tabs.onUpdated.addListener(listener);
+      if (typeof timer === 'object' && timer && 'unref' in timer) (timer as any).unref();
+    });
+  }),
+});
+
+const bridgeClient = new BridgeClient({
+  getSettings: () => Storage.getSettings(),
+  listSessions: () => [...new Set(sessions.values())].map((s) => ({
+    tabId: s.ownerTabId,
+    chatId: s.engine.chatId,
+    status: s.engine.status,
+    url: '',
+    title: '',
+  })),
+  onStartTask: (payload) => bridgeSessionManager.handleStartTask(payload as any),
+  onStopTask: (payload) => Promise.resolve(bridgeSessionManager.handleStopTask(payload as any)),
+  onGetState: (payload) => Promise.resolve(bridgeSessionManager.handleGetState(payload as any)),
+  stopBridgeRuns: () => bridgeSessionManager.stopBridgeRuns(),
+  onBridgeFrame: (frame) => bridgeSessionManager.onFrame(frame as any),
+  onBridgeConnected: (send) => bridgeSessionManager.setSender(send),
+});
+
+void bridgeClient;
+
 function getOrCreateSession(tabId: number, windowId?: number): BackgroundSession {
   let session = sessions.get(tabId);
   if (session) return session;
 
   const engine = new AgentRunner(tabId, windowId);
-  session = { engine, ports: new Set<chrome.runtime.Port>(), lastBroadcastHadNoListeners: false, ownerTabId: tabId };
+  session = { engine, ports: new Set<chrome.runtime.Port>(), lastBroadcastHadNoListeners: false, ownerTabId: tabId, source: 'panel' };
   sessions.set(tabId, session);
 
   // Each tab's runner broadcasts ONLY to that tab's own connected panels - never to a
@@ -115,6 +207,7 @@ function getOrCreateSession(tabId: number, windowId?: number): BackgroundSession
   engine.setStateChangeCallback((state) => {
     broadcastToSession(session!, 'STATE_UPDATE', state);
     syncKeepaliveAlarm();
+    bridgeSessionManager.onStateChange({ ownerTabId: session!.ownerTabId, engine: session!.engine });
   });
 
   Logger.debug('Background', `[SESSION_CREATED] New session for tab [${tabId}].`);
@@ -571,6 +664,10 @@ if (typeof chrome !== 'undefined' && chrome.alarms) {
       if (anySessionActive() && keepaliveIntervalId === null) {
         syncKeepaliveAlarm();
       }
+    } else if (alarm.name === 'tarka_bridge') {
+      // The bridge reconnect alarm: wakes the worker so it can re-join the bridge after a
+      // suspension (alarms survive suspension; the WS client does not).
+      bridgeClient.ensureConnected();
     }
   });
 }
@@ -729,8 +826,12 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged)
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || (!changes.agent_settings && !changes.models_ctx_cache)) return;
     for (const session of new Set(sessions.values())) void session.engine.refreshContext();
+    if (changes.agent_settings) void bridgeClient.sync();
   });
 }
+
+// Boot the bridge client if it is enabled (MV3 restarts the worker often; sync is cheap).
+void bridgeClient.sync();
 
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener((request: any, sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => {

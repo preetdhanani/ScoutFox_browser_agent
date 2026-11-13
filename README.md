@@ -155,6 +155,37 @@ Tarka supports any OpenAI-compatible API format, as well as native SDK integrati
    - Click the Tarka icon in Chrome's toolbar to launch the Side Panel.
    - Open **Settings**, configure your desired LLM endpoint, and begin.
 
+### External Harness (MCP Bridge)
+
+An external LLM harness such as Claude Code, Codex or any MCP client can hand tasks to Tarka and
+receive the results, data and step timeline. A small local Node process (the bridge) speaks MCP
+over stdio to the harness and WebSocket to the extension.
+
+1. **Install and start the bridge:**
+   ```bash
+   cd bridge && npm install
+   ```
+   then from the repository root:
+   ```bash
+   npm run bridge
+   ```
+   On first start the bridge prints its token to stderr: `Tarka Bridge Token: ...`.
+
+2. **Enable the bridge in Tarka:**
+   - Open the side panel's **Settings**, find **External bridge (MCP)**.
+   - Paste the token into the **Bridge token** field, set **Bridge connection** to **On**, and save.
+
+3. **Add the bridge to your harness** (example for Claude Code):
+   ```bash
+   claude mcp add tarka -- node bridge/bridge.mjs
+   ```
+   The harness then gets four tools: `tarka_run_task` (hand over a goal, blocks until the run
+   ends, returns answer, outcome, records and a step summary), `tarka_get_status`,
+   `tarka_stop_task` and `tarka_get_history`.
+
+Tarka runs the task with its own model, in its own tab, autonomously. The bridge only accepts
+connections from Chrome extension origins on 127.0.0.1 and checks the token on every connection.
+
 ---
 
 ## Security Model

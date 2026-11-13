@@ -100,7 +100,22 @@ export interface Settings {
    * getSettings fills each missing field from DEFAULT_RESEARCH (a deep merge, see normalizeResearch).
    */
   research: ResearchSettings;
+  /**
+   * The local MCP bridge (an external LLM harness drives Tarka). Absent in older settings;
+   * getSettings fills missing fields from DEFAULT_BRIDGE. The token is the one the bridge
+   * process prints to stderr on first run, pasted once into the panel.
+   */
+  bridge?: BridgeSettings;
 }
+
+export interface BridgeSettings {
+  enabled: boolean;
+  /** ws://127.0.0.1:<port> - only this host form is accepted (see bridge/wsClient.ts). */
+  url: string;
+  token: string;
+}
+
+export const DEFAULT_BRIDGE: BridgeSettings = { enabled: false, url: 'ws://127.0.0.1:7877', token: '' };
 
 /** Where web_search looks. DuckDuckGo's HTML page needs no key; SearXNG is a server the user names. */
 export type ResearchBackend = 'duckduckgo' | 'searxng';
@@ -114,6 +129,19 @@ export interface ResearchSettings {
 }
 
 export const DEFAULT_RESEARCH: ResearchSettings = { enabled: true, backend: 'duckduckgo', searxngUrl: '' };
+
+/**
+ * A stored bridge object (or nothing, from an older build) as a whole BridgeSettings: every
+ * field that is missing or of the wrong kind takes its default, every valid one is kept.
+ */
+export function normalizeBridge(raw: unknown): BridgeSettings {
+  const b = raw && typeof raw === 'object' ? (raw as Partial<BridgeSettings>) : {};
+  return {
+    enabled: typeof b.enabled === 'boolean' ? b.enabled : DEFAULT_BRIDGE.enabled,
+    url: typeof b.url === 'string' && b.url.trim() ? b.url.trim() : DEFAULT_BRIDGE.url,
+    token: typeof b.token === 'string' ? b.token : DEFAULT_BRIDGE.token
+  };
+}
 
 /**
  * A stored research object (or nothing, from an older build) as a whole ResearchSettings: every
@@ -291,6 +319,7 @@ export const DEFAULT_SETTINGS: Settings = {
   modelTier: 'auto',
   screenshots: true,
   research: { ...DEFAULT_RESEARCH },
+  bridge: { ...DEFAULT_BRIDGE },
 };
 
 /**
@@ -495,6 +524,7 @@ export const Storage = {
           customProviders,
           // A nested object: the defaults fill what an older build never stored.
           research: normalizeResearch(loaded.research),
+          bridge: normalizeBridge(loaded.bridge),
           contextWindow: loaded.contextWindow || {},
           // Screenshots are always on: every new page load gets an image for clarity.
           screenshots: true
@@ -562,7 +592,9 @@ export const Storage = {
       providerConfigs: updatedProviderConfigs,
       contextWindow: mergeContextWindow(current.contextWindow, newSettings.contextWindow as Record<string, number | null> | undefined),
       // A partial research object changes only the fields it names.
-      research: normalizeResearch({ ...current.research, ...(newSettings.research || {}) })
+      research: normalizeResearch({ ...current.research, ...(newSettings.research || {}) }),
+      // Same for the bridge.
+      bridge: normalizeBridge({ ...current.bridge, ...(newSettings.bridge || {}) })
     };
     delete (updated as any).engine;
 

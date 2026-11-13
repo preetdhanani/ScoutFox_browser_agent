@@ -17,6 +17,7 @@
     "check": "for f in content/*.js sidepanel/*.js; do node --check \"$f\" || exit 1; done",
     "build": "node scripts/build.mjs",
     "evalscan": "node scripts/evalscan.mjs",
+    "bridge": "node bridge/bridge.mjs",
     "zip": "node scripts/zip.mjs"
   },
   "author": "Prit Dhanani (preetdhanani)",

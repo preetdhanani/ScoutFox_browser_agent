@@ -343,6 +343,28 @@ It fails on a console error or an exception in the worker, on a CSP violation in
 See [tests/e2e/README.md](tests/e2e/README.md) for all options and what a run checks.
 CI does not run it: it needs a model key.
 
+### External Harness (MCP Bridge)
+
+The bridge (`bridge/`, started with `npm run bridge`) lets an MCP client such as Claude Code or
+Codex hand tasks to Tarka and receive the answer, the records and a step timeline.
+It is a companion process, never part of the extension: `tests/bridge/packaging.test.js` guards
+that nothing from `bridge/` or `tests/` enters `dist/`.
+Its dependencies live in `bridge/package.json` (`ws`, `@modelcontextprotocol/sdk`); install them
+once with `cd bridge && npm install`.
+The bridge and the extension share a token: the bridge persists it in `~/.tarka/bridge.json`
+(mode 0600) and prints it to stderr on first start; the user pastes it into the panel's
+"External bridge (MCP)" settings section.
+The extension dials the bridge as a WebSocket client on `ws://127.0.0.1:7877` (only that host
+form is accepted); the bridge checks the `chrome-extension://` origin and the token on every
+upgrade and rejects anything else with 401/403.
+Bridge runs are always autonomous (`autoApprove: true`): the hold methods of the old graph
+engine are stubs in the MCP architecture, so there is no respond channel.
+A task that cannot proceed ends with `finish(outcome: 'blocked')` and the bridge returns that
+verbatim.
+The bridge unit tests run with `npm test` (`tests/bridge/`); the e2e task `bridge-credentials-json`
+exercises the whole path (MCP stdio to bridge, WebSocket to the extension, real model run) with
+`npm run test:e2e -- --task=bridge-credentials-json`.
+
 ---
 
 ## 4. Chrome Web Store Publishing Checklist

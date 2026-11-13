@@ -377,6 +377,31 @@
             </div>
           </div>
 
+          <!-- External bridge: a local Node process (npm run bridge) that lets an MCP client
+               such as Claude Code hand tasks to Tarka and receive the results. -->
+          <div class="settings-section" id="bridgeSection">
+            <div class="settings-section-head">
+              <span class="settings-section-title">External bridge (MCP)</span>
+              <span class="subtext-hint">Lets an external LLM harness (Claude Code, Codex, ...) hand tasks to Tarka. Start the bridge with npm run bridge; it prints the token on first run.</span>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="bridgeEnabledSelect">Bridge connection</label>
+              <select id="bridgeEnabledSelect" class="form-select">
+                <option value="off">Off (Recommended)</option>
+                <option value="on">On - Tarka connects to the local bridge</option>
+              </select>
+            </div>
+            <div class="form-group" id="bridgeUrlGroup">
+              <label class="form-label" for="bridgeUrlInput">Bridge URL</label>
+              <input type="text" id="bridgeUrlInput" class="form-input" placeholder="ws://127.0.0.1:7877" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="form-group" id="bridgeTokenGroup">
+              <label class="form-label" for="bridgeTokenInput">Bridge token</label>
+              <input type="text" id="bridgeTokenInput" class="form-input" placeholder="paste the token the bridge printed" autocomplete="off" spellcheck="false">
+              <span class="subtext-hint" id="bridgeTokenHint">From the bridge's first start: "Tarka Bridge Token: ...". Keep it private - anyone with it can drive your browser.</span>
+            </div>
+          </div>
+
           <button class="btn btn-primary btn-block" id="btnSaveSettings">Save Settings</button>
         </div>
       </section>

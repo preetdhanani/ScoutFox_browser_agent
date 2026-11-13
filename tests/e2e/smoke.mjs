@@ -83,6 +83,7 @@ import { DEFAULT_PROVIDER, REAL_PROVIDER_NAMES, providerSettings, proxiedBaseUrl
 import { missingManifestFiles, prepareExtensionCopy } from './lib/extensionCopy.mjs';
 import { lastTurn, pageReadSteps, runFacts, resumeRequestProblems, stopPointReached, TASKS } from '../mcp/tasks.mjs';
 import { aggregate, aggregateLines, callsForReport, expectedFinishOutcome, runVerdict } from './lib/metrics.mjs';
+import { mcpRunTask, startBridgeForTest } from './lib/bridgeHarness.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -2089,7 +2090,10 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
   watchFixturePage(page, pageErrors);
   await page.goto(url, { waitUntil: 'load' });
   await page.bringToFront();
-  const tabId = await tabIdFor(ctx.driver, url);
+  // A bridge task runs in the tab the BRIDGE opens (its own dedicated tab), not the fixture tab
+  // the harness opened - the whole point of the bridge path is that the external harness does
+  // not aim a tab. The fixture page is still loaded and probed, so the run has the same site.
+  let tabId = await tabIdFor(ctx.driver, url);
   // Before the run: the page as loaded. After the run (below): the page the task ended on, which
   // is a new document when a click navigated.
   const probes = [await probePage(ctx, page, tabId)];
@@ -2117,15 +2121,73 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
     throw new Error(`the side panel for the Stop click is not Chrome's real panel (${livePanel.reason})`);
   }
   let driven;
+  let bridgeResult = null;
+  let bridgeSteps = [];
+  let bridgeProblems = [];
   try {
-    driven = await driveTask(ctx, llm, task, tabId, hosts, { name: shotName, dir: shotDir, list: screenshots }, livePanel ? { panel: livePanel, stopAfterSteps } : {});
+    if (task.bridge) {
+      // The bridge path: the harness speaks MCP to the real bridge process; the extension
+      // connects to it over WebSocket and Tarka's own model runs the task. The bridge's
+      // settings (url + token) are written like a user pastes them into the panel.
+      if (!ctx.bridge) ctx.bridge = await startBridgeForTest();
+      const bridgeUrl = `ws://127.0.0.1:${ctx.bridge.port}`;
+      await ctx.driver.evaluate(async ({ url: bUrl, token }) => {
+        const stored = await chrome.storage.local.get('agent_settings');
+        const settings = stored.agent_settings || {};
+        settings.bridge = { enabled: true, url: bUrl, token };
+        await chrome.storage.local.set({ agent_settings: settings });
+      }, { url: bridgeUrl, token: ctx.bridge.token });
+      // The settings change wakes the WS client (storage.onChanged); wait for the bridge to
+      // see the extension.
+      const connected = await (async () => {
+        for (let i = 0; i < 100; i++) {
+          if (ctx.bridge.stderr.join('').includes('extension connected')) return true;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return false;
+      })();
+      if (!connected) throw new Error(`the extension never connected to the bridge. stderr: ${ctx.bridge.stderr.join('')}`);
+      const startedAt = Date.now();
+      const { reply, notifications } = await mcpRunTask(ctx.bridge, { task: task.prompt, timeoutMs: task.timeoutMs, startUrl: url });
+      const wall = Date.now() - startedAt;
+      const text = reply?.result?.content?.[0]?.text || '';
+      // Take the LAST json block: the model's answer itself may contain a json sample, while the
+      // bridge's own report block always comes at the end of the text.
+      const jsonMatches = [...text.matchAll(/```json\n([\s\S]*?)\n```/g)];
+      let report = {};
+      try { report = jsonMatches.length ? JSON.parse(jsonMatches[jsonMatches.length - 1][1]) : {}; } catch { bridgeProblems.push('the bridge result holds no readable JSON report'); }
+      bridgeResult = { ...report, isError: reply?.result?.isError === true, text };
+      bridgeSteps = notifications.map((n) => n.message || '');
+      if (!notifications.length) bridgeProblems.push('no progress notifications were streamed during the bridge run');
+      // The run ran in the tab the bridge opened (its own session, its own chat). Point the
+      // harness at that tab, so the panel screenshots and the card check read the right session.
+      // The bridge logs the start reply (the tab id and chatId) to stderr.
+      const startReply = ctx.bridge.stderr.join('').match(/start reply: (\{.*\})/);
+      const bridgeTabId = startReply ? JSON.parse(startReply[1]).tabId : null;
+      if (bridgeTabId) tabId = bridgeTabId;
+      else bridgeProblems.push('the bridge start reply (tab id) was not logged');
+      // The run must also have left a normal history behind, so the panel shows it.
+      driven = await driveTask(ctx, llm, task, tabId, hosts, { name: shotName, dir: shotDir, list: screenshots }, {});
+      driven.wallMs = wall;
+    } else {
+      driven = await driveTask(ctx, llm, task, tabId, hosts, { name: shotName, dir: shotDir, list: screenshots }, livePanel ? { panel: livePanel, stopAfterSteps } : {});
+    }
   } finally {
     if (livePanel) {
       ctx.panel.pageErrors.push(...livePanel.errors());
       await livePanel.close();
     }
   }
-  const { state, run, timedOut, wallMs, logs, replies, states, stateStatuses, calls, facts } = driven;
+  const { state, run, timedOut, wallMs: pollWallMs, logs, replies, states, stateStatuses, calls, facts } = driven;
+  // A bridge run's wall time is the bridge tool call's duration; the poll time of the follow-up
+  // driveTask is not the run's.
+  const wallMs = task.bridge && bridgeResult ? driven.wallMs : pollWallMs;
+  // A bridge task's check reads the bridge tool result (run.bridgeResult) and the streamed
+  // steps (run.bridgeSteps), so they ride on the facts object the check sees.
+  if (task.bridge) {
+    facts.bridgeResult = bridgeResult;
+    facts.bridgeSteps = bridgeSteps;
+  }
   // The Stop must land while the run goes: a first turn that finished on its own tested no resume.
   const stopProblems = [];
   if (stopAfterSteps) {
@@ -2208,7 +2270,7 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
     answer,
     answerCorrect: answer ? !!task.check(facts) : false,
     notes: answer && task.warn ? task.warn(facts) : [],
-    expectProblems: [...stopProblems, ...followProblems, ...cardProblems, ...badgeProblems, ...restartProblems, ...logProblems, ...effortProblems, ...pageProblems, ...(followUp ? followUp.problems : [])],
+    expectProblems: [...stopProblems, ...followProblems, ...cardProblems, ...badgeProblems, ...restartProblems, ...logProblems, ...effortProblems, ...pageProblems, ...bridgeProblems, ...(followUp ? followUp.problems : [])],
     follow: run.follow,
     followUp: followUp ? {
       prompt: followUp.prompt,
@@ -2228,6 +2290,9 @@ async function runTask(ctx, fixtures, llm, name, attempt = 1) {
       calls: callsForReport(followUp.calls)
     } : null,
     holdProblems: run.problems,
+    bridgeResult,
+    bridgeSteps,
+    bridgeProblems,
     stateUpdates: { count: states.length, byStatus: stateStatuses },
     decisions: run.decisions,
     replies,
@@ -2462,6 +2527,8 @@ async function main() {
 
   const fixtures = await listen('fixture server', () => startFixtureServer({ root: SITE, port: FIXTURE_PORT }));
   onCleanup(closeServer(fixtures.server));
+  // The bridge process of a bridge task (started lazily by runTask) dies with the run.
+  onCleanup(() => { if (ctx.bridge) ctx.bridge.stop(); });
   let llm = null;
   if (needsModel) {
     if (REAL) {

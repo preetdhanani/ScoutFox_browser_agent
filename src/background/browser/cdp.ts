@@ -54,6 +54,13 @@ export class CDPManager {
   private attaching = new Map<number, Promise<void>>();
   /** Tabs with an attach in flight; sendCommand must not re-attach from inside one. */
   private inAttach = new Set<number>();
+  /** Listeners notified when a JavaScript dialog was auto-dismissed on a tab. */
+  private dialogListeners: Array<(tabId: number, dialogType: string, message: string) => void> = [];
+
+  /** Register a listener for auto-dismissed JavaScript dialogs (layering: cdp.ts knows no runners). */
+  onDialogOpening(listener: (tabId: number, dialogType: string, message: string) => void): void {
+    this.dialogListeners.push(listener);
+  }
 
   constructor(options: CDPManagerOptions = {}) {
     this.attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
@@ -89,8 +96,22 @@ export class CDPManager {
           }
         }
       });
-      this.initialized = true;
     }
+    // JavaScript dialogs (alert/confirm/prompt/beforeunload) block every CDP command until
+    // they are answered, and nobody is there to answer them in an autonomous run. Dismiss
+    // them immediately and tell the listener (background.ts records a notice for the model).
+    if (this.hasDebugger() && chrome.debugger.onEvent) {
+      chrome.debugger.onEvent.addListener((source, method, params: any) => {
+        if (method !== 'Page.javascriptDialogOpening' || source.tabId === undefined) return;
+        const dialogType = String(params?.type ?? 'alert');
+        const accept = dialogType === 'alert' || dialogType === 'beforeunload';
+        void this.sendCommand(source.tabId, 'Page.handleJavaScriptDialog', { accept }).catch(() => {
+          // The dialog may already be gone; nothing else to do.
+        });
+        for (const listener of this.dialogListeners) listener(source.tabId, dialogType, String(params?.message ?? ''));
+      });
+    }
+    this.initialized = true;
   }
 
   /**
